@@ -1,20 +1,24 @@
 # Maestro v0.1 Release Checklist
 
-Use this checklist before tagging `v0.1.0`.
+Status: completed for `v0.1.0`.
+
+Release commit: `9f00a4a`
+
+Tag: `v0.1.0`
 
 ## Scope
 
-- [ ] Paper mode is the official v0.1 execution mode.
-- [ ] Strategy results are limited to `TargetAllocationResult`.
-- [ ] Sample strategy remains an external package under `examples/`.
-- [ ] Sample strategy imports only from `maestro.sdk`.
-- [ ] Live trading is not implemented.
-- [ ] Real Telegram Bot API calls are not implemented.
-- [ ] Real KIS REST calls and order submission are not implemented.
+- [x] Paper mode is the official v0.1 execution mode.
+- [x] Strategy results are limited to `TargetAllocationResult`.
+- [x] Sample strategy remains an external package under `examples/`.
+- [x] Sample strategy imports only from `maestro.sdk`.
+- [x] Live trading is not implemented.
+- [x] Real Telegram Bot API calls are not implemented.
+- [x] Real KIS REST calls and order submission are not implemented.
 
 ## Fresh Environment Verification
 
-Run from a clean clone:
+Required commands:
 
 ```bash
 uv sync --extra dev
@@ -25,14 +29,14 @@ ruff format --check .
 pytest -q
 ```
 
-Expected:
+Verified locally before tagging:
 
-- `maestro run-once --config configs/paper.yaml` exits successfully.
-- SQLite state DB is created under `var/`.
-- JSONL audit log is created under `var/`.
-- Ruff check passes.
-- Ruff format check passes.
-- Pytest passes.
+- [x] `maestro run-once --config configs/paper.yaml` exits successfully.
+- [x] SQLite state DB is created under `var/`.
+- [x] JSONL audit log is created under `var/`.
+- [x] `ruff check .` passes.
+- [x] `ruff format --check .` passes.
+- [x] `pytest -q` passes with 20 tests.
 
 ## Optional Foundation Checks
 
@@ -46,6 +50,14 @@ maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
 ```
 
+Verified locally:
+
+- [x] CSV-backed paper run-once succeeds.
+- [x] Approval-gated paper run-once succeeds.
+- [x] Approval history CLI reads recorded decisions.
+- [x] KIS read-only mock sync stores a broker account snapshot.
+- [x] KIS account CLI reads the latest broker account snapshot.
+
 ## Release
 
 ```bash
@@ -54,7 +66,14 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Create a GitHub release note that calls out:
+Completed:
+
+- [x] Working tree was clean before tagging.
+- [x] `main` was pushed to `origin/main`.
+- [x] Annotated tag `v0.1.0` was created.
+- [x] Tag `v0.1.0` was pushed to GitHub.
+
+GitHub release note should call out:
 
 - v0.1 paper-mode skeleton.
 - External strategy SDK/plugin boundary.
