@@ -4,7 +4,8 @@
 
 - Maestro is not a strategy; it is the portfolio operating system.
 - Virtuoso apps propose; Maestro validates, constructs, protects, executes, and records.
-- Safety-first progression: mock -> paper -> approval-gated paper -> read-only broker -> approval-gated live trading.
+- Safety-first progression: mock -> paper -> DataHub providers -> approval-gated paper -> read-only broker -> approval-gated live trading.
+- DataHub is the research/market data layer; broker adapters are the account/execution layer.
 - Dashboard should remain read-only initially.
 - Telegram should be used for approval and urgent notifications, not high-risk administration.
 - Live auto-trading is explicitly deferred.
@@ -69,6 +70,8 @@ Scope:
 - Improve DataHub schema
 - Clarify historical versus latest price data
 - Stronger CSV provider behavior
+- Establish DataHub as the required path for strategy market and research data
+- Keep broker account/execution data separate from DataHub research data
 - Data freshness checks
 - Missing data policy
 - Symbol registry or simple asset metadata
@@ -82,7 +85,24 @@ Scope:
 
 Dashboard remains read-only. No live execution controls.
 
-## v0.3 — Telegram Approval in Paper Mode
+## v0.3 — External Research Data Providers
+
+Scope:
+
+- DataHub provider interface and provider routing
+- Provider freshness and stale-data policy
+- Cache/storage policy for provider responses
+- Symbol registry and provider symbol mapping
+- Data schemas for `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote`
+- Yahoo Finance/yfinance-style OHLCV provider as a future planned provider
+- FRED macro provider as a future planned provider
+- RSS/GDELT/News API provider as future planned providers
+- Sentiment/community data providers as future planned providers
+- Crypto exchange market data providers as future planned providers
+
+KIS is not the primary research data source. KIS broker quotes may be used later as `broker_quote` reference data for execution validation or reconciliation.
+
+## v0.4 — Telegram Approval in Paper Mode
 
 Scope:
 
@@ -97,16 +117,16 @@ Scope:
 - Paper execution only after approval
 - Fill/error notifications
 
-Still no live trading in v0.3.
+Still no live trading in v0.4.
 
-## v0.4 — KIS Read-only Integration
+## v0.5 — KIS Read-only Broker Integration
 
 Scope:
 
 - Real Korea Investment Securities read-only REST client
 - OAuth token management
 - Token refresh/persistence
-- Current price lookup
+- Broker-side quote/reference lookup for execution validation or reconciliation
 - Balance inquiry
 - Buying power inquiry
 - Order/fill inquiry
@@ -117,7 +137,7 @@ Scope:
 
 Read-only only. No order submission.
 
-## v0.5 — KIS Live Approval Trading
+## v0.6 — KIS Live Approval Trading
 
 Scope:
 
@@ -136,7 +156,7 @@ Scope:
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
 
-## v0.6 — Production Hardening
+## v0.7 — Production Hardening
 
 Scope:
 

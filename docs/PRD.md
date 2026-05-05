@@ -35,7 +35,7 @@ Key principles:
 1. **Strategy-agnostic core**: Maestro must not depend on the internal logic of any specific strategy.
 2. **Contract-first plugin architecture**: Virtuoso apps communicate with Maestro only through stable SDK schemas and interfaces.
 3. **Safe by default**: New strategies default to research or paper mode and cannot directly access capital.
-4. **Data through Maestro**: Production strategy apps request data through Maestro DataHub rather than calling external APIs freely.
+4. **Data through Maestro DataHub**: Production strategy apps request market, macro, news, sentiment, fundamental, and other research data through Maestro DataHub rather than calling external APIs directly.
 5. **Execution only by Maestro**: Strategy apps never place orders directly.
 6. **Human-in-the-loop before automation**: Early live trading must require Telegram approval.
 7. **Read-only dashboard**: Dashboard initially observes the ecosystem but cannot execute trades or change configuration.
@@ -67,14 +67,14 @@ Maestro is responsible for:
 - Strategy plugin loading
 - Strategy plugin permission/mode management
 - Strategy execution orchestration
-- Data request handling through DataHub
+- Market and research data request handling through DataHub
 - Strategy result validation
 - Portfolio target construction
 - Risk constraint enforcement
 - Order proposal generation
 - Telegram notification and approval workflow
 - Paper execution
-- Korea Investment Securities read-only and later live execution adapter
+- Broker adapters for read-only account state and later live execution, including Korea Investment Securities
 - State management
 - Reconciliation between internal state and broker account state
 - Audit logging
@@ -91,6 +91,8 @@ Maestro should not implement:
 - Strategy-specific branching by `strategy_id`
 - Direct strategy access to broker execution
 - Direct strategy access to capital
+- Direct strategy calls to external research data APIs
+- Direct strategy calls to broker APIs, including KIS
 - Unrestricted web/dashboard trading controls in early versions
 - Live auto-trading in the MVP
 
@@ -163,7 +165,18 @@ And Maestro will:
 - Recent paper orders
 - System status page
 
-### Phase 2: Telegram Notifications and Approval Flow
+### Phase 2: External Research Data Providers
+
+- DataHub provider interface and routing
+- Yahoo Finance/yfinance-style OHLCV provider
+- FRED macro provider
+- CSV/local data provider hardening
+- RSS/GDELT/News API provider options
+- Sentiment/community data provider options
+- Crypto exchange market data provider options
+- Data freshness, cache/storage, and symbol registry improvements
+
+### Phase 3: Telegram Notifications and Approval Flow
 
 - Telegram bot integration
 - Cycle summary notifications
@@ -174,10 +187,10 @@ And Maestro will:
 - Approved paper execution
 - Approval audit logs
 
-### Phase 3: Korea Investment Securities Read-only Adapter
+### Phase 4: Korea Investment Securities Read-only Broker Adapter
 
 - KIS OAuth access token management
-- Current price lookup
+- Broker-side quote/reference lookup for execution validation and reconciliation
 - Balance inquiry
 - Buying power inquiry
 - Daily order/fill inquiry
@@ -185,7 +198,7 @@ And Maestro will:
 - `live_readonly` mode
 - Account reconciliation
 
-### Phase 4: Live Approval Trading
+### Phase 5: Live Approval Trading
 
 - Limit-order-only live trading
 - Telegram approval required
@@ -197,7 +210,7 @@ And Maestro will:
 - Execution result Telegram notification
 - Internal state vs broker reconciliation
 
-### Phase 5: Production Hardening
+### Phase 6: Production Hardening
 
 - KIS WebSocket support
 - Real-time fill notification
@@ -210,7 +223,7 @@ And Maestro will:
 - Optional FastAPI read-only API
 - Deployment via systemd or Docker Compose
 
-### Phase 6: Limited Live Automation
+### Phase 7: Limited Live Automation
 
 - Very small auto-approval rules
 - Larger orders remain Telegram-approved
@@ -232,8 +245,11 @@ And Maestro will:
 
 - DataHub must process `DataRequest` objects.
 - v0.1 DataHub returns deterministic mock data.
-- Future DataHub providers include CSV, KIS current price, historical market data, macro data, and external data providers.
-- Production strategies should not call external data APIs directly.
+- Current implementation supports mock and CSV-style DataHub foundations.
+- Future DataHub providers include Yahoo Finance/yfinance-style OHLCV, FRED macro, CSV/local, RSS/GDELT/News API, sentiment/community data, fundamental data, and crypto exchange market data.
+- Supported and planned DataHub data types include `price`, `ohlcv`, `macro`, `news`, `sentiment`, and `fundamental`.
+- Production strategies must not call external data APIs directly.
+- DataHub is the primary research and strategy data source. Broker adapters may expose `broker_quote` reference data for execution validation or reconciliation, but broker quotes are not the primary research feed.
 
 ### 8.3 Portfolio Management
 
@@ -291,7 +307,9 @@ Future requirement:
 Future requirement:
 
 - KIS integration must be isolated in a broker adapter.
-- KIS adapter must manage auth, account queries, market data, orders, fills, errors, and rate limit handling.
+- KIS adapter must manage auth, balances, positions, buying power, orders, fills, reconciliation, errors, and rate limit handling.
+- KIS current price lookup may be used as `broker_quote` reference data for execution validation or reconciliation.
+- KIS must not be presented as Maestro's main research or strategy data source.
 - Live trading should initially be `live_approval`, not `live_auto`.
 - Only limit orders should be allowed initially.
 - All broker state should be reconciled against internal state.

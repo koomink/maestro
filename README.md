@@ -71,6 +71,37 @@ Symphony Ecosystem
     └── TradingAgents
 ```
 
+## Data and Execution Boundaries
+
+Maestro separates research/market data from broker account and execution data.
+
+```text
+Research / strategy data
+Yahoo Finance, FRED, CSV/local, RSS/GDELT/News API, sentiment/community data,
+crypto exchange market data
+        │
+        ▼
+Maestro DataHub
+        │
+        ▼
+Virtuoso strategy plugins
+        │
+        ▼
+Portfolio / risk / approval
+        │
+        ▼
+Execution engine
+        │
+        ▼
+Broker adapters, including KIS
+auth, balances, positions, buying power, orders, fills, reconciliation,
+and broker-side quote/reference data for execution checks
+```
+
+DataHub is the market and research data layer. Broker adapters are the account and execution layer. Strategy plugins must request data through Maestro DataHub and should not call external market, macro, news, sentiment, or broker APIs directly.
+
+Korea Investment Securities current price lookup may be used as broker-side quote/reference data for execution validation or reconciliation, but KIS is not the primary strategy or research data source.
+
 ## Project Status
 
 Maestro v0.1.1 is a stabilization patch on top of the v0.1 bootable skeleton. It is
@@ -403,10 +434,11 @@ Short direction:
 
 - v0.1.x: bootable skeleton and stabilization
 - v0.2: DataHub and read-only dashboard foundation
-- v0.3: Telegram approval in paper mode
-- v0.4: KIS read-only integration
-- v0.5: KIS live approval trading
-- v0.6: production hardening
+- v0.3: external research data providers
+- v0.4: Telegram approval in paper mode
+- v0.5: KIS read-only broker integration
+- v0.6: KIS live approval trading
+- v0.7: production hardening
 
 ## Dashboard Philosophy
 
@@ -497,6 +529,8 @@ Initial live trading rules:
 - Daily order notional cap
 - Reconciliation required
 - Unknown order status halts new orders
+
+KIS responsibilities should stay broker-focused: authentication, balances, positions, buying power, order submission, fills, broker state, and reconciliation. KIS current price lookup can support broker-side quote/reference checks, but strategy research data should come through DataHub providers rather than KIS.
 
 ## Development Rule
 

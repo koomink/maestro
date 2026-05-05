@@ -24,6 +24,16 @@
 - [x] Add tests for CSV schema validation
 - [x] Add tests for missing symbols and invalid OHLCV rows
 
+### DataHub Planning
+
+- [ ] Define a provider interface that can support future `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote` payloads
+- [ ] Define provider routing rules for symbol, asset type, data type, timeframe, and run mode
+- [ ] Define freshness and stale-data policies per data type
+- [ ] Define cache/storage requirements for provider responses without overbuilding a database in v0.2
+- [ ] Define a symbol registry and provider symbol mapping plan
+- [ ] Define schema compatibility rules so strategy plugins request data through Maestro DataHub only
+- [ ] Document that `broker_quote` is broker-side reference data for execution validation or reconciliation, not the primary strategy research feed
+
 ### Symbol Metadata
 
 - [x] Add a simple `SymbolMetadata` model
@@ -113,12 +123,42 @@
 - [x] `maestro run-once --config configs/csv_paper.yaml`
 - [x] `maestro status --config configs/paper.yaml`
 
-## Next Milestone: v0.3 Planning
+## Next Milestone: v0.3 External Research Data Providers Planning
+
+- [ ] Plan Yahoo Finance/yfinance-style OHLCV provider integration as a future planned provider
+- [ ] Plan FRED macro provider integration as a future planned provider
+- [ ] Plan RSS/GDELT/News API provider integration as future planned providers
+- [ ] Plan sentiment/community data provider integration as future planned providers
+- [ ] Plan crypto exchange market data provider integration as future planned providers
+- [ ] Define provider configuration and secrets handling
+- [ ] Define provider error, timeout, and rate-limit behavior
+- [ ] Define tests for provider routing, freshness, and schema normalization
+
+## Future Milestones
+
+### v0.4 Telegram Approval
 
 - [ ] Plan real Telegram Bot API integration boundary
 - [ ] Plan approval callback persistence and duplicate-decision prevention
 - [ ] Decide polling versus webhook for the first Telegram implementation
 - [ ] Define paper-only approval behavior before live trading work begins
+
+### v0.5 KIS Read-only Broker Integration
+
+- [ ] Plan real KIS read-only REST client boundary
+- [ ] Plan OAuth token management and token persistence
+- [ ] Plan balance, position, buying power, order/fill, and unfilled order reads
+- [ ] Plan broker account snapshot normalization
+- [ ] Plan internal state versus broker state reconciliation
+- [ ] Treat KIS current price lookup as `broker_quote` reference data for execution validation or reconciliation only
+- [ ] Keep strategy research data routed through Maestro DataHub, not KIS
+
+### v0.6 KIS Live Approval Trading
+
+- [ ] Plan KIS live order submission behind broker adapter
+- [ ] Require Telegram approval before live order submission
+- [ ] Define limit-order-only behavior and small notional limits
+- [ ] Define order status polling, partial fill handling, and halt-on-unknown-state behavior
 
 ## Completed / Historical Notes
 

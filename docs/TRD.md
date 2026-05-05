@@ -10,6 +10,24 @@ The architecture separates:
 Virtuoso strategy plugin → Maestro SDK contract → Maestro Core → Execution/State/Monitoring
 ```
 
+Data access and broker execution are separate layers:
+
+```text
+Strategy plugins
+    │ request DataRequest objects through Maestro SDK
+    ▼
+datahub/
+    market and research data: price, ohlcv, macro, news, sentiment, fundamental
+    future providers: Yahoo Finance/yfinance-style OHLCV, FRED, CSV/local,
+    RSS/GDELT/News API, sentiment/community data, crypto exchange market data
+
+execution/brokers/
+    broker account and execution data: auth, balances, positions, buying power,
+    orders, fills, reconciliation, broker_quote reference data
+```
+
+Strategy plugins must request data through Maestro DataHub and must not call external research data APIs or broker APIs directly. KIS current price lookup may be used as broker-side `broker_quote` reference data for execution validation or reconciliation, but KIS is not the primary strategy or research data source.
+
 Maestro owns the lifecycle of a portfolio management cycle:
 
 ```text
@@ -154,6 +172,10 @@ maestro/
 
 Some future modules may be created as stubs in v0.1 but not fully implemented.
 
+`datahub/` owns research and market data normalization, validation, routing, freshness, and provider selection. Its planned data types include `price`, `ohlcv`, `macro`, `news`, `sentiment`, and `fundamental`.
+
+`execution/brokers/` owns broker/account/execution integrations. Broker adapters, including KIS, should expose account state, buying power, positions, order submission/status, fills, reconciliation, and optional `broker_quote` data used only for execution validation or reconciliation.
+
 ## 3. Technology Stack
 
 ### 3.1 Runtime
@@ -193,11 +215,11 @@ Some future modules may be created as stubs in v0.1 but not fully implemented.
 - `approval.default_decision` supports `approved`, `rejected`, and `expired` for the Phase 2 no-network stub.
 - Telegram integration currently formats approval messages without calling Bot API.
 
-### 3.5 Phase 3 Additions
+### 3.5 Current KIS Mock Read-only Foundation
 
 - `RunMode.LIVE_READONLY` is supported for read-only broker sync commands.
 - KIS integration is isolated under `execution/brokers/kis`.
-- `KISReadOnlyClient` defines account, price, daily order, and unfilled order reads.
+- `KISReadOnlyClient` defines account, broker-side quote/reference, daily order, and unfilled order reads.
 - `MockKISReadOnlyClient` provides deterministic no-network responses.
 - Broker account snapshots are persisted in SQLite and audit JSONL.
 - Real KIS REST calls are not implemented in this phase.
@@ -312,13 +334,15 @@ class StrategyContext(BaseModel):
 class DataRequest(BaseModel):
     symbol: str
     asset_type: AssetType
-    data_type: str  # e.g., "ohlcv", "price", "macro"
+    data_type: str  # e.g., "price", "ohlcv", "macro", "news", "sentiment", "fundamental"
     timeframe: str | None = None
     lookback: int | None = None
     start: datetime | None = None
     end: datetime | None = None
     fields: list[str] = []
 ```
+
+`broker_quote` is reserved for broker-side reference prices used by execution validation or reconciliation. It should not replace DataHub research feeds for strategy decisions.
 
 ### 5.5 DataBundle
 
@@ -729,9 +753,11 @@ Components:
 - `client.py`: REST client wrapper
 - `orders.py`: order submission, cancel, amend
 - `account.py`: balance, buying power, positions
-- `market_data.py`: current price lookup
+- `market_data.py`: broker-side quote/reference lookup for execution validation or reconciliation
 - `websocket.py`: real-time price/fill notification later
 - `errors.py`: error code handling
+
+The KIS adapter is a broker adapter, not a research data provider. It should mainly handle authentication, balances, positions, buying power, orders, fills, and reconciliation. KIS current price lookup can produce `broker_quote` data for broker-side checks, but strategy plugins should receive research and market data through DataHub providers.
 
 Live trading safety:
 
