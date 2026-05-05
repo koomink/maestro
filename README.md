@@ -99,6 +99,14 @@ v0.1.1 stabilization adds:
 - Failure audit events with exception type, message, and traceback summary
 - Focused regression tests for the stabilization behavior
 
+v0.2 DataHub and dashboard foundation adds:
+
+- Explicit DataHub symbol payloads with `latest_price`, historical `bars`, stale flags, and warnings
+- CSV OHLCV validation and timestamp parsing
+- RiskDecision persistence for dashboard visibility
+- SQLite timeout/busy timeout/WAL settings for dashboard + CLI coexistence
+- Dashboard read models and clearer read-only dashboard tables
+
 Implemented foundations beyond the core v0.1 scope:
 
 - CSVDataProvider for simple historical data loading
@@ -388,6 +396,8 @@ Maestro must be safe by default.
 For version-level planning, see [docs/ROADMAP.md](docs/ROADMAP.md).
 
 For the current execution checklist, see [docs/TASKS.md](docs/TASKS.md).
+
+For DataHub payload details, see [docs/datahub.md](docs/datahub.md).
 
 Short direction:
 
