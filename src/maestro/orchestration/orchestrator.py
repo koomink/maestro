@@ -193,4 +193,8 @@ class MaestroOrchestrator:
         for symbol, payload in data_bundle.data.items():
             if isinstance(payload, dict) and "price" in payload:
                 prices[symbol] = float(payload["price"])
+            elif isinstance(payload, dict) and isinstance(payload.get("latest_price"), dict):
+                prices[symbol] = float(payload["latest_price"]["price"])
+            elif getattr(payload, "latest_price", None) is not None:
+                prices[symbol] = float(payload.latest_price.price)
         return prices
