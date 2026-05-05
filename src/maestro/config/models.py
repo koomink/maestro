@@ -44,6 +44,7 @@ class DataHubProviderConfig(StrictConfigModel):
     timeout_seconds: float = Field(default=10.0, gt=0)
     stale_after_seconds: int | None = Field(default=None, gt=0)
     symbol_map: dict[str, str] = Field(default_factory=dict)
+    api_key_env: str | None = None
 
 
 class DataHubConfig(StrictConfigModel):
@@ -53,6 +54,7 @@ class DataHubConfig(StrictConfigModel):
     timeout_seconds: float = Field(default=10.0, gt=0)
     stale_after_seconds: int | None = Field(default=None, gt=0)
     symbol_map: dict[str, str] = Field(default_factory=dict)
+    api_key_env: str | None = None
 
 
 class ExecutionConfig(StrictConfigModel):

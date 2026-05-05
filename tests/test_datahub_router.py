@@ -12,6 +12,7 @@ from maestro.datahub.errors import (
     StaleDataError,
     UnsupportedDataTypeError,
 )
+from maestro.datahub.fred_provider import FREDDataProvider
 from maestro.datahub.registry import DataHubRegistry
 from maestro.datahub.router import DataHubRouter
 from maestro.datahub.schemas import PricePoint, SymbolData
@@ -296,6 +297,43 @@ def test_build_data_provider_rejects_unsupported_yahoo_data_types():
         build_data_provider(config)
 
 
+def test_build_data_provider_accepts_fred_config_without_network_call():
+    provider = build_data_provider(DataHubConfig(provider="fred", api_key_env="FRED_TEST_API_KEY"))
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_defaults_fred_multi_provider_to_macro():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="fred",
+                provider="fred",
+                api_key_env="FRED_TEST_API_KEY",
+            )
+        ]
+    )
+
+    provider = build_data_provider(config)
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_rejects_unsupported_fred_data_types():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="fred",
+                provider="fred",
+                data_types=["macro", "price"],
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="supports only macro"):
+        build_data_provider(config)
+
+
 def test_router_integrates_yahoo_provider_with_fixture_client():
     class FakeYahooClient:
         def history(
@@ -326,3 +364,30 @@ def test_router_integrates_yahoo_provider_with_fixture_client():
 
     assert bundle.source == "yahoo"
     assert bundle.data["SPY"]["latest_price"]["price"] == 100.5
+
+
+def test_router_integrates_fred_provider_with_fixture_client(monkeypatch: pytest.MonkeyPatch):
+    class FakeFREDClient:
+        def observations(
+            self,
+            series_id: str,
+            *,
+            api_key: str,
+            timeout_seconds: float,
+        ) -> dict[str, Any]:
+            return {"observations": [{"date": "2025-01-01", "value": "1.2"}]}
+
+    monkeypatch.setenv("FRED_TEST_API_KEY", "secret-value")
+    registry = DataHubRegistry()
+    registry.register(
+        "fred",
+        FREDDataProvider(client=FakeFREDClient(), api_key_env="FRED_TEST_API_KEY"),
+        {"macro"},
+    )
+
+    bundle = DataHubRouter(registry).get_data(
+        [DataRequest(symbol="GDP", asset_type="cash", data_type="macro")]
+    )
+
+    assert bundle.source == "fred"
+    assert bundle.data["GDP"]["latest"]["value"] == 1.2

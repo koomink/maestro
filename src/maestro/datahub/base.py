@@ -56,6 +56,23 @@ def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
             {"price", "ohlcv"},
         )
         return DataHubRouter(registry)
+    if config.provider == "fred":
+        from maestro.datahub.fred_provider import FREDDataProvider
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
+
+        registry = DataHubRegistry()
+        registry.register(
+            "fred",
+            FREDDataProvider(
+                api_key_env=config.api_key_env,
+                timeout_seconds=config.timeout_seconds,
+                stale_after_seconds=config.stale_after_seconds,
+                symbol_map=config.symbol_map,
+            ),
+            {"macro"},
+        )
+        return DataHubRouter(registry)
     raise ValueError(f"Unsupported datahub provider: {config.provider}")
 
 
@@ -110,6 +127,26 @@ def _register_configured_provider(registry: Any, config: DataHubProviderConfig) 
         )
         return
 
+    if config.provider == "fred":
+        from maestro.datahub.fred_provider import FREDDataProvider
+
+        fred_data_types = set(config.data_types or ["macro"])
+        registry.register(
+            config.name,
+            FREDDataProvider(
+                api_key_env=config.api_key_env,
+                timeout_seconds=config.timeout_seconds,
+                stale_after_seconds=config.stale_after_seconds,
+                symbol_map=config.symbol_map,
+            ),
+            _validate_fred_data_types(fred_data_types),
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
     raise ValueError(f"Unsupported datahub provider: {config.provider}")
 
 
@@ -117,4 +154,11 @@ def _validate_yahoo_data_types(data_types: set[str]) -> set[str]:
     unsupported = data_types - {"price", "ohlcv"}
     if unsupported:
         raise ValueError(f"Yahoo provider supports only price and ohlcv: {sorted(unsupported)}")
+    return data_types
+
+
+def _validate_fred_data_types(data_types: set[str]) -> set[str]:
+    unsupported = data_types - {"macro"}
+    if unsupported:
+        raise ValueError(f"FRED provider supports only macro: {sorted(unsupported)}")
     return data_types

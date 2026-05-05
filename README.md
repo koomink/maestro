@@ -141,6 +141,7 @@ v0.2 DataHub and dashboard foundation adds:
 v0.3 DataHub provider work adds:
 
 - Optional Yahoo/yfinance-style `price` and `ohlcv` provider behind Maestro DataHub
+- FRED `macro` provider behind Maestro DataHub, using API keys from environment variables
 - Multi-provider DataHub routing with deterministic priority and fallback behavior
 - Fake-client and fixture-backed provider tests; normal tests do not call live external services
 
@@ -192,6 +193,25 @@ datahub:
 For multiple providers, use `datahub.providers` with lower `priority` values
 preferred first. Strategy plugins still request data through Maestro DataHub and
 do not call yfinance directly.
+
+## FRED Macro Provider
+
+The FRED provider uses stdlib HTTP and does not add a package dependency. Store
+the API key in an environment variable and reference only the variable name in
+config:
+
+```yaml
+datahub:
+  provider: fred
+  api_key_env: FRED_API_KEY
+  timeout_seconds: 5
+  stale_after_seconds: 7776000
+  symbol_map:
+    REAL_GDP: GDPC1
+```
+
+Strategy plugins still request macro data through Maestro DataHub and do not
+call FRED directly.
 
 ## v0.1 Success Criteria
 

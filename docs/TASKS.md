@@ -140,7 +140,7 @@
 ### Real Provider Planning and Implementation
 
 - [x] Plan Yahoo Finance/yfinance-style OHLCV provider integration
-- [ ] Plan FRED macro provider integration as a future planned provider
+- [x] Plan FRED macro provider integration
 - [ ] Plan RSS/GDELT/News API provider integration as future planned providers
 - [ ] Plan sentiment/community data provider integration as future planned providers
 - [ ] Plan crypto exchange market data provider integration as future planned providers
@@ -151,7 +151,7 @@
 - [x] Define fake-client and fixture testing policy for future external providers
 - [x] Define tests for provider routing, freshness, and schema normalization
 - [x] Implement Yahoo Finance/yfinance-style price and OHLCV provider
-- [ ] Implement FRED macro provider
+- [x] Implement FRED macro provider
 - [ ] Implement RSS/GDELT/news provider
 - [ ] Implement sentiment/community data provider
 - [ ] Implement crypto market data provider
@@ -161,7 +161,12 @@
 - [x] Add `yfinance` as an optional dependency extra
 - [x] Document Yahoo/yfinance install and config usage
 - [x] Add skipped-by-default live yfinance integration-test support
-- [ ] Add provider-specific secrets validation without logging secret values where providers require credentials
+- [x] Add FRED API key environment-variable config without logging secret values
+- [x] Add FRED timeout and provider-unavailable handling
+- [x] Add FRED malformed-response handling
+- [x] Add fixture-backed tests for FRED success, missing series, malformed payload, stale/fresh metadata, missing API key, and router integration
+- [x] Add skipped-by-default live FRED integration-test support
+- [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
 - [ ] Add provider-specific retry and rate-limit handling where providers need it
 - [ ] Add fixture-backed tests for each remaining real provider adapter
 

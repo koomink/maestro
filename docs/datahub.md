@@ -190,8 +190,9 @@ Current provider status:
 - `csv`: supports `price` and `ohlcv` from local CSV files.
 - `yahoo` / `yfinance`: supports `price` and `ohlcv` through a small
   Yahoo/yfinance-style client wrapper.
+- `fred`: supports `macro` through a small stdlib HTTP client wrapper.
 
-No FRED, news, GDELT, sentiment/community, crypto, or KIS network provider is
+No news, GDELT, sentiment/community, crypto, or KIS network provider is
 implemented in this scaffold. Those remain future v0.3 provider work.
 
 ### Multi-Provider Config
@@ -249,6 +250,9 @@ datahub:
       provider: fred
       priority: 30
       data_types: [macro]
+      api_key_env: FRED_API_KEY
+      timeout_seconds: 5
+      stale_after_seconds: 7776000
     - name: news_events
       provider: news
       priority: 40
@@ -265,10 +269,10 @@ datahub:
 ```
 
 The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
-The FRED, news, sentiment, and crypto provider names above are planning examples
-only; the current implementation rejects them until real provider adapters are
-added. Crypto asset-type support, secrets, API keys, retries, rate limits, and
-durable cache settings remain future v0.3 design work.
+The FRED provider is implemented for `macro` only. News, sentiment, and crypto
+provider names above are planning examples only; the current implementation
+rejects them until real provider adapters are added. Crypto asset-type support,
+retries, rate limits, and durable cache settings remain future v0.3 design work.
 
 ### Yahoo/yfinance Provider
 
@@ -356,6 +360,84 @@ MAESTRO_RUN_YFINANCE_INTEGRATION=1 uv run pytest tests/test_yahoo_integration.py
 Normal `pytest -q` remains fake-client and fixture based, with no live network
 calls.
 
+### FRED Macro Provider
+
+The FRED provider is the second real external research provider. It supports
+`macro` requests and normalizes FRED series observations into a simple macro
+payload:
+
+```python
+{
+    "GDP": {
+        "series_id": "GDP",
+        "provider_series_id": "GDP",
+        "latest": {"date": "2025-07-01", "value": 102.3, "source": "fred"},
+        "observations": [
+            {"date": "2025-04-01", "value": 101.2, "source": "fred"},
+            {"date": "2025-07-01", "value": 102.3, "source": "fred"},
+        ],
+        "is_stale": False,
+        "warnings": [],
+        "source": "fred",
+    }
+}
+```
+
+The provider uses stdlib HTTP and does not add a core or optional package
+dependency. It requires an API key stored in an environment variable; config
+stores only the environment variable name.
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: fred
+  api_key_env: FRED_API_KEY
+  timeout_seconds: 5
+  stale_after_seconds: 7776000
+  symbol_map:
+    REAL_GDP: GDPC1
+```
+
+Multi-provider example:
+
+```yaml
+datahub:
+  providers:
+    - name: fred_macro
+      provider: fred
+      priority: 20
+      data_types: [macro]
+      api_key_env: FRED_API_KEY
+      timeout_seconds: 5
+      stale_after_seconds: 7776000
+      symbol_map:
+        REAL_GDP: GDPC1
+```
+
+Config fields:
+
+- `api_key_env`: environment variable name that holds the FRED API key. Secret
+  values must not be placed in YAML, logs, dashboard read models, errors, or
+  cached payloads.
+- `timeout_seconds`: maximum time for the FRED HTTP call. Timeout failures are
+  mapped to provider-unavailable so the router can try a lower-priority fallback.
+- `stale_after_seconds`: optional threshold for marking the latest observation
+  stale.
+- `symbol_map`: maps Maestro canonical macro symbols to FRED series IDs.
+
+Malformed FRED payloads fail loudly. Missing API keys and transport failures are
+normalized as provider-unavailable errors.
+
+Live integration checks are optional and skipped by default:
+
+```bash
+MAESTRO_RUN_FRED_INTEGRATION=1 FRED_API_KEY=... uv run pytest tests/test_fred_integration.py
+```
+
+Normal `pytest -q` remains fake-client and fixture based, with no live network
+calls.
+
 ### Provider Operations Planning
 
 Future external research providers must keep operational concerns inside
@@ -413,9 +495,8 @@ Testing policy for future external providers:
 
 Remaining real provider work:
 
-- Implement real provider adapters for Yahoo/yfinance-style price and OHLCV,
-  FRED macro data, RSS/GDELT/news, sentiment/community feeds, and crypto market
-  data.
+- Implement real provider adapters for RSS/GDELT/news, sentiment/community
+  feeds, and crypto market data.
 - Add provider-specific config fields only when each adapter needs them.
 - Add bounded timeout/retry/rate-limit code inside each adapter.
 - Add provider-specific schema normalization and fixture-backed tests.
