@@ -145,9 +145,19 @@
 - [ ] Plan sentiment/community data provider integration as future planned providers
 - [ ] Plan crypto exchange market data provider integration as future planned providers
 - [x] Define provider configuration shape
-- [ ] Define provider secrets handling
-- [ ] Define provider error, timeout, and rate-limit behavior
-- [ ] Define tests for provider routing, freshness, and schema normalization
+- [x] Define provider secrets handling
+- [x] Define provider unavailable behavior
+- [x] Define provider error, timeout, retry, and rate-limit behavior
+- [x] Define fake-client and fixture testing policy for future external providers
+- [x] Define tests for provider routing, freshness, and schema normalization
+- [ ] Implement Yahoo Finance/yfinance-style price and OHLCV provider
+- [ ] Implement FRED macro provider
+- [ ] Implement RSS/GDELT/news provider
+- [ ] Implement sentiment/community data provider
+- [ ] Implement crypto market data provider
+- [ ] Add provider-specific secrets validation without logging secret values
+- [ ] Add provider-specific timeout, retry, and rate-limit handling
+- [ ] Add fixture-backed tests for each real provider adapter
 
 ## Future Milestones
 

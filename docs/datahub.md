@@ -262,3 +262,69 @@ Those provider names are planning examples only. The current implementation
 rejects them until real provider adapters are added. Crypto asset-type support,
 secrets, API keys, timeouts, rate limits, and durable cache settings remain
 future v0.3 design work.
+
+### Provider Operations Planning
+
+Future external research providers must keep operational concerns inside
+DataHub. Strategy plugins continue to request data through `DataRequest` and must
+not read secrets, construct API clients, or call provider APIs directly.
+
+Secrets handling:
+
+- Provider credentials should be referenced by environment variable name in
+  config, not stored as raw secrets in YAML.
+- Providers that do not require credentials, such as some Yahoo/yfinance-style
+  market data paths, should make that explicit in their adapter docs.
+- Required secrets should be validated when the provider is built. Missing
+  credentials should make that provider unavailable rather than falling back to a
+  broker data source for strategy research.
+- Secret values must not be written to audit logs, dashboard read models, errors,
+  or cached payloads.
+
+Timeout, retry, and rate-limit behavior:
+
+- Every network-backed provider should have a small explicit timeout.
+- Retries should be bounded and reserved for transient transport or rate-limit
+  failures. Provider adapters should not retry validation errors, unsupported
+  symbols, or malformed responses.
+- Rate-limit responses should become provider-level unavailable or stale-data
+  outcomes with clear warnings; they should not silently return partial research
+  data as fresh.
+- Provider adapters should normalize failures into DataHub errors or stale
+  payload metadata before returning to the router.
+
+Provider-unavailable behavior:
+
+- If a matching provider is configured but disabled, missing credentials,
+  rate-limited, or otherwise unavailable, DataHub should try the next matching
+  provider by priority.
+- If all matching providers are unavailable, DataHub should raise a
+  provider-unavailable error instead of returning empty data.
+- If no provider matches the request at all, DataHub should raise a no-provider
+  error. That is different from an unavailable configured provider.
+- `broker_quote` providers remain broker-side reference data for execution
+  validation or reconciliation and must not become the fallback for research
+  `price` or `ohlcv` requests.
+
+Testing policy for future external providers:
+
+- Unit tests should use fake clients or fixture payloads for Yahoo/yfinance,
+  FRED, news, sentiment, and crypto providers.
+- Normalization, freshness, timeout, retry, rate-limit, and error mapping should
+  be tested without real network calls.
+- Optional integration tests that contact real services should be explicitly
+  marked, skipped by default, and isolated from normal `pytest -q` runs.
+- Fixtures should include successful payloads, unsupported symbols, stale
+  responses, provider-unavailable responses, malformed provider data, and
+  rate-limit cases.
+
+Remaining real provider work:
+
+- Implement real provider adapters for Yahoo/yfinance-style price and OHLCV,
+  FRED macro data, RSS/GDELT/news, sentiment/community feeds, and crypto market
+  data.
+- Add provider-specific config fields only when each adapter needs them.
+- Add bounded timeout/retry/rate-limit code inside each adapter.
+- Add provider-specific schema normalization and fixture-backed tests.
+- Add any cache only behind DataHub and only if needed for repeatability or
+  rate-limit protection; v0.3 should not add heavy database infrastructure.
