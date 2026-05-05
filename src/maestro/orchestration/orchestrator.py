@@ -80,6 +80,11 @@ class MaestroOrchestrator:
 
             target = self.portfolio_manager.build_target(valid_results)
             risk_decision = self.risk_manager.check(target)
+            self.state_store.save_risk_decision(
+                run_id,
+                risk_decision.approved,
+                risk_decision.model_dump(mode="json"),
+            )
             if not risk_decision.approved:
                 raise ValueError(f"Risk check failed: {risk_decision.violations}")
 

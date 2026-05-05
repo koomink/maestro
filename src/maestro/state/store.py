@@ -14,7 +14,13 @@ class StateStore:
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=10)
+        conn.execute("PRAGMA busy_timeout=10000")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError:
+            pass
+        return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -77,6 +83,16 @@ class StateStore:
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS risk_decisions "
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "approved INTEGER, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
 
     def load_latest_portfolio_state(self) -> PortfolioState:
         with self._connect() as conn:
@@ -107,6 +123,11 @@ class StateStore:
     ) -> None:
         self._insert("broker_account_snapshots", run_id, account_id, payload)
 
+    def save_risk_decision(self, run_id: str, approved: bool, payload: dict[str, Any]) -> None:
+        payload_with_approved = dict(payload)
+        payload_with_approved["approved"] = approved
+        self._insert("risk_decisions", run_id, str(int(approved)), payload_with_approved)
+
     def list_portfolio_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("portfolio_snapshots", limit)
 
@@ -125,6 +146,9 @@ class StateStore:
     def list_broker_account_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("broker_account_snapshots", limit)
 
+    def list_risk_decisions(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self._list_rows("risk_decisions", limit)
+
     def load_latest_broker_account_snapshot(self) -> dict[str, Any] | None:
         rows = self.list_broker_account_snapshots(limit=1)
         return rows[0] if rows else None
@@ -138,6 +162,7 @@ class StateStore:
                 "system_events",
                 "approvals",
                 "broker_account_snapshots",
+                "risk_decisions",
             ]
             counts = {
                 table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -191,6 +216,11 @@ class StateStore:
                     "(run_id, account_id, payload) VALUES (?, ?, ?)",
                     (run_id, secondary, payload_json),
                 )
+            elif table == "risk_decisions":
+                conn.execute(
+                    "INSERT INTO risk_decisions (run_id, approved, payload) VALUES (?, ?, ?)",
+                    (run_id, int(secondary or "0"), payload_json),
+                )
             else:
                 conn.execute(
                     "INSERT INTO portfolio_snapshots (run_id, payload) VALUES (?, ?)",
@@ -205,6 +235,7 @@ class StateStore:
             "system_events",
             "approvals",
             "broker_account_snapshots",
+            "risk_decisions",
         }
         if table not in allowed_tables:
             raise ValueError(f"Unsupported table: {table}")
