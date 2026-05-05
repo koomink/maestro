@@ -293,6 +293,69 @@ Malformed provider rows fail loudly. Timeouts and client availability failures
 are normalized as provider-unavailable errors so the router can try the next
 matching provider by priority.
 
+Install the optional runtime dependency before using live Yahoo/yfinance calls:
+
+```bash
+pip install "maestro[yahoo]"
+```
+
+For local development with `uv`:
+
+```bash
+uv sync --extra yahoo
+```
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: yahoo
+  timeout_seconds: 5
+  stale_after_seconds: 86400
+  symbol_map:
+    SAMSUNG: 005930.KS
+```
+
+Multi-provider example with local fallback:
+
+```yaml
+datahub:
+  providers:
+    - name: yahoo_primary
+      provider: yahoo
+      priority: 10
+      data_types: [price, ohlcv]
+      timeout_seconds: 5
+      stale_after_seconds: 86400
+      symbol_map:
+        SAMSUNG: 005930.KS
+    - name: csv_fallback
+      provider: csv
+      priority: 100
+      data_types: [price, ohlcv]
+      csv_path: data/sample_prices.csv
+```
+
+Config fields:
+
+- `timeout_seconds`: maximum time passed to the yfinance history call. The
+  provider maps timeout failures to provider-unavailable so the router can try a
+  lower-priority fallback.
+- `stale_after_seconds`: optional threshold for marking the latest Yahoo bar as
+  stale. Omit it when staleness should be evaluated elsewhere.
+- `symbol_map`: maps Maestro canonical symbols to Yahoo/yfinance symbols. Keep
+  strategy plugins on Maestro symbols and put provider-specific ticker aliases
+  here.
+
+Live integration checks are optional and skipped by default:
+
+```bash
+MAESTRO_RUN_YFINANCE_INTEGRATION=1 uv run pytest tests/test_yahoo_integration.py
+```
+
+Normal `pytest -q` remains fake-client and fixture based, with no live network
+calls.
+
 ### Provider Operations Planning
 
 Future external research providers must keep operational concerns inside

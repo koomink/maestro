@@ -138,6 +138,12 @@ v0.2 DataHub and dashboard foundation adds:
 - SQLite timeout/busy timeout/WAL settings for dashboard + CLI coexistence
 - Dashboard read models and clearer read-only dashboard tables
 
+v0.3 DataHub provider work adds:
+
+- Optional Yahoo/yfinance-style `price` and `ohlcv` provider behind Maestro DataHub
+- Multi-provider DataHub routing with deterministic priority and fallback behavior
+- Fake-client and fixture-backed provider tests; normal tests do not call live external services
+
 Implemented foundations beyond the core v0.1 scope:
 
 - CSVDataProvider for simple historical data loading
@@ -156,6 +162,36 @@ Deferred real integrations:
 - No real KIS REST API calls
 - No KIS order submission
 - No web dashboard write controls
+
+## Optional Yahoo/yfinance Provider
+
+The Yahoo/yfinance provider is optional and is not required for core Maestro
+usage:
+
+```bash
+pip install "maestro[yahoo]"
+```
+
+Local development with `uv`:
+
+```bash
+uv sync --extra yahoo
+```
+
+Example DataHub config:
+
+```yaml
+datahub:
+  provider: yahoo
+  timeout_seconds: 5
+  stale_after_seconds: 86400
+  symbol_map:
+    SAMSUNG: 005930.KS
+```
+
+For multiple providers, use `datahub.providers` with lower `priority` values
+preferred first. Strategy plugins still request data through Maestro DataHub and
+do not call yfinance directly.
 
 ## v0.1 Success Criteria
 

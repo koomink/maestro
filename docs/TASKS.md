@@ -158,6 +158,9 @@
 - [x] Add Yahoo/yfinance-style timeout and provider-unavailable handling
 - [x] Add Yahoo/yfinance-style malformed-response handling
 - [x] Add fixture-backed tests for Yahoo/yfinance-style provider success, missing symbol, malformed payload, stale/fresh metadata, and router integration
+- [x] Add `yfinance` as an optional dependency extra
+- [x] Document Yahoo/yfinance install and config usage
+- [x] Add skipped-by-default live yfinance integration-test support
 - [ ] Add provider-specific secrets validation without logging secret values where providers require credentials
 - [ ] Add provider-specific retry and rate-limit handling where providers need it
 - [ ] Add fixture-backed tests for each remaining real provider adapter

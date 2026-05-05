@@ -20,6 +20,7 @@ dev = [
     "ruff>=0.8.0",
 ]
 dashboard = ["streamlit>=1.30"]
+yahoo = ["yfinance>=0.2"]
 
 [project.scripts]
 maestro = "maestro.cli:app"
@@ -31,6 +32,9 @@ where = ["src"]
 pythonpath = [
     "src",
     "examples/sample_static_allocation/src",
+]
+markers = [
+    "integration: optional tests that may call external services and are skipped by default",
 ]
 
 [tool.ruff]
