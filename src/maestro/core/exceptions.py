@@ -12,3 +12,7 @@ class ValidationError(MaestroError):
 
 class RiskError(MaestroError):
     pass
+
+
+class MissingPriceError(MaestroError):
+    pass

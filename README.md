@@ -73,7 +73,8 @@ Symphony Ecosystem
 
 ## Project Status
 
-Maestro v0.1 is intended to be a bootable skeleton, not a production trading system.
+Maestro v0.1.1 is a stabilization patch on top of the v0.1 bootable skeleton. It is
+not a production trading system.
 
 Official v0.1 release scope:
 
@@ -88,6 +89,15 @@ Official v0.1 release scope:
 - JSONL audit logs
 - CLI `run-once`
 - CLI `status`
+
+v0.1.1 stabilization adds:
+
+- Semantic ID prefixes for runs, paper orders, and approval requests
+- Explicit unsupported execution engine errors
+- Explicit missing price errors
+- Strict config validation for unknown YAML fields
+- Failure audit events with exception type, message, and traceback summary
+- Focused regression tests for the stabilization behavior
 
 Implemented foundations beyond the core v0.1 scope:
 
@@ -162,7 +172,6 @@ maestro/
 │       ├── approval/
 │       ├── integrations/
 │       ├── dashboard/
-│       ├── api/
 │       └── cli.py
 ├── examples/
 │   └── sample_static_allocation/
@@ -307,8 +316,6 @@ mode: paper
 portfolio:
   base_currency: KRW
   initial_cash: 10000000
-  min_cash_weight: 0.05
-  max_single_asset_weight: 0.3
   allowed_symbols:
     - CASH
     - MOCK_ETF_A
@@ -331,19 +338,16 @@ datahub:
 
 execution:
   engine: paper
-  allow_market_orders: false
 
 risk:
-  max_single_asset_weight: 0.3
+  max_single_asset_weight: 0.4
   min_cash_weight: 0.05
-  allow_short: false
-  allow_leverage: false
 
 state:
-  sqlite_path: "data/maestro_state.db"
+  sqlite_path: var/maestro_state.db
 
 audit:
-  jsonl_path: "logs/audit.jsonl"
+  jsonl_path: var/audit.jsonl
 ```
 
 ## Data Storage

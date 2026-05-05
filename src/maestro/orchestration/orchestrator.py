@@ -1,3 +1,5 @@
+import traceback
+
 from pydantic import BaseModel
 
 from maestro.approval.manager import ApprovalManager
@@ -5,7 +7,7 @@ from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.ids import new_run_id
 from maestro.datahub.base import BaseDataProvider, build_data_provider
-from maestro.execution.paper import PaperExecutionEngine
+from maestro.execution.factory import build_execution_engine
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.manager import PortfolioManager
@@ -30,7 +32,7 @@ class MaestroOrchestrator:
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
         self.portfolio_manager = PortfolioManager(config.strategies)
         self.risk_manager = RiskManager(config.portfolio.allowed_symbols, config.risk)
-        self.execution = PaperExecutionEngine()
+        self.execution = build_execution_engine(config.execution)
         self.approval_manager = ApprovalManager(config.approval)
         self.state_store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
         self.audit = AuditLogger(config.audit.jsonl_path)
@@ -173,10 +175,17 @@ class MaestroOrchestrator:
                         strategy.config.id for strategy in self.registry.strategies
                     ],
                     "data_requests": data_requests_by_strategy,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
                     "error": str(exc),
+                    "traceback": traceback.format_exc(limit=8),
                 },
             )
-            self.state_store.save_system_event(run_id, "run_once_failed", {"error": str(exc)})
+            self.state_store.save_system_event(
+                run_id,
+                "run_once_failed",
+                {"error_type": type(exc).__name__, "error_message": str(exc)},
+            )
             raise
 
     def _prices_from_bundle(self, data_bundle) -> dict[str, float]:

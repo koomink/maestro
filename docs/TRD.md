@@ -130,7 +130,7 @@ maestro/
 │       ├── dashboard/
 │       │   ├── __init__.py
 │       │   └── app.py
-│       └── api/
+│       └── cli.py
 │           ├── __init__.py
 │           ├── server.py
 │           └── routes_status.py
@@ -489,8 +489,6 @@ mode: paper
 portfolio:
   base_currency: KRW
   initial_cash: 10000000
-  min_cash_weight: 0.05
-  max_single_asset_weight: 0.3
   allowed_symbols:
     - CASH
     - MOCK_ETF_A
@@ -513,20 +511,20 @@ datahub:
 
 execution:
   engine: paper
-  allow_market_orders: false
 
 risk:
-  max_single_asset_weight: 0.3
+  max_single_asset_weight: 0.4
   min_cash_weight: 0.05
-  allow_short: false
-  allow_leverage: false
 
 state:
-  sqlite_path: "data/maestro_state.db"
+  sqlite_path: var/maestro_state.db
 
 audit:
-  jsonl_path: "logs/audit.jsonl"
+  jsonl_path: var/audit.jsonl
 ```
+
+Maestro v0.1.1 uses strict Pydantic config validation. Unknown YAML fields fail
+loudly instead of being ignored.
 
 ## 9. Orchestrator Run Cycle
 

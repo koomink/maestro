@@ -3,7 +3,7 @@ from datetime import timedelta
 from maestro.approval.models import ApprovalDecision, ApprovalRequest
 from maestro.config.models import ApprovalConfig
 from maestro.core.clock import utc_now
-from maestro.core.ids import new_run_id
+from maestro.core.ids import new_approval_id
 from maestro.execution.base import OrderIntent
 from maestro.integrations.telegram.bot import TelegramApprovalNotifier
 
@@ -28,7 +28,7 @@ class ApprovalManager:
 
         now = utc_now()
         request = ApprovalRequest(
-            approval_id=new_run_id(),
+            approval_id=new_approval_id(),
             run_id=run_id,
             created_at=now,
             expires_at=now + timedelta(seconds=self.config.timeout_seconds),

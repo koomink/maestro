@@ -1,6 +1,6 @@
-# Maestro v0.1 Release Checklist
+# Maestro v0.1 / v0.1.1 Release Checklist
 
-Status: completed for `v0.1.0`.
+Status: completed for `v0.1.0`; updated for `v0.1.1` stabilization.
 
 Release commit: `9f00a4a`
 
@@ -36,7 +36,19 @@ Verified locally before tagging:
 - [x] JSONL audit log is created under `var/`.
 - [x] `ruff check .` passes.
 - [x] `ruff format --check .` passes.
-- [x] `pytest -q` passes with 20 tests.
+- [x] `pytest -q` passes with 33 tests for v0.1.1.
+
+## v0.1.1 Stabilization
+
+- [x] Separate run, order, and approval ID generators.
+- [x] Paper order IDs use `ord_`.
+- [x] Approval request IDs use `appr_`.
+- [x] Unsupported execution engines fail clearly.
+- [x] Missing prices fail with `MissingPriceError`.
+- [x] Config models forbid unknown YAML fields.
+- [x] Failure audit logs include exception type, message, and traceback.
+- [x] README and TRD config examples match actual config models.
+- [x] Focused regression tests were added.
 
 ## Optional Foundation Checks
 

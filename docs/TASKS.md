@@ -377,6 +377,24 @@
 - [x] Add release checklist.
 - [x] Clarify README v0.1 scope vs later foundations.
 
+---
+
+## v0.1.1 Stabilization
+
+### Completed
+
+- [x] Add semantic ID generators for runs, orders, and approvals.
+- [x] Update OrderBuilder to use `ord_` IDs.
+- [x] Update ApprovalManager to use `appr_` IDs.
+- [x] Add execution engine factory.
+- [x] Reject unsupported execution engines explicitly.
+- [x] Add `MissingPriceError`.
+- [x] Raise explicit missing price errors for portfolio valuation and order building.
+- [x] Forbid unknown fields in config models.
+- [x] Add failure audit exception type, message, and traceback.
+- [x] Align README/TRD config examples with actual config models.
+- [x] Add focused stabilization tests.
+
 ### P0 Tasks
 
 - [ ] Implement `src/maestro/orchestration/cycle.py`.

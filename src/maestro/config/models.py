@@ -1,17 +1,21 @@
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from maestro.core.enums import RunMode, StrategyMode
 
 
-class PortfolioConfig(BaseModel):
+class StrictConfigModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PortfolioConfig(StrictConfigModel):
     base_currency: str = "KRW"
     initial_cash: float = Field(gt=0)
     allowed_symbols: list[str]
 
 
-class StrategyPluginConfig(BaseModel):
+class StrategyPluginConfig(StrictConfigModel):
     id: str
     enabled: bool = True
     mode: StrategyMode = StrategyMode.PAPER
@@ -27,29 +31,29 @@ class StrategyPluginConfig(BaseModel):
         return value
 
 
-class DataHubConfig(BaseModel):
+class DataHubConfig(StrictConfigModel):
     provider: str = "mock"
     csv_path: str | None = None
 
 
-class ExecutionConfig(BaseModel):
+class ExecutionConfig(StrictConfigModel):
     engine: str = "paper"
 
 
-class RiskConfig(BaseModel):
+class RiskConfig(StrictConfigModel):
     max_single_asset_weight: float = Field(gt=0.0, le=1.0)
     min_cash_weight: float = Field(ge=0.0, le=1.0)
 
 
-class StateConfig(BaseModel):
+class StateConfig(StrictConfigModel):
     sqlite_path: str
 
 
-class AuditConfig(BaseModel):
+class AuditConfig(StrictConfigModel):
     jsonl_path: str
 
 
-class ApprovalConfig(BaseModel):
+class ApprovalConfig(StrictConfigModel):
     enabled: bool = False
     provider: str = "console"
     require_approval: bool = False
@@ -65,7 +69,7 @@ class ApprovalConfig(BaseModel):
         return value
 
 
-class KISConfig(BaseModel):
+class KISConfig(StrictConfigModel):
     enabled: bool = False
     provider: str = "mock"
     account_id: str | None = None
@@ -75,7 +79,7 @@ class KISConfig(BaseModel):
     base_url: str | None = None
 
 
-class MaestroConfig(BaseModel):
+class MaestroConfig(StrictConfigModel):
     mode: RunMode = RunMode.PAPER
     portfolio: PortfolioConfig
     strategies: list[StrategyPluginConfig]
