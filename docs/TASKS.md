@@ -26,13 +26,13 @@
 
 ### DataHub Planning
 
-- [ ] Define a provider interface that can support future `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote` payloads
-- [ ] Define provider routing rules for symbol, asset type, data type, timeframe, and run mode
-- [ ] Define freshness and stale-data policies per data type
-- [ ] Define cache/storage requirements for provider responses without overbuilding a database in v0.2
-- [ ] Define a symbol registry and provider symbol mapping plan
-- [ ] Define schema compatibility rules so strategy plugins request data through Maestro DataHub only
-- [ ] Document that `broker_quote` is broker-side reference data for execution validation or reconciliation, not the primary strategy research feed
+- [x] Define a provider interface that can support future `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote` payloads
+- [x] Define provider routing rules for symbol, asset type, data type, timeframe, and run mode
+- [x] Define freshness and stale-data policies per data type
+- [x] Define cache/storage requirements for provider responses without overbuilding a database in v0.2
+- [x] Define a symbol registry and provider symbol mapping plan
+- [x] Define schema compatibility rules so strategy plugins request data through Maestro DataHub only
+- [x] Document that `broker_quote` is broker-side reference data for execution validation or reconciliation, not the primary strategy research feed
 
 ### Symbol Metadata
 

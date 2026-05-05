@@ -176,6 +176,13 @@ Some future modules may be created as stubs in v0.1 but not fully implemented.
 
 `execution/brokers/` owns broker/account/execution integrations. Broker adapters, including KIS, should expose account state, buying power, positions, order submission/status, fills, reconciliation, and optional `broker_quote` data used only for execution validation or reconciliation.
 
+The v0.2 provider planning contract is documented in [datahub.md](datahub.md).
+Future DataHub providers should route by canonical symbol, asset type, data type,
+timeframe/lookback, and run mode, then return normalized `DataBundle` payloads.
+Provider-specific symbols and caches belong behind DataHub, not inside strategy
+plugins or broker adapters. v0.2 does not implement real external providers or
+network calls.
+
 ## 3. Technology Stack
 
 ### 3.1 Runtime
