@@ -363,6 +363,20 @@
 - [ ] Broker reconciliation against internal portfolio state.
 - [ ] KIS order/fill history normalization beyond mock responses.
 
+---
+
+## v0.1 Release Hardening
+
+### Completed
+
+- [x] Add config validation failure tests.
+- [x] Add plugin loader failure tests.
+- [x] Add signal validator failure tests.
+- [x] Add paper execution behavior tests.
+- [x] Add audit JSONL content assertion for run-once.
+- [x] Add release checklist.
+- [x] Clarify README v0.1 scope vs later foundations.
+
 ### P0 Tasks
 
 - [ ] Implement `src/maestro/orchestration/cycle.py`.

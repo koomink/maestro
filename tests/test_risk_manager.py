@@ -42,3 +42,20 @@ def test_risk_manager_enforces_min_cash():
     assert round(decision.target.allocations["MOCK_ETF_A"], 6) == 0.4
     assert round(decision.target.allocations["MOCK_ETF_B"], 6) == 0.4
     assert decision.modifications == ["Raised CASH to 0.200000"]
+
+
+def test_risk_manager_rejects_unknown_symbol():
+    manager = RiskManager(
+        allowed_symbols=["CASH", "MOCK_ETF_A"],
+        config=RiskConfig(max_single_asset_weight=0.8, min_cash_weight=0.05),
+    )
+    target = PortfolioTarget(
+        timestamp=datetime.now(UTC),
+        allocations={"CASH": 0.5, "MOCK_ETF_X": 0.5},
+        source_strategy_ids=["s"],
+    )
+
+    decision = manager.check(target)
+
+    assert not decision.approved
+    assert decision.violations == ["MOCK_ETF_X is outside allowed universe"]

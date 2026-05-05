@@ -75,11 +75,10 @@ Symphony Ecosystem
 
 Maestro v0.1 is intended to be a bootable skeleton, not a production trading system.
 
-Current implementation includes the v0.1 skeleton plus Phase 1, Phase 2, and Phase 3 foundations:
+Official v0.1 release scope:
 
 - Paper mode only
 - MockDataHub only
-- CSVDataProvider for simple historical data loading
 - TargetAllocationResult only
 - External plugin loading
 - Simple portfolio construction
@@ -89,6 +88,10 @@ Current implementation includes the v0.1 skeleton plus Phase 1, Phase 2, and Pha
 - JSONL audit logs
 - CLI `run-once`
 - CLI `status`
+
+Implemented foundations beyond the core v0.1 scope:
+
+- CSVDataProvider for simple historical data loading
 - Optional Streamlit read-only dashboard
 - Approval request/decision gate before paper fills
 - Telegram approval message formatter and notifier stub
@@ -97,7 +100,13 @@ Current implementation includes the v0.1 skeleton plus Phase 1, Phase 2, and Pha
 - KIS read-only adapter interface and deterministic mock client
 - CLI `kis-sync` and `kis-account`
 
-No live trading is included in v0.1.
+Deferred real integrations:
+
+- No live trading
+- No real Telegram Bot API polling/webhook
+- No real KIS REST API calls
+- No KIS order submission
+- No web dashboard write controls
 
 ## v0.1 Success Criteria
 
@@ -223,6 +232,17 @@ uv pip install -e examples/sample_static_allocation
 Development checks:
 
 ```bash
+ruff check .
+ruff format --check .
+pytest -q
+```
+
+Fresh clone v0.1 verification:
+
+```bash
+uv sync --extra dev
+uv pip install -e examples/sample_static_allocation
+maestro run-once --config configs/paper.yaml
 ruff check .
 ruff format --check .
 pytest -q
