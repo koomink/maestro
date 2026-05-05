@@ -1,5 +1,5 @@
-from maestro.datahub.base import BaseDataProvider
 from maestro.core.clock import utc_now
+from maestro.datahub.base import BaseDataProvider
 from maestro.sdk import DataBundle, DataRequest
 
 

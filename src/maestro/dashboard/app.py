@@ -40,6 +40,9 @@ def render(config_path: str | Path) -> None:
     st.subheader("Recent Approvals")
     st.dataframe(store.list_approvals(limit=20), use_container_width=True)
 
+    st.subheader("Recent Broker Account Snapshots")
+    st.dataframe(store.list_broker_account_snapshots(limit=20), use_container_width=True)
+
     st.subheader("System Status")
     st.json(status)
 

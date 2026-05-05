@@ -75,7 +75,7 @@ Symphony Ecosystem
 
 Maestro v0.1 is intended to be a bootable skeleton, not a production trading system.
 
-Current implementation includes the v0.1 skeleton plus Phase 1 and Phase 2 foundations:
+Current implementation includes the v0.1 skeleton plus Phase 1, Phase 2, and Phase 3 foundations:
 
 - Paper mode only
 - MockDataHub only
@@ -93,6 +93,9 @@ Current implementation includes the v0.1 skeleton plus Phase 1 and Phase 2 found
 - Approval request/decision gate before paper fills
 - Telegram approval message formatter and notifier stub
 - CLI `approvals`
+- `live_readonly` mode config
+- KIS read-only adapter interface and deterministic mock client
+- CLI `kis-sync` and `kis-account`
 
 No live trading is included in v0.1.
 
@@ -217,6 +220,14 @@ uv pip install -e .
 uv pip install -e examples/sample_static_allocation
 ```
 
+Development checks:
+
+```bash
+ruff check .
+ruff format --check .
+pytest -q
+```
+
 Then run:
 
 ```bash
@@ -243,6 +254,15 @@ maestro approvals --config configs/approval_paper.yaml
 ```
 
 The Phase 2 Telegram integration is intentionally a no-network notifier stub. It formats the approval payload and records the configured decision so the orchestration, state, and audit contracts exist before a real Bot API client is added.
+
+To run the Phase 3 KIS read-only mock adapter:
+
+```bash
+maestro kis-sync --config configs/live_readonly.yaml
+maestro kis-account --config configs/live_readonly.yaml
+```
+
+The current KIS adapter is read-only and no-network. It stores deterministic mock broker account snapshots so the state, audit, dashboard, and CLI contracts are ready before a real KIS REST client is connected.
 
 To install dashboard dependencies and open the read-only dashboard:
 

@@ -6,7 +6,9 @@ class PortfolioState(BaseModel):
     positions: dict[str, float] = Field(default_factory=dict)
 
     def total_value(self, prices: dict[str, float]) -> float:
-        return self.cash + sum(quantity * prices[symbol] for symbol, quantity in self.positions.items())
+        return self.cash + sum(
+            quantity * prices[symbol] for symbol, quantity in self.positions.items()
+        )
 
     def summary(self, prices: dict[str, float]) -> dict[str, float | dict[str, float]]:
         return {

@@ -1,0 +1,39 @@
+mode: live_readonly
+
+portfolio:
+  base_currency: KRW
+  initial_cash: 10000000
+  allowed_symbols:
+    - CASH
+    - MOCK_ETF_A
+    - MOCK_ETF_B
+
+strategies: []
+
+datahub:
+  provider: mock
+
+execution:
+  engine: paper
+
+risk:
+  max_single_asset_weight: 0.4
+  min_cash_weight: 0.05
+
+state:
+  sqlite_path: var/live_readonly_state.db
+
+audit:
+  jsonl_path: var/live_readonly_audit.jsonl
+
+approval:
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
+  timeout_seconds: 300
+
+kis:
+  enabled: true
+  provider: mock
+  account_id: MOCK-ACCOUNT

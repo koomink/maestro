@@ -28,9 +28,7 @@ class SampleStaticAllocationStrategy(BaseStrategyPlugin):
             for symbol in allocations
         ]
 
-    def run(
-        self, data_bundle: DataBundle, context: StrategyContext
-    ) -> TargetAllocationResult:
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
         return TargetAllocationResult(
             strategy_id="sample_static_allocation",
             strategy_version=self.manifest().version,

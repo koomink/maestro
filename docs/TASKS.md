@@ -336,6 +336,33 @@
 - [ ] Telegram inline button callback handling.
 - [ ] Whitelisted Telegram user callback enforcement against real updates.
 
+---
+
+## Phase 3: Korea Investment Securities Read-only Adapter
+
+### Completed
+
+- [x] Add `live_readonly` mode.
+- [x] Add KIS config model.
+- [x] Add live-readonly config file.
+- [x] Add KIS read-only client interface.
+- [x] Add mock KIS read-only client.
+- [x] Add KIS auth manager placeholder.
+- [x] Add read-only KIS service.
+- [x] Store broker account snapshots in SQLite.
+- [x] Add KIS read-only audit event.
+- [x] Add `maestro kis-sync`.
+- [x] Add `maestro kis-account`.
+- [x] Add dashboard broker snapshots section.
+- [x] Add tests for KIS read-only service and CLI.
+
+### Deferred
+
+- [ ] Real KIS REST client.
+- [ ] OAuth token refresh and persistence.
+- [ ] Broker reconciliation against internal portfolio state.
+- [ ] KIS order/fill history normalization beyond mock responses.
+
 ### P0 Tasks
 
 - [ ] Implement `src/maestro/orchestration/cycle.py`.

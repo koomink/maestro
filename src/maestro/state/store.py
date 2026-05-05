@@ -20,23 +20,62 @@ class StateStore:
         with self._connect() as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS portfolio_snapshots "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS strategy_runs "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, strategy_id TEXT, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "strategy_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS orders "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, order_id TEXT, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "order_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS system_events "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, event_type TEXT, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "event_type TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS approvals "
-                "(id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, approval_id TEXT, payload TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "approval_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS broker_account_snapshots "
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "account_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
             )
 
     def load_latest_portfolio_state(self) -> PortfolioState:
@@ -63,6 +102,11 @@ class StateStore:
     def save_approval(self, run_id: str, approval_id: str, payload: dict[str, Any]) -> None:
         self._insert("approvals", run_id, approval_id, payload)
 
+    def save_broker_account_snapshot(
+        self, run_id: str, account_id: str, payload: dict[str, Any]
+    ) -> None:
+        self._insert("broker_account_snapshots", run_id, account_id, payload)
+
     def list_portfolio_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("portfolio_snapshots", limit)
 
@@ -78,6 +122,13 @@ class StateStore:
     def list_approvals(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("approvals", limit)
 
+    def list_broker_account_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self._list_rows("broker_account_snapshots", limit)
+
+    def load_latest_broker_account_snapshot(self) -> dict[str, Any] | None:
+        rows = self.list_broker_account_snapshots(limit=1)
+        return rows[0] if rows else None
+
     def status(self) -> dict[str, Any]:
         with self._connect() as conn:
             tables = [
@@ -86,6 +137,7 @@ class StateStore:
                 "orders",
                 "system_events",
                 "approvals",
+                "broker_account_snapshots",
             ]
             counts = {
                 table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -133,6 +185,12 @@ class StateStore:
                     "INSERT INTO approvals (run_id, approval_id, payload) VALUES (?, ?, ?)",
                     (run_id, secondary, payload_json),
                 )
+            elif table == "broker_account_snapshots":
+                conn.execute(
+                    "INSERT INTO broker_account_snapshots "
+                    "(run_id, account_id, payload) VALUES (?, ?, ?)",
+                    (run_id, secondary, payload_json),
+                )
             else:
                 conn.execute(
                     "INSERT INTO portfolio_snapshots (run_id, payload) VALUES (?, ?)",
@@ -146,6 +204,7 @@ class StateStore:
             "orders",
             "system_events",
             "approvals",
+            "broker_account_snapshots",
         }
         if table not in allowed_tables:
             raise ValueError(f"Unsupported table: {table}")

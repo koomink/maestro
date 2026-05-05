@@ -71,7 +71,9 @@ class MaestroOrchestrator:
                     },
                 )
                 if not validation.ok:
-                    raise ValueError(f"Invalid strategy result for {loaded.config.id}: {validation.errors}")
+                    raise ValueError(
+                        f"Invalid strategy result for {loaded.config.id}: {validation.errors}"
+                    )
                 valid_results.append(result)
 
             target = self.portfolio_manager.build_target(valid_results)
@@ -143,7 +145,9 @@ class MaestroOrchestrator:
                 {
                     "loaded_strategies": summary.loaded_strategies,
                     "data_requests": data_requests_by_strategy,
-                    "strategy_results": [result.model_dump(mode="json") for result in valid_results],
+                    "strategy_results": [
+                        result.model_dump(mode="json") for result in valid_results
+                    ],
                     "portfolio_target": target.model_dump(mode="json"),
                     "risk_decision": risk_decision.model_dump(mode="json"),
                     "approval_request": approval_request.model_dump(mode="json")
@@ -165,7 +169,9 @@ class MaestroOrchestrator:
                 run_id,
                 "run_once_failed",
                 {
-                    "loaded_strategies": [strategy.config.id for strategy in self.registry.strategies],
+                    "loaded_strategies": [
+                        strategy.config.id for strategy in self.registry.strategies
+                    ],
                     "data_requests": data_requests_by_strategy,
                     "error": str(exc),
                 },

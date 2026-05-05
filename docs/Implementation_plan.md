@@ -91,6 +91,31 @@ Out of scope remains unchanged:
 - No Korea Investment Securities integration.
 - No dashboard write controls.
 
+## Phase 3: Korea Investment Securities Read-only Adapter
+
+Implemented scope:
+
+- `live_readonly` run mode.
+- `configs/live_readonly.yaml`.
+- KIS read-only client interface.
+- Deterministic no-network mock KIS client.
+- KIS auth manager placeholder for environment-based credentials.
+- Read-only service for account snapshot, current prices, daily orders, and unfilled orders.
+- SQLite `broker_account_snapshots` table and read APIs.
+- JSONL audit event for KIS read-only snapshots.
+- CLI `maestro kis-sync --config ...`.
+- CLI `maestro kis-account --config ...`.
+- Dashboard section for recent broker account snapshots.
+
+The real KIS REST client is intentionally deferred. This phase creates the adapter boundary and persisted read model without broker side effects.
+
+Out of scope remains unchanged:
+
+- No KIS order submission.
+- No KIS WebSocket.
+- No real OAuth token refresh.
+- No live trading.
+
 ## 4. Milestone M0: Project Scaffold
 
 ### Goal

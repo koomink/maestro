@@ -1,30 +1,32 @@
-from enum import Enum
+from enum import StrEnum
 
 
-class RunMode(str, Enum):
+class RunMode(StrEnum):
     PAPER = "paper"
+    LIVE_READONLY = "live_readonly"
 
 
-class StrategyMode(str, Enum):
+class StrategyMode(StrEnum):
     PAPER = "paper"
+    LIVE_READONLY = "live_readonly"
     DISABLED = "disabled"
 
 
-class AssetType(str, Enum):
+class AssetType(StrEnum):
     CASH = "cash"
     DOMESTIC_ETF = "domestic_etf"
     US_ETF = "us_etf"
 
 
-class OrderSide(str, Enum):
+class OrderSide(StrEnum):
     BUY = "buy"
     SELL = "sell"
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     MARKET = "market"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     CREATED = "created"
     FILLED = "filled"

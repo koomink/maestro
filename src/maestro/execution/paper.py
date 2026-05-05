@@ -27,7 +27,9 @@ class PaperExecutionEngine:
             signed_notional = order.notional if order.side == OrderSide.BUY else -order.notional
             signed_quantity = order.quantity if order.side == OrderSide.BUY else -order.quantity
             next_state.cash -= signed_notional
-            next_state.positions[order.symbol] = next_state.positions.get(order.symbol, 0.0) + signed_quantity
+            next_state.positions[order.symbol] = (
+                next_state.positions.get(order.symbol, 0.0) + signed_quantity
+            )
         results = [
             ExecutionResult(
                 order_id=order.order_id,

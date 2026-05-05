@@ -42,9 +42,8 @@ class RiskManager:
                 excess = weight - self.config.max_single_asset_weight
                 allocations[symbol] = self.config.max_single_asset_weight
                 allocations["CASH"] = allocations.get("CASH", 0.0) + excess
-                modifications.append(
-                    f"Capped {symbol} from {weight:.6f} to {self.config.max_single_asset_weight:.6f}"
-                )
+                max_weight = self.config.max_single_asset_weight
+                modifications.append(f"Capped {symbol} from {weight:.6f} to {max_weight:.6f}")
 
         cash = allocations.get("CASH", 0.0)
         if cash < self.config.min_cash_weight:

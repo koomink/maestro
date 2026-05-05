@@ -1,9 +1,10 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+from sample_static_allocation.strategy import SampleStaticAllocationStrategy
+
 from maestro.core.enums import RunMode
 from maestro.sdk import BaseStrategyPlugin, DataBundle, StrategyContext, TargetAllocationResult
-from sample_static_allocation.strategy import SampleStaticAllocationStrategy
 
 
 def test_sample_strategy_contract_and_sdk_boundary():
@@ -31,7 +32,9 @@ def test_sample_strategy_contract_and_sdk_boundary():
     assert isinstance(result, TargetAllocationResult)
     assert sum(result.allocations.values()) == 1.0
 
-    source = Path("examples/sample_static_allocation/src/sample_static_allocation/strategy.py").read_text()
+    source = Path(
+        "examples/sample_static_allocation/src/sample_static_allocation/strategy.py"
+    ).read_text()
     assert "maestro.portfolio" not in source
     assert "maestro.risk" not in source
     assert "maestro.execution" not in source

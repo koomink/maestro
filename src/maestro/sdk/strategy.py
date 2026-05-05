@@ -19,7 +19,5 @@ class BaseStrategyPlugin(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def run(
-        self, data_bundle: DataBundle, context: StrategyContext
-    ) -> TargetAllocationResult:
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
         raise NotImplementedError

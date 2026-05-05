@@ -65,6 +65,16 @@ class ApprovalConfig(BaseModel):
         return value
 
 
+class KISConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "mock"
+    account_id: str | None = None
+    app_key_env: str = "KIS_APP_KEY"
+    app_secret_env: str = "KIS_APP_SECRET"
+    access_token_env: str = "KIS_ACCESS_TOKEN"
+    base_url: str | None = None
+
+
 class MaestroConfig(BaseModel):
     mode: RunMode = RunMode.PAPER
     portfolio: PortfolioConfig
@@ -75,3 +85,4 @@ class MaestroConfig(BaseModel):
     state: StateConfig
     audit: AuditConfig
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
+    kis: KISConfig = Field(default_factory=KISConfig)

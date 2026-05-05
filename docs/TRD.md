@@ -193,6 +193,15 @@ Some future modules may be created as stubs in v0.1 but not fully implemented.
 - `approval.default_decision` supports `approved`, `rejected`, and `expired` for the Phase 2 no-network stub.
 - Telegram integration currently formats approval messages without calling Bot API.
 
+### 3.5 Phase 3 Additions
+
+- `RunMode.LIVE_READONLY` is supported for read-only broker sync commands.
+- KIS integration is isolated under `execution/brokers/kis`.
+- `KISReadOnlyClient` defines account, price, daily order, and unfilled order reads.
+- `MockKISReadOnlyClient` provides deterministic no-network responses.
+- Broker account snapshots are persisted in SQLite and audit JSONL.
+- Real KIS REST calls are not implemented in this phase.
+
 ## 4. Public SDK Design
 
 External Virtuoso apps should import only from `maestro.sdk`.
