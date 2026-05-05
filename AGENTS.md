@@ -60,8 +60,31 @@ For multi-step tasks, state a brief plan:
 
 Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
+## 5. Keep Documentation in Sync
+
+**Major code changes must update docs in the same PR.**
+
+If a change affects architecture, configuration, CLI usage, public interfaces, data schemas, workflows, roadmap scope, or user-facing behavior, update the relevant docs before finishing.
+
+Check at least:
+- `README.md`
+- `docs/PRD.md`
+- `docs/TRD.md`
+- `docs/ROADMAP.md`
+- `docs/TASKS.md`
+- relevant domain docs such as `docs/datahub.md`
+
+Do not update docs for trivial internal changes unless the current docs would become misleading.
+
+Before finishing, verify:
+- README still matches the current system.
+- PRD/TRD still match the architecture.
+- ROADMAP/TASKS reflect completed and remaining work.
+- Current limitations are still clear.
+
+If code and docs disagree, fix the docs or call out the mismatch in the final summary.
+
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
-
 
