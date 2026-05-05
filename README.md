@@ -381,6 +381,10 @@ Maestro must be safe by default.
 
 ## Future Roadmap
 
+Detailed roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
+
+Current task checklist: [docs/TASKS.md](docs/TASKS.md)
+
 ### v0.1: Core Skeleton
 
 - Paper mode
