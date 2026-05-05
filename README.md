@@ -150,6 +150,7 @@ maestro/
 │   ├── PRD.md
 │   ├── TRD.md
 │   ├── Implementation_plan.md
+│   ├── ROADMAP.md
 │   └── TASKS.md
 ├── pyproject.toml
 ├── .env.example
@@ -359,12 +360,15 @@ SQLite = queryable state for dashboard/status
 JSONL = append-only audit log
 ```
 
-Suggested paths:
+Default config paths use `var/` for local runtime artifacts:
 
 ```text
-data/maestro_state.db
-logs/audit.jsonl
+var/maestro_state.db
+var/audit.jsonl
 ```
+
+Other configs use the same convention, for example `var/approval_state.db` and
+`var/live_readonly_state.db`. The `var/` directory is intentionally gitignored.
 
 ## Safety Principles
 
@@ -381,63 +385,18 @@ Maestro must be safe by default.
 
 ## Future Roadmap
 
-Detailed roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
+For version-level planning, see [docs/ROADMAP.md](docs/ROADMAP.md).
 
-Current task checklist: [docs/TASKS.md](docs/TASKS.md)
+For the current execution checklist, see [docs/TASKS.md](docs/TASKS.md).
 
-### v0.1: Core Skeleton
+Short direction:
 
-- Paper mode
-- MockDataHub
-- Sample external plugin
-- Simple PortfolioManager
-- Simple RiskManager
-- PaperExecutionEngine
-- SQLite state
-- JSONL audit logs
-
-### v0.2: Data and Dashboard
-
-- CSVDataProvider
-- Minimal Streamlit read-only dashboard
-- Portfolio and system status pages
-
-### v0.3: Telegram Approval in Paper Mode
-
-- Telegram notifications
-- Order proposals
-- Approve/reject buttons
-- Whitelisted user IDs
-- Approval timeout
-- Paper execution after approval
-
-### v0.4: Korea Investment Securities Read-only
-
-- KIS OAuth token management
-- Current price lookup
-- Balance inquiry
-- Buying power inquiry
-- Fill/order inquiry
-- Reconciliation
-- `live_readonly` mode
-
-### v0.5: KIS Live Approval Trading
-
-- Telegram-approved live orders
-- Limit orders only
-- Small notional limits
-- Fill polling
-- Partial fill handling
-- Broker/internal state reconciliation
-
-### v0.6: Hardening
-
-- KIS WebSocket
-- Kill switch
-- Advanced risk rules
-- Performance attribution
-- Enhanced dashboard
-- Deployment guide
+- v0.1.x: bootable skeleton and stabilization
+- v0.2: DataHub and read-only dashboard foundation
+- v0.3: Telegram approval in paper mode
+- v0.4: KIS read-only integration
+- v0.5: KIS live approval trading
+- v0.6: production hardening
 
 ## Dashboard Philosophy
 
