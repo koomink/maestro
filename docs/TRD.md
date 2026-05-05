@@ -183,6 +183,12 @@ Provider-specific symbols and caches belong behind DataHub, not inside strategy
 plugins or broker adapters. v0.2 does not implement real external providers or
 network calls.
 
+The v0.3 scaffold adds `DataHubRegistry` and `DataHubRouter` as lightweight
+in-process routing infrastructure. They are intentionally small: they record
+provider capabilities, route `DataRequest` objects, normalize payloads, and
+surface clear DataHub errors. They do not implement external API clients,
+database caches, or broker behavior.
+
 ## 3. Technology Stack
 
 ### 3.1 Runtime

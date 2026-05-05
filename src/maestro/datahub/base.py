@@ -13,12 +13,20 @@ class BaseDataProvider(ABC):
 def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
     if config.provider == "mock":
         from maestro.datahub.mock_provider import MockDataHub
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
 
-        return MockDataHub()
+        registry = DataHubRegistry()
+        registry.register("mock", MockDataHub(), {"price", "ohlcv"})
+        return DataHubRouter(registry)
     if config.provider == "csv":
         from maestro.datahub.csv_provider import CSVDataProvider
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
 
         if not config.csv_path:
             raise ValueError("datahub.csv_path is required when provider is 'csv'")
-        return CSVDataProvider(config.csv_path)
+        registry = DataHubRegistry()
+        registry.register("csv", CSVDataProvider(config.csv_path), {"price", "ohlcv"})
+        return DataHubRouter(registry)
     raise ValueError(f"Unsupported datahub provider: {config.provider}")

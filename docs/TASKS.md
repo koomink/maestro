@@ -123,7 +123,17 @@
 - [x] `maestro run-once --config configs/csv_paper.yaml`
 - [x] `maestro status --config configs/paper.yaml`
 
-## Next Milestone: v0.3 External Research Data Providers Planning
+## Next Milestone: v0.3 External Research Data Providers
+
+### Provider Scaffold
+
+- [x] Add lightweight DataHub provider registry
+- [x] Add lightweight DataHub request router
+- [x] Add DataHub errors for unsupported data type, no provider, provider unavailable, and stale data
+- [x] Keep existing `mock` and `csv` providers working through the router
+- [x] Add tests for routing, no-provider errors, normalization, stale/fresh metadata, and backward compatibility
+
+### Real Provider Planning and Implementation
 
 - [ ] Plan Yahoo Finance/yfinance-style OHLCV provider integration as a future planned provider
 - [ ] Plan FRED macro provider integration as a future planned provider

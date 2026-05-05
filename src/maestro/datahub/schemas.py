@@ -4,6 +4,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from maestro.core.enums import AssetType
 
+SUPPORTED_DATA_TYPES = frozenset(
+    {
+        "price",
+        "ohlcv",
+        "macro",
+        "news",
+        "sentiment",
+        "fundamental",
+        "broker_quote",
+    }
+)
+
 
 class PricePoint(BaseModel):
     symbol: str

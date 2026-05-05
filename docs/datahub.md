@@ -162,3 +162,32 @@ quotes, or support reconciliation.
 should use DataHub market/research providers such as CSV/local today and future
 Yahoo Finance/yfinance-style OHLCV, FRED, news, sentiment, fundamental, or crypto
 market data providers later.
+
+## v0.3 Provider Scaffold
+
+v0.3 starts with a lightweight provider scaffold, not real integrations.
+
+Implemented scaffold:
+
+- `DataHubRegistry` records provider capabilities: data types, optional symbols,
+  optional asset types, optional run modes, and availability.
+- `DataHubRouter` selects a provider for each `DataRequest`, groups requests by
+  provider, normalizes provider payloads, and combines them into one
+  `DataBundle`.
+- DataHub errors distinguish unsupported data types, no matching provider,
+  unavailable providers, and stale data when stale payloads are disallowed.
+- Existing `mock` and `csv` configs are still supported through the router.
+
+The scaffold recognizes these data types:
+
+```text
+price, ohlcv, macro, news, sentiment, fundamental, broker_quote
+```
+
+Current built-in providers remain local-only:
+
+- `mock`: supports `price` and `ohlcv` fixture-style payloads.
+- `csv`: supports `price` and `ohlcv` from local CSV files.
+
+No Yahoo, FRED, news, GDELT, sentiment/community, crypto, or KIS network provider
+is implemented in this scaffold. Those remain future v0.3 provider work.
