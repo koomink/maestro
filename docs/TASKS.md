@@ -139,7 +139,7 @@
 
 ### Real Provider Planning and Implementation
 
-- [ ] Plan Yahoo Finance/yfinance-style OHLCV provider integration as a future planned provider
+- [x] Plan Yahoo Finance/yfinance-style OHLCV provider integration
 - [ ] Plan FRED macro provider integration as a future planned provider
 - [ ] Plan RSS/GDELT/News API provider integration as future planned providers
 - [ ] Plan sentiment/community data provider integration as future planned providers
@@ -150,14 +150,17 @@
 - [x] Define provider error, timeout, retry, and rate-limit behavior
 - [x] Define fake-client and fixture testing policy for future external providers
 - [x] Define tests for provider routing, freshness, and schema normalization
-- [ ] Implement Yahoo Finance/yfinance-style price and OHLCV provider
+- [x] Implement Yahoo Finance/yfinance-style price and OHLCV provider
 - [ ] Implement FRED macro provider
 - [ ] Implement RSS/GDELT/news provider
 - [ ] Implement sentiment/community data provider
 - [ ] Implement crypto market data provider
-- [ ] Add provider-specific secrets validation without logging secret values
-- [ ] Add provider-specific timeout, retry, and rate-limit handling
-- [ ] Add fixture-backed tests for each real provider adapter
+- [x] Add Yahoo/yfinance-style timeout and provider-unavailable handling
+- [x] Add Yahoo/yfinance-style malformed-response handling
+- [x] Add fixture-backed tests for Yahoo/yfinance-style provider success, missing symbol, malformed payload, stale/fresh metadata, and router integration
+- [ ] Add provider-specific secrets validation without logging secret values where providers require credentials
+- [ ] Add provider-specific retry and rate-limit handling where providers need it
+- [ ] Add fixture-backed tests for each remaining real provider adapter
 
 ## Future Milestones
 

@@ -184,13 +184,15 @@ The scaffold recognizes these data types:
 price, ohlcv, macro, news, sentiment, fundamental, broker_quote
 ```
 
-Current built-in providers remain local-only:
+Current provider status:
 
 - `mock`: supports `price` and `ohlcv` fixture-style payloads.
 - `csv`: supports `price` and `ohlcv` from local CSV files.
+- `yahoo` / `yfinance`: supports `price` and `ohlcv` through a small
+  Yahoo/yfinance-style client wrapper.
 
-No Yahoo, FRED, news, GDELT, sentiment/community, crypto, or KIS network provider
-is implemented in this scaffold. Those remain future v0.3 provider work.
+No FRED, news, GDELT, sentiment/community, crypto, or KIS network provider is
+implemented in this scaffold. Those remain future v0.3 provider work.
 
 ### Multi-Provider Config
 
@@ -238,7 +240,11 @@ datahub:
     - name: yahoo_ohlcv
       provider: yahoo
       priority: 20
-      data_types: [price, ohlcv, fundamental]
+      data_types: [price, ohlcv]
+      timeout_seconds: 5
+      stale_after_seconds: 86400
+      symbol_map:
+        SAMSUNG: 005930.KS
     - name: fred_macro
       provider: fred
       priority: 30
@@ -258,10 +264,34 @@ datahub:
       symbols: [BTC-USD]
 ```
 
-Those provider names are planning examples only. The current implementation
-rejects them until real provider adapters are added. Crypto asset-type support,
-secrets, API keys, timeouts, rate limits, and durable cache settings remain
-future v0.3 design work.
+The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
+The FRED, news, sentiment, and crypto provider names above are planning examples
+only; the current implementation rejects them until real provider adapters are
+added. Crypto asset-type support, secrets, API keys, retries, rate limits, and
+durable cache settings remain future v0.3 design work.
+
+### Yahoo/yfinance Provider
+
+The Yahoo/yfinance-style provider is the first real external research provider.
+It remains behind DataHub and normalizes provider rows into `PricePoint`,
+`OHLCVBar`, and `SymbolData`.
+
+Supported behavior:
+
+- `price`: latest close from the selected Yahoo/yfinance history rows.
+- `ohlcv`: normalized OHLCV bars from Yahoo/yfinance history rows.
+- `timeout_seconds`: passed to the Yahoo/yfinance client wrapper.
+- `stale_after_seconds`: optional freshness threshold that marks payloads stale.
+- `symbol_map`: canonical Maestro symbol to provider-specific Yahoo symbol
+  mapping.
+
+The provider uses an optional lazy `yfinance` client wrapper at runtime. Normal
+tests use fake clients and fixture rows, so `pytest -q` does not require live
+network access or a real Yahoo/yfinance call.
+
+Malformed provider rows fail loudly. Timeouts and client availability failures
+are normalized as provider-unavailable errors so the router can try the next
+matching provider by priority.
 
 ### Provider Operations Planning
 

@@ -15,6 +15,7 @@ from maestro.datahub.errors import (
 from maestro.datahub.registry import DataHubRegistry
 from maestro.datahub.router import DataHubRouter
 from maestro.datahub.schemas import PricePoint, SymbolData
+from maestro.datahub.yahoo_provider import YahooDataProvider
 from maestro.sdk import DataBundle, DataRequest
 
 
@@ -32,6 +33,11 @@ class FixtureProvider(BaseDataProvider):
             generated_at=datetime.now(UTC),
             source=self.source,
         )
+
+
+class UnavailableProvider(BaseDataProvider):
+    def get_data(self, requests: list[DataRequest]) -> DataBundle:
+        raise ProviderUnavailableError("fixture unavailable")
 
 
 def request(symbol: str = "MOCK_ETF_A", data_type: str = "price") -> DataRequest:
@@ -219,6 +225,18 @@ def test_router_uses_registration_order_when_priority_matches():
     assert second_provider.received_requests == []
 
 
+def test_router_tries_next_provider_when_preferred_provider_is_unavailable():
+    fallback_provider = FixtureProvider("fallback", {"MOCK_ETF_A": {"price": 100.0}})
+    registry = DataHubRegistry()
+    registry.register("yahoo", UnavailableProvider(), {"price"}, priority=10)
+    registry.register("fallback", fallback_provider, {"price"}, priority=100)
+
+    bundle = DataHubRouter(registry).get_data([request()])
+
+    assert bundle.source == "fallback"
+    assert bundle.data["MOCK_ETF_A"]["price"] == 100.0
+
+
 def test_build_data_provider_keeps_mock_and_csv_configs_working():
     mock_config = DataHubConfig(provider="mock")
     mock_provider = build_data_provider(mock_config)
@@ -255,3 +273,56 @@ def test_build_data_provider_supports_multi_provider_config_with_priority():
 
     assert bundle.source == "csv"
     assert bundle.data["MOCK_ETF_A"]["latest_price"]["price"] == 103.0
+
+
+def test_build_data_provider_accepts_yahoo_config_without_network_call():
+    provider = build_data_provider(DataHubConfig(provider="yahoo"))
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_rejects_unsupported_yahoo_data_types():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="yahoo",
+                provider="yahoo",
+                data_types=["price", "fundamental"],
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="supports only price and ohlcv"):
+        build_data_provider(config)
+
+
+def test_router_integrates_yahoo_provider_with_fixture_client():
+    class FakeYahooClient:
+        def history(
+            self,
+            symbol: str,
+            *,
+            period: str,
+            interval: str,
+            timeout_seconds: float,
+        ) -> list[dict[str, Any]]:
+            return [
+                {
+                    "timestamp": "2026-01-01T00:00:00Z",
+                    "open": 100.0,
+                    "high": 101.0,
+                    "low": 99.0,
+                    "close": 100.5,
+                    "volume": 1000,
+                }
+            ]
+
+    registry = DataHubRegistry()
+    registry.register("yahoo", YahooDataProvider(client=FakeYahooClient()), {"price", "ohlcv"})
+
+    bundle = DataHubRouter(registry).get_data(
+        [DataRequest(symbol="SPY", asset_type="us_etf", data_type="price")]
+    )
+
+    assert bundle.source == "yahoo"
+    assert bundle.data["SPY"]["latest_price"]["price"] == 100.5
