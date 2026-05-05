@@ -10,6 +10,7 @@ class ProviderRegistration:
     name: str
     provider: BaseDataProvider
     data_types: frozenset[str]
+    priority: int = 100
     symbols: frozenset[str] | None = None
     asset_types: frozenset[AssetType] | None = None
     run_modes: frozenset[RunMode] | None = None
@@ -34,6 +35,7 @@ class DataHubRegistry:
         provider: BaseDataProvider,
         data_types: set[str],
         *,
+        priority: int = 100,
         symbols: set[str] | None = None,
         asset_types: set[AssetType] | None = None,
         run_modes: set[RunMode] | None = None,
@@ -44,6 +46,7 @@ class DataHubRegistry:
                 name=name,
                 provider=provider,
                 data_types=frozenset(data_types),
+                priority=priority,
                 symbols=frozenset(symbols) if symbols is not None else None,
                 asset_types=frozenset(asset_types) if asset_types is not None else None,
                 run_modes=frozenset(run_modes) if run_modes is not None else None,

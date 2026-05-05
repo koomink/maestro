@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from maestro.core.enums import RunMode, StrategyMode
+from maestro.core.enums import AssetType, RunMode, StrategyMode
 
 
 class StrictConfigModel(BaseModel):
@@ -31,9 +31,22 @@ class StrategyPluginConfig(StrictConfigModel):
         return value
 
 
+class DataHubProviderConfig(StrictConfigModel):
+    name: str
+    provider: str
+    priority: int = Field(default=100, ge=0)
+    enabled: bool = True
+    data_types: list[str] | None = None
+    symbols: list[str] | None = None
+    asset_types: list[AssetType] | None = None
+    run_modes: list[RunMode] | None = None
+    csv_path: str | None = None
+
+
 class DataHubConfig(StrictConfigModel):
     provider: str = "mock"
     csv_path: str | None = None
+    providers: list[DataHubProviderConfig] = Field(default_factory=list)
 
 
 class ExecutionConfig(StrictConfigModel):

@@ -59,7 +59,7 @@ class DataHubRouter(BaseDataProvider):
                 f"asset_type={request.asset_type} data_type={request.data_type}"
             )
 
-        for registration in registrations:
+        for registration in sorted(registrations, key=lambda item: item.priority):
             if registration.available:
                 return registration
         raise ProviderUnavailableError(

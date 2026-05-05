@@ -1,6 +1,6 @@
 # TASKS
 
-## Current Milestone: v0.2 DataHub and Dashboard Foundation
+## Completed Milestone: v0.2 DataHub and Dashboard Foundation
 
 ### DataHub
 
@@ -123,7 +123,7 @@
 - [x] `maestro run-once --config configs/csv_paper.yaml`
 - [x] `maestro status --config configs/paper.yaml`
 
-## Next Milestone: v0.3 External Research Data Providers
+## Current Milestone: v0.3 External Research Data Providers
 
 ### Provider Scaffold
 
@@ -132,6 +132,10 @@
 - [x] Add DataHub errors for unsupported data type, no provider, provider unavailable, and stale data
 - [x] Keep existing `mock` and `csv` providers working through the router
 - [x] Add tests for routing, no-provider errors, normalization, stale/fresh metadata, and backward compatibility
+- [x] Add lightweight multi-provider config support for current local providers
+- [x] Add deterministic provider priority and source preference rules
+- [x] Add tests for provider priority and config backward compatibility
+- [x] Document future provider config shape for Yahoo/yfinance, FRED, news, sentiment, and crypto market data
 
 ### Real Provider Planning and Implementation
 
@@ -140,7 +144,8 @@
 - [ ] Plan RSS/GDELT/News API provider integration as future planned providers
 - [ ] Plan sentiment/community data provider integration as future planned providers
 - [ ] Plan crypto exchange market data provider integration as future planned providers
-- [ ] Define provider configuration and secrets handling
+- [x] Define provider configuration shape
+- [ ] Define provider secrets handling
 - [ ] Define provider error, timeout, and rate-limit behavior
 - [ ] Define tests for provider routing, freshness, and schema normalization
 

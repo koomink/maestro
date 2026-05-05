@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
-from maestro.config.models import DataHubConfig
+from maestro.config.models import DataHubConfig, DataHubProviderConfig
 from maestro.sdk import DataBundle, DataRequest
 
 
@@ -11,6 +12,16 @@ class BaseDataProvider(ABC):
 
 
 def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
+    if config.providers:
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
+
+        registry = DataHubRegistry()
+        for provider_config in config.providers:
+            if provider_config.enabled:
+                _register_configured_provider(registry, provider_config)
+        return DataHubRouter(registry)
+
     if config.provider == "mock":
         from maestro.datahub.mock_provider import MockDataHub
         from maestro.datahub.registry import DataHubRegistry
@@ -29,4 +40,40 @@ def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
         registry = DataHubRegistry()
         registry.register("csv", CSVDataProvider(config.csv_path), {"price", "ohlcv"})
         return DataHubRouter(registry)
+    raise ValueError(f"Unsupported datahub provider: {config.provider}")
+
+
+def _register_configured_provider(registry: Any, config: DataHubProviderConfig) -> None:
+    data_types = set(config.data_types or ["price", "ohlcv"])
+    if config.provider == "mock":
+        from maestro.datahub.mock_provider import MockDataHub
+
+        registry.register(
+            config.name,
+            MockDataHub(),
+            data_types,
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
+    if config.provider == "csv":
+        from maestro.datahub.csv_provider import CSVDataProvider
+
+        csv_path = config.csv_path
+        if not csv_path:
+            raise ValueError("datahub.providers[].csv_path is required when provider is 'csv'")
+        registry.register(
+            config.name,
+            CSVDataProvider(csv_path),
+            data_types,
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
     raise ValueError(f"Unsupported datahub provider: {config.provider}")

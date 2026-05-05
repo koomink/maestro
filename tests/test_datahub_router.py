@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from maestro.config.models import DataHubConfig, DataHubProviderConfig
 from maestro.core.enums import RunMode
 from maestro.datahub.base import BaseDataProvider, build_data_provider
 from maestro.datahub.errors import (
@@ -190,14 +191,67 @@ def test_router_respects_run_mode_constraints():
         DataHubRouter(registry, run_mode=RunMode.LIVE_READONLY).get_data([request()])
 
 
+def test_router_prefers_lower_priority_provider():
+    fallback_provider = FixtureProvider("fallback", {"MOCK_ETF_A": {"price": 99.0}})
+    preferred_provider = FixtureProvider("preferred", {"MOCK_ETF_A": {"price": 101.0}})
+    registry = DataHubRegistry()
+    registry.register("fallback", fallback_provider, {"price"}, priority=100)
+    registry.register("preferred", preferred_provider, {"price"}, priority=10)
+
+    bundle = DataHubRouter(registry).get_data([request()])
+
+    assert bundle.source == "preferred"
+    assert bundle.data["MOCK_ETF_A"]["price"] == 101.0
+    assert fallback_provider.received_requests == []
+
+
+def test_router_uses_registration_order_when_priority_matches():
+    first_provider = FixtureProvider("first", {"MOCK_ETF_A": {"price": 100.0}})
+    second_provider = FixtureProvider("second", {"MOCK_ETF_A": {"price": 101.0}})
+    registry = DataHubRegistry()
+    registry.register("first", first_provider, {"price"}, priority=50)
+    registry.register("second", second_provider, {"price"}, priority=50)
+
+    bundle = DataHubRouter(registry).get_data([request()])
+
+    assert bundle.source == "first"
+    assert bundle.data["MOCK_ETF_A"]["price"] == 100.0
+    assert second_provider.received_requests == []
+
+
 def test_build_data_provider_keeps_mock_and_csv_configs_working():
-    mock_config = type("Config", (), {"provider": "mock", "csv_path": None})()
+    mock_config = DataHubConfig(provider="mock")
     mock_provider = build_data_provider(mock_config)
     mock_bundle = mock_provider.get_data([request()])
 
-    csv_config = type("Config", (), {"provider": "csv", "csv_path": "data/sample_prices.csv"})()
+    csv_config = DataHubConfig(provider="csv", csv_path="data/sample_prices.csv")
     csv_provider = build_data_provider(csv_config)
     csv_bundle = csv_provider.get_data([request()])
 
     assert mock_bundle.data["MOCK_ETF_A"]["latest_price"]["price"] == 100.0
     assert csv_bundle.data["MOCK_ETF_A"]["latest_price"]["price"] == 103.0
+
+
+def test_build_data_provider_supports_multi_provider_config_with_priority():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="csv_prices",
+                provider="csv",
+                priority=20,
+                data_types=["price", "ohlcv"],
+                csv_path="data/sample_prices.csv",
+            ),
+            DataHubProviderConfig(
+                name="mock_fallback",
+                provider="mock",
+                priority=100,
+                data_types=["price", "ohlcv"],
+            ),
+        ]
+    )
+
+    bundle = build_data_provider(config).get_data([request()])
+
+    assert bundle.source == "csv"
+    assert bundle.data["MOCK_ETF_A"]["latest_price"]["price"] == 103.0

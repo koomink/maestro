@@ -170,7 +170,7 @@ v0.3 starts with a lightweight provider scaffold, not real integrations.
 Implemented scaffold:
 
 - `DataHubRegistry` records provider capabilities: data types, optional symbols,
-  optional asset types, optional run modes, and availability.
+  optional asset types, optional run modes, priority, and availability.
 - `DataHubRouter` selects a provider for each `DataRequest`, groups requests by
   provider, normalizes provider payloads, and combines them into one
   `DataBundle`.
@@ -191,3 +191,74 @@ Current built-in providers remain local-only:
 
 No Yahoo, FRED, news, GDELT, sentiment/community, crypto, or KIS network provider
 is implemented in this scaffold. Those remain future v0.3 provider work.
+
+### Multi-Provider Config
+
+Existing single-provider configs still work:
+
+```yaml
+datahub:
+  provider: mock
+```
+
+```yaml
+datahub:
+  provider: csv
+  csv_path: data/sample_prices.csv
+```
+
+v0.3 also supports an optional `datahub.providers` list for multiple local
+providers. The router chooses the first matching provider by lowest `priority`;
+when priorities match, config order is the source preference. Disabled providers
+are ignored. When `providers` is present, it takes precedence over the legacy
+single `provider` field.
+
+```yaml
+datahub:
+  providers:
+    - name: local_csv_prices
+      provider: csv
+      priority: 10
+      data_types: [price, ohlcv]
+      asset_types: [domestic_etf]
+      run_modes: [paper]
+      csv_path: data/sample_prices.csv
+    - name: mock_fallback
+      provider: mock
+      priority: 100
+      data_types: [price, ohlcv]
+```
+
+Future external providers should use the same shape, without strategy plugins
+calling those APIs directly:
+
+```yaml
+datahub:
+  providers:
+    - name: yahoo_ohlcv
+      provider: yahoo
+      priority: 20
+      data_types: [price, ohlcv, fundamental]
+    - name: fred_macro
+      provider: fred
+      priority: 30
+      data_types: [macro]
+    - name: news_events
+      provider: news
+      priority: 40
+      data_types: [news]
+    - name: community_sentiment
+      provider: sentiment
+      priority: 50
+      data_types: [sentiment]
+    - name: crypto_market_data
+      provider: crypto_exchange
+      priority: 20
+      data_types: [price, ohlcv]
+      symbols: [BTC-USD]
+```
+
+Those provider names are planning examples only. The current implementation
+rejects them until real provider adapters are added. Crypto asset-type support,
+secrets, API keys, timeouts, rate limits, and durable cache settings remain
+future v0.3 design work.
