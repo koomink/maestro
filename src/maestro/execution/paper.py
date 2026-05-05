@@ -1,0 +1,51 @@
+from maestro.core.enums import OrderSide, OrderStatus
+from maestro.execution.base import ExecutionResult, OrderIntent
+from maestro.execution.order_builder import OrderBuilder
+from maestro.portfolio.manager import PortfolioTarget
+from maestro.state.models import PortfolioState
+
+
+class PaperExecutionEngine:
+    def __init__(self) -> None:
+        self.order_builder = OrderBuilder()
+
+    def propose_orders(
+        self,
+        current_state: PortfolioState,
+        target: PortfolioTarget,
+        prices: dict[str, float],
+    ) -> list[OrderIntent]:
+        return self.order_builder.build_orders(current_state, target, prices)
+
+    def execute_orders(
+        self,
+        current_state: PortfolioState,
+        orders: list[OrderIntent],
+    ) -> tuple[list[ExecutionResult], PortfolioState]:
+        next_state = current_state.model_copy(deep=True)
+        for order in orders:
+            signed_notional = order.notional if order.side == OrderSide.BUY else -order.notional
+            signed_quantity = order.quantity if order.side == OrderSide.BUY else -order.quantity
+            next_state.cash -= signed_notional
+            next_state.positions[order.symbol] = next_state.positions.get(order.symbol, 0.0) + signed_quantity
+        results = [
+            ExecutionResult(
+                order_id=order.order_id,
+                status=OrderStatus.FILLED,
+                filled_quantity=order.quantity,
+                fill_price=order.price,
+                filled_notional=order.notional,
+            )
+            for order in orders
+        ]
+        return results, next_state
+
+    def execute(
+        self,
+        current_state: PortfolioState,
+        target: PortfolioTarget,
+        prices: dict[str, float],
+    ) -> tuple[list[OrderIntent], list[ExecutionResult], PortfolioState]:
+        orders = self.propose_orders(current_state, target, prices)
+        results, next_state = self.execute_orders(current_state, orders)
+        return orders, results, next_state
