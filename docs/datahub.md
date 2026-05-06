@@ -191,8 +191,9 @@ Current provider status:
 - `yahoo` / `yfinance`: supports `price` and `ohlcv` through a small
   Yahoo/yfinance-style client wrapper.
 - `fred`: supports `macro` through a small stdlib HTTP client wrapper.
+- `rss`: supports `news` through a small stdlib HTTP/XML client wrapper.
 
-No news, GDELT, sentiment/community, crypto, or KIS network provider is
+No GDELT, News API, sentiment/community, crypto, or KIS network provider is
 implemented in this scaffold. Those remain future v0.3 provider work.
 
 ### Multi-Provider Config
@@ -254,9 +255,13 @@ datahub:
       timeout_seconds: 5
       stale_after_seconds: 7776000
     - name: news_events
-      provider: news
+      provider: rss
       priority: 40
       data_types: [news]
+      feed_urls:
+        - https://example.com/rss
+      timeout_seconds: 5
+      stale_after_seconds: 604800
     - name: community_sentiment
       provider: sentiment
       priority: 50
@@ -269,10 +274,11 @@ datahub:
 ```
 
 The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
-The FRED provider is implemented for `macro` only. News, sentiment, and crypto
-provider names above are planning examples only; the current implementation
-rejects them until real provider adapters are added. Crypto asset-type support,
-retries, rate limits, and durable cache settings remain future v0.3 design work.
+The FRED provider is implemented for `macro` only. The RSS provider is
+implemented for `news` only. GDELT, News API, sentiment, and crypto provider
+names remain planning examples only; the current implementation rejects them
+until real provider adapters are added. Crypto asset-type support, retries, rate
+limits, and durable cache settings remain future v0.3 design work.
 
 ### Yahoo/yfinance Provider
 
@@ -438,6 +444,103 @@ MAESTRO_RUN_FRED_INTEGRATION=1 FRED_API_KEY=... uv run pytest tests/test_fred_in
 Normal `pytest -q` remains fake-client and fixture based, with no live network
 calls.
 
+### RSS News Provider
+
+The RSS provider is the first real news provider. It supports `news` requests
+and normalizes feed items into a simple news payload:
+
+```python
+{
+    "MARKET": {
+        "symbol": "MARKET",
+        "latest": {
+            "title": "Latest market story",
+            "url": "https://example.com/story",
+            "published_at": "2026-01-01T00:00:00+00:00",
+            "summary": "Story summary",
+            "feed_url": "https://example.com/rss",
+            "source": "Example News",
+        },
+        "items": [
+            {
+                "title": "Latest market story",
+                "url": "https://example.com/story",
+                "published_at": "2026-01-01T00:00:00+00:00",
+                "summary": "Story summary",
+                "feed_url": "https://example.com/rss",
+                "source": "Example News",
+            }
+        ],
+        "is_stale": False,
+        "warnings": [],
+        "source": "rss",
+    }
+}
+```
+
+The provider uses stdlib HTTP and XML parsing and does not add a core or
+optional package dependency. Normal tests use fake clients and fixture XML, so
+`pytest -q` does not require live network access.
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: rss
+  feed_urls:
+    - https://example.com/rss
+  timeout_seconds: 5
+  stale_after_seconds: 604800
+  symbol_map:
+    FED: Federal Reserve
+  source_map:
+    https://example.com/rss: Example News
+```
+
+Multi-provider example:
+
+```yaml
+datahub:
+  providers:
+    - name: rss_news
+      provider: rss
+      priority: 40
+      data_types: [news]
+      feed_urls:
+        - https://example.com/rss
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      symbol_map:
+        FED: Federal Reserve
+      source_map:
+        https://example.com/rss: Example News
+```
+
+Config fields:
+
+- `feed_urls`: one or more RSS feed URLs. The provider fetches each feed for a
+  news request and merges normalized items.
+- `timeout_seconds`: maximum time for each RSS HTTP call. Timeout and transport
+  failures are mapped to provider-unavailable so the router can try a fallback.
+- `stale_after_seconds`: optional threshold for marking the latest dated item
+  stale.
+- `symbol_map`: optional request-symbol to keyword mapping. When present, the
+  provider filters feed items whose title or summary contains that keyword.
+- `source_map`: optional feed URL to display-source mapping. When omitted, the
+  feed title or URL is used as the item source.
+
+Malformed RSS XML, malformed item dates, and items missing title or URL fail
+loudly. Empty feeds fail loudly instead of returning fresh empty news.
+
+Live integration checks are optional and skipped by default:
+
+```bash
+MAESTRO_RUN_RSS_INTEGRATION=1 uv run pytest tests/test_rss_integration.py
+```
+
+Normal `pytest -q` remains fake-client and fixture based, with no live network
+calls.
+
 ### Provider Operations Planning
 
 Future external research providers must keep operational concerns inside
@@ -495,8 +598,8 @@ Testing policy for future external providers:
 
 Remaining real provider work:
 
-- Implement real provider adapters for RSS/GDELT/news, sentiment/community
-  feeds, and crypto market data.
+- Implement real provider adapters for GDELT/News API, sentiment/community feeds,
+  and crypto market data.
 - Add provider-specific config fields only when each adapter needs them.
 - Add bounded timeout/retry/rate-limit code inside each adapter.
 - Add provider-specific schema normalization and fixture-backed tests.

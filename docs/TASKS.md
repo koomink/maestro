@@ -141,7 +141,8 @@
 
 - [x] Plan Yahoo Finance/yfinance-style OHLCV provider integration
 - [x] Plan FRED macro provider integration
-- [ ] Plan RSS/GDELT/News API provider integration as future planned providers
+- [x] Plan RSS news provider integration
+- [ ] Plan GDELT/News API provider integration as future planned providers
 - [ ] Plan sentiment/community data provider integration as future planned providers
 - [ ] Plan crypto exchange market data provider integration as future planned providers
 - [x] Define provider configuration shape
@@ -152,7 +153,8 @@
 - [x] Define tests for provider routing, freshness, and schema normalization
 - [x] Implement Yahoo Finance/yfinance-style price and OHLCV provider
 - [x] Implement FRED macro provider
-- [ ] Implement RSS/GDELT/news provider
+- [x] Implement RSS news provider
+- [ ] Implement GDELT/News API provider
 - [ ] Implement sentiment/community data provider
 - [ ] Implement crypto market data provider
 - [x] Add Yahoo/yfinance-style timeout and provider-unavailable handling
@@ -166,6 +168,10 @@
 - [x] Add FRED malformed-response handling
 - [x] Add fixture-backed tests for FRED success, missing series, malformed payload, stale/fresh metadata, missing API key, and router integration
 - [x] Add skipped-by-default live FRED integration-test support
+- [x] Add RSS timeout and provider-unavailable handling
+- [x] Add RSS malformed-feed and empty-feed handling
+- [x] Add fixture-backed tests for RSS success, empty feed, malformed feed, stale/fresh metadata, config validation, and router integration
+- [x] Add skipped-by-default live RSS integration-test support
 - [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
 - [ ] Add provider-specific retry and rate-limit handling where providers need it
 - [ ] Add fixture-backed tests for each remaining real provider adapter

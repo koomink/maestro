@@ -15,6 +15,7 @@ from maestro.datahub.errors import (
 from maestro.datahub.fred_provider import FREDDataProvider
 from maestro.datahub.registry import DataHubRegistry
 from maestro.datahub.router import DataHubRouter
+from maestro.datahub.rss_provider import RSSNewsProvider
 from maestro.datahub.schemas import PricePoint, SymbolData
 from maestro.datahub.yahoo_provider import YahooDataProvider
 from maestro.sdk import DataBundle, DataRequest
@@ -334,6 +335,56 @@ def test_build_data_provider_rejects_unsupported_fred_data_types():
         build_data_provider(config)
 
 
+def test_build_data_provider_accepts_rss_config_without_network_call():
+    provider = build_data_provider(
+        DataHubConfig(provider="rss", feed_urls=["https://example.test/rss"])
+    )
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_defaults_rss_multi_provider_to_news():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="rss",
+                provider="rss",
+                feed_urls=["https://example.test/rss"],
+            )
+        ]
+    )
+
+    provider = build_data_provider(config)
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_requires_rss_feed_urls():
+    with pytest.raises(ValueError, match="requires at least one feed URL"):
+        build_data_provider(DataHubConfig(provider="rss"))
+
+
+def test_build_data_provider_rejects_blank_rss_feed_url():
+    with pytest.raises(ValueError, match="feed URLs must not be blank"):
+        build_data_provider(DataHubConfig(provider="rss", feed_urls=[" "]))
+
+
+def test_build_data_provider_rejects_unsupported_rss_data_types():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="rss",
+                provider="rss",
+                data_types=["news", "sentiment"],
+                feed_urls=["https://example.test/rss"],
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="supports only news"):
+        build_data_provider(config)
+
+
 def test_router_integrates_yahoo_provider_with_fixture_client():
     class FakeYahooClient:
         def history(
@@ -391,3 +442,34 @@ def test_router_integrates_fred_provider_with_fixture_client(monkeypatch: pytest
 
     assert bundle.source == "fred"
     assert bundle.data["GDP"]["latest"]["value"] == 1.2
+
+
+def test_router_integrates_rss_provider_with_fixture_client():
+    class FakeRSSClient:
+        def fetch(self, url: str, *, timeout_seconds: float) -> str:
+            return """
+            <rss version="2.0">
+              <channel>
+                <title>Fixture News</title>
+                <item>
+                  <title>Market story</title>
+                  <link>https://example.test/story</link>
+                  <pubDate>Wed, 01 Jan 2026 00:00:00 GMT</pubDate>
+                </item>
+              </channel>
+            </rss>
+            """
+
+    registry = DataHubRegistry()
+    registry.register(
+        "rss",
+        RSSNewsProvider(feed_urls=["https://example.test/rss"], client=FakeRSSClient()),
+        {"news"},
+    )
+
+    bundle = DataHubRouter(registry).get_data(
+        [DataRequest(symbol="MARKET", asset_type="cash", data_type="news")]
+    )
+
+    assert bundle.source == "rss"
+    assert bundle.data["MARKET"]["latest"]["title"] == "Market story"

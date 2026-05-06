@@ -45,6 +45,8 @@ class DataHubProviderConfig(StrictConfigModel):
     stale_after_seconds: int | None = Field(default=None, gt=0)
     symbol_map: dict[str, str] = Field(default_factory=dict)
     api_key_env: str | None = None
+    feed_urls: list[str] = Field(default_factory=list)
+    source_map: dict[str, str] = Field(default_factory=dict)
 
 
 class DataHubConfig(StrictConfigModel):
@@ -55,6 +57,8 @@ class DataHubConfig(StrictConfigModel):
     stale_after_seconds: int | None = Field(default=None, gt=0)
     symbol_map: dict[str, str] = Field(default_factory=dict)
     api_key_env: str | None = None
+    feed_urls: list[str] = Field(default_factory=list)
+    source_map: dict[str, str] = Field(default_factory=dict)
 
 
 class ExecutionConfig(StrictConfigModel):
