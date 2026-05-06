@@ -17,6 +17,7 @@ from maestro.datahub.registry import DataHubRegistry
 from maestro.datahub.router import DataHubRouter
 from maestro.datahub.rss_provider import RSSNewsProvider
 from maestro.datahub.schemas import PricePoint, SymbolData
+from maestro.datahub.sentiment_provider import RuleBasedSentimentProvider
 from maestro.datahub.yahoo_provider import YahooDataProvider
 from maestro.sdk import DataBundle, DataRequest
 
@@ -385,6 +386,52 @@ def test_build_data_provider_rejects_unsupported_rss_data_types():
         build_data_provider(config)
 
 
+def test_build_data_provider_accepts_sentiment_config_without_network_call():
+    provider = build_data_provider(
+        DataHubConfig(
+            provider="sentiment",
+            sentiment_texts=["SPY posts strong gains"],
+            symbol_map={"SPY": "SPY"},
+        )
+    )
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_defaults_sentiment_multi_provider_to_sentiment():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="sentiment",
+                provider="sentiment",
+                sentiment_texts=["SPY posts strong gains"],
+                symbol_map={"SPY": "SPY"},
+            )
+        ]
+    )
+
+    provider = build_data_provider(config)
+
+    assert isinstance(provider, DataHubRouter)
+
+
+def test_build_data_provider_rejects_unsupported_sentiment_data_types():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="sentiment",
+                provider="sentiment",
+                data_types=["sentiment", "news"],
+                sentiment_texts=["SPY posts strong gains"],
+                symbol_map={"SPY": "SPY"},
+            )
+        ]
+    )
+
+    with pytest.raises(ValueError, match="supports only sentiment"):
+        build_data_provider(config)
+
+
 def test_router_integrates_yahoo_provider_with_fixture_client():
     class FakeYahooClient:
         def history(
@@ -473,3 +520,22 @@ def test_router_integrates_rss_provider_with_fixture_client():
 
     assert bundle.source == "rss"
     assert bundle.data["MARKET"]["latest"]["title"] == "Market story"
+
+
+def test_router_integrates_sentiment_provider_with_fixture_text():
+    registry = DataHubRegistry()
+    registry.register(
+        "sentiment",
+        RuleBasedSentimentProvider(
+            texts=["SPY posts strong gains"],
+            symbol_map={"SPY": "SPY"},
+        ),
+        {"sentiment"},
+    )
+
+    bundle = DataHubRouter(registry).get_data(
+        [DataRequest(symbol="SPY", asset_type="us_etf", data_type="sentiment")]
+    )
+
+    assert bundle.source == "sentiment"
+    assert bundle.data["SPY"]["label"] == "positive"
