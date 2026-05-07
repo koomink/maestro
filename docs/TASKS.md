@@ -143,7 +143,8 @@
 - [x] Plan FRED macro provider integration
 - [x] Plan RSS news provider integration
 - [ ] Plan GDELT/News API provider integration as future planned providers
-- [ ] Plan sentiment/community data provider integration as future planned providers
+- [x] Plan lightweight rule-based sentiment provider integration
+- [ ] Plan Reddit/X/Discord/Telegram/community sentiment API integration as future planned providers
 - [ ] Plan crypto exchange market data provider integration as future planned providers
 - [x] Define provider configuration shape
 - [x] Define provider secrets handling
@@ -155,7 +156,8 @@
 - [x] Implement FRED macro provider
 - [x] Implement RSS news provider
 - [ ] Implement GDELT/News API provider
-- [ ] Implement sentiment/community data provider
+- [x] Implement lightweight rule-based sentiment provider
+- [ ] Implement Reddit/X/Discord/Telegram/community sentiment API provider
 - [ ] Implement crypto market data provider
 - [x] Add Yahoo/yfinance-style timeout and provider-unavailable handling
 - [x] Add Yahoo/yfinance-style malformed-response handling
@@ -172,6 +174,8 @@
 - [x] Add RSS malformed-feed and empty-feed handling
 - [x] Add fixture-backed tests for RSS success, empty feed, malformed feed, stale/fresh metadata, config validation, and router integration
 - [x] Add skipped-by-default live RSS integration-test support
+- [x] Add rule-based sentiment provider unavailable and malformed-result handling
+- [x] Add fixture-backed tests for sentiment positive, negative, neutral, empty input, malformed input, stale/fresh metadata, config validation, and router integration
 - [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
 - [ ] Add provider-specific retry and rate-limit handling where providers need it
 - [ ] Add fixture-backed tests for each remaining real provider adapter

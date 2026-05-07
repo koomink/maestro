@@ -78,7 +78,7 @@ Maestro separates research/market data from broker account and execution data.
 ```text
 Research / strategy data
 Yahoo Finance, FRED, CSV/local, RSS feeds,
-future GDELT/News API, sentiment/community data, crypto exchange market data
+rule-based sentiment, future GDELT/News API, community APIs, crypto exchange data
         │
         ▼
 Maestro DataHub
