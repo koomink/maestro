@@ -192,12 +192,9 @@ Current provider status:
   Yahoo/yfinance-style client wrapper.
 - `fred`: supports `macro` through a small stdlib HTTP client wrapper.
 - `rss`: supports `news` through a small stdlib HTTP/XML client wrapper.
-- `sentiment`: supports `sentiment` through configured fixture/news text and a
-  lightweight rule-based analyzer.
 
-No GDELT, News API, Reddit/X/Discord/Telegram/community API, crypto, or KIS
-network provider is implemented in this scaffold. Those remain future v0.3
-provider work.
+No GDELT, News API, sentiment/community, crypto, or KIS network provider is
+implemented in this scaffold. Those remain future v0.3 provider work.
 
 ### Multi-Provider Config
 
@@ -269,14 +266,6 @@ datahub:
       provider: sentiment
       priority: 50
       data_types: [sentiment]
-      sentiment_texts:
-        - SPY posts strong gains as confidence improves.
-        - Federal Reserve commentary raises slowdown risks.
-      symbol_map:
-        SPY: SPY
-        FED: Federal Reserve,Fed
-      source_name: fixture_news
-      stale_after_seconds: 86400
     - name: crypto_market_data
       provider: crypto_exchange
       priority: 20
@@ -286,12 +275,10 @@ datahub:
 
 The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
 The FRED provider is implemented for `macro` only. The RSS provider is
-implemented for `news` only. The rule-based sentiment provider is implemented
-for configured fixture/news text only. GDELT, News API, Reddit/X/Discord/Telegram
-community APIs, paid sentiment APIs, and crypto provider names remain planning
-examples only; the current implementation rejects them until real provider
-adapters are added. Crypto asset-type support, retries, rate limits, and durable
-cache settings remain future v0.3 design work.
+implemented for `news` only. GDELT, News API, sentiment, and crypto provider
+names remain planning examples only; the current implementation rejects them
+until real provider adapters are added. Crypto asset-type support, retries, rate
+limits, and durable cache settings remain future v0.3 design work.
 
 ### Yahoo/yfinance Provider
 
@@ -554,83 +541,6 @@ MAESTRO_RUN_RSS_INTEGRATION=1 uv run pytest tests/test_rss_integration.py
 Normal `pytest -q` remains fake-client and fixture based, with no live network
 calls.
 
-### Rule-based Sentiment Provider
-
-The first sentiment provider is intentionally network-free. It supports
-`sentiment` requests by analyzing configured fixture/news text snippets with a
-small rule-based analyzer:
-
-```python
-{
-    "SPY": {
-        "symbol": "SPY",
-        "score": 0.75,
-        "label": "positive",
-        "source": "fixture_news",
-        "provider": "sentiment",
-        "timestamp": "2026-01-01T00:00:00+00:00",
-        "related_symbols": ["SPY"],
-        "keywords": ["SPY"],
-        "text_count": 2,
-        "is_stale": False,
-        "warnings": [],
-    }
-}
-```
-
-The provider does not call Reddit, X/Twitter, Discord, Telegram, paid sentiment
-APIs, or any live community source. Normal tests use fixture strings and fake
-analyzers.
-
-Single-provider example:
-
-```yaml
-datahub:
-  provider: sentiment
-  sentiment_texts:
-    - SPY posts strong gains as confidence improves.
-    - SPY faces downside risk after weak guidance.
-  symbol_map:
-    SPY: SPY
-  source_name: fixture_news
-  stale_after_seconds: 86400
-```
-
-Multi-provider example:
-
-```yaml
-datahub:
-  providers:
-    - name: rule_sentiment
-      provider: sentiment
-      priority: 60
-      data_types: [sentiment]
-      sentiment_texts:
-        - SPY posts strong gains as confidence improves.
-        - Federal Reserve commentary raises slowdown risks.
-      symbol_map:
-        SPY: SPY
-        FED: Federal Reserve,Fed
-      source_name: fixture_news
-      stale_after_seconds: 86400
-```
-
-Config fields:
-
-- `sentiment_texts`: fixture/news text snippets to analyze. Empty input and
-  non-string snippets fail loudly.
-- `symbol_map`: optional request-symbol to comma-separated keyword mapping. The
-  provider filters snippets whose text contains any configured keyword.
-- `timeout_seconds`: passed through to the analyzer interface for future bounded
-  implementations and fake-analyzer tests.
-- `stale_after_seconds`: optional threshold for marking analyzer timestamps
-  stale. The default rule-based analyzer emits generated-at timestamps, so it is
-  fresh unless a test or future analyzer supplies an older timestamp.
-- `source_name`: display source written into normalized payloads.
-
-Malformed analyzer results fail loudly. Analyzer timeouts and availability
-failures are normalized as provider-unavailable errors.
-
 ### Provider Operations Planning
 
 Future external research providers must keep operational concerns inside
@@ -688,8 +598,8 @@ Testing policy for future external providers:
 
 Remaining real provider work:
 
-- Implement real provider adapters for GDELT/News API, Reddit/X/Discord/Telegram
-  community sentiment feeds, paid sentiment APIs, and crypto market data.
+- Implement real provider adapters for GDELT/News API, sentiment/community feeds,
+  and crypto market data.
 - Add provider-specific config fields only when each adapter needs them.
 - Add bounded timeout/retry/rate-limit code inside each adapter.
 - Add provider-specific schema normalization and fixture-backed tests.
