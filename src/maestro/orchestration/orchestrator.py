@@ -33,7 +33,7 @@ class MaestroOrchestrator:
         self.portfolio_manager = PortfolioManager(config.strategies)
         self.risk_manager = RiskManager(config.portfolio.allowed_symbols, config.risk)
         self.execution = build_execution_engine(config.execution)
-        self.approval_manager = ApprovalManager(config.approval)
+        self.approval_manager = ApprovalManager(config.approval, run_mode=config.mode)
         self.state_store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
         self.audit = AuditLogger(config.audit.jsonl_path)
 

@@ -414,14 +414,20 @@ To inspect current state from SQLite:
 maestro status --config configs/paper.yaml
 ```
 
-To run the paper pipeline with the current approval gate stub enabled:
+To run the paper pipeline with the approval gate enabled:
 
 ```bash
 maestro run-once --config configs/approval_paper.yaml
 maestro approvals --config configs/approval_paper.yaml
 ```
 
-The current Telegram integration is intentionally a no-network notifier stub. It formats the approval payload and records the configured decision so the orchestration, state, and audit contracts exist before a real Bot API client is added.
+By default, `configs/approval_paper.yaml` uses the no-network `console`
+approval stub and records the configured decision. For the v0.4 Telegram MVP,
+set `approval.provider: telegram`, configure `telegram_bot_token_env`,
+`telegram_allowed_chat_ids`, and `whitelisted_user_ids`, and keep
+`mode: paper`. Maestro sends the order proposal through the Bot API and polls
+for `approve <approval_id>` or `reject <approval_id>` replies. Normal tests use
+fake Telegram clients and do not call the Telegram network.
 
 To run the current KIS read-only mock adapter:
 

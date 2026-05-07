@@ -16,4 +16,18 @@ def format_approval_request(request: ApprovalRequest) -> str:
     if request.risk_violations:
         lines.append("risk_violations:")
         lines.extend(f"- {item}" for item in request.risk_violations)
+    if request.proposed_orders:
+        lines.append("proposed_orders:")
+        for order in request.proposed_orders:
+            symbol = order.get("symbol", "unknown")
+            side = order.get("side", "unknown")
+            notional = float(order.get("notional", 0.0))
+            lines.append(f"- {side} {symbol} notional={notional:.2f}")
+    lines.extend(
+        [
+            "",
+            f"Reply with: approve {request.approval_id}",
+            f"Or reply with: reject {request.approval_id}",
+        ]
+    )
     return "\n".join(lines)

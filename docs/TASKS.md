@@ -189,10 +189,18 @@
 
 ### v0.4 Telegram Approval
 
-- [ ] Plan real Telegram Bot API integration boundary
-- [ ] Plan approval callback persistence and duplicate-decision prevention
-- [ ] Decide polling versus webhook for the first Telegram implementation
-- [ ] Define paper-only approval behavior before live trading work begins
+- [x] Plan real Telegram Bot API integration boundary
+- [x] Decide polling versus webhook for the first Telegram implementation
+- [x] Add minimal Telegram Bot API polling client behind an interface
+- [x] Add bot token environment-variable config without storing or logging token values
+- [x] Add allowed Telegram user and chat ID config
+- [x] Send order proposal messages with approve/reject commands
+- [x] Receive approve/reject decisions through polling
+- [x] Persist approval decisions and reject duplicate persisted decisions
+- [x] Keep normal tests fake-client based with no Telegram network calls
+- [x] Define paper-only approval behavior before live trading work begins
+- [ ] Add inline approve/reject button callback handling after polling MVP
+- [ ] Add fill/error Telegram notifications
 
 ### v0.5 KIS Read-only Broker Integration
 

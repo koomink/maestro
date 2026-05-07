@@ -116,7 +116,17 @@ class StateStore:
         self._insert("system_events", run_id, event_type, payload)
 
     def save_approval(self, run_id: str, approval_id: str, payload: dict[str, Any]) -> None:
+        if self.approval_exists(approval_id):
+            raise ValueError(f"Approval decision already exists: {approval_id}")
         self._insert("approvals", run_id, approval_id, payload)
+
+    def approval_exists(self, approval_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM approvals WHERE approval_id = ? LIMIT 1",
+                (approval_id,),
+            ).fetchone()
+        return row is not None
 
     def save_broker_account_snapshot(
         self, run_id: str, account_id: str, payload: dict[str, Any]

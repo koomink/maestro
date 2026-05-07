@@ -89,6 +89,9 @@ class ApprovalConfig(StrictConfigModel):
     default_decision: str = "approved"
     timeout_seconds: int = Field(default=300, gt=0)
     whitelisted_user_ids: list[int] = Field(default_factory=list)
+    telegram_bot_token_env: str = "TELEGRAM_BOT_TOKEN"
+    telegram_allowed_chat_ids: list[int] = Field(default_factory=list)
+    telegram_poll_interval_seconds: float = Field(default=1.0, ge=0)
 
     @field_validator("default_decision")
     @classmethod

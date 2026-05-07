@@ -3,15 +3,29 @@ from datetime import timedelta
 from maestro.approval.models import ApprovalDecision, ApprovalRequest
 from maestro.config.models import ApprovalConfig
 from maestro.core.clock import utc_now
+from maestro.core.enums import RunMode
 from maestro.core.ids import new_approval_id
 from maestro.execution.base import OrderIntent
-from maestro.integrations.telegram.bot import TelegramApprovalNotifier
+from maestro.integrations.telegram.bot import (
+    TelegramApprovalNotifier,
+    TelegramApprovalService,
+    TelegramBotAPIClient,
+    TelegramBotClient,
+)
 
 
 class ApprovalManager:
-    def __init__(self, config: ApprovalConfig) -> None:
+    def __init__(
+        self,
+        config: ApprovalConfig,
+        *,
+        run_mode: RunMode = RunMode.PAPER,
+        telegram_client: TelegramBotClient | None = None,
+    ) -> None:
         self.config = config
+        self.run_mode = run_mode
         self.notifier = TelegramApprovalNotifier()
+        self.telegram_client = telegram_client
 
     def is_user_allowed(self, user_id: int) -> bool:
         return not self.config.whitelisted_user_ids or user_id in self.config.whitelisted_user_ids
@@ -39,6 +53,21 @@ class ApprovalManager:
             risk_modifications=risk_modifications,
             risk_violations=risk_violations,
         )
+        if self.config.provider == "telegram":
+            if self.run_mode != RunMode.PAPER:
+                raise ValueError("Telegram approval MVP is paper-mode only")
+            client = self.telegram_client or TelegramBotAPIClient(
+                token_env=self.config.telegram_bot_token_env,
+                timeout_seconds=self.config.timeout_seconds,
+            )
+            service = TelegramApprovalService(
+                client=client,
+                chat_ids=self.config.telegram_allowed_chat_ids,
+                allowed_user_ids=self.config.whitelisted_user_ids,
+                poll_interval_seconds=self.config.telegram_poll_interval_seconds,
+            )
+            return request, *service.request_decision(request)
+
         message = self.notifier.send_approval_request(request)
         decision = ApprovalDecision(
             approval_id=request.approval_id,
