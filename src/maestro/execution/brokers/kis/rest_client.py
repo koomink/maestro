@@ -1,0 +1,315 @@
+import json
+from datetime import date
+from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from maestro.config.models import KISConfig
+from maestro.core.clock import utc_now
+from maestro.execution.brokers.kis.auth import KISAuthManager, KISToken
+from maestro.execution.brokers.kis.client import KISReadOnlyClient
+from maestro.execution.brokers.kis.models import (
+    KISAccountSnapshot,
+    KISBuyingPower,
+    KISCashBalance,
+    KISOrderSummary,
+    KISPosition,
+)
+
+
+class UrlLibKISTransport:
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str],
+        params: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+        timeout_seconds: float = 10.0,
+    ) -> dict[str, Any]:
+        target_url = url
+        if params:
+            target_url = f"{url}?{urlencode(params)}"
+        body = json.dumps(json_body).encode("utf-8") if json_body is not None else None
+        request = Request(target_url, data=body, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=timeout_seconds) as response:
+                response_text = response.read().decode("utf-8")
+        except HTTPError as exc:
+            raise ValueError(f"KIS request failed with HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise ValueError("KIS request failed before receiving a response") from exc
+        try:
+            payload = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("KIS response was not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("KIS response JSON was not an object")
+        return payload
+
+
+class KISRestReadOnlyClient(KISReadOnlyClient):
+    def __init__(
+        self,
+        config: KISConfig,
+        *,
+        transport: UrlLibKISTransport | None = None,
+        auth_manager: KISAuthManager | None = None,
+    ) -> None:
+        self.config = config
+        self.transport = transport or UrlLibKISTransport()
+        self.auth_manager = auth_manager or KISAuthManager(config, self.transport)
+        self.credentials = self.auth_manager.get_credentials()
+
+    def get_account_snapshot(self) -> KISAccountSnapshot:
+        positions, cash_balance = self._fetch_balance()
+        buying_power = self.get_buying_power()
+        return KISAccountSnapshot(
+            account_id=self.credentials.account_id,
+            cash=cash_balance.cash,
+            buying_power=buying_power.cash_buying_power,
+            positions=positions,
+            cash_balance=cash_balance,
+            buying_power_detail=buying_power,
+            fetched_at=utc_now(),
+            source="kis_rest_readonly",
+        )
+
+    def get_positions(self) -> list[KISPosition]:
+        positions, _ = self._fetch_balance()
+        return positions
+
+    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+        pdno = symbol or ""
+        payload = self._get(
+            "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+            self._tr_id(real="TTTC8908R", demo="VTTC8908R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "PDNO": pdno,
+                "ORD_UNPR": "0",
+                "ORD_DVSN": "01",
+                "CMA_EVLU_AMT_ICLD_YN": "N",
+                "OVRS_ICLD_YN": "N",
+            },
+        )
+        output = _as_dict(payload.get("output"))
+        return KISBuyingPower(
+            symbol=symbol,
+            order_price=_optional_float(output.get("ord_unpr")),
+            cash_buying_power=_first_float(output, "nrcvb_buy_amt", "max_buy_amt", "ord_psbl_cash"),
+            max_buy_quantity=_optional_first_float(output, "nrcvb_buy_qty", "max_buy_qty"),
+            source="kis_rest_readonly",
+        )
+
+    def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        prices: dict[str, float] = {}
+        for symbol in symbols:
+            if symbol == "CASH":
+                prices[symbol] = 1.0
+                continue
+            payload = self._get(
+                "/uapi/domestic-stock/v1/quotations/inquire-price",
+                "FHKST01010100",
+                {
+                    "FID_COND_MRKT_DIV_CODE": self.config.quote_market_code,
+                    "FID_INPUT_ISCD": symbol,
+                },
+            )
+            output = _as_dict(payload.get("output"))
+            prices[symbol] = _first_float(output, "stck_prpr", "ovrs_now_pric", "last")
+        return prices
+
+    def get_order_fills(self) -> list[KISOrderSummary]:
+        return self._fetch_order_summaries(ccld_dvsn="00")
+
+    def get_unfilled_orders(self) -> list[KISOrderSummary]:
+        return self._fetch_order_summaries(ccld_dvsn="02")
+
+    def _fetch_balance(self) -> tuple[list[KISPosition], KISCashBalance]:
+        payload = self._get(
+            "/uapi/domestic-stock/v1/trading/inquire-balance",
+            self._tr_id(real="TTTC8434R", demo="VTTC8434R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "AFHR_FLPR_YN": "N",
+                "OFL_YN": "",
+                "INQR_DVSN": "01",
+                "UNPR_DVSN": "01",
+                "FUND_STTL_ICLD_YN": "N",
+                "FNCG_AMT_AUTO_RDPT_YN": "N",
+                "PRCS_DVSN": "00",
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+            },
+        )
+        position_rows = _as_list(payload.get("output1"))
+        summary = _first_item(payload.get("output2"))
+        positions = [
+            KISPosition(
+                symbol=str(row.get("pdno") or row.get("prdt_code") or ""),
+                name=_optional_str(row.get("prdt_name")),
+                quantity=_first_float(row, "hldg_qty", "ord_psbl_qty"),
+                average_price=_first_float(row, "pchs_avg_pric", "avg_unpr"),
+                current_price=_position_current_price(row),
+                unrealized_pnl=_optional_first_float(row, "evlu_pfls_amt", "evlu_pfls_rt"),
+            )
+            for row in position_rows
+            if _first_float(row, "hldg_qty", "ord_psbl_qty", default=0.0) > 0
+        ]
+        cash = _first_float(summary, "dnca_tot_amt", "prvs_rcdl_excc_amt", "nxdy_excc_amt")
+        cash_balance = KISCashBalance(
+            cash=cash,
+            total_asset_value=_optional_first_float(summary, "tot_evlu_amt", "nass_amt"),
+            withdrawable_cash=_optional_first_float(summary, "dnca_tot_amt", "nxdy_excc_amt"),
+        )
+        return positions, cash_balance
+
+    def _fetch_order_summaries(self, ccld_dvsn: str) -> list[KISOrderSummary]:
+        today = date.today().strftime("%Y%m%d")
+        payload = self._get(
+            "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
+            self._tr_id(real="TTTC0081R", demo="VTTC0081R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "INQR_STRT_DT": today,
+                "INQR_END_DT": today,
+                "SLL_BUY_DVSN_CD": "00",
+                "PDNO": "",
+                "CCLD_DVSN": ccld_dvsn,
+                "INQR_DVSN": "00",
+                "INQR_DVSN_3": "00",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "INQR_DVSN_1": "",
+                "CTX_AREA_FK100": "",
+                "CTX_AREA_NK100": "",
+                "EXCG_ID_DVSN_CD": "KRX",
+            },
+        )
+        return [_order_summary(row) for row in _as_list(payload.get("output1"))]
+
+    def _get(self, path: str, tr_id: str, params: dict[str, str]) -> dict[str, Any]:
+        token = self.auth_manager.get_access_token()
+        payload = self.transport.request(
+            "GET",
+            f"{self.config.resolved_base_url()}{path}",
+            headers=self._headers(tr_id, token),
+            params=params,
+            timeout_seconds=self.config.timeout_seconds,
+        )
+        if payload.get("rt_cd") not in ("0", None):
+            msg_cd = payload.get("msg_cd", "unknown")
+            msg1 = payload.get("msg1", "KIS request failed")
+            raise ValueError(f"KIS read-only request failed: {msg_cd} {msg1}")
+        return payload
+
+    def _headers(self, tr_id: str, token: KISToken) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Accept": "text/plain",
+            "charset": "UTF-8",
+            "authorization": f"Bearer {token.access_token}",
+            "appkey": self.credentials.app_key,
+            "appsecret": self.credentials.app_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+            "tr_cont": "",
+        }
+
+    def _tr_id(self, *, real: str, demo: str) -> str:
+        return demo if self.config.paper_trading else real
+
+
+def _order_summary(row: dict[str, Any]) -> KISOrderSummary:
+    return KISOrderSummary(
+        order_id=str(row.get("odno") or row.get("orgn_odno") or ""),
+        symbol=str(row.get("pdno") or ""),
+        name=_optional_str(row.get("prdt_name")),
+        side=_side(row.get("sll_buy_dvsn_cd") or row.get("sll_buy_dvsn_cd_name")),
+        quantity=_first_float(row, "ord_qty", "tot_ccld_qty"),
+        filled_quantity=_first_float(row, "tot_ccld_qty", "ccld_qty", default=0.0),
+        average_fill_price=_optional_first_float(row, "avg_prvs", "ord_unpr"),
+        status=_status(row),
+        raw_status=_optional_str(row.get("ord_dvsn_name") or row.get("ccld_dvsn_name")),
+        submitted_at=utc_now(),
+    )
+
+
+def _as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _first_item(value: Any) -> dict[str, Any]:
+    if isinstance(value, list) and value and isinstance(value[0], dict):
+        return value[0]
+    return _as_dict(value)
+
+
+def _first_float(row: dict[str, Any], *keys: str, default: float = 0.0) -> float:
+    value = _optional_first_float(row, *keys)
+    return default if value is None else value
+
+
+def _optional_first_float(row: dict[str, Any], *keys: str) -> float | None:
+    for key in keys:
+        value = _optional_float(row.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _optional_str(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value)
+
+
+def _position_current_price(row: dict[str, Any]) -> float:
+    price = _optional_first_float(row, "prpr", "now_pric", "stck_prpr")
+    if price is not None:
+        return price
+    quantity = _optional_first_float(row, "hldg_qty", "ord_psbl_qty")
+    market_value = _optional_float(row.get("evlu_amt"))
+    if quantity and market_value is not None:
+        return market_value / quantity
+    return 0.0
+
+
+def _side(value: Any) -> str:
+    text = str(value or "")
+    if text in {"01", "매도", "sell"}:
+        return "sell"
+    if text in {"02", "매수", "buy"}:
+        return "buy"
+    return text or "unknown"
+
+
+def _status(row: dict[str, Any]) -> str:
+    ordered = _first_float(row, "ord_qty", default=0.0)
+    filled = _first_float(row, "tot_ccld_qty", "ccld_qty", default=0.0)
+    if ordered > 0 and filled >= ordered:
+        return "filled"
+    if filled > 0:
+        return "partially_filled"
+    return "open"

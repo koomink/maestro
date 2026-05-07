@@ -206,13 +206,15 @@
 
 ### v0.5 KIS Read-only Broker Integration
 
-- [ ] Plan real KIS read-only REST client boundary
-- [ ] Plan OAuth token management and token persistence
-- [ ] Plan balance, position, buying power, order/fill, and unfilled order reads
-- [ ] Plan broker account snapshot normalization
+- [x] Plan real KIS read-only REST client boundary
+- [x] Plan OAuth token management and token persistence
+- [x] Plan balance, position, buying power, order/fill, and unfilled order reads
+- [x] Plan broker account snapshot normalization
 - [ ] Plan internal state versus broker state reconciliation
-- [ ] Treat KIS current price lookup as `broker_quote` reference data for execution validation or reconciliation only
-- [ ] Keep strategy research data routed through Maestro DataHub, not KIS
+- [x] Treat KIS current price lookup as `broker_quote` reference data for execution validation or reconciliation only
+- [x] Keep strategy research data routed through Maestro DataHub, not KIS
+- [x] Keep normal tests fake-client based with no KIS network calls
+- [x] Expose no callable KIS order submission path in v0.5
 
 ### v0.6 KIS Live Approval Trading
 

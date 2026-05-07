@@ -190,13 +190,17 @@ And Maestro will:
 ### Phase 4: Korea Investment Securities Read-only Broker Adapter
 
 - KIS OAuth access token management
+- App key and secret from environment variables only
+- Optional owner-only access token cache
 - Broker-side quote/reference lookup for execution validation and reconciliation
 - Balance inquiry
+- Position normalization
 - Buying power inquiry
 - Daily order/fill inquiry
 - Unfilled order inquiry
 - `live_readonly` mode
 - Account reconciliation
+- No KIS order submission path in this phase
 
 ### Phase 5: Live Approval Trading
 
@@ -307,9 +311,10 @@ Future requirement:
 Future requirement:
 
 - KIS integration must be isolated in a broker adapter.
-- KIS adapter must manage auth, balances, positions, buying power, orders, fills, reconciliation, errors, and rate limit handling.
+- KIS adapter must manage auth, balances, positions, buying power, fills, reconciliation, errors, and rate limit handling.
 - KIS current price lookup may be used as `broker_quote` reference data for execution validation or reconciliation.
 - KIS must not be presented as Maestro's main research or strategy data source.
+- `live_readonly` must expose no callable order submission, cancel, amend, buy, or sell path.
 - Live trading should initially be `live_approval`, not `live_auto`.
 - Only limit orders should be allowed initially.
 - All broker state should be reconciled against internal state.

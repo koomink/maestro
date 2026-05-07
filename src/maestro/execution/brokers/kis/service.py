@@ -4,6 +4,7 @@ from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.mock_client import MockKISReadOnlyClient
 from maestro.execution.brokers.kis.models import KISReadOnlySnapshot
+from maestro.execution.brokers.kis.rest_client import KISRestReadOnlyClient
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 
@@ -31,7 +32,7 @@ class KISReadOnlyService:
         snapshot = KISReadOnlySnapshot(
             account=account,
             current_prices=self.client.get_current_prices(symbols),
-            daily_orders=self.client.get_daily_orders(),
+            order_fills=self.client.get_order_fills(),
             unfilled_orders=self.client.get_unfilled_orders(),
         )
         self.state_store.save_broker_account_snapshot(
@@ -49,4 +50,6 @@ class KISReadOnlyService:
     def _build_client(self, config: KISConfig) -> KISReadOnlyClient:
         if config.provider == "mock":
             return MockKISReadOnlyClient(config.account_id or "MOCK-ACCOUNT")
-        raise NotImplementedError("Real KIS REST client is not implemented yet")
+        if config.provider == "kis":
+            return KISRestReadOnlyClient(config)
+        raise ValueError(f"Unsupported KIS provider: {config.provider}")

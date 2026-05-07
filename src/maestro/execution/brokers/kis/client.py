@@ -2,7 +2,9 @@ from abc import ABC, abstractmethod
 
 from maestro.execution.brokers.kis.models import (
     KISAccountSnapshot,
+    KISBuyingPower,
     KISOrderSummary,
+    KISPosition,
 )
 
 
@@ -12,11 +14,19 @@ class KISReadOnlyClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_positions(self) -> list[KISPosition]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+        raise NotImplementedError
+
+    @abstractmethod
     def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         raise NotImplementedError
 
     @abstractmethod
-    def get_daily_orders(self) -> list[KISOrderSummary]:
+    def get_order_fills(self) -> list[KISOrderSummary]:
         raise NotImplementedError
 
     @abstractmethod

@@ -5,6 +5,7 @@ from pathlib import Path
 import typer
 
 from maestro.config.loader import load_config
+from maestro.core.enums import RunMode
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
@@ -62,6 +63,8 @@ def approvals(
 @app.command("kis-sync")
 def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
     maestro_config = load_config(config)
+    if maestro_config.mode != RunMode.LIVE_READONLY:
+        raise typer.BadParameter("kis-sync requires mode=live_readonly")
     store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     service = KISReadOnlyService(maestro_config.kis, store, audit)

@@ -2,6 +2,8 @@ from maestro.core.clock import utc_now
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.models import (
     KISAccountSnapshot,
+    KISBuyingPower,
+    KISCashBalance,
     KISOrderSummary,
     KISPosition,
 )
@@ -17,25 +19,40 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
         }
 
     def get_account_snapshot(self) -> KISAccountSnapshot:
+        positions = self.get_positions()
+        buying_power = self.get_buying_power()
         return KISAccountSnapshot(
             account_id=self.account_id,
             cash=5_000_000.0,
-            buying_power=5_000_000.0,
-            positions=[
-                KISPosition(
-                    symbol="MOCK_ETF_A",
-                    quantity=30000.0,
-                    average_price=100.0,
-                    current_price=self.prices["MOCK_ETF_A"],
-                ),
-                KISPosition(
-                    symbol="MOCK_ETF_B",
-                    quantity=40000.0,
-                    average_price=50.0,
-                    current_price=self.prices["MOCK_ETF_B"],
-                ),
-            ],
+            buying_power=buying_power.cash_buying_power,
+            positions=positions,
+            cash_balance=KISCashBalance(cash=5_000_000.0, withdrawable_cash=5_000_000.0),
+            buying_power_detail=buying_power,
             fetched_at=utc_now(),
+            source="kis_mock",
+        )
+
+    def get_positions(self) -> list[KISPosition]:
+        return [
+            KISPosition(
+                symbol="MOCK_ETF_A",
+                quantity=30000.0,
+                average_price=100.0,
+                current_price=self.prices["MOCK_ETF_A"],
+            ),
+            KISPosition(
+                symbol="MOCK_ETF_B",
+                quantity=40000.0,
+                average_price=50.0,
+                current_price=self.prices["MOCK_ETF_B"],
+            ),
+        ]
+
+    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+        return KISBuyingPower(
+            symbol=symbol,
+            cash_buying_power=5_000_000.0,
+            max_buy_quantity=None,
             source="kis_mock",
         )
 
@@ -45,7 +62,7 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
             raise ValueError(f"Mock KIS prices missing symbols: {missing}")
         return {symbol: self.prices[symbol] for symbol in symbols}
 
-    def get_daily_orders(self) -> list[KISOrderSummary]:
+    def get_order_fills(self) -> list[KISOrderSummary]:
         return []
 
     def get_unfilled_orders(self) -> list[KISOrderSummary]:

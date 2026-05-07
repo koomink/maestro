@@ -160,13 +160,13 @@ Implemented foundations beyond the core v0.1 scope:
 - CLI `approvals`
 - `live_readonly` mode config
 - KIS read-only adapter interface and deterministic mock client
+- KIS read-only REST client for auth, balance, positions, buying power, order/fill inquiry, unfilled order inquiry, and broker-side quote lookup
 - CLI `kis-sync` and `kis-account`
 
 Deferred real integrations:
 
 - No live trading
 - No real Telegram Bot API polling/webhook
-- No real KIS REST API calls
 - No KIS order submission
 - No GDELT/News API or community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
@@ -432,14 +432,31 @@ keyboards, callback queries, webhooks, dashboard write controls, KIS order
 submission, and live trading remain deferred. Normal tests use fake Telegram
 clients and do not call the Telegram network.
 
-To run the current KIS read-only mock adapter:
+To run the KIS read-only adapter:
 
 ```bash
 maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
 ```
 
-The current KIS adapter is read-only and no-network. It stores deterministic mock broker account snapshots so the state, audit, dashboard, and CLI contracts are ready before a real KIS REST client is connected.
+`configs/live_readonly.yaml` uses the deterministic no-network mock provider.
+For the real KIS read-only REST provider, set `kis.provider: kis`,
+`kis.account_id`, and these environment variable names:
+
+- `KIS_APP_KEY`: KIS app key
+- `KIS_APP_SECRET`: KIS app secret
+- `KIS_ACCESS_TOKEN`: optional pre-issued access token
+
+If `KIS_ACCESS_TOKEN` is unset, Maestro can issue `/oauth2/tokenP` and can
+persist the access token when `kis.token_cache_path` is configured. The cache
+file is written with owner-only permissions. Secrets and access tokens are not
+stored in broker snapshots, audit events, dashboard rows, or test fixtures.
+
+The KIS client is read-only in v0.5. It adapts OAuth/header/TR_ID/payload logic
+from `koomink/open-trading-api` for these inquiry APIs only:
+`inquire-balance`, `inquire-psbl-order`, `inquire-daily-ccld`, and
+`inquire-price`. Order submission samples from the reference repo were not
+copied or exposed.
 
 To install dashboard dependencies and open the read-only dashboard:
 
@@ -638,7 +655,7 @@ Initial live trading rules:
 - Reconciliation required
 - Unknown order status halts new orders
 
-KIS responsibilities should stay broker-focused: authentication, balances, positions, buying power, order submission, fills, broker state, and reconciliation. KIS current price lookup can support broker-side quote/reference checks, but strategy research data should come through DataHub providers rather than KIS.
+KIS responsibilities should stay broker-focused: authentication, balances, positions, buying power, fills, broker state, and reconciliation. KIS current price lookup can support broker-side quote/reference checks, but strategy research data should come through DataHub providers rather than KIS. v0.5 deliberately has no callable KIS buy/sell/order submission path.
 
 ## Development Rule
 

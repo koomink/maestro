@@ -228,14 +228,17 @@ database caches, or broker behavior.
 - `approval.default_decision` supports `approved`, `rejected`, and `expired` for the Phase 2 no-network stub.
 - Telegram integration currently formats approval messages without calling Bot API.
 
-### 3.5 Current KIS Mock Read-only Foundation
+### 3.5 Current KIS Read-only Foundation
 
 - `RunMode.LIVE_READONLY` is supported for read-only broker sync commands.
 - KIS integration is isolated under `execution/brokers/kis`.
-- `KISReadOnlyClient` defines account, broker-side quote/reference, daily order, and unfilled order reads.
+- `KISReadOnlyClient` defines account snapshot, positions, buying power, broker-side quote/reference, order/fill, and unfilled order reads.
 - `MockKISReadOnlyClient` provides deterministic no-network responses.
+- `KISRestReadOnlyClient` adapts the reference repo's KIS OAuth token issuance, request headers, TR_IDs, and inquiry payloads for read-only REST calls.
+- App key and secret are read from configured environment variable names only.
+- Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance.
 - Broker account snapshots are persisted in SQLite and audit JSONL.
-- Real KIS REST calls are not implemented in this phase.
+- v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.
 
 ## 4. Public SDK Design
 
@@ -763,14 +766,14 @@ execution/brokers/kis/
 Components:
 
 - `auth.py`: OAuth token and approval key management
-- `client.py`: REST client wrapper
-- `orders.py`: order submission, cancel, amend
-- `account.py`: balance, buying power, positions
-- `market_data.py`: broker-side quote/reference lookup for execution validation or reconciliation
+- `client.py`: read-only client protocol
+- `rest_client.py`: read-only REST client wrapper
+- future `orders.py`: order submission, cancel, amend after v0.5
+- `rest_client.py`: balance, buying power, positions, order/fill inquiry, unfilled orders, and broker-side quote/reference lookup for execution validation or reconciliation
 - `websocket.py`: real-time price/fill notification later
 - `errors.py`: error code handling
 
-The KIS adapter is a broker adapter, not a research data provider. It should mainly handle authentication, balances, positions, buying power, orders, fills, and reconciliation. KIS current price lookup can produce `broker_quote` data for broker-side checks, but strategy plugins should receive research and market data through DataHub providers.
+The KIS adapter is a broker adapter, not a research data provider. It should mainly handle authentication, balances, positions, buying power, fills, and reconciliation. KIS current price lookup can produce `broker_quote` data for broker-side checks, but strategy plugins should receive research and market data through DataHub providers.
 
 Live trading safety:
 

@@ -132,8 +132,8 @@ Still no live trading in v0.4.
 Scope:
 
 - Real Korea Investment Securities read-only REST client
-- OAuth token management
-- Token refresh/persistence
+- OAuth token management via configured environment variable names
+- Optional owner-only access token cache after `/oauth2/tokenP` issuance
 - Broker-side quote/reference lookup for execution validation or reconciliation
 - Balance inquiry
 - Buying power inquiry
@@ -143,7 +143,7 @@ Scope:
 - Internal state versus broker state reconciliation
 - `live_readonly` mode hardening
 
-Read-only only. No order submission.
+Read-only only. No order submission, cancel, amend, buy, or sell callable path.
 
 ## v0.6 — KIS Live Approval Trading
 

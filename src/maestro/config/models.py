@@ -108,7 +108,18 @@ class KISConfig(StrictConfigModel):
     app_key_env: str = "KIS_APP_KEY"
     app_secret_env: str = "KIS_APP_SECRET"
     access_token_env: str = "KIS_ACCESS_TOKEN"
+    token_cache_path: str | None = None
     base_url: str | None = None
+    paper_trading: bool = False
+    timeout_seconds: float = Field(default=10.0, gt=0)
+    quote_market_code: str = "J"
+
+    def resolved_base_url(self) -> str:
+        if self.base_url:
+            return self.base_url.rstrip("/")
+        if self.paper_trading:
+            return "https://openapivts.koreainvestment.com:29443"
+        return "https://openapi.koreainvestment.com:9443"
 
 
 class MaestroConfig(StrictConfigModel):
