@@ -236,7 +236,8 @@ database caches, or broker behavior.
 - `MockKISReadOnlyClient` provides deterministic no-network responses.
 - `KISRestReadOnlyClient` adapts the reference repo's KIS OAuth token issuance, request headers, TR_IDs, and inquiry payloads for read-only REST calls.
 - App key and secret are read from configured environment variable names only.
-- Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance.
+- Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance. Tokens may be stored only in `kis.token_cache_path`, never in state, audit logs, dashboard rows, or tests.
+- v0.5 KIS REST support is domestic-stock read-only first. Overseas stock/ETF endpoints, pagination/continuation, canonical symbol mapping, and state-vs-broker reconciliation are future work.
 - Broker account snapshots are persisted in SQLite and audit JSONL.
 - v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.
 

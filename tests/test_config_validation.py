@@ -64,5 +64,20 @@ def test_current_sample_configs_load():
         "configs/approval_paper.yaml",
         "configs/telegram_approval_paper.yaml",
         "configs/live_readonly.yaml",
+        "configs/kis_live_readonly.example.yaml",
     ]:
         assert load_config(path)
+
+
+def test_kis_live_readonly_example_config_uses_real_readonly_provider():
+    config = load_config("configs/kis_live_readonly.example.yaml")
+
+    assert config.mode == "live_readonly"
+    assert config.kis.enabled is True
+    assert config.kis.provider == "kis"
+    assert config.kis.account_id == "12345678-01"
+    assert config.kis.app_key_env == "KIS_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.kis.token_cache_path == "var/kis_access_token.json"
+    assert config.kis.paper_trading is False

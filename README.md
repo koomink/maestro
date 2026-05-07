@@ -157,6 +157,7 @@ Implemented foundations beyond the core v0.1 scope:
 - Optional Streamlit read-only dashboard
 - Approval request/decision gate before paper fills
 - Telegram approval message formatter and notifier stub
+- Telegram Bot API polling approval MVP for paper mode
 - CLI `approvals`
 - `live_readonly` mode config
 - KIS read-only adapter interface and deterministic mock client
@@ -166,7 +167,7 @@ Implemented foundations beyond the core v0.1 scope:
 Deferred real integrations:
 
 - No live trading
-- No real Telegram Bot API polling/webhook
+- No Telegram webhook or inline callback buttons
 - No KIS order submission
 - No GDELT/News API or community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
@@ -440,7 +441,8 @@ maestro kis-account --config configs/live_readonly.yaml
 ```
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
-For the real KIS read-only REST provider, set `kis.provider: kis`,
+For the real KIS read-only REST provider, start from
+`configs/kis_live_readonly.example.yaml`, set `kis.provider: kis`,
 `kis.account_id`, and these environment variable names:
 
 - `KIS_APP_KEY`: KIS app key
@@ -449,14 +451,18 @@ For the real KIS read-only REST provider, set `kis.provider: kis`,
 
 If `KIS_ACCESS_TOKEN` is unset, Maestro can issue `/oauth2/tokenP` and can
 persist the access token when `kis.token_cache_path` is configured. The cache
-file is written with owner-only permissions. Secrets and access tokens are not
-stored in broker snapshots, audit events, dashboard rows, or test fixtures.
+file is written with owner-only permissions. Access tokens may be stored only in
+`kis.token_cache_path`; they must never be written to state, audit logs,
+dashboard rows, or test fixtures. App secrets follow the same no-persistence
+rule.
 
 The KIS client is read-only in v0.5. It adapts OAuth/header/TR_ID/payload logic
 from `koomink/open-trading-api` for these inquiry APIs only:
 `inquire-balance`, `inquire-psbl-order`, `inquire-daily-ccld`, and
-`inquire-price`. Order submission samples from the reference repo were not
-copied or exposed.
+`inquire-price`. This is domestic-stock read-only first. Overseas stock/ETF
+endpoints, pagination/continuation handling, canonical symbol mapping, and
+state-vs-broker reconciliation remain future work. Order submission samples from
+the reference repo were not copied or exposed.
 
 To install dashboard dependencies and open the read-only dashboard:
 

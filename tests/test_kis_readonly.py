@@ -103,6 +103,25 @@ def test_kis_auth_manager_issues_and_caches_token(monkeypatch, tmp_path):
     assert len(token_calls) == 1
 
 
+def test_kis_rest_client_exposes_no_order_submission_surface():
+    client_source = Path("src/maestro/execution/brokers/kis/rest_client.py").read_text()
+    forbidden_tokens = [
+        "/order-cash",
+        "/order-credit",
+        "/order-rvsecncl",
+        "/order-resv",
+        "/uapi/hashkey",
+        "def submit",
+        "def buy",
+        "def sell",
+        "def cancel",
+        "def amend",
+    ]
+
+    for token in forbidden_tokens:
+        assert token not in client_source
+
+
 def _live_readonly_config(tmp_path):
     raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_readonly.db")

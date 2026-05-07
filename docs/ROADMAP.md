@@ -135,15 +135,17 @@ Scope:
 - OAuth token management via configured environment variable names
 - Optional owner-only access token cache after `/oauth2/tokenP` issuance
 - Broker-side quote/reference lookup for execution validation or reconciliation
-- Balance inquiry
-- Buying power inquiry
-- Order/fill inquiry
-- Unfilled order inquiry
+- Domestic-stock balance inquiry
+- Domestic-stock buying power inquiry
+- Domestic-stock order/fill inquiry
+- Domestic-stock unfilled order inquiry
 - Broker account snapshot normalization
 - Internal state versus broker state reconciliation
 - `live_readonly` mode hardening
 
 Read-only only. No order submission, cancel, amend, buy, or sell callable path.
+Overseas stock/ETF endpoints, pagination/continuation, canonical symbol mapping,
+and full reconciliation remain future work.
 
 ## v0.6 — KIS Live Approval Trading
 

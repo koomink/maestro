@@ -1,0 +1,43 @@
+mode: live_readonly
+
+portfolio:
+  base_currency: KRW
+  initial_cash: 10000000
+  allowed_symbols:
+    - CASH
+    - "005930"
+
+strategies: []
+
+datahub:
+  provider: mock
+
+execution:
+  engine: paper
+
+risk:
+  max_single_asset_weight: 0.4
+  min_cash_weight: 0.05
+
+state:
+  sqlite_path: var/kis_live_readonly_state.db
+
+audit:
+  jsonl_path: var/kis_live_readonly_audit.jsonl
+
+approval:
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
+  timeout_seconds: 300
+
+kis:
+  enabled: true
+  provider: kis
+  account_id: "12345678-01"
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  access_token_env: KIS_ACCESS_TOKEN
+  token_cache_path: var/kis_access_token.json
+  paper_trading: false

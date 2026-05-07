@@ -215,6 +215,7 @@
 - [x] Keep strategy research data routed through Maestro DataHub, not KIS
 - [x] Keep normal tests fake-client based with no KIS network calls
 - [x] Expose no callable KIS order submission path in v0.5
+- [x] Document domestic-stock read-only-first scope and future overseas/pagination/symbol-map/reconciliation work
 
 ### v0.6 KIS Live Approval Trading
 
