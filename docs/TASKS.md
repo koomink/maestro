@@ -123,7 +123,7 @@
 - [x] `maestro run-once --config configs/csv_paper.yaml`
 - [x] `maestro status --config configs/paper.yaml`
 
-## Current Milestone: v0.3 External Research Data Providers
+## Completed Milestone: v0.3 External Research Data Providers
 
 ### Provider Scaffold
 
@@ -143,10 +143,7 @@
 - [x] Plan Yahoo Finance/yfinance-style OHLCV provider integration
 - [x] Plan FRED macro provider integration
 - [x] Plan RSS news provider integration
-- [ ] Plan GDELT/News API provider integration as future planned providers
 - [x] Plan lightweight rule-based sentiment provider integration
-- [ ] Plan Reddit/X/Discord/Telegram/community sentiment API integration as future planned providers
-- [ ] Revisit crypto exchange market data provider planning only after stocks/ETFs scope expands
 - [x] Define provider configuration shape
 - [x] Define provider secrets handling
 - [x] Define provider unavailable behavior
@@ -156,10 +153,7 @@
 - [x] Implement Yahoo Finance/yfinance-style price and OHLCV provider
 - [x] Implement FRED macro provider
 - [x] Implement RSS news provider
-- [ ] Implement GDELT/News API provider
 - [x] Implement lightweight rule-based sentiment provider
-- [ ] Implement Reddit/X/Discord/Telegram/community sentiment API provider
-- [ ] Implement crypto market data provider only if the supported universe expands beyond stocks/ETFs
 - [x] Add Yahoo/yfinance-style timeout and provider-unavailable handling
 - [x] Add Yahoo/yfinance-style malformed-response handling
 - [x] Add fixture-backed tests for Yahoo/yfinance-style provider success, missing symbol, malformed payload, stale/fresh metadata, and router integration
@@ -178,11 +172,20 @@
 - [x] Add rule-based sentiment provider unavailable and malformed-result handling
 - [x] Add fixture-backed tests for sentiment positive, negative, neutral, empty input, malformed input, stale/fresh metadata, config validation, and router integration
 - [x] Confirm Yahoo/yfinance, FRED, and RSS can make live network calls when configured, with skipped-by-default integration tests
-- [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
-- [ ] Add provider-specific retry and rate-limit handling where providers need it
-- [ ] Add fixture-backed tests for each remaining real provider adapter
+- [x] Keep normal tests fake-client and fixture based, with no live network dependency
+- [x] Move GDELT/News API, community sentiment APIs, paid sentiment APIs, and crypto provider work to future milestones
 
 ## Future Milestones
+
+### Future DataHub Provider Work
+
+- [ ] Plan GDELT/News API provider integration as future news providers
+- [ ] Plan Reddit/X/Discord/Telegram/community sentiment API integrations as future sentiment providers
+- [ ] Plan paid sentiment API integrations if a concrete provider is selected
+- [ ] Revisit crypto exchange market data provider planning only after stocks/ETFs scope expands
+- [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
+- [ ] Add provider-specific retry and rate-limit handling where future providers need it
+- [ ] Add fixture-backed tests for each future real provider adapter
 
 ### v0.4 Telegram Approval
 
