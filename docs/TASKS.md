@@ -196,10 +196,12 @@
 - [x] Add allowed Telegram user and chat ID config
 - [x] Send order proposal messages with approve/reject commands
 - [x] Receive approve/reject decisions through polling
+- [x] Document that `run-once` blocks while polling for approval, rejection, or timeout
 - [x] Persist approval decisions and reject duplicate persisted decisions
 - [x] Keep normal tests fake-client based with no Telegram network calls
 - [x] Define paper-only approval behavior before live trading work begins
 - [ ] Add inline approve/reject button callback handling after polling MVP
+- [ ] Add webhook handling after polling MVP
 - [ ] Add fill/error Telegram notifications
 
 ### v0.5 KIS Read-only Broker Integration

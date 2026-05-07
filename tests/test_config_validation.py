@@ -62,6 +62,7 @@ def test_current_sample_configs_load():
         "configs/paper.yaml",
         "configs/csv_paper.yaml",
         "configs/approval_paper.yaml",
+        "configs/telegram_approval_paper.yaml",
         "configs/live_readonly.yaml",
     ]:
         assert load_config(path)

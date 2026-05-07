@@ -1,0 +1,50 @@
+mode: paper
+
+portfolio:
+  base_currency: KRW
+  initial_cash: 10000000
+  allowed_symbols:
+    - CASH
+    - MOCK_ETF_A
+    - MOCK_ETF_B
+
+strategies:
+  - id: sample_static_allocation
+    enabled: true
+    mode: paper
+    weight: 1.0
+    entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
+    config:
+      allocations:
+        CASH: 0.5
+        MOCK_ETF_A: 0.3
+        MOCK_ETF_B: 0.2
+
+datahub:
+  provider: mock
+
+execution:
+  engine: paper
+
+risk:
+  max_single_asset_weight: 0.4
+  min_cash_weight: 0.05
+
+state:
+  sqlite_path: var/telegram_approval_state.db
+
+audit:
+  jsonl_path: var/telegram_approval_audit.jsonl
+
+approval:
+  enabled: true
+  provider: telegram
+  require_approval: true
+  default_decision: approved
+  timeout_seconds: 300
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_allowed_chat_ids:
+    - 123456789
+  whitelisted_user_ids:
+    - 123456789
+  telegram_poll_interval_seconds: 1.0

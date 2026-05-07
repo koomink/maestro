@@ -13,7 +13,7 @@ from maestro.state.store import StateStore
 
 
 class FakeTelegramClient:
-    def __init__(self, updates: list[dict[str, Any]]) -> None:
+    def __init__(self, updates: list[dict[str, Any]] | object) -> None:
         self.updates = updates
         self.sent_messages: list[dict[str, Any]] = []
         self.get_updates_calls: list[dict[str, Any]] = []
@@ -43,6 +43,20 @@ def approval_request() -> ApprovalRequest:
             {"symbol": "MOCK_ETF_A", "side": "buy", "notional": 600.0},
             {"symbol": "MOCK_ETF_B", "side": "buy", "notional": 400.0},
         ],
+    )
+
+
+def expired_approval_request() -> ApprovalRequest:
+    now = utc_now()
+    return ApprovalRequest(
+        approval_id="appr_expired",
+        run_id="run_test",
+        created_at=now - timedelta(seconds=2),
+        expires_at=now - timedelta(seconds=1),
+        channel="telegram",
+        order_count=1,
+        estimated_notional=100.0,
+        proposed_orders=[{"symbol": "MOCK_ETF_A", "side": "buy", "notional": 100.0}],
     )
 
 
@@ -83,6 +97,22 @@ def test_telegram_service_sends_request_and_receives_approval():
     assert "buy MOCK_ETF_A notional=600.00" in message
     assert "approve appr_test" in message
     assert "reject appr_test" in message
+
+
+def test_telegram_service_sends_request_to_all_configured_chats():
+    request = approval_request()
+    client = FakeTelegramClient([update(f"approve {request.approval_id}", chat_id=200)])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100, 200],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
+    assert [item["chat_id"] for item in client.sent_messages] == [100, 200]
 
 
 def test_telegram_service_receives_rejection():
@@ -140,6 +170,65 @@ def test_telegram_service_returns_one_decision_for_duplicate_updates():
     decision, _ = service.request_decision(request)
 
     assert decision.status == "approved"
+
+
+def test_telegram_service_ignores_wrong_approval_id():
+    request = approval_request()
+    client = FakeTelegramClient(
+        [
+            update("approve appr_other", update_id=1),
+            update(f"approve {request.approval_id}", update_id=2),
+        ]
+    )
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
+
+
+def test_telegram_service_times_out_to_expired():
+    request = expired_approval_request()
+    client = FakeTelegramClient([])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "expired"
+
+
+def test_telegram_service_rejects_empty_allowed_chat_ids():
+    with pytest.raises(ValueError, match="telegram_allowed_chat_ids"):
+        TelegramApprovalService(
+            client=FakeTelegramClient([]),
+            chat_ids=[],
+            allowed_user_ids=[10],
+            poll_interval_seconds=0,
+        )
+
+
+def test_telegram_service_rejects_malformed_get_updates_response():
+    request = approval_request()
+    client = FakeTelegramClient({"not": "a list"})
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    with pytest.raises(ValueError, match="Malformed Telegram updates"):
+        service.request_decision(request)
 
 
 def test_telegram_approval_manager_is_paper_only():

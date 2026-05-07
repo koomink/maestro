@@ -423,11 +423,14 @@ maestro approvals --config configs/approval_paper.yaml
 
 By default, `configs/approval_paper.yaml` uses the no-network `console`
 approval stub and records the configured decision. For the v0.4 Telegram MVP,
-set `approval.provider: telegram`, configure `telegram_bot_token_env`,
-`telegram_allowed_chat_ids`, and `whitelisted_user_ids`, and keep
-`mode: paper`. Maestro sends the order proposal through the Bot API and polls
-for `approve <approval_id>` or `reject <approval_id>` replies. Normal tests use
-fake Telegram clients and do not call the Telegram network.
+start from `configs/telegram_approval_paper.yaml`, set
+`TELEGRAM_BOT_TOKEN` in the environment, configure
+`telegram_allowed_chat_ids` and `whitelisted_user_ids`, and keep `mode: paper`.
+Maestro sends the order proposal through the Bot API and `run-once` blocks while
+polling for `approve <approval_id>` or `reject <approval_id>` replies. Inline
+keyboards, callback queries, webhooks, dashboard write controls, KIS order
+submission, and live trading remain deferred. Normal tests use fake Telegram
+clients and do not call the Telegram network.
 
 To run the current KIS read-only mock adapter:
 
