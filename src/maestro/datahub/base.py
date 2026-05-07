@@ -73,6 +73,42 @@ def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
             {"macro"},
         )
         return DataHubRouter(registry)
+    if config.provider == "rss":
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
+        from maestro.datahub.rss_provider import RSSNewsProvider
+
+        registry = DataHubRegistry()
+        registry.register(
+            "rss",
+            RSSNewsProvider(
+                feed_urls=config.feed_urls,
+                timeout_seconds=config.timeout_seconds,
+                stale_after_seconds=config.stale_after_seconds,
+                symbol_map=config.symbol_map,
+                source_map=config.source_map,
+            ),
+            {"news"},
+        )
+        return DataHubRouter(registry)
+    if config.provider == "sentiment":
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
+        from maestro.datahub.sentiment_provider import RuleBasedSentimentProvider
+
+        registry = DataHubRegistry()
+        registry.register(
+            "sentiment",
+            RuleBasedSentimentProvider(
+                texts=config.sentiment_texts,
+                timeout_seconds=config.timeout_seconds,
+                stale_after_seconds=config.stale_after_seconds,
+                symbol_map=config.symbol_map,
+                source_name=config.source_name,
+            ),
+            {"sentiment"},
+        )
+        return DataHubRouter(registry)
     raise ValueError(f"Unsupported datahub provider: {config.provider}")
 
 
@@ -147,6 +183,48 @@ def _register_configured_provider(registry: Any, config: DataHubProviderConfig) 
         )
         return
 
+    if config.provider == "rss":
+        from maestro.datahub.rss_provider import RSSNewsProvider
+
+        rss_data_types = set(config.data_types or ["news"])
+        registry.register(
+            config.name,
+            RSSNewsProvider(
+                feed_urls=config.feed_urls,
+                timeout_seconds=config.timeout_seconds,
+                stale_after_seconds=config.stale_after_seconds,
+                symbol_map=config.symbol_map,
+                source_map=config.source_map,
+            ),
+            _validate_rss_data_types(rss_data_types),
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
+    if config.provider == "sentiment":
+        from maestro.datahub.sentiment_provider import RuleBasedSentimentProvider
+
+        sentiment_data_types = set(config.data_types or ["sentiment"])
+        registry.register(
+            config.name,
+            RuleBasedSentimentProvider(
+                texts=config.sentiment_texts,
+                timeout_seconds=config.timeout_seconds,
+                stale_after_seconds=config.stale_after_seconds,
+                symbol_map=config.symbol_map,
+                source_name=config.source_name,
+            ),
+            _validate_sentiment_data_types(sentiment_data_types),
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
     raise ValueError(f"Unsupported datahub provider: {config.provider}")
 
 
@@ -161,4 +239,18 @@ def _validate_fred_data_types(data_types: set[str]) -> set[str]:
     unsupported = data_types - {"macro"}
     if unsupported:
         raise ValueError(f"FRED provider supports only macro: {sorted(unsupported)}")
+    return data_types
+
+
+def _validate_rss_data_types(data_types: set[str]) -> set[str]:
+    unsupported = data_types - {"news"}
+    if unsupported:
+        raise ValueError(f"RSS provider supports only news: {sorted(unsupported)}")
+    return data_types
+
+
+def _validate_sentiment_data_types(data_types: set[str]) -> set[str]:
+    unsupported = data_types - {"sentiment"}
+    if unsupported:
+        raise ValueError(f"Sentiment provider supports only sentiment: {sorted(unsupported)}")
     return data_types

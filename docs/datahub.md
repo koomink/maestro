@@ -159,15 +159,20 @@ including KIS, to validate order prices, compare expected versus broker-visible
 quotes, or support reconciliation.
 
 `broker_quote` is not a primary strategy or research feed. Strategy research
-should use DataHub market/research providers such as CSV/local today and future
-Yahoo Finance/yfinance-style OHLCV, FRED, news, sentiment, fundamental, or crypto
-market data providers later.
+should use DataHub market/research providers such as CSV/local, Yahoo
+Finance/yfinance-style OHLCV, FRED macro, RSS news, and configured sentiment
+providers. Crypto market data is deferred until the supported universe expands
+beyond stocks and ETFs.
 
-## v0.3 Provider Scaffold
+## v0.3 Provider Scope
 
-v0.3 starts with a lightweight provider scaffold, not real integrations.
+v0.3 closes out real external research providers for the current stock/ETF
+universe. Yahoo/yfinance, FRED, and RSS can make live network calls when
+configured; normal tests remain fake-client and fixture based, and live-network
+smoke tests are skipped by default. Sentiment is intentionally network-free for
+v0.3 and analyzes configured fixture/news text only.
 
-Implemented scaffold:
+Implemented routing scaffold:
 
 - `DataHubRegistry` records provider capabilities: data types, optional symbols,
   optional asset types, optional run modes, priority, and availability.
@@ -191,9 +196,14 @@ Current provider status:
 - `yahoo` / `yfinance`: supports `price` and `ohlcv` through a small
   Yahoo/yfinance-style client wrapper.
 - `fred`: supports `macro` through a small stdlib HTTP client wrapper.
+- `rss`: supports `news` through a small stdlib HTTP/XML client wrapper.
+- `sentiment`: supports `sentiment` through configured fixture/news text and a
+  lightweight rule-based analyzer.
 
-No news, GDELT, sentiment/community, crypto, or KIS network provider is
-implemented in this scaffold. Those remain future v0.3 provider work.
+No GDELT, News API, Reddit/X/Discord/Telegram/community API, crypto, or KIS
+network research provider is implemented. GDELT/News API and community
+sentiment APIs remain future provider work. Crypto is explicitly deferred
+because the current supported universe is stocks and ETFs only.
 
 ### Multi-Provider Config
 
@@ -254,25 +264,36 @@ datahub:
       timeout_seconds: 5
       stale_after_seconds: 7776000
     - name: news_events
-      provider: news
+      provider: rss
       priority: 40
       data_types: [news]
+      feed_urls:
+        - https://example.com/rss
+      timeout_seconds: 5
+      stale_after_seconds: 604800
     - name: community_sentiment
       provider: sentiment
       priority: 50
       data_types: [sentiment]
-    - name: crypto_market_data
-      provider: crypto_exchange
-      priority: 20
-      data_types: [price, ohlcv]
-      symbols: [BTC-USD]
+      sentiment_texts:
+        - SPY posts strong gains as confidence improves.
+        - Federal Reserve commentary raises slowdown risks.
+      symbol_map:
+        SPY: SPY
+        FED: Federal Reserve,Fed
+      source_name: fixture_news
+      stale_after_seconds: 86400
 ```
 
 The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
-The FRED provider is implemented for `macro` only. News, sentiment, and crypto
-provider names above are planning examples only; the current implementation
-rejects them until real provider adapters are added. Crypto asset-type support,
-retries, rate limits, and durable cache settings remain future v0.3 design work.
+The FRED provider is implemented for `macro` only. The RSS provider is
+implemented for `news` only. The rule-based sentiment provider is implemented
+for configured fixture/news text only. GDELT, News API, Reddit/X/Discord/Telegram
+community APIs and paid sentiment APIs remain planning examples only. Crypto
+provider work is deferred until the supported universe expands beyond stocks and
+ETFs. The current implementation rejects unsupported provider names until real
+provider adapters are added. Retries, rate limits, and durable cache settings
+remain future design work where each provider needs them.
 
 ### Yahoo/yfinance Provider
 
@@ -438,6 +459,180 @@ MAESTRO_RUN_FRED_INTEGRATION=1 FRED_API_KEY=... uv run pytest tests/test_fred_in
 Normal `pytest -q` remains fake-client and fixture based, with no live network
 calls.
 
+### RSS News Provider
+
+The RSS provider is the first real news provider. It supports `news` requests
+and normalizes feed items into a simple news payload:
+
+```python
+{
+    "MARKET": {
+        "symbol": "MARKET",
+        "latest": {
+            "title": "Latest market story",
+            "url": "https://example.com/story",
+            "published_at": "2026-01-01T00:00:00+00:00",
+            "summary": "Story summary",
+            "feed_url": "https://example.com/rss",
+            "source": "Example News",
+        },
+        "items": [
+            {
+                "title": "Latest market story",
+                "url": "https://example.com/story",
+                "published_at": "2026-01-01T00:00:00+00:00",
+                "summary": "Story summary",
+                "feed_url": "https://example.com/rss",
+                "source": "Example News",
+            }
+        ],
+        "is_stale": False,
+        "warnings": [],
+        "source": "rss",
+    }
+}
+```
+
+The provider uses stdlib HTTP and XML parsing and does not add a core or
+optional package dependency. Normal tests use fake clients and fixture XML, so
+`pytest -q` does not require live network access.
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: rss
+  feed_urls:
+    - https://example.com/rss
+  timeout_seconds: 5
+  stale_after_seconds: 604800
+  symbol_map:
+    FED: Federal Reserve
+  source_map:
+    https://example.com/rss: Example News
+```
+
+Multi-provider example:
+
+```yaml
+datahub:
+  providers:
+    - name: rss_news
+      provider: rss
+      priority: 40
+      data_types: [news]
+      feed_urls:
+        - https://example.com/rss
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      symbol_map:
+        FED: Federal Reserve
+      source_map:
+        https://example.com/rss: Example News
+```
+
+Config fields:
+
+- `feed_urls`: one or more RSS feed URLs. The provider fetches each feed for a
+  news request and merges normalized items.
+- `timeout_seconds`: maximum time for each RSS HTTP call. Timeout and transport
+  failures are mapped to provider-unavailable so the router can try a fallback.
+- `stale_after_seconds`: optional threshold for marking the latest dated item
+  stale.
+- `symbol_map`: optional request-symbol to keyword mapping. When present, the
+  provider filters feed items whose title or summary contains that keyword.
+- `source_map`: optional feed URL to display-source mapping. When omitted, the
+  feed title or URL is used as the item source.
+
+Malformed RSS XML, malformed item dates, and items missing title or URL fail
+loudly. Empty feeds fail loudly instead of returning fresh empty news.
+
+Live integration checks are optional and skipped by default:
+
+```bash
+MAESTRO_RUN_RSS_INTEGRATION=1 uv run pytest tests/test_rss_integration.py
+```
+
+Normal `pytest -q` remains fake-client and fixture based, with no live network
+calls.
+
+### Rule-based Sentiment Provider
+
+The first sentiment provider is intentionally network-free. It supports
+`sentiment` requests by analyzing configured fixture/news text snippets with a
+small rule-based analyzer:
+
+```python
+{
+    "SPY": {
+        "symbol": "SPY",
+        "score": 0.75,
+        "label": "positive",
+        "source": "fixture_news",
+        "provider": "sentiment",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+        "related_symbols": ["SPY"],
+        "keywords": ["SPY"],
+        "text_count": 2,
+        "is_stale": False,
+        "warnings": [],
+    }
+}
+```
+
+The provider does not call Reddit, X/Twitter, Discord, Telegram, paid sentiment
+APIs, or any live community source. Normal tests use fixture strings and fake
+analyzers.
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: sentiment
+  sentiment_texts:
+    - SPY posts strong gains as confidence improves.
+    - SPY faces downside risk after weak guidance.
+  symbol_map:
+    SPY: SPY
+  source_name: fixture_news
+  stale_after_seconds: 86400
+```
+
+Multi-provider example:
+
+```yaml
+datahub:
+  providers:
+    - name: rule_sentiment
+      provider: sentiment
+      priority: 60
+      data_types: [sentiment]
+      sentiment_texts:
+        - SPY posts strong gains as confidence improves.
+        - Federal Reserve commentary raises slowdown risks.
+      symbol_map:
+        SPY: SPY
+        FED: Federal Reserve,Fed
+      source_name: fixture_news
+      stale_after_seconds: 86400
+```
+
+Config fields:
+
+- `sentiment_texts`: fixture/news text snippets to analyze. Empty input and
+  non-string snippets fail loudly.
+- `symbol_map`: optional request-symbol to comma-separated keyword mapping. The
+  provider filters snippets whose text contains any configured keyword.
+- `timeout_seconds`: passed through to the analyzer interface for future bounded
+  implementations and fake-analyzer tests.
+- `stale_after_seconds`: optional threshold for marking analyzer timestamps
+  stale. The default rule-based analyzer emits generated-at timestamps, so it is
+  fresh unless a test or future analyzer supplies an older timestamp.
+- `source_name`: display source written into normalized payloads.
+
+Malformed analyzer results fail loudly. Analyzer timeouts and availability
+failures are normalized as provider-unavailable errors.
+
 ### Provider Operations Planning
 
 Future external research providers must keep operational concerns inside
@@ -484,19 +679,24 @@ Provider-unavailable behavior:
 Testing policy for future external providers:
 
 - Unit tests should use fake clients or fixture payloads for Yahoo/yfinance,
-  FRED, news, sentiment, and crypto providers.
+  FRED, RSS news, rule-based sentiment, and future provider adapters.
 - Normalization, freshness, timeout, retry, rate-limit, and error mapping should
   be tested without real network calls.
 - Optional integration tests that contact real services should be explicitly
   marked, skipped by default, and isolated from normal `pytest -q` runs.
+- Current skipped-by-default live-network checks cover Yahoo/yfinance, FRED, and
+  RSS. Rule-based sentiment has no live integration test because it has no
+  network source in v0.3.
 - Fixtures should include successful payloads, unsupported symbols, stale
   responses, provider-unavailable responses, malformed provider data, and
   rate-limit cases.
 
 Remaining real provider work:
 
-- Implement real provider adapters for RSS/GDELT/news, sentiment/community
-  feeds, and crypto market data.
+- Implement real provider adapters for GDELT/News API, Reddit/X/Discord/Telegram
+  community sentiment feeds, and paid sentiment APIs.
+- Defer crypto market data until stocks/ETFs are no longer the supported
+  universe.
 - Add provider-specific config fields only when each adapter needs them.
 - Add bounded timeout/retry/rate-limit code inside each adapter.
 - Add provider-specific schema normalization and fixture-backed tests.

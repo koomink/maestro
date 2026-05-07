@@ -135,15 +135,18 @@
 - [x] Add lightweight multi-provider config support for current local providers
 - [x] Add deterministic provider priority and source preference rules
 - [x] Add tests for provider priority and config backward compatibility
-- [x] Document future provider config shape for Yahoo/yfinance, FRED, news, sentiment, and crypto market data
+- [x] Document v0.3 provider config shape for Yahoo/yfinance, FRED, RSS news, and rule-based sentiment
+- [x] Defer crypto provider work because the current universe is stocks and ETFs only
 
 ### Real Provider Planning and Implementation
 
 - [x] Plan Yahoo Finance/yfinance-style OHLCV provider integration
 - [x] Plan FRED macro provider integration
-- [ ] Plan RSS/GDELT/News API provider integration as future planned providers
-- [ ] Plan sentiment/community data provider integration as future planned providers
-- [ ] Plan crypto exchange market data provider integration as future planned providers
+- [x] Plan RSS news provider integration
+- [ ] Plan GDELT/News API provider integration as future planned providers
+- [x] Plan lightweight rule-based sentiment provider integration
+- [ ] Plan Reddit/X/Discord/Telegram/community sentiment API integration as future planned providers
+- [ ] Revisit crypto exchange market data provider planning only after stocks/ETFs scope expands
 - [x] Define provider configuration shape
 - [x] Define provider secrets handling
 - [x] Define provider unavailable behavior
@@ -152,9 +155,11 @@
 - [x] Define tests for provider routing, freshness, and schema normalization
 - [x] Implement Yahoo Finance/yfinance-style price and OHLCV provider
 - [x] Implement FRED macro provider
-- [ ] Implement RSS/GDELT/news provider
-- [ ] Implement sentiment/community data provider
-- [ ] Implement crypto market data provider
+- [x] Implement RSS news provider
+- [ ] Implement GDELT/News API provider
+- [x] Implement lightweight rule-based sentiment provider
+- [ ] Implement Reddit/X/Discord/Telegram/community sentiment API provider
+- [ ] Implement crypto market data provider only if the supported universe expands beyond stocks/ETFs
 - [x] Add Yahoo/yfinance-style timeout and provider-unavailable handling
 - [x] Add Yahoo/yfinance-style malformed-response handling
 - [x] Add fixture-backed tests for Yahoo/yfinance-style provider success, missing symbol, malformed payload, stale/fresh metadata, and router integration
@@ -166,6 +171,13 @@
 - [x] Add FRED malformed-response handling
 - [x] Add fixture-backed tests for FRED success, missing series, malformed payload, stale/fresh metadata, missing API key, and router integration
 - [x] Add skipped-by-default live FRED integration-test support
+- [x] Add RSS timeout and provider-unavailable handling
+- [x] Add RSS malformed-feed and empty-feed handling
+- [x] Add fixture-backed tests for RSS success, empty feed, malformed feed, stale/fresh metadata, config validation, and router integration
+- [x] Add skipped-by-default live RSS integration-test support
+- [x] Add rule-based sentiment provider unavailable and malformed-result handling
+- [x] Add fixture-backed tests for sentiment positive, negative, neutral, empty input, malformed input, stale/fresh metadata, config validation, and router integration
+- [x] Confirm Yahoo/yfinance, FRED, and RSS can make live network calls when configured, with skipped-by-default integration tests
 - [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
 - [ ] Add provider-specific retry and rate-limit handling where providers need it
 - [ ] Add fixture-backed tests for each remaining real provider adapter
