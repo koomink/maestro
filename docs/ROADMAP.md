@@ -94,9 +94,10 @@ Scope:
 - Cache/storage policy for provider responses
 - Symbol registry and provider symbol mapping
 - Data schemas for `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote`
-- Yahoo Finance/yfinance-style OHLCV provider as a future planned provider
-- FRED macro provider as a future planned provider
-- RSS/GDELT/News API provider as future planned providers
+- Yahoo Finance/yfinance-style OHLCV provider
+- FRED macro provider
+- RSS news provider as the first `news` provider, with GDELT/News API remaining
+  future provider options
 - Sentiment/community data providers as future planned providers
 - Crypto exchange market data providers as future planned providers
 
