@@ -159,15 +159,20 @@ including KIS, to validate order prices, compare expected versus broker-visible
 quotes, or support reconciliation.
 
 `broker_quote` is not a primary strategy or research feed. Strategy research
-should use DataHub market/research providers such as CSV/local today and future
-Yahoo Finance/yfinance-style OHLCV, FRED, news, sentiment, fundamental, or crypto
-market data providers later.
+should use DataHub market/research providers such as CSV/local, Yahoo
+Finance/yfinance-style OHLCV, FRED macro, RSS news, and configured sentiment
+providers. Crypto market data is deferred until the supported universe expands
+beyond stocks and ETFs.
 
-## v0.3 Provider Scaffold
+## v0.3 Provider Scope
 
-v0.3 starts with a lightweight provider scaffold, not real integrations.
+v0.3 closes out real external research providers for the current stock/ETF
+universe. Yahoo/yfinance, FRED, and RSS can make live network calls when
+configured; normal tests remain fake-client and fixture based, and live-network
+smoke tests are skipped by default. Sentiment is intentionally network-free for
+v0.3 and analyzes configured fixture/news text only.
 
-Implemented scaffold:
+Implemented routing scaffold:
 
 - `DataHubRegistry` records provider capabilities: data types, optional symbols,
   optional asset types, optional run modes, priority, and availability.
@@ -196,8 +201,9 @@ Current provider status:
   lightweight rule-based analyzer.
 
 No GDELT, News API, Reddit/X/Discord/Telegram/community API, crypto, or KIS
-network provider is implemented in this scaffold. Those remain future v0.3
-provider work.
+network research provider is implemented. GDELT/News API and community
+sentiment APIs remain future provider work. Crypto is explicitly deferred
+because the current supported universe is stocks and ETFs only.
 
 ### Multi-Provider Config
 
@@ -277,21 +283,17 @@ datahub:
         FED: Federal Reserve,Fed
       source_name: fixture_news
       stale_after_seconds: 86400
-    - name: crypto_market_data
-      provider: crypto_exchange
-      priority: 20
-      data_types: [price, ohlcv]
-      symbols: [BTC-USD]
 ```
 
 The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
 The FRED provider is implemented for `macro` only. The RSS provider is
 implemented for `news` only. The rule-based sentiment provider is implemented
 for configured fixture/news text only. GDELT, News API, Reddit/X/Discord/Telegram
-community APIs, paid sentiment APIs, and crypto provider names remain planning
-examples only; the current implementation rejects them until real provider
-adapters are added. Crypto asset-type support, retries, rate limits, and durable
-cache settings remain future v0.3 design work.
+community APIs and paid sentiment APIs remain planning examples only. Crypto
+provider work is deferred until the supported universe expands beyond stocks and
+ETFs. The current implementation rejects unsupported provider names until real
+provider adapters are added. Retries, rate limits, and durable cache settings
+remain future design work where each provider needs them.
 
 ### Yahoo/yfinance Provider
 
@@ -677,11 +679,14 @@ Provider-unavailable behavior:
 Testing policy for future external providers:
 
 - Unit tests should use fake clients or fixture payloads for Yahoo/yfinance,
-  FRED, news, sentiment, and crypto providers.
+  FRED, RSS news, rule-based sentiment, and future provider adapters.
 - Normalization, freshness, timeout, retry, rate-limit, and error mapping should
   be tested without real network calls.
 - Optional integration tests that contact real services should be explicitly
   marked, skipped by default, and isolated from normal `pytest -q` runs.
+- Current skipped-by-default live-network checks cover Yahoo/yfinance, FRED, and
+  RSS. Rule-based sentiment has no live integration test because it has no
+  network source in v0.3.
 - Fixtures should include successful payloads, unsupported symbols, stale
   responses, provider-unavailable responses, malformed provider data, and
   rate-limit cases.
@@ -689,7 +694,9 @@ Testing policy for future external providers:
 Remaining real provider work:
 
 - Implement real provider adapters for GDELT/News API, Reddit/X/Discord/Telegram
-  community sentiment feeds, paid sentiment APIs, and crypto market data.
+  community sentiment feeds, and paid sentiment APIs.
+- Defer crypto market data until stocks/ETFs are no longer the supported
+  universe.
 - Add provider-specific config fields only when each adapter needs them.
 - Add bounded timeout/retry/rate-limit code inside each adapter.
 - Add provider-specific schema normalization and fixture-backed tests.
