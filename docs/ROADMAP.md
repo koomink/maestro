@@ -94,17 +94,11 @@ Scope:
 - Cache/storage policy for provider responses
 - Symbol registry and provider symbol mapping
 - Data schemas for `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote`
-- Real external research API providers for the current stock/ETF universe:
-  Yahoo Finance/yfinance-style `price` and `ohlcv`, FRED `macro`, and RSS
-  `news`
-- A network-free rule-based `sentiment` provider over configured fixture/news
-  text
-- Optional live-network provider smoke tests for Yahoo/yfinance, FRED, and RSS,
-  skipped by default so normal tests remain fake-client and fixture based
-- GDELT/News API and Reddit/X/Discord/Telegram/community sentiment APIs remain
-  future provider options
-- Crypto exchange market data is deferred because the current supported universe
-  is stocks and ETFs only
+- Yahoo Finance/yfinance-style OHLCV provider as a future planned provider
+- FRED macro provider as a future planned provider
+- RSS/GDELT/News API provider as future planned providers
+- Sentiment/community data providers as future planned providers
+- Crypto exchange market data providers as future planned providers
 
 KIS is not the primary research data source. KIS broker quotes may be used later as `broker_quote` reference data for execution validation or reconciliation.
 

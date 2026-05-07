@@ -78,7 +78,7 @@ Maestro separates research/market data from broker account and execution data.
 ```text
 Research / strategy data
 Yahoo Finance, FRED, CSV/local, RSS feeds,
-rule-based sentiment, future GDELT/News API and community APIs
+rule-based sentiment, future GDELT/News API, community APIs, crypto exchange data
         │
         ▼
 Maestro DataHub
@@ -142,14 +142,8 @@ v0.3 DataHub provider work adds:
 
 - Optional Yahoo/yfinance-style `price` and `ohlcv` provider behind Maestro DataHub
 - FRED `macro` provider behind Maestro DataHub, using API keys from environment variables
-- RSS `news` provider behind Maestro DataHub
-- Network-free rule-based `sentiment` provider over configured fixture/news text
 - Multi-provider DataHub routing with deterministic priority and fallback behavior
-- Skipped-by-default live-network smoke tests for Yahoo/yfinance, FRED, and RSS
 - Fake-client and fixture-backed provider tests; normal tests do not call live external services
-
-Crypto market data is deferred because the current supported universe is stocks
-and ETFs only.
 
 Implemented foundations beyond the core v0.1 scope:
 
@@ -168,8 +162,6 @@ Deferred real integrations:
 - No real Telegram Bot API polling/webhook
 - No real KIS REST API calls
 - No KIS order submission
-- No GDELT/News API or community sentiment APIs yet
-- No crypto market data while the supported universe is stocks and ETFs only
 - No web dashboard write controls
 
 ## Optional Yahoo/yfinance Provider
@@ -220,41 +212,6 @@ datahub:
 
 Strategy plugins still request macro data through Maestro DataHub and do not
 call FRED directly.
-
-## RSS News Provider
-
-The RSS provider uses stdlib HTTP/XML parsing. It can fetch live RSS feeds when
-configured with `feed_urls`, while normal tests use fake clients and fixture XML:
-
-```yaml
-datahub:
-  provider: rss
-  feed_urls:
-    - https://example.com/rss
-  timeout_seconds: 5
-  stale_after_seconds: 604800
-```
-
-Live RSS checks are optional and skipped by default unless
-`MAESTRO_RUN_RSS_INTEGRATION=1` is set.
-
-## Rule-based Sentiment Provider
-
-The first sentiment provider is network-free and analyzes configured
-fixture/news text:
-
-```yaml
-datahub:
-  provider: sentiment
-  sentiment_texts:
-    - SPY posts strong gains as confidence improves.
-  symbol_map:
-    SPY: SPY
-  source_name: fixture_news
-```
-
-Reddit, X/Twitter, Discord, Telegram, and paid sentiment APIs remain future
-provider work.
 
 ## v0.1 Success Criteria
 
