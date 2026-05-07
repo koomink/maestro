@@ -142,9 +142,7 @@ v0.3 DataHub provider work adds:
 
 - Optional Yahoo/yfinance-style `price` and `ohlcv` provider behind Maestro DataHub
 - FRED `macro` provider behind Maestro DataHub, using API keys from environment variables
-- RSS `news` provider behind Maestro DataHub, with no secrets required
 - Multi-provider DataHub routing with deterministic priority and fallback behavior
-- Skipped-by-default live-network smoke tests for Yahoo/yfinance, FRED, and RSS
 - Fake-client and fixture-backed provider tests; normal tests do not call live external services
 
 Implemented foundations beyond the core v0.1 scope:
