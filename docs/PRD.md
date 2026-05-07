@@ -199,7 +199,7 @@ And Maestro will:
 - Daily order/fill inquiry
 - Unfilled order inquiry
 - `live_readonly` mode
-- Account reconciliation
+- Basic account reconciliation against latest broker snapshot
 - No KIS order submission path in this phase
 
 ### Phase 5: Live Approval Trading

@@ -122,6 +122,12 @@ class KISConfig(StrictConfigModel):
         return "https://openapi.koreainvestment.com:9443"
 
 
+class ReconciliationConfig(StrictConfigModel):
+    cash_tolerance: float = Field(default=0.0, ge=0.0)
+    position_quantity_tolerance: float = Field(default=0.0, ge=0.0)
+    value_tolerance: float = Field(default=0.0, ge=0.0)
+
+
 class MaestroConfig(StrictConfigModel):
     mode: RunMode = RunMode.PAPER
     portfolio: PortfolioConfig
@@ -133,3 +139,4 @@ class MaestroConfig(StrictConfigModel):
     audit: AuditConfig
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     kis: KISConfig = Field(default_factory=KISConfig)
+    reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)

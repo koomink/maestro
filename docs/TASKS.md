@@ -210,7 +210,7 @@
 - [x] Plan OAuth token management and token persistence
 - [x] Plan balance, position, buying power, order/fill, and unfilled order reads
 - [x] Plan broker account snapshot normalization
-- [ ] Plan internal state versus broker state reconciliation
+- [x] Add basic internal state versus latest broker snapshot reconciliation
 - [x] Treat KIS current price lookup as `broker_quote` reference data for execution validation or reconciliation only
 - [x] Keep strategy research data routed through Maestro DataHub, not KIS
 - [x] Keep normal tests fake-client based with no KIS network calls

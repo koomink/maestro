@@ -438,6 +438,7 @@ To run the KIS read-only adapter:
 ```bash
 maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
+maestro reconcile --config configs/live_readonly.yaml
 ```
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
@@ -461,8 +462,12 @@ from `koomink/open-trading-api` for these inquiry APIs only:
 `inquire-balance`, `inquire-psbl-order`, `inquire-daily-ccld`, and
 `inquire-price`. This is domestic-stock read-only first. Overseas stock/ETF
 endpoints, pagination/continuation handling, canonical symbol mapping, and
-state-vs-broker reconciliation remain future work. Order submission samples from
-the reference repo were not copied or exposed.
+full reconciliation remain future work. v0.5.2 adds read-only reconciliation
+checks between Maestro state and the latest broker snapshot for cash,
+position quantity, unknown broker positions, missing broker positions, and
+missing broker snapshots. Results are persisted as `broker_reconciliation`
+system events and audit log events. Order submission samples from the reference
+repo were not copied or exposed.
 
 To install dashboard dependencies and open the read-only dashboard:
 

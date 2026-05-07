@@ -7,6 +7,7 @@ import typer
 from maestro.config.loader import load_config
 from maestro.core.enums import RunMode
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state.store import StateStore
@@ -91,6 +92,31 @@ def kis_account(config: Path = typer.Option(..., "--config")) -> None:
         f"cash={account['cash']:.2f} buying_power={account['buying_power']:.2f} "
         f"positions={len(account['positions'])}"
     )
+
+
+@app.command("reconcile")
+def reconcile(config: Path = typer.Option(..., "--config")) -> None:
+    maestro_config = load_config(config)
+    if maestro_config.mode != RunMode.LIVE_READONLY:
+        raise typer.BadParameter("reconcile requires mode=live_readonly")
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    result = BrokerReconciliationService(
+        maestro_config.reconciliation,
+        store,
+        audit,
+    ).reconcile_latest()
+    status = "passed" if result.passed else "failed"
+    typer.echo(
+        f"status={status} issues={len(result.issues)} "
+        f"cash_difference={result.cash_difference or 0.0:.2f} "
+        f"broker_account_id={result.broker_account_id or 'none'}"
+    )
+    if not result.passed:
+        for issue in result.issues:
+            symbol = f" symbol={issue.symbol}" if issue.symbol else ""
+            typer.echo(f"issue={issue.issue_type}{symbol} message={issue.message}")
+        raise typer.Exit(1)
 
 
 @app.command("dashboard")

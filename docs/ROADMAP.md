@@ -140,7 +140,7 @@ Scope:
 - Domestic-stock order/fill inquiry
 - Domestic-stock unfilled order inquiry
 - Broker account snapshot normalization
-- Internal state versus broker state reconciliation
+- Basic internal state versus latest broker snapshot reconciliation
 - `live_readonly` mode hardening
 
 Read-only only. No order submission, cancel, amend, buy, or sell callable path.

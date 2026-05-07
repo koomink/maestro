@@ -41,3 +41,8 @@ kis:
   access_token_env: KIS_ACCESS_TOKEN
   token_cache_path: var/kis_access_token.json
   paper_trading: false
+
+reconciliation:
+  cash_tolerance: 0.0
+  position_quantity_tolerance: 0.0
+  value_tolerance: 0.0
