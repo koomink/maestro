@@ -158,14 +158,16 @@ Started scope:
 - Daily notional limits
 - Broker order ID mapping
 - Duplicate-order prevention
+- Order status polling interface
+- Persisted `live_order_status` system and audit events
+- KIS daily/unfilled order inquiry status normalization
 - Reconciliation before and after orders
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
 
 Remaining scope:
 
-- Order status polling
-- Partial fill reconciliation
+- Full partial fill portfolio reconciliation
 - Cancellation policy
 - Post-order reconciliation workflow
 

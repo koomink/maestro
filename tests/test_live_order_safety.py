@@ -11,6 +11,10 @@ from maestro.execution.live_orders import (
     LiveOrderRequest,
     LiveOrderResult,
     LiveOrderSafetyService,
+    LiveOrderStatusClient,
+    LiveOrderStatusService,
+    LiveOrderStatusSnapshot,
+    PartialFillSummary,
 )
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
@@ -140,6 +144,42 @@ def test_live_order_halts_on_unknown_broker_state(tmp_path):
     assert broker.requests == [request]
 
 
+def test_live_order_status_service_persists_status_snapshot(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    broker_order = _broker_order()
+    service = LiveOrderStatusService(
+        store,
+        audit,
+        FakeLiveOrderStatusClient(OrderStatus.PARTIALLY_FILLED),
+    )
+
+    snapshot = service.poll_order_status("run_1", broker_order)
+
+    events = store.list_system_events_by_type("live_order_status")
+    assert snapshot.status == OrderStatus.PARTIALLY_FILLED
+    assert events[0]["payload"]["status"] == "partially_filled"
+    assert events[0]["payload"]["broker_order"]["broker_order_id"] == "KIS-1"
+    assert events[0]["payload"]["partial_fill"]["filled_quantity"] == 1.0
+
+
+def test_live_order_status_service_halts_unknown_status(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    service = LiveOrderStatusService(
+        store,
+        audit,
+        FakeLiveOrderStatusClient(OrderStatus.UNKNOWN),
+    )
+
+    snapshot = service.poll_order_status("run_1", _broker_order())
+
+    events = store.list_system_events_by_type("live_order_status")
+    assert snapshot.status == OrderStatus.HALTED
+    assert "unknown order state" in (snapshot.message or "")
+    assert events[0]["payload"]["status"] == "halted"
+
+
 def _context(
     tmp_path,
     *,
@@ -174,6 +214,16 @@ def _context(
         broker,
     )
     return service, request, approval, broker
+
+
+def _broker_order() -> BrokerOrderId:
+    return BrokerOrderId(
+        broker="kis",
+        broker_order_id="KIS-1",
+        broker_order_org_no="KRX",
+        order_id="ord_live_1",
+        submitted_at=utc_now().isoformat(),
+    )
 
 
 def _approval(
@@ -215,4 +265,26 @@ class FakeLiveOrderClient(LiveOrderClient):
             order_id=request.order_id,
             status=self.status,
             broker_order=broker_order,
+        )
+
+
+class FakeLiveOrderStatusClient(LiveOrderStatusClient):
+    def __init__(self, status: OrderStatus) -> None:
+        self.status = status
+
+    def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        return LiveOrderStatusSnapshot(
+            broker_order=broker_order_id,
+            status=self.status,
+            checked_at=utc_now().isoformat(),
+            symbol="005930",
+            side=OrderSide.BUY,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=2.0,
+                filled_quantity=1.0,
+                remaining_quantity=1.0,
+                average_fill_price=70_000.0,
+                fill_count=1,
+            ),
+            raw_status=self.status.value,
         )

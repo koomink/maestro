@@ -10,7 +10,7 @@ from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.rest_client import KISRestLiveOrderClient, KISRestReadOnlyClient
 from maestro.execution.brokers.kis.service import KISReadOnlyService
-from maestro.execution.live_orders import LiveOrderRequest
+from maestro.execution.live_orders import BrokerOrderId, LiveOrderRequest
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 
@@ -166,6 +166,70 @@ def test_kis_live_order_client_uses_domestic_limit_order_payload(monkeypatch):
     }
 
 
+def test_kis_live_order_client_normalizes_open_status(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport())
+
+    snapshot = client.get_order_status(_broker_order("0002"))
+
+    assert snapshot.status == OrderStatus.OPEN
+    assert snapshot.symbol == "005930"
+    assert snapshot.side == OrderSide.BUY
+    assert snapshot.partial_fill.ordered_quantity == 3.0
+    assert snapshot.partial_fill.filled_quantity == 0.0
+    assert snapshot.partial_fill.remaining_quantity == 3.0
+
+
+def test_kis_live_order_client_normalizes_filled_status(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport())
+
+    snapshot = client.get_order_status(_broker_order("0001"))
+
+    assert snapshot.status == OrderStatus.FILLED
+    assert snapshot.partial_fill.ordered_quantity == 2.0
+    assert snapshot.partial_fill.filled_quantity == 2.0
+    assert snapshot.partial_fill.remaining_quantity == 0.0
+    assert snapshot.fills[0].quantity == 2.0
+    assert snapshot.fills[0].price == 70_000.0
+
+
+def test_kis_live_order_client_normalizes_partial_fill_status(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport(partial_order=True))
+
+    snapshot = client.get_order_status(_broker_order("0003"))
+
+    assert snapshot.status == OrderStatus.PARTIALLY_FILLED
+    assert snapshot.partial_fill.ordered_quantity == 5.0
+    assert snapshot.partial_fill.filled_quantity == 2.0
+    assert snapshot.partial_fill.remaining_quantity == 3.0
+
+
+def test_kis_live_order_client_normalizes_rejected_status(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport(rejected_order=True))
+
+    snapshot = client.get_order_status(_broker_order("0004"))
+
+    assert snapshot.status == OrderStatus.REJECTED
+    assert snapshot.raw_status == "주문거부"
+
+
+def test_kis_live_order_client_normalizes_canceled_status(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport(canceled_order=True))
+
+    snapshot = client.get_order_status(_broker_order("0005"))
+
+    assert snapshot.status == OrderStatus.CANCELED
+    assert snapshot.raw_status == "취소"
+
+
+def test_kis_live_order_client_returns_unknown_for_missing_order(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport())
+
+    snapshot = client.get_order_status(_broker_order("missing"))
+
+    assert snapshot.status == OrderStatus.UNKNOWN
+    assert "not found" in (snapshot.message or "")
+
+
 def _live_readonly_config(tmp_path):
     raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_readonly.db")
@@ -175,9 +239,43 @@ def _live_readonly_config(tmp_path):
     return load_config(config_path)
 
 
+def _kis_live_order_client(monkeypatch, transport: "FakeKISTransport") -> KISRestLiveOrderClient:
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+    )
+    return KISRestLiveOrderClient(config, transport=transport)
+
+
+def _broker_order(order_id: str) -> BrokerOrderId:
+    return BrokerOrderId(
+        broker="kis",
+        broker_order_id=order_id,
+        broker_order_org_no="KRX",
+        order_id="ord_live_1",
+        submitted_at="2026-05-08T00:00:00+00:00",
+    )
+
+
 class FakeKISTransport:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        partial_order: bool = False,
+        rejected_order: bool = False,
+        canceled_order: bool = False,
+    ) -> None:
         self.calls = []
+        self.partial_order = partial_order
+        self.rejected_order = rejected_order
+        self.canceled_order = canceled_order
 
     def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
         self.calls.append(
@@ -239,6 +337,48 @@ class FakeKISTransport:
                             "ord_qty": "3",
                             "tot_ccld_qty": "0",
                             "ord_unpr": "70000",
+                        }
+                    ],
+                }
+            if self.partial_order:
+                return {
+                    "rt_cd": "0",
+                    "output1": [
+                        {
+                            "odno": "0003",
+                            "pdno": "005930",
+                            "sll_buy_dvsn_cd": "02",
+                            "ord_qty": "5",
+                            "tot_ccld_qty": "2",
+                            "avg_prvs": "70000",
+                        }
+                    ],
+                }
+            if self.rejected_order:
+                return {
+                    "rt_cd": "0",
+                    "output1": [
+                        {
+                            "odno": "0004",
+                            "pdno": "005930",
+                            "sll_buy_dvsn_cd": "02",
+                            "ord_qty": "5",
+                            "tot_ccld_qty": "0",
+                            "rjct_rson_name": "주문거부",
+                        }
+                    ],
+                }
+            if self.canceled_order:
+                return {
+                    "rt_cd": "0",
+                    "output1": [
+                        {
+                            "odno": "0005",
+                            "pdno": "005930",
+                            "sll_buy_dvsn_cd": "01",
+                            "ord_qty": "5",
+                            "tot_ccld_qty": "0",
+                            "ccld_dvsn_name": "취소",
                         }
                     ],
                 }

@@ -256,10 +256,18 @@ database caches, or broker behavior.
   duplicate-order prevention, and halt-on-unknown-state behavior.
 - `LiveOrderRequest`, `LiveOrderResult`, `BrokerOrderId`, and expanded
   `OrderStatus` values define the live order contract.
+- `LiveOrderStatusClient` exposes `get_order_status(broker_order_id)`.
+  `LiveOrderStatusService` persists snapshots as `live_order_status` system
+  events and audit events; unknown broker status is converted to `halted`.
+- `LiveOrderStatusSnapshot`, `FillEvent`, and `PartialFillSummary` define status
+  and partial-fill normalization.
 - `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
   KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
   real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,
   `ORD_DVSN=00` for limit orders, and uppercase KIS body keys.
+- KIS status tracking reuses domestic-stock `inquire-daily-ccld` and the existing
+  unfilled-order inquiry path, then normalizes accepted, open, partially filled,
+  filled, rejected, canceled, and unknown states into Maestro `OrderStatus`.
 - Maestro exposes no direct unguarded buy/sell CLI, no market orders, no dashboard
   write controls, no live order network smoke test, and no Telegram webhook/buttons
   in this phase.

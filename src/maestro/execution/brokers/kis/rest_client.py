@@ -19,9 +19,13 @@ from maestro.execution.brokers.kis.models import (
 )
 from maestro.execution.live_orders import (
     BrokerOrderId,
+    FillEvent,
     LiveOrderClient,
     LiveOrderRequest,
     LiveOrderResult,
+    LiveOrderStatusClient,
+    LiveOrderStatusSnapshot,
+    PartialFillSummary,
 )
 
 
@@ -233,7 +237,7 @@ class KISRestReadOnlyClient(KISReadOnlyClient):
         return demo if self.config.paper_trading else real
 
 
-class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient):
+class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient, LiveOrderStatusClient):
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         payload = self._post(
             "/uapi/domestic-stock/v1/trading/order-cash",
@@ -289,6 +293,22 @@ class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient):
             return self._tr_id(real="TTTC0802U", demo="VTTC0802U")
         return self._tr_id(real="TTTC0801U", demo="VTTC0801U")
 
+    def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        matched = self._find_order_summary(broker_order_id.broker_order_id)
+        if matched is None:
+            return _unknown_status_snapshot(
+                broker_order_id,
+                message="KIS order status was not found in daily or unfilled order inquiry.",
+            )
+        return _status_snapshot_from_summary(broker_order_id, matched)
+
+    def _find_order_summary(self, order_id: str) -> KISOrderSummary | None:
+        summaries = [*self.get_unfilled_orders(), *self.get_order_fills()]
+        for summary in summaries:
+            if summary.order_id == order_id:
+                return summary
+        return None
+
 
 def _order_summary(row: dict[str, Any]) -> KISOrderSummary:
     return KISOrderSummary(
@@ -299,9 +319,64 @@ def _order_summary(row: dict[str, Any]) -> KISOrderSummary:
         quantity=_first_float(row, "ord_qty", "tot_ccld_qty"),
         filled_quantity=_first_float(row, "tot_ccld_qty", "ccld_qty", default=0.0),
         average_fill_price=_optional_first_float(row, "avg_prvs", "ord_unpr"),
-        status=_status(row),
-        raw_status=_optional_str(row.get("ord_dvsn_name") or row.get("ccld_dvsn_name")),
+        status=_status(row).value,
+        raw_status=_raw_order_status(row),
         submitted_at=utc_now(),
+    )
+
+
+def _status_snapshot_from_summary(
+    broker_order: BrokerOrderId,
+    summary: KISOrderSummary,
+) -> LiveOrderStatusSnapshot:
+    status = _order_status_from_text(summary.status)
+    fill_count = 1 if summary.filled_quantity > 0 else 0
+    fills = []
+    if summary.filled_quantity > 0 and summary.average_fill_price is not None:
+        fills.append(
+            FillEvent(
+                broker_order_id=broker_order.broker_order_id,
+                symbol=summary.symbol,
+                quantity=summary.filled_quantity,
+                price=summary.average_fill_price,
+                filled_at=summary.submitted_at.isoformat(),
+                raw={"raw_status": summary.raw_status},
+            )
+        )
+    return LiveOrderStatusSnapshot(
+        broker_order=broker_order,
+        status=status,
+        checked_at=utc_now().isoformat(),
+        symbol=summary.symbol,
+        side=_order_side_from_text(summary.side),
+        partial_fill=PartialFillSummary(
+            ordered_quantity=summary.quantity,
+            filled_quantity=summary.filled_quantity,
+            remaining_quantity=max(summary.quantity - summary.filled_quantity, 0.0),
+            average_fill_price=summary.average_fill_price,
+            fill_count=fill_count,
+        ),
+        fills=fills,
+        raw_status=summary.raw_status or summary.status,
+        raw=summary.model_dump(mode="json"),
+    )
+
+
+def _unknown_status_snapshot(
+    broker_order: BrokerOrderId,
+    *,
+    message: str,
+) -> LiveOrderStatusSnapshot:
+    return LiveOrderStatusSnapshot(
+        broker_order=broker_order,
+        status=OrderStatus.UNKNOWN,
+        checked_at=utc_now().isoformat(),
+        partial_fill=PartialFillSummary(
+            ordered_quantity=0.0,
+            filled_quantity=0.0,
+            remaining_quantity=0.0,
+        ),
+        message=message,
     )
 
 
@@ -369,14 +444,53 @@ def _side(value: Any) -> str:
     return text or "unknown"
 
 
-def _status(row: dict[str, Any]) -> str:
+def _status(row: dict[str, Any]) -> OrderStatus:
+    raw_status = _raw_order_status(row)
+    normalized = _order_status_from_text(raw_status or "")
+    if normalized in {OrderStatus.REJECTED, OrderStatus.CANCELED}:
+        return normalized
     ordered = _first_float(row, "ord_qty", default=0.0)
     filled = _first_float(row, "tot_ccld_qty", "ccld_qty", default=0.0)
     if ordered > 0 and filled >= ordered:
-        return "filled"
+        return OrderStatus.FILLED
     if filled > 0:
-        return "partially_filled"
-    return "open"
+        return OrderStatus.PARTIALLY_FILLED
+    return OrderStatus.OPEN
+
+
+def _raw_order_status(row: dict[str, Any]) -> str | None:
+    return _optional_str(
+        row.get("ord_dvsn_name")
+        or row.get("ccld_dvsn_name")
+        or row.get("rjct_rson")
+        or row.get("rjct_rson_name")
+        or row.get("ord_tmd")
+    )
+
+
+def _order_status_from_text(value: str) -> OrderStatus:
+    text = value.lower()
+    if value in {"취소", "취소확인", "정정취소"} or "cancel" in text or "canceled" in text:
+        return OrderStatus.CANCELED
+    if value in {"거부", "주문거부"} or "reject" in text or "rejected" in text:
+        return OrderStatus.REJECTED
+    if value == OrderStatus.FILLED.value:
+        return OrderStatus.FILLED
+    if value == OrderStatus.PARTIALLY_FILLED.value:
+        return OrderStatus.PARTIALLY_FILLED
+    if value == OrderStatus.OPEN.value:
+        return OrderStatus.OPEN
+    if value == OrderStatus.ACCEPTED_BY_BROKER.value:
+        return OrderStatus.ACCEPTED_BY_BROKER
+    return OrderStatus.UNKNOWN
+
+
+def _order_side_from_text(value: str) -> OrderSide | None:
+    if value == OrderSide.BUY.value:
+        return OrderSide.BUY
+    if value == OrderSide.SELL.value:
+        return OrderSide.SELL
+    return None
 
 
 def _kis_quantity(value: float) -> str:

@@ -182,8 +182,9 @@ v0.6 starts `live_approval` infrastructure, not `live_auto`. Live order submissi
 is disabled by default and is available only through the safety interface. The
 contract requires a Telegram approval decision, the latest broker reconciliation
 to pass, limit orders only, per-order and daily notional caps, duplicate-order
-prevention, and halt-on-unknown broker/order state behavior. Normal tests use
-fake clients and do not call KIS network endpoints.
+prevention, persisted live order status snapshots, and halt-on-unknown
+broker/order state behavior. Normal tests use fake clients and do not call KIS
+network endpoints.
 
 Safe execution config defaults:
 

@@ -226,7 +226,10 @@
 - [x] Add broker order ID mapping and order status model expansion
 - [x] Add KIS domestic-stock limit-order client skeleton behind the safety interface
 - [x] Keep normal tests fake-client based with no KIS network calls
-- [ ] Implement order status polling and partial fill reconciliation
+- [x] Add live order status polling interface
+- [x] Persist live order status snapshots as `live_order_status` system/audit events
+- [x] Normalize KIS daily/unfilled order inquiry statuses for open, partial fill, filled, rejected, canceled, and unknown states
+- [ ] Implement full partial fill portfolio reconciliation
 - [x] Define halt-on-unknown-state behavior
 - [ ] Define cancellation policy
 

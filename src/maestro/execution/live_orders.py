@@ -58,10 +58,86 @@ class LiveOrderResult(BaseModel):
         return self.filled_quantity * self.average_fill_price
 
 
+class FillEvent(BaseModel):
+    broker_order_id: str
+    symbol: str
+    quantity: float
+    price: float
+    filled_at: str
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def notional(self) -> float:
+        return self.quantity * self.price
+
+
+class PartialFillSummary(BaseModel):
+    ordered_quantity: float
+    filled_quantity: float
+    remaining_quantity: float
+    average_fill_price: float | None = None
+    fill_count: int = 0
+
+    @property
+    def filled_notional(self) -> float:
+        if self.average_fill_price is None:
+            return 0.0
+        return self.filled_quantity * self.average_fill_price
+
+
+class LiveOrderStatusSnapshot(BaseModel):
+    broker_order: BrokerOrderId
+    status: OrderStatus
+    checked_at: str
+    symbol: str | None = None
+    side: OrderSide | None = None
+    partial_fill: PartialFillSummary
+    fills: list[FillEvent] = Field(default_factory=list)
+    raw_status: str | None = None
+    message: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class LiveOrderClient(ABC):
     @abstractmethod
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         raise NotImplementedError
+
+
+class LiveOrderStatusClient(ABC):
+    @abstractmethod
+    def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        raise NotImplementedError
+
+
+class LiveOrderStatusService:
+    def __init__(
+        self,
+        state_store: StateStore,
+        audit_logger: AuditLogger,
+        status_client: LiveOrderStatusClient,
+    ) -> None:
+        self.state_store = state_store
+        self.audit_logger = audit_logger
+        self.status_client = status_client
+
+    def poll_order_status(
+        self,
+        run_id: str,
+        broker_order_id: BrokerOrderId,
+    ) -> LiveOrderStatusSnapshot:
+        snapshot = self.status_client.get_order_status(broker_order_id)
+        if snapshot.status == OrderStatus.UNKNOWN:
+            snapshot = snapshot.model_copy(
+                update={
+                    "status": OrderStatus.HALTED,
+                    "message": "Live order halted because broker returned an unknown order state.",
+                }
+            )
+        payload = snapshot.model_dump(mode="json")
+        self.state_store.save_system_event(run_id, "live_order_status", payload)
+        self.audit_logger.log(run_id, "live_order_status", payload)
+        return snapshot
 
 
 class LiveOrderSafetyService:
