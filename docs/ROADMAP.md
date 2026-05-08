@@ -161,13 +161,14 @@ Started scope:
 - Order status polling interface
 - Persisted `live_order_status` system and audit events
 - KIS daily/unfilled order inquiry status normalization
+- Partial/full fill portfolio reconciliation using cumulative fill deltas
+- `maestro reconcile-fills`
 - Reconciliation before and after orders
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
 
 Remaining scope:
 
-- Full partial fill portfolio reconciliation
 - Cancellation policy
 - Post-order reconciliation workflow
 

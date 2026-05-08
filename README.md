@@ -186,6 +186,11 @@ prevention, persisted live order status snapshots, and halt-on-unknown
 broker/order state behavior. Normal tests use fake clients and do not call KIS
 network endpoints.
 
+Partial and full fill reconciliation reads `live_order_status` snapshots,
+applies only newly recognized cumulative fill deltas to Maestro portfolio state,
+and records `fill_reconciliation` system and audit events. Rejected, canceled,
+halted, and unknown statuses do not update the portfolio.
+
 Safe execution config defaults:
 
 ```yaml
@@ -464,6 +469,7 @@ To run the KIS read-only adapter:
 maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
 maestro reconcile --config configs/live_readonly.yaml
+maestro reconcile-fills --config configs/live_readonly.yaml
 ```
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.

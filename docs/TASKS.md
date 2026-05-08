@@ -229,7 +229,9 @@
 - [x] Add live order status polling interface
 - [x] Persist live order status snapshots as `live_order_status` system/audit events
 - [x] Normalize KIS daily/unfilled order inquiry statuses for open, partial fill, filled, rejected, canceled, and unknown states
-- [ ] Implement full partial fill portfolio reconciliation
+- [x] Implement partial/full fill portfolio reconciliation from live order status snapshots
+- [x] Avoid double-counting duplicate live order status snapshots
+- [x] Add `maestro reconcile-fills`
 - [x] Define halt-on-unknown-state behavior
 - [ ] Define cancellation policy
 

@@ -6,7 +6,9 @@ import typer
 
 from maestro.config.loader import load_config
 from maestro.core.enums import RunMode
+from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
@@ -117,6 +119,22 @@ def reconcile(config: Path = typer.Option(..., "--config")) -> None:
             symbol = f" symbol={issue.symbol}" if issue.symbol else ""
             typer.echo(f"issue={issue.issue_type}{symbol} message={issue.message}")
         raise typer.Exit(1)
+
+
+@app.command("reconcile-fills")
+def reconcile_fills(config: Path = typer.Option(..., "--config")) -> None:
+    maestro_config = load_config(config)
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter("reconcile-fills requires mode=live_readonly or live_approval")
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    result = PartialFillReconciliationService(store, audit).reconcile_latest(new_run_id())
+    typer.echo(
+        f"applied_fills={len(result.applied_fills)} "
+        f"skipped_fills={len(result.skipped_fills)} "
+        f"portfolio_updated={str(result.portfolio_updated).lower()} "
+        f"cash={result.cash:.2f} positions={len(result.positions)}"
+    )
 
 
 @app.command("dashboard")

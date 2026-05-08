@@ -261,6 +261,15 @@ database caches, or broker behavior.
   events and audit events; unknown broker status is converted to `halted`.
 - `LiveOrderStatusSnapshot`, `FillEvent`, and `PartialFillSummary` define status
   and partial-fill normalization.
+- `PartialFillReconciliationService` reads recent `live_order_status` events,
+  compares cumulative filled quantity/notional against previous
+  `fill_reconciliation` watermarks, applies only new fill deltas to cash and
+  positions, persists a portfolio snapshot when fills were applied, and writes
+  `fill_reconciliation` system and audit events.
+- `FillReconciliationResult` and `AppliedFill` describe applied deltas; skipped
+  statuses include duplicate/no-new-fill, terminal non-fill states, and unknown
+  broker state. Rejected, canceled, halted, and unknown statuses never update the
+  portfolio.
 - `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
   KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
   real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,
