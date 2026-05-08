@@ -199,6 +199,12 @@ recorded. Filled, rejected, canceled, halted, and unknown orders cannot be
 canceled; unknown state halts the path instead of attempting cancel. There is no
 direct cancel CLI and no real KIS cancel network call in this phase.
 
+`LiveOrderWorkflowService` composes the safe pieces for one approval-gated
+post-order workflow: submit through the safety service, stop on submit halt, poll
+broker status, reconcile fills, optionally run broker reconciliation, and persist
+a `live_order_workflow` summary with status, broker order ID, applied fills,
+reconciliation result, and halt/failure reason.
+
 Safe execution config defaults:
 
 ```yaml

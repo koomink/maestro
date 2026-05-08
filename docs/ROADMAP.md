@@ -166,6 +166,8 @@ Started scope:
 - Cancellation policy and guarded cancel interface
 - Open and partial-fill remaining-quantity cancellation rules
 - Cancel forbidden for filled, rejected, canceled, halted, and unknown states
+- Post-order workflow orchestration through existing safety/status/fill/reconciliation services
+- Persisted `live_order_workflow` summaries
 - Reconciliation before and after orders
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
@@ -173,7 +175,7 @@ Started scope:
 Remaining scope:
 
 - Real broker cancel adapter implementation
-- Post-order reconciliation workflow
+- Multi-poll order lifecycle loop and operator-facing notifications
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
 

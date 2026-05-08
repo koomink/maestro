@@ -281,6 +281,13 @@ database caches, or broker behavior.
 - Successful cancellation attempts are persisted as `live_order_cancel` system
   events and audit events. Duplicate cancellation attempts for the same broker
   order ID are rejected.
+- `LiveOrderWorkflowService` orchestrates one approval-gated post-order workflow:
+  submit through `LiveOrderSafetyService`, stop on halted/unknown submission,
+  poll through `LiveOrderStatusService`, reconcile fills, optionally run broker
+  reconciliation, and persist a `live_order_workflow` system/audit summary.
+- `LiveOrderWorkflowResult` records submitted order result, latest status
+  snapshot, applied fills, optional broker reconciliation result, workflow status,
+  and halt/failure reason.
 - `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
   KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
   real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,

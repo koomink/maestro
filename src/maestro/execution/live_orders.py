@@ -8,6 +8,7 @@ from maestro.approval.models import ApprovalDecision
 from maestro.config.models import ExecutionConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, OrderType
+from maestro.execution.reconciliation import ReconciliationResult
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -143,6 +144,21 @@ class LiveOrderCancelResult(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class LiveOrderWorkflowResult(BaseModel):
+    run_id: str
+    workflow_status: OrderStatus
+    order_id: str
+    broker_order_id: str | None = None
+    submitted_order: LiveOrderResult | None = None
+    status_snapshot: LiveOrderStatusSnapshot | None = None
+    fill_reconciliation: FillReconciliationResult | None = None
+    broker_reconciliation: dict[str, Any] | None = None
+    applied_fills: list[AppliedFill] = Field(default_factory=list)
+    halt_reason: str | None = None
+    failed_reason: str | None = None
+    checked_at: str
+
+
 class LiveOrderClient(ABC):
     @abstractmethod
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
@@ -158,6 +174,12 @@ class LiveOrderStatusClient(ABC):
 class LiveOrderCancelClient(ABC):
     @abstractmethod
     def cancel_order(self, request: LiveOrderCancelRequest) -> LiveOrderCancelResult:
+        raise NotImplementedError
+
+
+class BrokerReconciliationRunner(ABC):
+    @abstractmethod
+    def reconcile_latest(self) -> ReconciliationResult:
         raise NotImplementedError
 
 
@@ -280,6 +302,115 @@ class LiveOrderCancellationService:
             if broker_order.get("broker_order_id") == broker_order_id:
                 return True
         return False
+
+
+class LiveOrderWorkflowService:
+    def __init__(
+        self,
+        state_store: StateStore,
+        audit_logger: AuditLogger,
+        safety_service: "LiveOrderSafetyService",
+        status_service: LiveOrderStatusService,
+        fill_reconciliation_service: "PartialFillReconciliationService",
+        broker_reconciliation_service: BrokerReconciliationRunner | None = None,
+    ) -> None:
+        self.state_store = state_store
+        self.audit_logger = audit_logger
+        self.safety_service = safety_service
+        self.status_service = status_service
+        self.fill_reconciliation_service = fill_reconciliation_service
+        self.broker_reconciliation_service = broker_reconciliation_service
+
+    def run(
+        self,
+        request: LiveOrderRequest,
+        approval_decision: ApprovalDecision,
+    ) -> LiveOrderWorkflowResult:
+        try:
+            result = self._run(request, approval_decision)
+        except Exception as exc:
+            result = LiveOrderWorkflowResult(
+                run_id=request.run_id,
+                workflow_status=OrderStatus.FAILED,
+                order_id=request.order_id,
+                failed_reason=str(exc),
+                checked_at=utc_now().isoformat(),
+            )
+        self._persist_summary(result)
+        return result
+
+    def _run(
+        self,
+        request: LiveOrderRequest,
+        approval_decision: ApprovalDecision,
+    ) -> LiveOrderWorkflowResult:
+        submitted = self.safety_service.submit_approved_order(request, approval_decision)
+        broker_order = submitted.broker_order
+        if submitted.status == OrderStatus.HALTED or broker_order is None:
+            return LiveOrderWorkflowResult(
+                run_id=request.run_id,
+                workflow_status=OrderStatus.HALTED,
+                order_id=request.order_id,
+                broker_order_id=broker_order.broker_order_id if broker_order else None,
+                submitted_order=submitted,
+                halt_reason=submitted.message or "Live order submission halted.",
+                checked_at=utc_now().isoformat(),
+            )
+
+        status_snapshot = self.status_service.poll_order_status(request.run_id, broker_order)
+        if status_snapshot.status == OrderStatus.HALTED:
+            return LiveOrderWorkflowResult(
+                run_id=request.run_id,
+                workflow_status=OrderStatus.HALTED,
+                order_id=request.order_id,
+                broker_order_id=broker_order.broker_order_id,
+                submitted_order=submitted,
+                status_snapshot=status_snapshot,
+                halt_reason=status_snapshot.message or "Live order status polling halted.",
+                checked_at=utc_now().isoformat(),
+            )
+
+        fill_result = self.fill_reconciliation_service.reconcile_latest(request.run_id)
+        broker_reconciliation = self._reconcile_broker_if_possible()
+        if broker_reconciliation is not None and broker_reconciliation.passed is not True:
+            return LiveOrderWorkflowResult(
+                run_id=request.run_id,
+                workflow_status=OrderStatus.FAILED,
+                order_id=request.order_id,
+                broker_order_id=broker_order.broker_order_id,
+                submitted_order=submitted,
+                status_snapshot=status_snapshot,
+                fill_reconciliation=fill_result,
+                broker_reconciliation=broker_reconciliation.model_dump(mode="json"),
+                applied_fills=fill_result.applied_fills,
+                halt_reason="Broker reconciliation failed after fill reconciliation.",
+                checked_at=utc_now().isoformat(),
+            )
+
+        return LiveOrderWorkflowResult(
+            run_id=request.run_id,
+            workflow_status=status_snapshot.status,
+            order_id=request.order_id,
+            broker_order_id=broker_order.broker_order_id,
+            submitted_order=submitted,
+            status_snapshot=status_snapshot,
+            fill_reconciliation=fill_result,
+            broker_reconciliation=broker_reconciliation.model_dump(mode="json")
+            if broker_reconciliation
+            else None,
+            applied_fills=fill_result.applied_fills,
+            checked_at=utc_now().isoformat(),
+        )
+
+    def _reconcile_broker_if_possible(self) -> ReconciliationResult | None:
+        if self.broker_reconciliation_service is None:
+            return None
+        return self.broker_reconciliation_service.reconcile_latest()
+
+    def _persist_summary(self, result: LiveOrderWorkflowResult) -> None:
+        payload = result.model_dump(mode="json")
+        self.state_store.save_system_event(result.run_id, "live_order_workflow", payload)
+        self.audit_logger.log(result.run_id, "live_order_workflow", payload)
 
 
 class PartialFillReconciliationService:

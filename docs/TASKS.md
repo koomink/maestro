@@ -240,6 +240,11 @@
 - [x] Forbid cancel for filled/rejected/canceled/halted/unknown states
 - [x] Persist cancel results as system/audit events
 - [x] Keep real KIS cancel network call and direct cancel CLI out of scope
+- [x] Add post-order workflow orchestration service
+- [x] Persist `live_order_workflow` summaries
+- [x] Stop workflow on halted submit/status before polling/fill reconciliation
+- [x] Run fill reconciliation and optional broker reconciliation after status polling
+- [x] Keep workflow tests fake-client based with no KIS network calls
 
 ## Completed / Historical Notes
 

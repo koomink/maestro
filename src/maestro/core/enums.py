@@ -42,3 +42,4 @@ class OrderStatus(StrEnum):
     CANCELED = "canceled"
     UNKNOWN = "unknown"
     HALTED = "halted"
+    FAILED = "failed"
