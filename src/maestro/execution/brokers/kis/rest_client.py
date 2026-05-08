@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 
 from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
+from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.brokers.kis.auth import KISAuthManager, KISToken
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.models import (
@@ -15,6 +16,12 @@ from maestro.execution.brokers.kis.models import (
     KISCashBalance,
     KISOrderSummary,
     KISPosition,
+)
+from maestro.execution.live_orders import (
+    BrokerOrderId,
+    LiveOrderClient,
+    LiveOrderRequest,
+    LiveOrderResult,
 )
 
 
@@ -226,6 +233,63 @@ class KISRestReadOnlyClient(KISReadOnlyClient):
         return demo if self.config.paper_trading else real
 
 
+class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient):
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        payload = self._post(
+            "/uapi/domestic-stock/v1/trading/order-cash",
+            self._order_tr_id(request.side),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "PDNO": request.symbol,
+                "ORD_DVSN": "00",
+                "ORD_QTY": _kis_quantity(request.quantity),
+                "ORD_UNPR": _kis_price(request.limit_price),
+            },
+        )
+        output = _as_dict(payload.get("output"))
+        broker_order_id = _optional_str(output.get("ODNO") or output.get("odno"))
+        broker_order_org_no = _optional_str(
+            output.get("KRX_FWDG_ORD_ORGNO") or output.get("krx_fwdg_ord_orgno")
+        )
+        broker_order = None
+        if broker_order_id:
+            broker_order = BrokerOrderId(
+                broker="kis",
+                broker_order_id=broker_order_id,
+                broker_order_org_no=broker_order_org_no,
+                order_id=request.order_id,
+                submitted_at=utc_now().isoformat(),
+            )
+        return LiveOrderResult(
+            order_id=request.order_id,
+            status=OrderStatus.ACCEPTED_BY_BROKER if broker_order else OrderStatus.UNKNOWN,
+            broker_order=broker_order,
+            message=_optional_str(payload.get("msg1")),
+            raw=payload,
+        )
+
+    def _post(self, path: str, tr_id: str, json_body: dict[str, str]) -> dict[str, Any]:
+        token = self.auth_manager.get_access_token()
+        payload = self.transport.request(
+            "POST",
+            f"{self.config.resolved_base_url()}{path}",
+            headers=self._headers(tr_id, token),
+            json_body=json_body,
+            timeout_seconds=self.config.timeout_seconds,
+        )
+        if payload.get("rt_cd") not in ("0", None):
+            msg_cd = payload.get("msg_cd", "unknown")
+            msg1 = payload.get("msg1", "KIS request failed")
+            raise ValueError(f"KIS live order request failed: {msg_cd} {msg1}")
+        return payload
+
+    def _order_tr_id(self, side: OrderSide) -> str:
+        if side == OrderSide.BUY:
+            return self._tr_id(real="TTTC0802U", demo="VTTC0802U")
+        return self._tr_id(real="TTTC0801U", demo="VTTC0801U")
+
+
 def _order_summary(row: dict[str, Any]) -> KISOrderSummary:
     return KISOrderSummary(
         order_id=str(row.get("odno") or row.get("orgn_odno") or ""),
@@ -313,3 +377,15 @@ def _status(row: dict[str, Any]) -> str:
     if filled > 0:
         return "partially_filled"
     return "open"
+
+
+def _kis_quantity(value: float) -> str:
+    if not value.is_integer():
+        raise ValueError("KIS domestic-stock live orders require whole-share quantities")
+    return str(int(value))
+
+
+def _kis_price(value: float) -> str:
+    if not value.is_integer():
+        raise ValueError("KIS domestic-stock live orders require whole-KRW limit prices")
+    return str(int(value))

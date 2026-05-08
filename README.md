@@ -163,15 +163,39 @@ Implemented foundations beyond the core v0.1 scope:
 - KIS read-only adapter interface and deterministic mock client
 - KIS read-only REST client for auth, balance, positions, buying power, order/fill inquiry, unfilled order inquiry, and broker-side quote lookup
 - CLI `kis-sync` and `kis-account`
+- Live approval order safety contract and KIS domestic-stock limit-order client skeleton
+  behind that contract
 
 Deferred real integrations:
 
-- No live trading
+- No live auto-trading
 - No Telegram webhook or inline callback buttons
-- No KIS order submission
+- No direct or unguarded KIS buy/sell/order CLI
+- No market orders
 - No GDELT/News API or community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
 - No web dashboard write controls
+
+## Live Approval Safety
+
+v0.6 starts `live_approval` infrastructure, not `live_auto`. Live order submission
+is disabled by default and is available only through the safety interface. The
+contract requires a Telegram approval decision, the latest broker reconciliation
+to pass, limit orders only, per-order and daily notional caps, duplicate-order
+prevention, and halt-on-unknown broker/order state behavior. Normal tests use
+fake clients and do not call KIS network endpoints.
+
+Safe execution config defaults:
+
+```yaml
+execution:
+  engine: paper
+  live_order_enabled: false
+  require_reconciliation_pass: true
+  max_live_order_notional: 0
+  max_daily_live_notional: 0
+  allowed_order_type: limit
+```
 
 ## Optional Yahoo/yfinance Provider
 
@@ -429,9 +453,9 @@ start from `configs/telegram_approval_paper.yaml`, set
 `telegram_allowed_chat_ids` and `whitelisted_user_ids`, and keep `mode: paper`.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
 polling for `approve <approval_id>` or `reject <approval_id>` replies. Inline
-keyboards, callback queries, webhooks, dashboard write controls, KIS order
-submission, and live trading remain deferred. Normal tests use fake Telegram
-clients and do not call the Telegram network.
+keyboards, callback queries, webhooks, dashboard write controls, and live auto
+trading remain deferred. Normal tests use fake Telegram clients and do not call
+the Telegram network.
 
 To run the KIS read-only adapter:
 
@@ -457,17 +481,12 @@ file is written with owner-only permissions. Access tokens may be stored only in
 dashboard rows, or test fixtures. App secrets follow the same no-persistence
 rule.
 
-The KIS client is read-only in v0.5. It adapts OAuth/header/TR_ID/payload logic
-from `koomink/open-trading-api` for these inquiry APIs only:
-`inquire-balance`, `inquire-psbl-order`, `inquire-daily-ccld`, and
-`inquire-price`. This is domestic-stock read-only first. Overseas stock/ETF
-endpoints, pagination/continuation handling, canonical symbol mapping, and
-full reconciliation remain future work. v0.5.2 adds read-only reconciliation
-checks between Maestro state and the latest broker snapshot for cash,
-position quantity, unknown broker positions, missing broker positions, and
-missing broker snapshots. Results are persisted as `broker_reconciliation`
-system events and audit log events. Order submission samples from the reference
-repo were not copied or exposed.
+The KIS read-only client adapts OAuth/header/TR_ID/payload logic from
+`koomink/open-trading-api` for these inquiry APIs: `inquire-balance`,
+`inquire-psbl-order`, `inquire-daily-ccld`, and `inquire-price`. v0.6 also adds
+a domestic-stock limit-order client skeleton for `order-cash`, but it is intended
+to be called only through `LiveOrderSafetyService`. There is no direct buy/sell
+CLI, no market order path, and no normal test that calls the KIS network.
 
 To install dashboard dependencies and open the read-only dashboard:
 
@@ -666,7 +685,11 @@ Initial live trading rules:
 - Reconciliation required
 - Unknown order status halts new orders
 
-KIS responsibilities should stay broker-focused: authentication, balances, positions, buying power, fills, broker state, and reconciliation. KIS current price lookup can support broker-side quote/reference checks, but strategy research data should come through DataHub providers rather than KIS. v0.5 deliberately has no callable KIS buy/sell/order submission path.
+KIS responsibilities should stay broker-focused: authentication, balances,
+positions, buying power, fills, broker state, order submission behind the safety
+contract, and reconciliation. KIS current price lookup can support broker-side
+quote/reference checks, but strategy research data should come through DataHub
+providers rather than KIS.
 
 ## Development Rule
 

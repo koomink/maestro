@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from maestro.core.enums import AssetType, RunMode, StrategyMode
+from maestro.core.enums import AssetType, OrderType, RunMode, StrategyMode
 
 
 class StrictConfigModel(BaseModel):
@@ -67,6 +67,18 @@ class DataHubConfig(StrictConfigModel):
 
 class ExecutionConfig(StrictConfigModel):
     engine: str = "paper"
+    live_order_enabled: bool = False
+    require_reconciliation_pass: bool = True
+    max_live_order_notional: float = Field(default=0.0, ge=0.0)
+    max_daily_live_notional: float = Field(default=0.0, ge=0.0)
+    allowed_order_type: OrderType = OrderType.LIMIT
+
+    @field_validator("allowed_order_type")
+    @classmethod
+    def validate_allowed_order_type(cls, value: OrderType) -> OrderType:
+        if value != OrderType.LIMIT:
+            raise ValueError("allowed_order_type must be limit")
+        return value
 
 
 class RiskConfig(StrictConfigModel):

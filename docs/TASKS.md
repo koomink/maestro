@@ -219,10 +219,16 @@
 
 ### v0.6 KIS Live Approval Trading
 
-- [ ] Plan KIS live order submission behind broker adapter
-- [ ] Require Telegram approval before live order submission
-- [ ] Define limit-order-only behavior and small notional limits
-- [ ] Define order status polling, partial fill handling, and halt-on-unknown-state behavior
+- [x] Plan KIS live order submission behind broker adapter
+- [x] Require Telegram approval before live order submission
+- [x] Define limit-order-only behavior and small notional limits
+- [x] Add daily notional limits and duplicate-order prevention
+- [x] Add broker order ID mapping and order status model expansion
+- [x] Add KIS domestic-stock limit-order client skeleton behind the safety interface
+- [x] Keep normal tests fake-client based with no KIS network calls
+- [ ] Implement order status polling and partial fill reconciliation
+- [x] Define halt-on-unknown-state behavior
+- [ ] Define cancellation policy
 
 ## Completed / Historical Notes
 

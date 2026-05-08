@@ -150,6 +150,29 @@ class StateStore:
     def list_system_events(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("system_events", limit)
 
+    def list_system_events_by_type(
+        self,
+        event_type: str,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM system_events WHERE event_type = ? ORDER BY id DESC LIMIT ?",
+                (event_type, limit),
+            ).fetchall()
+
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            output.append(item)
+        return output
+
+    def load_latest_system_event(self, event_type: str) -> dict[str, Any] | None:
+        rows = self.list_system_events_by_type(event_type, limit=1)
+        return rows[0] if rows else None
+
     def list_approvals(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("approvals", limit)
 

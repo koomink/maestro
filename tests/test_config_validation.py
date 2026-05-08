@@ -37,6 +37,26 @@ def test_unknown_execution_field_fails(tmp_path):
         load_config(config_path)
 
 
+def test_live_order_config_defaults_are_safe():
+    config = load_config("configs/paper.yaml")
+
+    assert config.execution.live_order_enabled is False
+    assert config.execution.require_reconciliation_pass is True
+    assert config.execution.max_live_order_notional == 0.0
+    assert config.execution.max_daily_live_notional == 0.0
+    assert config.execution.allowed_order_type == "limit"
+
+
+def test_live_order_config_rejects_market_order_type(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["allowed_order_type"] = "market"
+    config_path = tmp_path / "market_live_order.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="allowed_order_type"):
+        load_config(config_path)
+
+
 def test_unknown_risk_field_fails(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["risk"]["allow_short"] = False

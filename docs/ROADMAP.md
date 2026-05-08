@@ -149,7 +149,7 @@ and full reconciliation remain future work.
 
 ## v0.6 — KIS Live Approval Trading
 
-Scope:
+Started scope:
 
 - KIS live order submission behind broker adapter
 - Telegram approval required
@@ -158,11 +158,16 @@ Scope:
 - Daily notional limits
 - Broker order ID mapping
 - Duplicate-order prevention
-- Order status polling
-- Partial fill handling
-- Cancellation policy
 - Reconciliation before and after orders
 - Halt on unknown broker state
+- Safe defaults keep live orders disabled unless explicitly configured
+
+Remaining scope:
+
+- Order status polling
+- Partial fill reconciliation
+- Cancellation policy
+- Post-order reconciliation workflow
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
 

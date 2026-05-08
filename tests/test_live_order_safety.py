@@ -1,0 +1,218 @@
+import pytest
+
+from maestro.approval.models import ApprovalDecision
+from maestro.config.models import ExecutionConfig
+from maestro.core.clock import utc_now
+from maestro.core.enums import OrderSide, OrderStatus, OrderType
+from maestro.core.ids import new_run_id
+from maestro.execution.live_orders import (
+    BrokerOrderId,
+    LiveOrderClient,
+    LiveOrderRequest,
+    LiveOrderResult,
+    LiveOrderSafetyService,
+)
+from maestro.monitoring.audit_logger import AuditLogger
+from maestro.state.store import StateStore
+
+
+def test_live_order_requires_enabled_config(tmp_path):
+    service, request, approval, broker = _context(tmp_path, enabled=False)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    with pytest.raises(ValueError, match="disabled"):
+        service.submit_approved_order(request, approval)
+
+    assert broker.requests == []
+
+
+def test_live_order_requires_telegram_approval(tmp_path):
+    service, request, _, broker = _context(tmp_path)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+    rejected = _approval(request, status="rejected")
+
+    with pytest.raises(ValueError, match="Telegram approval"):
+        service.submit_approved_order(request, rejected)
+
+    assert broker.requests == []
+
+
+def test_live_order_rejects_non_telegram_approval_source(tmp_path):
+    service, request, _, broker = _context(tmp_path)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+    approval = _approval(request, decided_by="console:default_decision")
+
+    with pytest.raises(ValueError, match="Telegram approval"):
+        service.submit_approved_order(request, approval)
+
+    assert broker.requests == []
+
+
+def test_live_order_requires_latest_reconciliation_pass(tmp_path):
+    service, request, approval, broker = _context(tmp_path)
+    service.state_store.save_system_event(
+        request.run_id,
+        "broker_reconciliation",
+        {"passed": False, "issues": [{"issue_type": "cash_mismatch"}]},
+    )
+
+    with pytest.raises(ValueError, match="reconciliation"):
+        service.submit_approved_order(request, approval)
+
+    assert broker.requests == []
+
+
+def test_live_order_rejects_market_orders(tmp_path):
+    service, _, _, broker = _context(tmp_path)
+
+    with pytest.raises(ValueError, match="limit"):
+        LiveOrderRequest(
+            order_id="ord_live_1",
+            symbol="005930",
+            side=OrderSide.BUY,
+            quantity=1,
+            limit_price=70_000,
+            order_type=OrderType.MARKET,
+            approval_id="appr_1",
+            run_id=new_run_id(),
+        )
+
+    assert broker.requests == []
+
+
+def test_live_order_enforces_per_order_cap(tmp_path):
+    service, request, approval, broker = _context(tmp_path, max_order=10_000)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    with pytest.raises(ValueError, match="per-order cap"):
+        service.submit_approved_order(request, approval)
+
+    assert broker.requests == []
+
+
+def test_live_order_enforces_daily_cap(tmp_path):
+    service, request, approval, broker = _context(tmp_path, max_daily=200_000)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+    first = request.model_copy(update={"order_id": "ord_live_first", "duplicate_key": "first"})
+    service.submit_approved_order(first, approval)
+
+    with pytest.raises(ValueError, match="daily cap"):
+        service.submit_approved_order(request, approval)
+
+    assert len(broker.requests) == 1
+
+
+def test_live_order_prevents_duplicates(tmp_path):
+    service, request, approval, broker = _context(tmp_path)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    service.submit_approved_order(request, approval)
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        service.submit_approved_order(request, approval)
+
+    assert len(broker.requests) == 1
+
+
+def test_live_order_persists_accepted_result(tmp_path):
+    service, request, approval, broker = _context(tmp_path)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    result = service.submit_approved_order(request, approval)
+
+    events = service.state_store.list_system_events_by_type("live_order_result")
+    assert result.status == OrderStatus.ACCEPTED_BY_BROKER
+    assert broker.requests == [request]
+    assert events[0]["payload"]["request"]["order_id"] == request.order_id
+    assert events[0]["payload"]["result"]["broker_order"]["broker_order_id"] == "KIS-1"
+
+
+def test_live_order_halts_on_unknown_broker_state(tmp_path):
+    service, request, approval, broker = _context(tmp_path, broker_status=OrderStatus.UNKNOWN)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    result = service.submit_approved_order(request, approval)
+
+    events = service.state_store.list_system_events_by_type("live_order_halt")
+    assert result.status == OrderStatus.HALTED
+    assert len(events) == 1
+    assert events[0]["payload"]["result"]["status"] == "halted"
+    assert broker.requests == [request]
+
+
+def _context(
+    tmp_path,
+    *,
+    enabled: bool = True,
+    max_order: float = 200_000,
+    max_daily: float = 300_000,
+    broker_status: OrderStatus = OrderStatus.ACCEPTED_BY_BROKER,
+):
+    run_id = new_run_id()
+    request = LiveOrderRequest(
+        order_id="ord_live_1",
+        symbol="005930",
+        side=OrderSide.BUY,
+        quantity=2,
+        limit_price=70_000,
+        approval_id="appr_1",
+        run_id=run_id,
+        duplicate_key="strategy-signal-1",
+    )
+    approval = _approval(request)
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    broker = FakeLiveOrderClient(broker_status)
+    service = LiveOrderSafetyService(
+        ExecutionConfig(
+            live_order_enabled=enabled,
+            max_live_order_notional=max_order,
+            max_daily_live_notional=max_daily,
+        ),
+        store,
+        audit,
+        broker,
+    )
+    return service, request, approval, broker
+
+
+def _approval(
+    request: LiveOrderRequest,
+    *,
+    status: str = "approved",
+    decided_by: str = "telegram:fake",
+) -> ApprovalDecision:
+    return ApprovalDecision(
+        approval_id=request.approval_id,
+        run_id=request.run_id,
+        status=status,
+        decided_at=utc_now(),
+        decided_by=decided_by,
+    )
+
+
+def _save_passed_reconciliation(store: StateStore, run_id: str) -> None:
+    store.save_system_event(run_id, "broker_reconciliation", {"passed": True, "issues": []})
+
+
+class FakeLiveOrderClient(LiveOrderClient):
+    def __init__(self, status: OrderStatus) -> None:
+        self.status = status
+        self.requests: list[LiveOrderRequest] = []
+
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        self.requests.append(request)
+        broker_order = None
+        if self.status != OrderStatus.UNKNOWN:
+            broker_order = BrokerOrderId(
+                broker="kis",
+                broker_order_id="KIS-1",
+                broker_order_org_no="KRX",
+                order_id=request.order_id,
+                submitted_at=utc_now().isoformat(),
+            )
+        return LiveOrderResult(
+            order_id=request.order_id,
+            status=self.status,
+            broker_order=broker_order,
+        )

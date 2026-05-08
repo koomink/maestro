@@ -242,6 +242,28 @@ database caches, or broker behavior.
 - `maestro reconcile` compares Maestro portfolio state with the latest broker account snapshot and persists a `broker_reconciliation` system event plus audit event.
 - v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.
 
+### 3.6 Current Live Approval Order Foundation
+
+- `RunMode.LIVE_APPROVAL` is defined for approval-gated live trading work. There is
+  no `live_auto` mode.
+- Live orders are disabled by default with:
+  `live_order_enabled=false`, `require_reconciliation_pass=true`,
+  `max_live_order_notional=0`, `max_daily_live_notional=0`, and
+  `allowed_order_type=limit`.
+- `LiveOrderSafetyService` is the only internal live order submission boundary.
+  It requires an approved approval decision, the latest `broker_reconciliation`
+  event to pass, limit orders only, per-order and daily notional caps,
+  duplicate-order prevention, and halt-on-unknown-state behavior.
+- `LiveOrderRequest`, `LiveOrderResult`, `BrokerOrderId`, and expanded
+  `OrderStatus` values define the live order contract.
+- `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
+  KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
+  real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,
+  `ORD_DVSN=00` for limit orders, and uppercase KIS body keys.
+- Maestro exposes no direct unguarded buy/sell CLI, no market orders, no dashboard
+  write controls, no live order network smoke test, and no Telegram webhook/buttons
+  in this phase.
+
 ## 4. Public SDK Design
 
 External Virtuoso apps should import only from `maestro.sdk`.
@@ -275,7 +297,6 @@ class RunMode(str, Enum):
     PAPER = "paper"
     LIVE_READONLY = "live_readonly"
     LIVE_APPROVAL = "live_approval"
-    LIVE_AUTO = "live_auto"
 
 class StrategyMode(str, Enum):
     RESEARCH = "research"

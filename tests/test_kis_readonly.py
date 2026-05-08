@@ -6,9 +6,11 @@ from typer.testing import CliRunner
 from maestro.cli import app
 from maestro.config.loader import load_config
 from maestro.config.models import KISConfig
+from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.brokers.kis.auth import KISAuthManager
-from maestro.execution.brokers.kis.rest_client import KISRestReadOnlyClient
+from maestro.execution.brokers.kis.rest_client import KISRestLiveOrderClient, KISRestReadOnlyClient
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.live_orders import LiveOrderRequest
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 
@@ -103,15 +105,12 @@ def test_kis_auth_manager_issues_and_caches_token(monkeypatch, tmp_path):
     assert len(token_calls) == 1
 
 
-def test_kis_rest_client_exposes_no_order_submission_surface():
+def test_kis_readonly_rest_client_exposes_no_order_submission_surface():
     client_source = Path("src/maestro/execution/brokers/kis/rest_client.py").read_text()
     forbidden_tokens = [
-        "/order-cash",
         "/order-credit",
         "/order-rvsecncl",
         "/order-resv",
-        "/uapi/hashkey",
-        "def submit",
         "def buy",
         "def sell",
         "def cancel",
@@ -120,6 +119,51 @@ def test_kis_rest_client_exposes_no_order_submission_surface():
 
     for token in forbidden_tokens:
         assert token not in client_source
+
+
+def test_kis_live_order_client_uses_domestic_limit_order_payload(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+    )
+    transport = FakeKISTransport()
+    client = KISRestLiveOrderClient(config, transport=transport)
+
+    result = client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_1",
+            symbol="005930",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=70000,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    order_call = [call for call in transport.calls if call["url"].endswith("/trading/order-cash")][
+        0
+    ]
+    assert result.status == OrderStatus.ACCEPTED_BY_BROKER
+    assert result.broker_order is not None
+    assert result.broker_order.broker_order_id == "0000000001"
+    assert order_call["method"] == "POST"
+    assert order_call["headers"]["tr_id"] == "TTTC0802U"
+    assert order_call["json_body"] == {
+        "CANO": "12345678",
+        "ACNT_PRDT_CD": "01",
+        "PDNO": "005930",
+        "ORD_DVSN": "00",
+        "ORD_QTY": "2",
+        "ORD_UNPR": "70000",
+    }
 
 
 def _live_readonly_config(tmp_path):
@@ -210,5 +254,15 @@ class FakeKISTransport:
                         "avg_prvs": "70000",
                     }
                 ],
+            }
+        if url.endswith("/trading/order-cash"):
+            return {
+                "rt_cd": "0",
+                "msg1": "order accepted",
+                "output": {
+                    "KRX_FWDG_ORD_ORGNO": "KRX",
+                    "ODNO": "0000000001",
+                    "ORD_TMD": "090001",
+                },
             }
         raise AssertionError(f"Unexpected KIS fake URL: {url}")
