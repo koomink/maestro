@@ -72,6 +72,9 @@ class ExecutionConfig(StrictConfigModel):
     max_live_order_notional: float = Field(default=0.0, ge=0.0)
     max_daily_live_notional: float = Field(default=0.0, ge=0.0)
     allowed_order_type: OrderType = OrderType.LIMIT
+    order_status_poll_interval_seconds: float = Field(default=30.0, ge=0.0)
+    order_status_max_polls: int = Field(default=20, gt=0)
+    order_status_terminal_timeout_seconds: float = Field(default=1800.0, ge=0.0)
 
     @field_validator("allowed_order_type")
     @classmethod

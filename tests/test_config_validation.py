@@ -45,6 +45,19 @@ def test_live_order_config_defaults_are_safe():
     assert config.execution.max_live_order_notional == 0.0
     assert config.execution.max_daily_live_notional == 0.0
     assert config.execution.allowed_order_type == "limit"
+    assert config.execution.order_status_poll_interval_seconds == 30.0
+    assert config.execution.order_status_max_polls == 20
+    assert config.execution.order_status_terminal_timeout_seconds == 1800.0
+
+
+def test_live_order_lifecycle_config_validates_positive_max_polls(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["order_status_max_polls"] = 0
+    config_path = tmp_path / "invalid_max_polls.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="order_status_max_polls"):
+        load_config(config_path)
 
 
 def test_live_order_config_rejects_market_order_type(tmp_path):

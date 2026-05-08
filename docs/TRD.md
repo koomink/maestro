@@ -288,6 +288,15 @@ database caches, or broker behavior.
 - `LiveOrderWorkflowResult` records submitted order result, latest status
   snapshot, applied fills, optional broker reconciliation result, workflow status,
   and halt/failure reason.
+- `LiveOrderLifecycleService` runs a bounded multi-poll lifecycle loop. It polls
+  until terminal status or `execution.order_status_max_polls`, reconciles fills
+  after every poll, optionally runs broker reconciliation after fill updates, and
+  persists a `live_order_lifecycle` system/audit summary. Reaching max polls is
+  non-terminal and does not auto-cancel.
+- `LiveOrderNotificationClient` is an operator notification abstraction only.
+  v0.6.5 has no real Telegram notification implementation, webhook, or buttons.
+- Safe polling defaults are `order_status_poll_interval_seconds=30`,
+  `order_status_max_polls=20`, and `order_status_terminal_timeout_seconds=1800`.
 - `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
   KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
   real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,

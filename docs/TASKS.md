@@ -245,6 +245,11 @@
 - [x] Stop workflow on halted submit/status before polling/fill reconciliation
 - [x] Run fill reconciliation and optional broker reconciliation after status polling
 - [x] Keep workflow tests fake-client based with no KIS network calls
+- [x] Add bounded multi-poll lifecycle service
+- [x] Add safe order status polling config defaults
+- [x] Add operator notification abstraction with fake-client tests
+- [x] Persist `live_order_lifecycle` summaries
+- [x] Do not auto-cancel when max polls are reached
 
 ## Completed / Historical Notes
 

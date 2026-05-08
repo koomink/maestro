@@ -205,6 +205,12 @@ broker status, reconcile fills, optionally run broker reconciliation, and persis
 a `live_order_workflow` summary with status, broker order ID, applied fills,
 reconciliation result, and halt/failure reason.
 
+`LiveOrderLifecycleService` extends that into a bounded multi-poll loop. It polls
+until a terminal status or max polls, reconciles fills after every poll, runs
+broker reconciliation after fill updates when configured, emits operator
+notifications through `LiveOrderNotificationClient`, and records a
+`live_order_lifecycle` summary. Max polls do not auto-cancel.
+
 Safe execution config defaults:
 
 ```yaml
@@ -215,6 +221,9 @@ execution:
   max_live_order_notional: 0
   max_daily_live_notional: 0
   allowed_order_type: limit
+  order_status_poll_interval_seconds: 30
+  order_status_max_polls: 20
+  order_status_terminal_timeout_seconds: 1800
 ```
 
 ## Optional Yahoo/yfinance Provider
