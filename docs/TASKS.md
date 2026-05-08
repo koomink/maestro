@@ -233,7 +233,13 @@
 - [x] Avoid double-counting duplicate live order status snapshots
 - [x] Add `maestro reconcile-fills`
 - [x] Define halt-on-unknown-state behavior
-- [ ] Define cancellation policy
+- [x] Define cancellation policy
+- [x] Add cancellation request/result/client interface only
+- [x] Require Telegram approval and latest safe status for cancellation
+- [x] Allow open order and remaining partial-fill cancellation only
+- [x] Forbid cancel for filled/rejected/canceled/halted/unknown states
+- [x] Persist cancel results as system/audit events
+- [x] Keep real KIS cancel network call and direct cancel CLI out of scope
 
 ## Completed / Historical Notes
 

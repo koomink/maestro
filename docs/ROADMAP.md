@@ -163,13 +163,16 @@ Started scope:
 - KIS daily/unfilled order inquiry status normalization
 - Partial/full fill portfolio reconciliation using cumulative fill deltas
 - `maestro reconcile-fills`
+- Cancellation policy and guarded cancel interface
+- Open and partial-fill remaining-quantity cancellation rules
+- Cancel forbidden for filled, rejected, canceled, halted, and unknown states
 - Reconciliation before and after orders
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
 
 Remaining scope:
 
-- Cancellation policy
+- Real broker cancel adapter implementation
 - Post-order reconciliation workflow
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.

@@ -270,6 +270,17 @@ database caches, or broker behavior.
   statuses include duplicate/no-new-fill, terminal non-fill states, and unknown
   broker state. Rejected, canceled, halted, and unknown statuses never update the
   portfolio.
+- `LiveOrderCancelRequest`, `LiveOrderCancelResult`, and `LiveOrderCancelClient`
+  define the cancellation interface only. There is no direct cancel CLI and no
+  KIS cancel network call in v0.6.3.
+- Cancellation requires Telegram approval, latest broker reconciliation pass, and
+  latest live order status of `open` or `partially_filled`. Partial-fill
+  cancellation is only for the remaining open quantity and requires a prior fill
+  reconciliation event. Filled, rejected, canceled, halted, and unknown states
+  block cancellation; unknown broker state does not attempt cancel.
+- Successful cancellation attempts are persisted as `live_order_cancel` system
+  events and audit events. Duplicate cancellation attempts for the same broker
+  order ID are rejected.
 - `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
   KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
   real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,

@@ -191,6 +191,14 @@ applies only newly recognized cumulative fill deltas to Maestro portfolio state,
 and records `fill_reconciliation` system and audit events. Rejected, canceled,
 halted, and unknown statuses do not update the portfolio.
 
+Cancellation policy is defined as an interface only. A cancel request requires
+Telegram approval, the latest broker reconciliation to pass, and the latest
+order status to be `open` or `partially_filled`. Partial-fill cancellation is
+allowed only for the remaining open quantity after fill reconciliation has been
+recorded. Filled, rejected, canceled, halted, and unknown orders cannot be
+canceled; unknown state halts the path instead of attempting cancel. There is no
+direct cancel CLI and no real KIS cancel network call in this phase.
+
 Safe execution config defaults:
 
 ```yaml

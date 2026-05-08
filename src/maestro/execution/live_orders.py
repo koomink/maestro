@@ -128,6 +128,21 @@ class FillReconciliationResult(BaseModel):
     positions: dict[str, float]
 
 
+class LiveOrderCancelRequest(BaseModel):
+    run_id: str
+    approval_id: str
+    broker_order: BrokerOrderId
+    reason: str | None = None
+
+
+class LiveOrderCancelResult(BaseModel):
+    broker_order: BrokerOrderId
+    status: OrderStatus
+    canceled_quantity: float
+    message: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class LiveOrderClient(ABC):
     @abstractmethod
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
@@ -137,6 +152,12 @@ class LiveOrderClient(ABC):
 class LiveOrderStatusClient(ABC):
     @abstractmethod
     def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        raise NotImplementedError
+
+
+class LiveOrderCancelClient(ABC):
+    @abstractmethod
+    def cancel_order(self, request: LiveOrderCancelRequest) -> LiveOrderCancelResult:
         raise NotImplementedError
 
 
@@ -168,6 +189,97 @@ class LiveOrderStatusService:
         self.state_store.save_system_event(run_id, "live_order_status", payload)
         self.audit_logger.log(run_id, "live_order_status", payload)
         return snapshot
+
+
+class LiveOrderCancellationService:
+    def __init__(
+        self,
+        state_store: StateStore,
+        audit_logger: AuditLogger,
+        cancel_client: LiveOrderCancelClient,
+    ) -> None:
+        self.state_store = state_store
+        self.audit_logger = audit_logger
+        self.cancel_client = cancel_client
+
+    def cancel_order(
+        self,
+        request: LiveOrderCancelRequest,
+        approval_decision: ApprovalDecision,
+    ) -> LiveOrderCancelResult:
+        latest_status = self._validate_cancellation_policy(request, approval_decision)
+        result = self.cancel_client.cancel_order(request)
+        payload = {
+            "request": request.model_dump(mode="json"),
+            "result": result.model_dump(mode="json"),
+            "latest_status": latest_status.model_dump(mode="json"),
+        }
+        self.state_store.save_system_event(request.run_id, "live_order_cancel", payload)
+        self.audit_logger.log(request.run_id, "live_order_cancel", payload)
+        return result
+
+    def _validate_cancellation_policy(
+        self,
+        request: LiveOrderCancelRequest,
+        approval_decision: ApprovalDecision,
+    ) -> LiveOrderStatusSnapshot:
+        if approval_decision.approval_id != request.approval_id:
+            raise ValueError("Approval decision does not match the cancel request")
+        if approval_decision.run_id != request.run_id:
+            raise ValueError("Approval decision run_id does not match the cancel request")
+        if approval_decision.status != "approved":
+            raise ValueError("Telegram approval is required before live order cancellation")
+        if not approval_decision.decided_by.startswith("telegram:"):
+            raise ValueError("Telegram approval is required before live order cancellation")
+        if self._is_duplicate_cancel(request.broker_order.broker_order_id):
+            raise ValueError("Duplicate live order cancellation rejected")
+        latest_reconciliation = self.state_store.load_latest_system_event("broker_reconciliation")
+        if (
+            latest_reconciliation is None
+            or latest_reconciliation["payload"].get("passed") is not True
+        ):
+            raise ValueError(
+                "Latest broker reconciliation must pass before live order cancellation"
+            )
+
+        latest_status = self._load_latest_status(request.broker_order.broker_order_id)
+        if latest_status is None:
+            raise ValueError("Latest live order status is required before cancellation")
+        if latest_status.status == OrderStatus.UNKNOWN:
+            raise ValueError("Unknown broker state blocks live order cancellation")
+        if latest_status.status == OrderStatus.HALTED:
+            raise ValueError("Halted live order state blocks cancellation")
+        if latest_status.status not in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
+            raise ValueError(
+                f"Live order cancellation is forbidden for status={latest_status.status}"
+            )
+        if latest_status.partial_fill.remaining_quantity <= 0:
+            raise ValueError("Live order cancellation requires a remaining open quantity")
+        if latest_status.status == OrderStatus.PARTIALLY_FILLED:
+            latest_fill_reconciliation = self.state_store.load_latest_system_event(
+                "fill_reconciliation"
+            )
+            if latest_fill_reconciliation is None:
+                raise ValueError(
+                    "Latest fill reconciliation is required before partial-fill cancellation"
+                )
+        return latest_status
+
+    def _load_latest_status(self, broker_order_id: str) -> LiveOrderStatusSnapshot | None:
+        rows = self.state_store.list_system_events_by_type("live_order_status", limit=1000)
+        for row in rows:
+            snapshot = LiveOrderStatusSnapshot.model_validate(row["payload"])
+            if snapshot.broker_order.broker_order_id == broker_order_id:
+                return snapshot
+        return None
+
+    def _is_duplicate_cancel(self, broker_order_id: str) -> bool:
+        rows = self.state_store.list_system_events_by_type("live_order_cancel", limit=1000)
+        for row in rows:
+            broker_order = row["payload"].get("request", {}).get("broker_order", {})
+            if broker_order.get("broker_order_id") == broker_order_id:
+                return True
+        return False
 
 
 class PartialFillReconciliationService:
