@@ -261,6 +261,16 @@ And Maestro will:
 - PortfolioManager combines strategy target allocations using configured fixed strategy weights.
 - Allocations should normalize to 1.0 or allocate residual to `CASH`.
 - Portfolio target must be passed to RiskManager before execution.
+- Static allowed-symbol configs remain valid for examples, tests, tutorials, and
+  conservative paper trading, but they are not the intended product ceiling.
+- The planned production design separates a broad research universe from a
+  stricter tradable universe. Research inputs may include symbols, macro series,
+  or keywords used only for analysis. Tradable symbols must pass Maestro
+  validation before allocation or execution.
+- Future Virtuoso apps may propose candidate symbols through the SDK, but Maestro
+  must validate them against `UniversePolicy`, resolve metadata through an
+  `InstrumentResolver`, check DataHub availability/freshness, and verify broker
+  tradability when required.
 
 ### 8.4 Risk Management
 
@@ -272,6 +282,10 @@ And Maestro will:
   - Allowed asset universe
   - Strategy weight limits
 - RiskManager may modify target allocations, but all modifications must be logged.
+- Future dynamic-universe risk checks must reject unknown, unresolved,
+  untradable, and research-only symbols in `TargetAllocationResult`.
+- Virtuoso apps must not directly approve tradability, call broker APIs, submit
+  orders, or bypass Maestro safety gates.
 
 ### 8.5 Execution
 

@@ -275,6 +275,41 @@ request fields. The intended first production target is US-listed stocks and
 ETFs via `kis_overseas_stock`; the domestic-stock KIS path remains isolated as
 `kis_domestic_stock` for existing adapter tests and is not the strategic default.
 
+Current example configs use static `portfolio.allowed_symbols` and
+`universe.instruments` lists such as `AAPL`, `MSFT`, `VOO`, `QQQ`, and `SGOV`.
+Those lists are tutorial, test, and conservative paper-mode examples, not a
+product limit. The intended production design is a policy-based dynamic universe:
+Virtuoso apps may propose candidate symbols and data needs, but Maestro validates,
+resolves, and approves tradability before any symbol can receive an allocation or
+reach execution.
+
+Maestro distinguishes a broad research universe from a stricter tradable
+universe. Research symbols can include analysis inputs such as `SPY`, `VIX`,
+`DXY`, FRED macro series, news keywords, or other non-tradable references.
+Tradable symbols must pass Maestro-side instrument metadata resolution, DataHub
+availability and freshness checks, broker product mapping, broker tradability
+checks when required, and risk/safety policy. Virtuoso apps can propose
+candidates, but they cannot approve tradability, call broker APIs, submit orders,
+or allocate to research-only symbols.
+
+Planned dynamic-universe flow:
+
+1. A Virtuoso app declares data needs and candidate symbols through the SDK.
+2. Maestro validates candidates against `UniversePolicy`.
+3. Maestro resolves metadata through an `InstrumentResolver`.
+4. Maestro checks DataHub availability and freshness.
+5. For `intended_use: tradable`, Maestro checks broker mapping and tradability.
+6. Approved candidates become temporary or persistent tradable universe entries.
+7. `TargetAllocationResult` allocations are accepted only for approved tradable
+   symbols.
+
+Planned `UniversePolicy` fields include `allowed_asset_types`,
+`allowed_regions`, `allowed_currencies`, `allowed_broker_products`,
+`deny_symbols`, `deny_asset_tags` such as leveraged, inverse, OTC, options, and
+futures, `max_new_symbols_per_run`,
+`require_operator_approval_for_new_symbols`,
+`require_broker_tradability_check`, and `require_data_freshness_check`.
+
 Daily loss limit config exists as a conservative skeleton. When
 `execution.daily_loss_limit` is set, live approval fails closed until broker PnL
 normalization is implemented for the configured overseas stock/ETF broker
@@ -595,8 +630,11 @@ maestro status --config configs/us_etf_yahoo_paper.yaml
 
 `configs/us_etf_yahoo_paper.yaml` uses canonical USD symbols
 `CASH_USD`, `VOO`, `QQQ`, and `SGOV` in the sample allocation, with AAPL and
-MSFT included in the allowed US universe. Yahoo/yfinance supplies external
-market data through Maestro DataHub. Execution remains simulated inside
+MSFT included in the static example US universe. Yahoo/yfinance supplies external
+market data through Maestro DataHub. The fixed symbol list is intentionally small
+for a runnable paper example; future production flows should use policy-based
+candidate validation before adding new tradable symbols. Execution remains
+simulated inside
 `PaperExecutionEngine`; this path does not call KIS, does not submit live
 orders, and does not enable live trading.
 
@@ -713,6 +751,12 @@ state:
 audit:
   jsonl_path: var/audit.jsonl
 ```
+
+This static form remains valid for examples, tests, tutorials, and conservative
+paper configs. It should not be read as the final universe model. The future
+production path is dynamic and policy-gated: strategy apps propose candidates,
+Maestro resolves and validates them, and only approved tradable instruments may
+appear in target allocations.
 
 ## Data Storage
 

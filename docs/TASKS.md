@@ -336,14 +336,37 @@
 - [ ] Keep direct buy/sell/cancel CLI deferred
 - [ ] Keep real KIS cancel deferred until separately verified and guarded
 
-### v0.9 Virtuoso SDK/App Integration
+### v0.9 Dynamic Universe & Virtuoso SDK Contract
 
 - [ ] Harden Maestro SDK contracts for external Virtuoso apps
+- [ ] Add `CandidateInstrumentRequest` planning for Virtuoso-proposed candidate
+      symbols and data needs
+- [ ] Add `intended_use: research | tradable` planning to candidate/data
+      requests
+- [ ] Document and implement the research universe versus tradable universe
+      distinction
+- [ ] Add `UniversePolicy` for allowed asset types, regions, currencies, broker
+      products, denied symbols, denied asset tags, max new symbols per run, and
+      required approval/data/broker checks
+- [ ] Add `InstrumentResolver` for canonical symbol metadata, venue, currency,
+      broker product, exchange code, precision, and broker mapping
+- [ ] Add broker tradability checks before candidate symbols can become tradable
+- [ ] Add dynamic symbol approval for temporary or persistent tradable universe
+      entries
+- [ ] Reject allocations to research-only, unknown, unresolved, or untradable
+      symbols
+- [ ] Extend `StrategyManifest` planning with `supports_dynamic_universe`,
+      `max_candidate_symbols`, `allowed_data_types`, and
+      `supported_asset_types`
 - [ ] Add versioned plugin/app compatibility checks
 - [ ] Document external Virtuoso app packaging
 - [ ] Add strategy app data-boundary tests
 - [ ] Document promotion flow from mock paper to real-data paper to live approval
 - [ ] Keep Virtuoso apps proposal-only; Maestro owns data, risk, approval, execution, state, and audit
+- [ ] Keep static `allowed_symbols` configs valid for examples, tests,
+      tutorials, and conservative paper configs
+- [ ] Keep live auto-trading, market orders, direct broker calls from strategy
+      apps, and dashboard write controls deferred
 
 ## Completed / Historical Notes
 

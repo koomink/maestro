@@ -429,6 +429,20 @@ class StrategyManifest(BaseModel):
     can_short: bool = False
 ```
 
+Future dynamic-universe SDK planning should extend the manifest with capability
+fields such as:
+
+```python
+supports_dynamic_universe: bool = False
+max_candidate_symbols: int | None = None
+allowed_data_types: list[str] = []
+supported_asset_types: list[AssetType] = []
+```
+
+These fields are not implemented in the current contract. They document the
+intended direction for v0.9 so Maestro can bound what each Virtuoso app may
+request before candidate symbols are resolved or approved.
+
 ### 5.3 StrategyContext
 
 ```python
@@ -457,6 +471,24 @@ class DataRequest(BaseModel):
 
 `broker_quote` is reserved for broker-side reference prices used by execution validation or reconciliation. It should not replace DataHub research feeds for strategy decisions.
 
+Future dynamic-universe work should add a separate candidate request contract:
+
+```python
+class CandidateInstrumentRequest(BaseModel):
+    symbol: str
+    intended_use: Literal["research", "tradable"]
+    requested_data_types: list[str] = []
+    asset_type: AssetType | None = None
+    region: str | None = None
+    currency: str | None = None
+    metadata: dict[str, Any] = {}
+```
+
+`intended_use: research` covers analysis-only symbols, series, and keywords such
+as `SPY`, `VIX`, `DXY`, FRED macro series, and news topics. `intended_use:
+tradable` asks Maestro to validate whether a canonical instrument can become
+eligible for allocation and execution.
+
 ### 5.5 DataBundle
 
 ```python
@@ -483,6 +515,13 @@ class TargetAllocationResult(BaseModel):
     risk_flags: list[str] = []
     metadata: dict[str, Any] = {}
 ```
+
+`TargetAllocationResult` currently contains allocations only. Future
+dynamic-universe support must validate those allocations against Maestro's
+approved tradable universe. Maestro should reject allocations to research-only,
+unknown, unresolved, or broker-untradable symbols. Virtuoso apps may propose
+candidate symbols, but they cannot directly approve tradability or execute
+orders.
 
 ### 5.7 PortfolioTarget
 
@@ -588,6 +627,13 @@ def on_stop(self, context: StrategyContext) -> None: ...
 def on_error(self, error: Exception, context: StrategyContext) -> None: ...
 ```
 
+Future v0.9 dynamic-universe work may add an optional candidate-discovery method,
+for example `build_candidate_requests(context) -> list[CandidateInstrumentRequest]`.
+That method would let Virtuoso apps propose research inputs and tradable
+candidates, while Maestro remains responsible for validation, metadata
+resolution, DataHub checks, broker tradability checks, operator approval when
+policy requires it, and allocation eligibility.
+
 ## 7. Plugin Loading
 
 Config example:
@@ -662,6 +708,12 @@ audit:
 
 Maestro v0.1.1 uses strict Pydantic config validation. Unknown YAML fields fail
 loudly instead of being ignored.
+
+Static `allowed_symbols` is valid for examples, tests, tutorials, and
+conservative paper configs. It should not be treated as the final production
+universe model. The planned production path uses `UniversePolicy` and an
+`InstrumentResolver` so Virtuoso apps can propose candidates and Maestro can
+approve only symbols that satisfy research or tradability requirements.
 
 ## 9. Orchestrator Run Cycle
 

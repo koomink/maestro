@@ -294,11 +294,26 @@ Planned scope:
 No `live_auto`, no market orders, no direct buy/sell/cancel CLI, and no real KIS
 cancel adapter unless separately verified and guarded.
 
-## v0.9 — Virtuoso SDK/App Integration
+## v0.9 — Dynamic Universe & Virtuoso SDK Contract
 
 Planned scope:
 
 - Harden Maestro SDK contracts for external Virtuoso apps
+- Add `CandidateInstrumentRequest` planning and implementation for strategy
+  proposed symbols and data needs
+- Separate research universe inputs from approved tradable universe entries
+- Add `UniversePolicy` for allowed asset types, regions, currencies, broker
+  products, deny-listed symbols/tags, max new symbols per run, and approval or
+  broker/data checks required for new tradable symbols
+- Add `InstrumentResolver` to normalize canonical symbols into asset metadata,
+  venue, currency, broker product, exchange code, precision, and broker mapping
+- Add broker tradability checks for candidates with `intended_use: tradable`
+- Add dynamic symbol approval so approved candidates can become temporary or
+  persistent tradable universe entries
+- Validate `TargetAllocationResult` allocations against the approved tradable
+  universe and reject research-only, unknown, unresolved, or untradable symbols
+- Extend `StrategyManifest` planning with `supports_dynamic_universe`,
+  `max_candidate_symbols`, `allowed_data_types`, and `supported_asset_types`
 - Versioned plugin/app compatibility checks
 - Example Virtuoso app packaging guidance
 - Strategy app data-boundary tests
@@ -307,6 +322,12 @@ Planned scope:
 
 Virtuoso apps continue to propose only; Maestro owns data access, risk,
 approval, execution, state, and audit.
+
+Static `allowed_symbols` configs remain valid for examples, tests, tutorials,
+and conservative paper trading. They are not intended to define the final product
+limit. Dynamic universe support must keep the same safety constraints: no
+`live_auto`, no market orders, no direct broker calls from strategy apps, no
+direct buy/sell/cancel CLI, and no dashboard write controls.
 
 ## v1.0 — Private Approval-gated Production Beta
 

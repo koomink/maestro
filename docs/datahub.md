@@ -151,12 +151,58 @@ DataHub provider symbol maps translate Maestro canonical symbols into
 provider-specific research symbols. Strategies should not carry provider-specific
 ticker translation logic.
 
+Static `allowed_symbols` lists are acceptable for examples, tests, tutorials,
+and conservative paper configs. They are not the intended production ceiling.
+The future production model should support a policy-based dynamic universe where
+Virtuoso apps can propose candidate symbols, and Maestro validates and resolves
+them before they can become tradable.
+
+The research universe and tradable universe are separate:
+
+- Research universe: symbols, series, and keywords used for analysis, such as
+  `SPY`, `VIX`, `DXY`, FRED macro series, RSS/news keywords, or sentiment
+  topics. Research inputs may be broad and may include non-tradable references.
+- Tradable universe: canonical instruments eligible for allocation and
+  execution. Tradable candidates must pass stricter Maestro validation,
+  including instrument metadata resolution, DataHub availability/freshness,
+  broker product mapping, and broker tradability checks when required.
+
+Planned dynamic candidate flow:
+
+1. A Virtuoso app proposes candidate symbols or data needs, marking each request
+   with `intended_use: research` or `intended_use: tradable`.
+2. Maestro validates candidates against `UniversePolicy`.
+3. Maestro resolves canonical instrument metadata through `InstrumentResolver`.
+4. Maestro checks that required DataHub providers can serve fresh data.
+5. For tradable candidates, Maestro verifies broker mapping and tradability when
+   policy requires it.
+6. Approved candidates become temporary or persistent tradable universe entries.
+7. Allocation validation accepts only approved tradable symbols.
+
+Planned `UniversePolicy` fields include `allowed_asset_types`,
+`allowed_regions`, `allowed_currencies`, `allowed_broker_products`,
+`deny_symbols`, `deny_asset_tags` such as leveraged, inverse, OTC, options, and
+futures, `max_new_symbols_per_run`,
+`require_operator_approval_for_new_symbols`,
+`require_broker_tradability_check`, and `require_data_freshness_check`.
+
+Virtuoso apps can propose candidates but cannot approve tradability, bypass
+Maestro DataHub, call broker APIs, or execute orders. Maestro should reject
+unknown, unresolved, untradable, and research-only symbols in
+`TargetAllocationResult.allocations`.
+
 ### Schema Compatibility
 
 The public SDK stays centered on `DataRequest` and `DataBundle`. Strategy
 plugins request data through Maestro DataHub and receive normalized payloads;
 they should not call Yahoo, FRED, news APIs, crypto exchanges, KIS, or other
 external APIs directly.
+
+Future SDK planning should add `CandidateInstrumentRequest`,
+`intended_use: research | tradable`, and `StrategyManifest` capability fields such as
+`supports_dynamic_universe`, `max_candidate_symbols`, `allowed_data_types`, and
+`supported_asset_types`. These are design notes, not implemented behavior in the
+current docs-covered release.
 
 For v0.2 compatibility, the orchestrator can still extract prices from legacy
 payloads shaped as `{"price": 100.0}`. New providers should emit the explicit
