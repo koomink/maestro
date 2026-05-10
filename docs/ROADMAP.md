@@ -227,8 +227,6 @@ Started scope:
 Remaining scope:
 
 - Unknown order status halt
-- Improved Python logging
-- Monitoring and health checks
 - Optional KIS WebSocket
 - Performance attribution
 
@@ -271,7 +269,7 @@ milestone.
 
 ## v0.7.3 — Operational Closeout
 
-Planned scope:
+Completed scope:
 
 - `maestro health` CLI
 - Structured Python logging
@@ -280,7 +278,8 @@ Planned scope:
 - Backup/restore guide for SQLite state, audit logs, and local config
 - Operator runbooks for halt recovery and broker reconciliation
 
-No dashboard write controls and no Telegram admin controls.
+Health is local by default and does not call live KIS endpoints. No dashboard
+write controls and no Telegram admin controls.
 
 ## v0.8 — KIS Overseas Live Approval Beta
 

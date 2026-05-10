@@ -663,6 +663,7 @@ maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
 maestro reconcile --config configs/live_readonly.yaml
 maestro reconcile-fills --config configs/live_readonly.yaml
+maestro health --config configs/live_readonly.yaml
 ```
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
@@ -696,6 +697,20 @@ implemented; real overseas submit/status/cancel paths remain fail-closed until
 their endpoint paths, TR_IDs, exchange codes, request fields, and response fields
 are separately verified. There is no direct buy/sell CLI, no market order path,
 and no normal test that calls the KIS network.
+
+`maestro health --config ...` performs local operational checks without live KIS
+network calls. It checks config loading, SQLite state, audit path, safety state,
+recent halt/failure events, DataHub config, KIS env var presence, token cache
+path, latest broker snapshot age, and latest reconciliation status. Missing KIS
+env vars or broker snapshots are reported in health output without printing
+secret values.
+
+Operational docs:
+
+- [Deployment guide](docs/deployment.md)
+- [VPS/systemd guide](docs/vps_systemd.md)
+- [Backup/restore guide](docs/backup_restore.md)
+- [Operator runbook](docs/operator_runbook.md)
 
 To install dashboard dependencies and open the read-only dashboard:
 

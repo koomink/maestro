@@ -262,7 +262,8 @@
 - [x] Add `docs/live_approval_release_checklist.md`
 - [x] Document why package metadata remains `0.1.1`
 - [ ] Implement real KIS cancel adapter after endpoint path, TR_IDs, and request fields are verified
-- [ ] Implement real KIS overseas-stock read-only/submit/status adapters after endpoint paths, TR_IDs, exchange codes, and response fields are verified
+- [x] Implement real KIS overseas-stock read-only adapter after endpoint paths, TR_IDs, exchange codes, and response fields are verified
+- [ ] Implement real KIS overseas-stock submit/status adapters after endpoint paths, TR_IDs, exchange codes, and response fields are verified
 
 ### v0.7 Production Hardening
 
@@ -283,13 +284,13 @@
 - [x] Add daily loss limit config skeleton that fails closed until broker PnL normalization exists
 - [x] Add daily order count and notional limits
 - [x] Add instrument-aware live order validation for quantity step, price tick, minimums, currency, and broker product
-- [ ] Add improved Python logging
+- [x] Add improved Python logging
 - [ ] Add audit log rotation or hash chain
-- [ ] Add monitoring and health checks
-- [ ] Add deployment, VPS/systemd, and backup/restore guides
-- [ ] Keep dashboard write controls deferred
-- [ ] Keep Telegram pause/kill/admin controls deferred
-- [ ] Keep live auto-trading out of scope
+- [x] Add monitoring and health checks
+- [x] Add deployment, VPS/systemd, and backup/restore guides
+- [x] Keep dashboard write controls deferred
+- [x] Keep Telegram pause/kill/admin controls deferred
+- [x] Keep live auto-trading out of scope
 
 ### v0.7.1 Real-data US Stock/ETF Paper Mode
 
@@ -315,14 +316,15 @@
 
 ### v0.7.3 Operational Closeout
 
-- [ ] Add `maestro health` CLI
-- [ ] Add structured Python logging
-- [ ] Add deployment guide
-- [ ] Add VPS/systemd guide
-- [ ] Add backup/restore guide for SQLite state, audit logs, and local config
-- [ ] Add operator runbooks for halt recovery and broker reconciliation
-- [ ] Keep dashboard write controls deferred
-- [ ] Keep Telegram admin controls deferred
+- [x] Add `maestro health` CLI
+- [x] Add structured Python logging
+- [x] Add deployment guide
+- [x] Add VPS/systemd guide
+- [x] Add backup/restore guide for SQLite state, audit logs, and local config
+- [x] Add operator runbooks for halt recovery and broker reconciliation
+- [x] Keep health local by default with no live KIS network calls
+- [x] Keep dashboard write controls deferred
+- [x] Keep Telegram admin controls deferred
 
 ### v0.8 KIS Overseas Live Approval Beta
 

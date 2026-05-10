@@ -11,6 +11,8 @@ from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.monitoring.health import HealthService
+from maestro.monitoring.logging import configure_structured_logging
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
@@ -21,6 +23,7 @@ app = typer.Typer()
 @app.callback()
 def main() -> None:
     """Maestro command line interface."""
+    configure_structured_logging()
 
 
 @app.command("run-once")
@@ -47,6 +50,15 @@ def status(config: Path = typer.Option(..., "--config")) -> None:
         f"approvals={store_status['counts']['approvals']} "
         f"broker_snapshots={store_status['counts']['broker_account_snapshots']}"
     )
+
+
+@app.command("health")
+def health(config: Path = typer.Option(..., "--config")) -> None:
+    maestro_config = load_config(config)
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    report = HealthService(maestro_config, store).run()
+    for line in report.text_lines():
+        typer.echo(line)
 
 
 @app.command("approvals")
