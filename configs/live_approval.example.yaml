@@ -83,6 +83,8 @@ execution:
   require_reconciliation_pass: true
   max_live_order_notional: 100
   max_daily_live_notional: 300
+  max_daily_live_order_count: 3
+  daily_loss_limit: null
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20
@@ -127,3 +129,4 @@ reconciliation:
   cash_tolerance: 0.0
   position_quantity_tolerance: 0.0
   value_tolerance: 0.0
+  max_age_seconds: 86400

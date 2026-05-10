@@ -89,6 +89,8 @@ class ExecutionConfig(StrictConfigModel):
     require_reconciliation_pass: bool = True
     max_live_order_notional: float = Field(default=0.0, ge=0.0)
     max_daily_live_notional: float = Field(default=0.0, ge=0.0)
+    max_daily_live_order_count: int = Field(default=0, ge=0)
+    daily_loss_limit: float | None = Field(default=None, gt=0.0)
     allowed_order_type: OrderType = OrderType.LIMIT
     order_status_poll_interval_seconds: float = Field(default=30.0, ge=0.0)
     order_status_max_polls: int = Field(default=20, gt=0)
@@ -160,6 +162,7 @@ class ReconciliationConfig(StrictConfigModel):
     cash_tolerance: float = Field(default=0.0, ge=0.0)
     position_quantity_tolerance: float = Field(default=0.0, ge=0.0)
     value_tolerance: float = Field(default=0.0, ge=0.0)
+    max_age_seconds: int = Field(default=86400, gt=0)
 
 
 class MaestroConfig(StrictConfigModel):

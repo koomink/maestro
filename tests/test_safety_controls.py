@@ -112,6 +112,35 @@ def test_kill_switch_cannot_be_reset_by_resume(tmp_path):
     assert safety.current_state().state == SafetyState.KILLED
 
 
+def test_clear_halt_requires_halted_state_and_reason(tmp_path):
+    config = load_config(_paper_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    safety = SafetyControlService(store, audit)
+
+    with pytest.raises(ValueError, match="halted"):
+        safety.clear_halt(new_run_id(), "not halted")
+
+    safety.halt(new_run_id(), "unknown broker state")
+    current = safety.clear_halt(new_run_id(), "broker state reconciled")
+
+    assert current.state == SafetyState.ACTIVE
+    events = store.list_system_events_by_type("safety_state", limit=2)
+    assert events[0]["payload"]["reason"] == "broker state reconciled"
+
+
+def test_clear_halt_cannot_reset_kill_switch(tmp_path):
+    config = load_config(_paper_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    safety = SafetyControlService(store, audit)
+
+    safety.kill_switch(new_run_id(), "operator kill")
+
+    with pytest.raises(ValueError, match="cannot be reset"):
+        safety.clear_halt(new_run_id(), "unsafe")
+
+
 def test_safety_cli_transitions_are_persisted(tmp_path):
     config_path = _paper_config_path(tmp_path)
     runner = CliRunner()

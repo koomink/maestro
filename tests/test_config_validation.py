@@ -45,6 +45,8 @@ def test_live_order_config_defaults_are_safe():
     assert config.execution.require_reconciliation_pass is True
     assert config.execution.max_live_order_notional == 0.0
     assert config.execution.max_daily_live_notional == 0.0
+    assert config.execution.max_daily_live_order_count == 0
+    assert config.execution.daily_loss_limit is None
     assert config.execution.allowed_order_type == "limit"
     assert config.execution.order_status_poll_interval_seconds == 30.0
     assert config.execution.order_status_max_polls == 20
@@ -131,6 +133,8 @@ def test_live_approval_example_config_is_safe_by_default():
     assert config.execution.allowed_order_type == "limit"
     assert config.execution.max_live_order_notional == 100.0
     assert config.execution.max_daily_live_notional == 300.0
+    assert config.execution.max_daily_live_order_count == 3
+    assert config.execution.daily_loss_limit is None
     assert config.approval.enabled is True
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True

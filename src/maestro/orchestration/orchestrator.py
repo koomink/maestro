@@ -1,4 +1,6 @@
 import traceback
+from datetime import UTC, datetime
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -77,6 +79,7 @@ class MaestroOrchestrator:
         strategy_ids = self.registry.strategy_ids
         validator = SignalValidator(self.config.portfolio.allowed_symbols, strategy_ids)
         data_requests_by_strategy = {}
+        data_quality_issues: list[dict[str, Any]] = []
         prices = {"CASH": 1.0}
 
         try:
@@ -94,6 +97,7 @@ class MaestroOrchestrator:
                     request.model_dump(mode="json") for request in requests
                 ]
                 data_bundle = self.datahub.get_data(requests)
+                data_quality_issues.extend(self._data_quality_issues(data_bundle))
                 prices.update(self._prices_from_bundle(data_bundle))
                 result = loaded.plugin.run(data_bundle, context)
                 validation = validator.validate(result)
@@ -123,11 +127,18 @@ class MaestroOrchestrator:
 
             orders = self.execution.propose_orders(current_state, risk_decision.target, prices)
             safety_state = self.safety.current_state()
+            live_blocks = self._live_execution_blocks(run_id, orders, data_quality_issues)
             if (
                 orders
                 and self.config.mode == RunMode.LIVE_APPROVAL
-                and safety_state.blocks_live_execution
+                and (safety_state.blocks_live_execution or live_blocks)
             ):
+                if live_blocks:
+                    self.safety.halt(
+                        run_id,
+                        "Live approval blocked by production hardening gate.",
+                        source="system",
+                    )
                 self.safety.record_blocked_execution(
                     run_id,
                     self.config.mode.value,
@@ -159,6 +170,7 @@ class MaestroOrchestrator:
                         "paper_orders": [],
                         "execution_results": [],
                         "safety_state": safety_state.model_dump(mode="json"),
+                        "live_blocks": live_blocks,
                         "execution_skipped": True,
                         "state_summary": next_state.summary(prices),
                     },
@@ -170,6 +182,12 @@ class MaestroOrchestrator:
                     self.config.mode.value,
                     safety_state,
                     "before_paper_execution",
+                )
+            if orders and self.config.mode == RunMode.PAPER and data_quality_issues:
+                self._record_event(
+                    run_id,
+                    "stale_data_warning",
+                    {"issues": data_quality_issues, "mode": self.config.mode.value},
                 )
             approval_request, approval_decision, approval_message = (
                 self.approval_manager.request_approval(
@@ -294,6 +312,172 @@ class MaestroOrchestrator:
             elif getattr(payload, "latest_price", None) is not None:
                 prices[symbol] = float(payload.latest_price.price)
         return prices
+
+    def _data_quality_issues(self, data_bundle) -> list[dict[str, Any]]:
+        issues = []
+        for request in data_bundle.requests:
+            payload = data_bundle.data.get(request.symbol)
+            if not isinstance(payload, dict):
+                issues.append(
+                    {
+                        "symbol": request.symbol,
+                        "data_type": request.data_type,
+                        "source": data_bundle.source,
+                        "timestamp": None,
+                        "reason": "missing_payload",
+                    }
+                )
+                continue
+            latest_price = payload.get("latest_price")
+            timestamp = None
+            source = data_bundle.source
+            if isinstance(latest_price, dict):
+                timestamp = latest_price.get("timestamp")
+                source = latest_price.get("source") or source
+            if payload.get("is_stale"):
+                issues.append(
+                    {
+                        "symbol": request.symbol,
+                        "data_type": request.data_type,
+                        "source": source,
+                        "timestamp": timestamp,
+                        "reason": "stale",
+                    }
+                )
+            if request.data_type == "price" and latest_price is None:
+                issues.append(
+                    {
+                        "symbol": request.symbol,
+                        "data_type": request.data_type,
+                        "source": source,
+                        "timestamp": timestamp,
+                        "reason": "missing_latest_price",
+                    }
+                )
+        return issues
+
+    def _live_execution_blocks(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        data_quality_issues: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if self.config.mode != RunMode.LIVE_APPROVAL or not orders:
+            return []
+        blocks = []
+        if data_quality_issues:
+            payload = {"issues": data_quality_issues, "mode": self.config.mode.value}
+            self._record_event(run_id, "stale_data_halt", payload)
+            blocks.append({"event_type": "stale_data_halt", **payload})
+
+        reconciliation_block = self._reconciliation_block()
+        if reconciliation_block is not None:
+            self._record_event(run_id, "broker_reconciliation_halt", reconciliation_block)
+            blocks.append({"event_type": "broker_reconciliation_halt", **reconciliation_block})
+
+        limit_block = self._daily_limit_block(orders)
+        if limit_block is not None:
+            self._record_event(run_id, "live_order_limit_halt", limit_block)
+            blocks.append({"event_type": "live_order_limit_halt", **limit_block})
+
+        instrument_block = self._instrument_validation_block(orders)
+        if instrument_block is not None:
+            self._record_event(run_id, "instrument_validation_halt", instrument_block)
+            blocks.append({"event_type": "instrument_validation_halt", **instrument_block})
+
+        if self.config.execution.daily_loss_limit is not None:
+            payload = {
+                "reason": "broker_pnl_normalization_unavailable",
+                "daily_loss_limit": self.config.execution.daily_loss_limit,
+            }
+            self._record_event(run_id, "daily_loss_limit_halt", payload)
+            blocks.append({"event_type": "daily_loss_limit_halt", **payload})
+        return blocks
+
+    def _reconciliation_block(self) -> dict[str, Any] | None:
+        if not self.config.execution.require_reconciliation_pass:
+            return None
+        latest = self.state_store.load_latest_system_event("broker_reconciliation")
+        if latest is None:
+            return {"reason": "missing_reconciliation"}
+        if latest["payload"].get("passed") is not True:
+            return {
+                "reason": "failed_reconciliation",
+                "reconciliation": latest["payload"],
+            }
+        created_at = self._parse_store_created_at(latest["created_at"])
+        age_seconds = (utc_now() - created_at).total_seconds()
+        if age_seconds > self.config.reconciliation.max_age_seconds:
+            return {
+                "reason": "stale_reconciliation",
+                "created_at": latest["created_at"],
+                "age_seconds": age_seconds,
+                "max_age_seconds": self.config.reconciliation.max_age_seconds,
+            }
+        return None
+
+    def _daily_limit_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
+        today = utc_now().date().isoformat()
+        existing_notional = 0.0
+        existing_count = 0
+        for row in self.state_store.list_system_events_by_type("live_order_result", limit=1000):
+            payload = row["payload"]
+            if payload.get("submitted_date") == today:
+                existing_count += 1
+                existing_notional += float(payload.get("notional", 0.0))
+        proposed_notional = sum(order.notional for order in orders)
+        proposed_count = len(orders)
+        if existing_notional + proposed_notional > self.config.execution.max_daily_live_notional:
+            return {
+                "reason": "daily_notional_exceeded",
+                "existing_notional": existing_notional,
+                "proposed_notional": proposed_notional,
+                "max_daily_live_notional": self.config.execution.max_daily_live_notional,
+            }
+        max_count = self.config.execution.max_daily_live_order_count
+        if max_count > 0 and existing_count + proposed_count > max_count:
+            return {
+                "reason": "daily_order_count_exceeded",
+                "existing_count": existing_count,
+                "proposed_count": proposed_count,
+                "max_daily_live_order_count": max_count,
+            }
+        return None
+
+    def _instrument_validation_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
+        instruments = {
+            instrument.symbol: instrument for instrument in self.config.universe.instruments
+        }
+        if not instruments:
+            return None
+        for order in orders:
+            instrument = instruments.get(order.symbol)
+            if instrument is None:
+                return {"reason": "missing_instrument", "symbol": order.symbol}
+            if instrument.currency.value != self.config.portfolio.base_currency:
+                return {"reason": "currency_mismatch", "symbol": order.symbol}
+            if instrument.broker_product != self.config.kis.broker_product:
+                return {"reason": "broker_product_mismatch", "symbol": order.symbol}
+            if order.quantity < instrument.min_order_quantity:
+                return {"reason": "min_order_quantity", "symbol": order.symbol}
+            if order.notional < instrument.min_order_notional:
+                return {"reason": "min_order_notional", "symbol": order.symbol}
+            if not self._is_step_multiple(order.quantity, instrument.quantity_step):
+                return {"reason": "quantity_step", "symbol": order.symbol}
+            if not self._is_step_multiple(order.price, instrument.price_tick):
+                return {"reason": "price_tick", "symbol": order.symbol}
+        return None
+
+    def _record_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
+        self.state_store.save_system_event(run_id, event_type, payload)
+        self.audit.log(run_id, event_type, payload)
+
+    def _parse_store_created_at(self, value: str) -> datetime:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+
+    def _is_step_multiple(self, value: float, step: float) -> bool:
+        scaled = value / step
+        return abs(scaled - round(scaled)) < 1e-9
 
     def _execute_live_approval_orders(
         self,

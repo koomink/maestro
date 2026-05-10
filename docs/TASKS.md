@@ -272,15 +272,17 @@
 - [x] Add `maestro pause --config ... --reason "..."`
 - [x] Add `maestro resume --config ... --reason "..."`
 - [x] Add `maestro kill-switch --config ... --reason "..."`
+- [x] Add explicit `maestro clear-halt --config ... --reason "..."`
 - [x] Gate `MaestroOrchestrator.run_once()` before live approval submission
 - [x] Record live execution skips caused by paused, killed, or halted state
 - [x] Keep paper mode runnable while recording a safety warning event
 - [x] Prevent casual kill-switch reset through `resume`
-- [ ] Add explicit halted-state recovery procedure
-- [ ] Add stale data halt
-- [ ] Add reconciliation mismatch halt
-- [ ] Add daily loss limit
-- [ ] Add daily order count and notional limits
+- [x] Add explicit halted-state recovery procedure
+- [x] Add stale data halt for live approval and stale-data warning for paper
+- [x] Add missing, stale, and failed reconciliation halt
+- [x] Add daily loss limit config skeleton that fails closed until broker PnL normalization exists
+- [x] Add daily order count and notional limits
+- [x] Add instrument-aware live order validation for quantity step, price tick, minimums, currency, and broker product
 - [ ] Add improved Python logging
 - [ ] Add audit log rotation or hash chain
 - [ ] Add monitoring and health checks

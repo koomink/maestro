@@ -54,6 +54,14 @@ class SafetyControlService:
             raise ValueError("halted state requires an explicit recovery method")
         return self._transition(run_id, SafetyState.ACTIVE, reason, source, current)
 
+    def clear_halt(self, run_id: str, reason: str, source: str = "cli") -> SafetySnapshot:
+        current = self.current_state()
+        if current.state == SafetyState.KILLED:
+            raise ValueError("kill switch is active and cannot be reset by clear-halt")
+        if current.state != SafetyState.HALTED:
+            raise ValueError("clear-halt requires current state to be halted")
+        return self._transition(run_id, SafetyState.ACTIVE, reason, source, current)
+
     def kill_switch(self, run_id: str, reason: str, source: str = "cli") -> SafetySnapshot:
         return self._transition(
             run_id,

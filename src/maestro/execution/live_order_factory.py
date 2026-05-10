@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from maestro.config.models import MaestroConfig
+from maestro.core.enums import Currency
 from maestro.execution.brokers.kis.rest_client import build_kis_rest_live_order_client
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
@@ -67,6 +68,9 @@ def build_live_approval_dependencies(
         state_store,
         audit_logger,
         broker_client,
+        instruments=config.universe.instruments,
+        broker_product=config.kis.broker_product,
+        base_currency=Currency(config.portfolio.base_currency),
     )
     status_service = LiveOrderStatusService(state_store, audit_logger, order_status_client)
     fill_reconciliation_service = PartialFillReconciliationService(state_store, audit_logger)

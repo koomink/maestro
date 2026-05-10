@@ -200,6 +200,7 @@ inspect and change state with CLI commands:
 maestro safety-status --config configs/paper.yaml
 maestro pause --config configs/live_approval.example.yaml --reason "operator maintenance"
 maestro resume --config configs/live_approval.example.yaml --reason "checks passed"
+maestro clear-halt --config configs/live_approval.example.yaml --reason "root cause fixed"
 maestro kill-switch --config configs/live_approval.example.yaml --reason "emergency stop"
 ```
 
@@ -207,15 +208,19 @@ maestro kill-switch --config configs/live_approval.example.yaml --reason "emerge
 approval or lifecycle execution and record `safety_execution_blocked` events.
 Paper mode currently records a `safety_gate_warning` and continues so local
 simulation remains usable. The kill switch is intentionally not reset by
-`resume`; recovery needs an explicit future safe method.
+`resume` or `clear-halt`. A halted state can be cleared only with
+`clear-halt --reason` after the operator reviews state, audit events, broker
+account status, and the specific halt cause.
 
 v0.6 starts `live_approval` infrastructure, not `live_auto`. Live order submission
 is disabled by default and is available only through the safety interface. The
 contract requires a Telegram approval decision, the latest broker reconciliation
-to pass, limit orders only, per-order and daily notional caps, duplicate-order
-prevention, persisted live order status snapshots, and halt-on-unknown
-broker/order state behavior. Normal tests use fake clients and do not call KIS
-or Telegram network endpoints.
+to pass within `reconciliation.max_age_seconds`, fresh required DataHub price
+data, limit orders only, per-order and daily notional/count caps,
+instrument-aware quantity/price/minimum validation, duplicate-order prevention,
+persisted live order status snapshots, and halt-on-unknown broker/order state
+behavior. Normal tests use fake clients and do not call KIS or Telegram network
+endpoints.
 
 Maestro core uses canonical symbols and should remain broker/product agnostic.
 `universe.instruments` describes each tradable symbol's asset type, market
@@ -224,6 +229,11 @@ quantity step. Broker adapters translate canonical symbols into product-specific
 request fields. The intended first production target is US-listed stocks and
 ETFs via `kis_overseas_stock`; the domestic-stock KIS path remains isolated as
 `kis_domestic_stock` for existing adapter tests and is not the strategic default.
+
+Daily loss limit config exists as a conservative skeleton. When
+`execution.daily_loss_limit` is set, live approval fails closed until broker PnL
+normalization is implemented for the configured overseas stock/ETF broker
+product. Leave it unset until normalized broker PnL is available.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
@@ -275,6 +285,8 @@ execution:
   require_reconciliation_pass: true
   max_live_order_notional: 0
   max_daily_live_notional: 0
+  max_daily_live_order_count: 0
+  daily_loss_limit: null
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20

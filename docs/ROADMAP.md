@@ -205,19 +205,22 @@ Started scope:
 
 - Persistent global safety state for `active`, `paused`, `killed`, and `halted`
 - CLI safety controls: `safety-status`, `pause`, `resume`, and `kill-switch`
+- Explicit `clear-halt --reason` recovery path for halted state
 - Safety gate in `MaestroOrchestrator.run_once()` before paper or live execution
 - Live approval submission blocked before approval/lifecycle execution when
   safety state is paused, killed, or halted
 - Safety transition, blocked execution, and paper warning events persisted to
   system events and audit logs
+- Stale required DataHub data halts live approval and warns in paper mode
+- Missing, stale, or failed broker reconciliation halts live approval when
+  reconciliation is required
+- Daily live notional and order count gates use persisted live order events
+- Instrument-aware live order validation uses `universe.instruments`
+- Daily loss limit config fails closed until broker PnL normalization exists
 
 Remaining scope:
 
-- Stale data halt
-- Reconciliation mismatch halt
 - Unknown order status halt
-- Daily loss limit
-- Daily order count/notional limits
 - Improved Python logging
 - Audit log rotation or hash chain
 - Monitoring and health checks

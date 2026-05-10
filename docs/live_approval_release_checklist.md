@@ -19,6 +19,11 @@ write controls, and no high-risk Telegram admin controls.
 - Confirm `execution.require_reconciliation_pass=true`.
 - Confirm per-order and daily live notional caps are small enough for the first
   operator-approved order.
+- Confirm `execution.max_daily_live_order_count` is small enough for the first
+  operator-approved run.
+- Leave `execution.daily_loss_limit` unset until broker PnL normalization is
+  implemented for the configured overseas stock/ETF broker product.
+- Confirm required DataHub price data is fresh before live approval.
 - Confirm the dashboard remains read-only.
 - Confirm no strategy plugin imports or calls KIS, Telegram, or other broker APIs
   directly.
@@ -55,7 +60,8 @@ the wrong account, or does not use the intended broker product adapter.
    event.
 3. Investigate every cash or position mismatch before live approval.
 
-Live order submission is blocked when the latest reconciliation does not pass.
+Live order submission is blocked when the latest reconciliation is missing,
+failed, or older than `reconciliation.max_age_seconds`.
 
 ## Telegram Approval Test
 
@@ -125,11 +131,38 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 ## Halt / Failure Handling
 
 - Halt on unknown submit result or unknown broker status.
+- Halt on stale required DataHub data before approval/lifecycle execution.
+- Halt on missing, stale, or failed broker reconciliation when reconciliation is
+  required.
+- Halt when daily live notional or order count caps would be exceeded.
+- Halt when a proposed live order violates `universe.instruments` precision,
+  minimum, currency, or broker product constraints.
+- Halt when `execution.daily_loss_limit` is configured before broker PnL
+  normalization exists.
 - Halt or fail when broker reconciliation fails after a fill update.
 - Do not retry blindly after any halt/failure.
 - Preserve state and audit files for review.
-- Inspect `live_order_result`, `live_order_status`, `fill_reconciliation`, and
-  `live_order_lifecycle` events before the next run.
+- Inspect `safety_state`, `safety_execution_blocked`, `stale_data_halt`,
+  `broker_reconciliation_halt`, `live_order_limit_halt`,
+  `instrument_validation_halt`, `live_order_result`, `live_order_status`,
+  `fill_reconciliation`, and `live_order_lifecycle` events before the next run.
+
+## Halt Recovery
+
+1. Keep `execution.live_order_enabled=false` until the root cause is resolved.
+2. Review the halt event, audit log, broker account state, latest reconciliation,
+   and affected canonical symbols.
+3. Run read-only sync and broker reconciliation again.
+4. Confirm DataHub freshness, universe mappings, precision rules, daily limits,
+   and operator approval path.
+5. Clear only a `halted` state with:
+
+```bash
+maestro clear-halt --config <live-approval-config> --reason "<root cause fixed>"
+```
+
+`resume` does not clear halted state. `clear-halt` and `resume` do not clear a
+killed state.
 
 ## Rollback / Stop Procedure
 

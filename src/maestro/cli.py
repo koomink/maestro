@@ -104,6 +104,15 @@ def kill_switch(
     typer.echo(f"state={current.state.value} reason={current.reason}")
 
 
+@app.command("clear-halt")
+def clear_halt(
+    config: Path = typer.Option(..., "--config"),
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    current = _safety_service(config).clear_halt(new_run_id(), reason)
+    typer.echo(f"state={current.state.value} reason={current.reason}")
+
+
 @app.command("kis-sync")
 def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
     maestro_config = load_config(config)

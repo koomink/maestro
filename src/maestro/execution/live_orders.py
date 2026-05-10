@@ -9,7 +9,8 @@ from pydantic import BaseModel, Field, model_validator
 from maestro.approval.models import ApprovalDecision
 from maestro.config.models import ExecutionConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderSide, OrderStatus, OrderType
+from maestro.core.enums import BrokerProduct, Currency, OrderSide, OrderStatus, OrderType
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.reconciliation import ReconciliationResult
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.models import PortfolioState
@@ -780,11 +781,17 @@ class LiveOrderSafetyService:
         state_store: StateStore,
         audit_logger: AuditLogger,
         broker_client: LiveOrderClient,
+        instruments: list[TradableInstrument] | None = None,
+        broker_product: BrokerProduct | None = None,
+        base_currency: Currency | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
         self.broker_client = broker_client
+        self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
+        self.broker_product = broker_product
+        self.base_currency = base_currency
 
     def submit_approved_order(
         self,
@@ -829,6 +836,10 @@ class LiveOrderSafetyService:
             raise ValueError("Live order notional exceeds per-order cap")
         if self._daily_live_notional() + request.notional > self.config.max_daily_live_notional:
             raise ValueError("Live order notional exceeds daily cap")
+        if self.config.max_daily_live_order_count > 0:
+            if self._daily_live_order_count() + 1 > self.config.max_daily_live_order_count:
+                raise ValueError("Live order count exceeds daily cap")
+        self._validate_instrument_contract(request)
         if self._is_duplicate(request):
             raise ValueError("Duplicate live order request rejected")
         if self.config.require_reconciliation_pass:
@@ -837,6 +848,25 @@ class LiveOrderSafetyService:
                 raise ValueError(
                     "Latest broker reconciliation must pass before live order submission"
                 )
+
+    def _validate_instrument_contract(self, request: LiveOrderRequest) -> None:
+        if not self.instruments:
+            return
+        instrument = self.instruments.get(request.symbol)
+        if instrument is None:
+            raise ValueError(f"Live order symbol is not in universe: {request.symbol}")
+        if self.base_currency is not None and instrument.currency != self.base_currency:
+            raise ValueError("Live order currency does not match portfolio base currency")
+        if self.broker_product is not None and instrument.broker_product != self.broker_product:
+            raise ValueError("Live order broker product does not match KIS adapter product")
+        if request.quantity < instrument.min_order_quantity:
+            raise ValueError("Live order quantity is below instrument minimum")
+        if request.notional < instrument.min_order_notional:
+            raise ValueError("Live order notional is below instrument minimum")
+        if not _is_step_multiple(request.quantity, instrument.quantity_step):
+            raise ValueError("Live order quantity does not match instrument quantity_step")
+        if not _is_step_multiple(request.limit_price, instrument.price_tick):
+            raise ValueError("Live order limit price does not match instrument price_tick")
 
     def _persist(
         self,
@@ -863,6 +893,14 @@ class LiveOrderSafetyService:
                 total += float(payload.get("notional", 0.0))
         return total
 
+    def _daily_live_order_count(self) -> int:
+        today = date.today().isoformat()
+        count = 0
+        for row in self.state_store.list_system_events_by_type("live_order_result", limit=1000):
+            if row["payload"].get("submitted_date") == today:
+                count += 1
+        return count
+
     def _is_duplicate(self, request: LiveOrderRequest) -> bool:
         key = _duplicate_key(request)
         for event_type in ("live_order_result", "live_order_halt"):
@@ -880,6 +918,11 @@ def _duplicate_key(request: LiveOrderRequest) -> str:
         f"{request.approval_id}:{request.symbol}:{request.side}:"
         f"{request.quantity}:{request.limit_price}:{submitted_minute}"
     )
+
+
+def _is_step_multiple(value: float, step: float) -> bool:
+    scaled = value / step
+    return abs(scaled - round(scaled)) < 1e-9
 
 
 def _fill_delta(
