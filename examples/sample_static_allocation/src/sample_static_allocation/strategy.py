@@ -50,4 +50,4 @@ class SampleStaticAllocationStrategy(BaseStrategyPlugin):
         )
 
     def _asset_type(self, symbol: str) -> str:
-        return "cash" if symbol == "CASH" else "domestic_etf"
+        return "cash" if symbol == "CASH" or symbol.startswith("CASH_") else "etf"

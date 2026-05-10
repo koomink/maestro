@@ -1,6 +1,7 @@
 from maestro.core.enums import OrderSide
 from maestro.core.exceptions import MissingPriceError
 from maestro.core.ids import new_order_id
+from maestro.core.symbols import is_cash_symbol
 from maestro.execution.base import OrderIntent
 from maestro.portfolio.manager import PortfolioTarget
 from maestro.state.models import PortfolioState
@@ -16,7 +17,7 @@ class OrderBuilder:
         orders: list[OrderIntent] = []
         total_value = current_state.total_value(prices)
         for symbol, target_weight in target.allocations.items():
-            if symbol == "CASH":
+            if is_cash_symbol(symbol):
                 continue
             if symbol not in prices:
                 raise MissingPriceError(f"Missing prices for symbols: {symbol}")

@@ -113,6 +113,17 @@ def test_yahoo_provider_uses_symbol_map_for_provider_symbol():
     assert client.calls[0]["symbol"] == "005930.KS"
 
 
+def test_yahoo_provider_handles_cash_usd_without_external_call():
+    client = FakeYahooClient({})
+    provider = YahooDataProvider(client=client, symbol_map={"AAPL": "AAPL"})
+
+    bundle = provider.get_data([request(symbol="CASH_USD")])
+
+    assert bundle.data["CASH_USD"]["latest_price"]["price"] == 1.0
+    assert bundle.data["CASH_USD"]["latest_price"]["source"] == "cash_reference"
+    assert client.calls == []
+
+
 def test_yahoo_provider_rejects_missing_symbol():
     provider = YahooDataProvider(client=FakeYahooClient({"MISSING": []}))
 

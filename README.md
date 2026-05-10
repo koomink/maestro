@@ -585,6 +585,21 @@ To inspect current state from SQLite:
 maestro status --config configs/paper.yaml
 ```
 
+To run real-data US stock/ETF paper mode:
+
+```bash
+uv sync --extra yahoo
+maestro run-once --config configs/us_etf_yahoo_paper.yaml
+maestro status --config configs/us_etf_yahoo_paper.yaml
+```
+
+`configs/us_etf_yahoo_paper.yaml` uses canonical USD symbols
+`CASH_USD`, `VOO`, `QQQ`, and `SGOV` in the sample allocation, with AAPL and
+MSFT included in the allowed US universe. Yahoo/yfinance supplies external
+market data through Maestro DataHub. Execution remains simulated inside
+`PaperExecutionEngine`; this path does not call KIS, does not submit live
+orders, and does not enable live trading.
+
 To run the paper pipeline with the approval gate enabled:
 
 ```bash

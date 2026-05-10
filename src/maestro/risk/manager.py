@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 from maestro.config.models import RiskConfig
+from maestro.core.symbols import is_cash_symbol
 from maestro.portfolio.manager import PortfolioTarget
 
 
@@ -36,7 +37,7 @@ class RiskManager:
             )
 
         for symbol, weight in list(allocations.items()):
-            if symbol == "CASH":
+            if is_cash_symbol(symbol):
                 continue
             if weight > self.config.max_single_asset_weight:
                 excess = weight - self.config.max_single_asset_weight
@@ -45,11 +46,14 @@ class RiskManager:
                 max_weight = self.config.max_single_asset_weight
                 modifications.append(f"Capped {symbol} from {weight:.6f} to {max_weight:.6f}")
 
-        cash = allocations.get("CASH", 0.0)
+        cash_symbol = self._cash_symbol(allocations)
+        cash = allocations.get(cash_symbol, 0.0)
         if cash < self.config.min_cash_weight:
             needed = self.config.min_cash_weight - cash
             reducible = [
-                symbol for symbol in allocations if symbol != "CASH" and allocations[symbol] > 0
+                symbol
+                for symbol in allocations
+                if not is_cash_symbol(symbol) and allocations[symbol] > 0
             ]
             non_cash_total = sum(allocations[symbol] for symbol in reducible)
             if non_cash_total <= 0:
@@ -58,14 +62,15 @@ class RiskManager:
                 for symbol in reducible:
                     reduction = needed * (allocations[symbol] / non_cash_total)
                     allocations[symbol] -= reduction
-                allocations["CASH"] = self.config.min_cash_weight
-                modifications.append(f"Raised CASH to {self.config.min_cash_weight:.6f}")
+                allocations[cash_symbol] = self.config.min_cash_weight
+                modifications.append(f"Raised {cash_symbol} to {self.config.min_cash_weight:.6f}")
 
         gross = sum(allocations.values())
         if gross > 1.000001:
             violations.append("Gross exposure exceeds 1.0")
         elif gross < 1.0:
-            allocations["CASH"] = allocations.get("CASH", 0.0) + (1.0 - gross)
+            cash_symbol = self._cash_symbol(allocations)
+            allocations[cash_symbol] = allocations.get(cash_symbol, 0.0) + (1.0 - gross)
 
         adjusted = PortfolioTarget(
             timestamp=target.timestamp,
@@ -78,3 +83,12 @@ class RiskManager:
             modifications=modifications,
             violations=violations,
         )
+
+    def _cash_symbol(self, allocations: dict[str, float]) -> str:
+        for symbol in allocations:
+            if is_cash_symbol(symbol):
+                return symbol
+        for symbol in self.allowed_symbols:
+            if is_cash_symbol(symbol):
+                return symbol
+        return "CASH"

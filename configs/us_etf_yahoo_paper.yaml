@@ -1,0 +1,129 @@
+mode: paper
+
+portfolio:
+  base_currency: USD
+  initial_cash: 10000
+  allowed_symbols:
+    - CASH_USD
+    - AAPL
+    - MSFT
+    - VOO
+    - QQQ
+    - SGOV
+
+universe:
+  instruments:
+    - symbol: CASH_USD
+      asset_type: cash
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: USD
+      quantity_step: 0.01
+      price_tick: 0.01
+      min_order_quantity: 0.01
+      min_order_notional: 0
+    - symbol: AAPL
+      asset_type: stock
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: AAPL
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: MSFT
+      asset_type: stock
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: MSFT
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: VOO
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: VOO
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: QQQ
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: QQQ
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: SGOV
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: SGOV
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+
+strategies:
+  - id: sample_static_allocation
+    enabled: true
+    mode: paper
+    weight: 1.0
+    entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
+    config:
+      allocations:
+        CASH_USD: 0.1
+        VOO: 0.45
+        QQQ: 0.25
+        SGOV: 0.2
+
+datahub:
+  provider: yahoo
+  stale_after_seconds: 604800
+  symbol_map:
+    AAPL: AAPL
+    MSFT: MSFT
+    VOO: VOO
+    QQQ: QQQ
+    SGOV: SGOV
+
+execution:
+  engine: paper
+
+risk:
+  max_single_asset_weight: 0.5
+  min_cash_weight: 0.05
+
+state:
+  sqlite_path: var/us_etf_yahoo_paper_state.db
+
+audit:
+  jsonl_path: var/us_etf_yahoo_paper_audit.jsonl
+
+approval:
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
+  timeout_seconds: 300

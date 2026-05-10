@@ -102,6 +102,7 @@ def test_current_sample_configs_load():
         "configs/live_readonly.yaml",
         "configs/kis_live_readonly.example.yaml",
         "configs/live_approval.example.yaml",
+        "configs/us_etf_yahoo_paper.yaml",
     ]:
         assert load_config(path)
 
@@ -163,6 +164,37 @@ def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
 
     with pytest.raises(ValidationError, match="TSLA"):
         load_config(config_path)
+
+
+def test_us_etf_yahoo_paper_config_declares_usd_universe_and_symbol_map():
+    config = load_config("configs/us_etf_yahoo_paper.yaml")
+
+    assert config.mode == "paper"
+    assert config.portfolio.base_currency == "USD"
+    assert config.datahub.provider == "yahoo"
+    assert config.execution.engine == "paper"
+    assert config.portfolio.allowed_symbols == [
+        "CASH_USD",
+        "AAPL",
+        "MSFT",
+        "VOO",
+        "QQQ",
+        "SGOV",
+    ]
+    universe_symbols = {instrument.symbol for instrument in config.universe.instruments}
+    assert set(config.portfolio.allowed_symbols) == universe_symbols
+    for symbol in ["AAPL", "MSFT", "VOO", "QQQ", "SGOV"]:
+        assert config.datahub.symbol_map[symbol] == symbol
+        assert config.universe.get(symbol).broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
+        assert config.universe.get(symbol).currency == "USD"
+        assert config.universe.get(symbol).quantity_step == 1
+        assert config.universe.get(symbol).price_tick == 0.01
+    assert "CASH_USD" not in config.datahub.symbol_map
+    assert config.universe.get("AAPL").exchange_code == "NASD"
+    assert config.universe.get("MSFT").exchange_code == "NASD"
+    assert config.universe.get("QQQ").exchange_code == "NASD"
+    assert config.universe.get("VOO").exchange_code == "AMEX"
+    assert config.universe.get("SGOV").exchange_code == "AMEX"
 
 
 def test_live_approval_example_config_has_no_hardcoded_secrets(

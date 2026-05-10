@@ -73,6 +73,20 @@ class YahooDataProvider(BaseDataProvider):
         generated_at = utc_now()
         data: dict[str, Any] = {}
         for request in requests:
+            if request.symbol.startswith("CASH"):
+                data[request.symbol] = SymbolData(
+                    symbol=request.symbol,
+                    latest_price=PricePoint(
+                        symbol=request.symbol,
+                        timestamp=generated_at,
+                        price=1.0,
+                        source="cash_reference",
+                    ),
+                    bars=[],
+                    is_stale=False,
+                    warnings=[],
+                ).model_dump(mode="json")
+                continue
             provider_symbol = self.symbol_map.get(request.symbol, request.symbol)
             rows = self._fetch_rows(request, provider_symbol)
             if not rows:

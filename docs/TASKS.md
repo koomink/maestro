@@ -293,13 +293,13 @@
 
 ### v0.7.1 Real-data US Stock/ETF Paper Mode
 
-- [ ] Add Yahoo/yfinance paper config for US-listed stocks and ETFs
-- [ ] Add USD universe example with AAPL, MSFT, VOO, QQQ, and SGOV-style instruments
-- [ ] Document DataHub symbol mapping for external provider symbols
-- [ ] Validate paper-mode freshness behavior with real-data providers
-- [ ] Confirm `PaperExecutionEngine` remains simulated execution inside Maestro
-- [ ] Keep KIS out of strategy research data
-- [ ] Keep normal tests fake-client/fixture based
+- [x] Add Yahoo/yfinance paper config for US-listed stocks and ETFs
+- [x] Add USD universe example with AAPL, MSFT, VOO, QQQ, and SGOV-style instruments
+- [x] Document DataHub symbol mapping for external provider symbols
+- [x] Validate paper-mode path with fixture Yahoo data in normal tests
+- [x] Confirm `PaperExecutionEngine` remains simulated execution inside Maestro
+- [x] Keep KIS out of strategy research data
+- [x] Keep normal tests fake-client/fixture based
 
 ### v0.7.2 KIS Overseas Read-only Adapter
 

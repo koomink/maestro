@@ -238,14 +238,15 @@ live auto-trading remains out of scope.
 
 ## v0.7.1 — Real-data US Stock/ETF Paper Mode
 
-Planned scope:
+Started scope:
 
 - Yahoo/yfinance paper config for US-listed stocks and ETFs
 - USD base-currency paper universe
-- AAPL, MSFT, VOO, QQQ, and SGOV-style example instruments
+- AAPL, MSFT, VOO, QQQ, and SGOV example instruments
 - DataHub symbol mapping examples for external provider symbols
 - Freshness policy for real market data in paper mode
 - Clear docs that paper execution is simulated inside Maestro
+- `CASH_USD` handled as a cash reference price without a Yahoo call
 
 This milestone proves the overseas stock/ETF research-data path without broker
 execution. It should not call KIS for strategy research data.
