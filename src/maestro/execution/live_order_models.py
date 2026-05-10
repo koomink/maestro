@@ -1,0 +1,194 @@
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
+
+from maestro.core.enums import OrderSide, OrderStatus, OrderType
+
+
+class BrokerOrderId(BaseModel):
+    broker: str
+    broker_order_id: str
+    broker_order_org_no: str | None = None
+    order_id: str
+    submitted_at: str
+
+
+class LiveOrderRequest(BaseModel):
+    order_id: str
+    symbol: str
+    side: OrderSide
+    quantity: float = Field(gt=0)
+    limit_price: float = Field(gt=0)
+    order_type: OrderType = OrderType.LIMIT
+    approval_id: str
+    run_id: str
+    duplicate_key: str | None = None
+
+    @property
+    def notional(self) -> float:
+        return self.quantity * self.limit_price
+
+    @model_validator(mode="after")
+    def validate_limit_order(self) -> "LiveOrderRequest":
+        if self.order_type != OrderType.LIMIT:
+            raise ValueError("Live orders must be limit orders")
+        return self
+
+
+class LiveOrderResult(BaseModel):
+    order_id: str
+    status: OrderStatus
+    broker_order: BrokerOrderId | None = None
+    filled_quantity: float = 0.0
+    average_fill_price: float | None = None
+    message: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def live_notional(self) -> float:
+        if self.average_fill_price is None:
+            return 0.0
+        return self.filled_quantity * self.average_fill_price
+
+
+class FillEvent(BaseModel):
+    broker_order_id: str
+    symbol: str
+    quantity: float
+    price: float
+    filled_at: str
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def notional(self) -> float:
+        return self.quantity * self.price
+
+
+class PartialFillSummary(BaseModel):
+    ordered_quantity: float
+    filled_quantity: float
+    remaining_quantity: float
+    average_fill_price: float | None = None
+    fill_count: int = 0
+
+    @property
+    def filled_notional(self) -> float:
+        if self.average_fill_price is None:
+            return 0.0
+        return self.filled_quantity * self.average_fill_price
+
+
+class LiveOrderStatusSnapshot(BaseModel):
+    broker_order: BrokerOrderId
+    status: OrderStatus
+    checked_at: str
+    symbol: str | None = None
+    side: OrderSide | None = None
+    partial_fill: PartialFillSummary
+    fills: list[FillEvent] = Field(default_factory=list)
+    raw_status: str | None = None
+    message: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class AppliedFill(BaseModel):
+    broker_order_id: str
+    symbol: str
+    side: OrderSide
+    quantity: float
+    price: float
+    notional: float
+    cumulative_filled_quantity: float
+    cumulative_filled_notional: float
+    status_checked_at: str
+
+
+class SkippedFill(BaseModel):
+    broker_order_id: str
+    status_checked_at: str
+    reason: str
+    status: OrderStatus
+
+
+class FillReconciliationResult(BaseModel):
+    run_id: str
+    checked_at: str
+    applied_fills: list[AppliedFill] = Field(default_factory=list)
+    skipped_fills: list[SkippedFill] = Field(default_factory=list)
+    portfolio_updated: bool = False
+    cash: float
+    positions: dict[str, float]
+
+
+class LiveOrderCancelRequest(BaseModel):
+    run_id: str
+    approval_id: str
+    broker_order: BrokerOrderId
+    reason: str | None = None
+
+
+class LiveOrderCancelResult(BaseModel):
+    broker_order: BrokerOrderId
+    status: OrderStatus
+    canceled_quantity: float
+    message: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class LiveOrderWorkflowResult(BaseModel):
+    run_id: str
+    workflow_status: OrderStatus
+    order_id: str
+    broker_order_id: str | None = None
+    submitted_order: LiveOrderResult | None = None
+    status_snapshot: LiveOrderStatusSnapshot | None = None
+    fill_reconciliation: FillReconciliationResult | None = None
+    broker_reconciliation: dict[str, Any] | None = None
+    applied_fills: list[AppliedFill] = Field(default_factory=list)
+    halt_reason: str | None = None
+    failed_reason: str | None = None
+    checked_at: str
+
+
+class LiveOrderLifecycleNotification(BaseModel):
+    run_id: str
+    order_id: str
+    status: OrderStatus
+    message: str
+    broker_order_id: str | None = None
+
+
+class LiveOrderLifecycleResult(BaseModel):
+    run_id: str
+    order_id: str
+    final_status: OrderStatus
+    broker_order_id: str | None = None
+    submitted_order: LiveOrderResult | None = None
+    poll_count: int = 0
+    status_snapshots: list[LiveOrderStatusSnapshot] = Field(default_factory=list)
+    applied_fills: list[AppliedFill] = Field(default_factory=list)
+    fill_reconciliations: list[FillReconciliationResult] = Field(default_factory=list)
+    broker_reconciliations: list[dict[str, Any]] = Field(default_factory=list)
+    notifications_sent: list[LiveOrderLifecycleNotification] = Field(default_factory=list)
+    max_polls_reached: bool = False
+    halt_reason: str | None = None
+    failed_reason: str | None = None
+    checked_at: str
+
+
+__all__ = [
+    "AppliedFill",
+    "BrokerOrderId",
+    "FillEvent",
+    "FillReconciliationResult",
+    "LiveOrderCancelRequest",
+    "LiveOrderCancelResult",
+    "LiveOrderLifecycleNotification",
+    "LiveOrderLifecycleResult",
+    "LiveOrderRequest",
+    "LiveOrderResult",
+    "LiveOrderStatusSnapshot",
+    "LiveOrderWorkflowResult",
+    "PartialFillSummary",
+    "SkippedFill",
+]

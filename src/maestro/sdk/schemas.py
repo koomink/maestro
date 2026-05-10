@@ -7,6 +7,7 @@ from maestro.core.enums import AssetType, RunMode, StrategyMode
 
 
 class StrategyManifest(BaseModel):
+    sdk_contract_version: str = "0.9"
     strategy_id: str
     name: str
     version: str
@@ -20,6 +21,9 @@ class StrategyManifest(BaseModel):
     can_run_live: bool = False
     can_use_leverage: bool = False
     can_short: bool = False
+    supports_dynamic_universe: bool = False
+    max_candidate_symbols: int | None = Field(default=None, ge=0)
+    allowed_data_types: list[str] = Field(default_factory=list)
 
 
 class StrategyContext(BaseModel):
@@ -35,9 +39,23 @@ class DataRequest(BaseModel):
     symbol: str
     asset_type: AssetType
     data_type: str
+    intended_use: Literal["research", "tradable"] = "research"
     timeframe: str | None = None
     lookback: int | None = None
     fields: list[str] = Field(default_factory=list)
+
+
+class CandidateInstrumentRequest(BaseModel):
+    symbol: str
+    asset_type: AssetType
+    intended_use: Literal["research", "tradable"] = "research"
+    data_types: list[str] = Field(default_factory=lambda: ["price"])
+    currency: str | None = None
+    region: str | None = None
+    broker_product: str | None = None
+    exchange_code: str | None = None
+    broker_symbol: str | None = None
+    reason: str | None = None
 
 
 class DataBundle(BaseModel):

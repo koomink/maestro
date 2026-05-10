@@ -18,8 +18,13 @@ from maestro.execution.brokers.kis.rest_client import (
     build_kis_rest_live_order_client,
 )
 from maestro.execution.brokers.kis.service import KISReadOnlyService
-from maestro.execution.live_orders import BrokerOrderId, LiveOrderRequest
+from maestro.execution.live_orders import (
+    BrokerOrderId,
+    LiveOrderCancelRequest,
+    LiveOrderRequest,
+)
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
@@ -53,6 +58,42 @@ def test_kis_cli_sync_and_account(tmp_path):
     assert "account_id=MOCK-ACCOUNT" in sync_result.output
     assert account_result.exit_code == 0
     assert "positions=2" in account_result.output
+
+
+def test_live_smoke_kis_readonly_allows_mock_only_when_explicit(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
+
+    result = CliRunner().invoke(app, ["live-smoke", "--config", str(config_path)])
+
+    assert result.exit_code == 2
+    assert "requires kis.provider=kis" in result.output
+    assert "unless --allow-mock is set" in result.output
+
+
+def test_live_smoke_kis_readonly_runs_sync_and_reconciliation_with_mock(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_portfolio_snapshot(
+        "run_existing",
+        PortfolioState(
+            cash=5_000_000.0,
+            positions={"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0},
+        ),
+    )
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
+
+    result = CliRunner().invoke(
+        app,
+        ["live-smoke", "--config", str(config_path), "--check", "kis-readonly", "--allow-mock"],
+    )
+
+    assert result.exit_code == 0
+    assert "check=kis_readonly_snapshot status=ok provider=mock" in result.output
+    assert "account_id=MOCK-ACCOUNT" in result.output
+    assert "check=broker_reconciliation status=ok" in result.output
 
 
 def test_kis_rest_client_normalizes_readonly_responses(monkeypatch):
@@ -117,11 +158,9 @@ def test_kis_readonly_rest_client_exposes_no_order_submission_surface():
     client_source = Path("src/maestro/execution/brokers/kis/rest_client.py").read_text()
     forbidden_tokens = [
         "/order-credit",
-        "/order-rvsecncl",
         "/order-resv",
         "def buy",
         "def sell",
-        "def cancel",
         "def amend",
     ]
 
@@ -319,6 +358,277 @@ def test_kis_overseas_readonly_requires_universe_metadata(monkeypatch):
         raise AssertionError("Expected missing metadata to fail closed")
 
 
+def test_kis_overseas_live_order_client_uses_verified_us_limit_order_payload(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    result = client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_us_1",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=191.25,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    order_call = [call for call in transport.calls if call["url"].endswith("/trading/order")][0]
+    assert result.status == OrderStatus.ACCEPTED_BY_BROKER
+    assert result.broker_order is not None
+    assert result.broker_order.broker_order_id == "9003"
+    assert order_call["method"] == "POST"
+    assert order_call["headers"]["tr_id"] == "TTTT1002U"
+    assert order_call["json_body"] == {
+        "CANO": "12345678",
+        "ACNT_PRDT_CD": "01",
+        "OVRS_EXCG_CD": "NASD",
+        "PDNO": "AAPL",
+        "ORD_QTY": "2",
+        "OVRS_ORD_UNPR": "191.25",
+        "CTAC_TLNO": "",
+        "MGCO_APTM_ODNO": "",
+        "SLL_TYPE": "",
+        "ORD_SVR_DVSN_CD": "0",
+        "ORD_DVSN": "00",
+    }
+
+
+def test_kis_overseas_live_order_client_uses_demo_sell_tr_id(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        paper_trading=True,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_us_2",
+            symbol="VOO",
+            side=OrderSide.SELL,
+            quantity=1,
+            limit_price=500.5,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    order_call = [call for call in transport.calls if call["url"].endswith("/trading/order")][0]
+    assert order_call["headers"]["tr_id"] == "VTTT1006U"
+    assert order_call["json_body"]["OVRS_EXCG_CD"] == "AMEX"
+    assert order_call["json_body"]["SLL_TYPE"] == "00"
+
+
+def test_kis_overseas_live_order_client_normalizes_order_status(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=FakeKISOverseasTransport(),
+        instruments=_us_instruments(),
+    )
+
+    open_snapshot = client.get_order_status(_overseas_broker_order("9002"))
+    filled_snapshot = client.get_order_status(_overseas_broker_order("9001"))
+
+    assert open_snapshot.status == OrderStatus.OPEN
+    assert open_snapshot.symbol == "VOO"
+    assert open_snapshot.partial_fill.remaining_quantity == 1.0
+    assert filled_snapshot.status == OrderStatus.FILLED
+    assert filled_snapshot.symbol == "AAPL"
+    assert filled_snapshot.fills[0].price == 189.5
+
+
+def test_kis_overseas_live_order_client_fails_on_kis_error_response(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=FakeKISOverseasTransport(order_rt_cd="1"),
+        instruments=_us_instruments(),
+    )
+
+    try:
+        client.submit_limit_order(
+            LiveOrderRequest(
+                order_id="ord_live_us_1",
+                symbol="AAPL",
+                side=OrderSide.BUY,
+                quantity=2,
+                limit_price=191.25,
+                approval_id="appr_1",
+                run_id="run_1",
+            )
+        )
+    except ValueError as exc:
+        assert "KIS overseas live order request failed" in str(exc)
+    else:
+        raise AssertionError("Expected KIS error response to fail closed")
+
+
+def test_kis_overseas_live_order_client_unknown_when_order_id_missing(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=FakeKISOverseasTransport(missing_order_id=True),
+        instruments=_us_instruments(),
+    )
+
+    result = client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_us_1",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=191.25,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    assert result.status == OrderStatus.UNKNOWN
+    assert result.broker_order is None
+
+
+def test_kis_overseas_order_status_fails_on_malformed_numeric_field(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=FakeKISOverseasTransport(malformed_order=True),
+        instruments=_us_instruments(),
+    )
+
+    try:
+        client.get_order_status(_overseas_broker_order("9002"))
+    except ValueError as exc:
+        assert "Malformed KIS numeric field" in str(exc)
+    else:
+        raise AssertionError("Expected malformed KIS numeric field to fail closed")
+
+
+def test_kis_overseas_cancel_adapter_uses_verified_cancel_payload(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    result = client.cancel_order(
+        LiveOrderCancelRequest(
+            run_id="run_1",
+            approval_id="appr_1",
+            broker_order=_overseas_broker_order("9002"),
+            reason="operator approved cancel",
+        )
+    )
+
+    cancel_call = [
+        call for call in transport.calls if call["url"].endswith("/trading/order-rvsecncl")
+    ][0]
+    assert result.status == OrderStatus.CANCELED
+    assert result.canceled_quantity == 1.0
+    assert cancel_call["method"] == "POST"
+    assert cancel_call["headers"]["tr_id"] == "TTTT1004U"
+    assert cancel_call["json_body"] == {
+        "CANO": "12345678",
+        "ACNT_PRDT_CD": "01",
+        "OVRS_EXCG_CD": "AMEX",
+        "PDNO": "VOO",
+        "ORGN_ODNO": "9002",
+        "RVSE_CNCL_DVSN_CD": "02",
+        "ORD_QTY": "1",
+        "OVRS_ORD_UNPR": "0",
+        "MGCO_APTM_ODNO": "",
+        "ORD_SVR_DVSN_CD": "0",
+    }
+
+
 def test_kis_live_order_client_normalizes_open_status(monkeypatch):
     client = _kis_live_order_client(monkeypatch, FakeKISTransport())
 
@@ -413,6 +723,16 @@ def _broker_order(order_id: str) -> BrokerOrderId:
         broker_order_id=order_id,
         broker_order_org_no="KRX",
         order_id="ord_live_1",
+        submitted_at="2026-05-08T00:00:00+00:00",
+    )
+
+
+def _overseas_broker_order(order_id: str) -> BrokerOrderId:
+    return BrokerOrderId(
+        broker="kis",
+        broker_order_id=order_id,
+        broker_order_org_no="NASD",
+        order_id="ord_live_us_1",
         submitted_at="2026-05-08T00:00:00+00:00",
     )
 
@@ -602,8 +922,17 @@ class FakeKISTransport:
 
 
 class FakeKISOverseasTransport:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        order_rt_cd: str = "0",
+        missing_order_id: bool = False,
+        malformed_order: bool = False,
+    ) -> None:
         self.calls = []
+        self.order_rt_cd = order_rt_cd
+        self.missing_order_id = missing_order_id
+        self.malformed_order = malformed_order
 
     def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
         self.calls.append(
@@ -678,6 +1007,7 @@ class FakeKISOverseasTransport:
                 ],
             }
         if url.endswith("/inquire-nccs"):
+            order_quantity = "bad" if self.malformed_order else "1"
             return {
                 "rt_cd": "0",
                 "output": [
@@ -685,11 +1015,32 @@ class FakeKISOverseasTransport:
                         "odno": "9002",
                         "pdno": "VOO",
                         "sll_buy_dvsn_cd": "02",
-                        "ft_ord_qty": "1",
+                        "ft_ord_qty": order_quantity,
                         "ft_ccld_qty": "0",
                         "nccs_qty": "1",
                         "ft_ord_unpr3": "500.00",
                     }
                 ],
+            }
+        if url.endswith("/trading/order"):
+            if self.order_rt_cd != "0":
+                return {"rt_cd": self.order_rt_cd, "msg_cd": "EGW001", "msg1": "rejected"}
+            return {
+                "rt_cd": "0",
+                "msg1": "overseas order accepted",
+                "output": {}
+                if self.missing_order_id
+                else {
+                    "ODNO": "9003",
+                    "ORD_TMD": "093001",
+                },
+            }
+        if url.endswith("/trading/order-rvsecncl"):
+            return {
+                "rt_cd": "0",
+                "msg1": "cancel accepted",
+                "output": {
+                    "ODNO": "9002",
+                },
             }
         raise AssertionError(f"Unexpected KIS overseas fake URL: {url}")

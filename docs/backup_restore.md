@@ -44,6 +44,9 @@ maestro status --config <config>
 maestro kis-account --config <config>
 ```
 
+Confirm the `audit_integrity` health check is `ok` or investigate the restored
+audit JSONL before resuming live approval.
+
 5. For broker-connected workflows, run read-only sync and reconciliation before
    allowing live approval:
 

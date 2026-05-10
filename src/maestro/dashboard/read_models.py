@@ -1,5 +1,8 @@
 from typing import Any
 
+from maestro.config.models import MaestroConfig
+from maestro.core.clock import utc_now
+from maestro.monitoring.health import HealthService
 from maestro.state.store import StateStore
 
 
@@ -132,6 +135,170 @@ def build_broker_snapshots_table(store: StateStore, limit: int = 20) -> list[dic
     return rows
 
 
+def build_safety_state_card(store: StateStore) -> dict[str, Any]:
+    latest = store.load_latest_system_event("safety_state")
+    if latest is None:
+        return {
+            "state": "active",
+            "reason": "default",
+            "source": "system",
+            "updated_at": None,
+        }
+    payload = latest.get("payload", {})
+    return {
+        "state": payload.get("state", "unknown"),
+        "reason": payload.get("reason"),
+        "source": payload.get("source"),
+        "updated_at": payload.get("updated_at") or latest.get("created_at"),
+    }
+
+
+def build_health_summary(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
+    report = HealthService(config, store).run()
+    counts = {"ok": 0, "warn": 0, "fail": 0}
+    rows = []
+    for check in report.checks:
+        counts[check.status] = counts.get(check.status, 0) + 1
+        rows.append(
+            {
+                "check": check.name,
+                "status": check.status,
+                "message": check.message,
+                "details": check.details,
+            }
+        )
+    return {
+        "status": report.status,
+        "generated_at": report.generated_at,
+        "counts": counts,
+        "checks": rows,
+    }
+
+
+def build_latest_broker_snapshot_card(store: StateStore) -> dict[str, Any]:
+    latest = store.load_latest_broker_account_snapshot()
+    if latest is None:
+        return {
+            "created_at": None,
+            "account_id": None,
+            "cash": None,
+            "buying_power": None,
+            "positions_count": 0,
+            "source": None,
+        }
+    payload = latest.get("payload", {})
+    account = payload.get("account", {})
+    return {
+        "created_at": latest.get("created_at"),
+        "account_id": latest.get("account_id") or account.get("account_id"),
+        "cash": account.get("cash"),
+        "buying_power": account.get("buying_power"),
+        "positions_count": len(account.get("positions", [])),
+        "source": account.get("source") or payload.get("source"),
+    }
+
+
+def build_latest_reconciliation_card(store: StateStore) -> dict[str, Any]:
+    latest = store.load_latest_system_event("broker_reconciliation")
+    if latest is None:
+        return {
+            "created_at": None,
+            "passed": None,
+            "issues_count": 0,
+            "cash_difference": None,
+            "broker_account_id": None,
+        }
+    payload = latest.get("payload", {})
+    return {
+        "created_at": latest.get("created_at"),
+        "passed": payload.get("passed"),
+        "issues_count": len(payload.get("issues", [])),
+        "cash_difference": payload.get("cash_difference"),
+        "broker_account_id": payload.get("broker_account_id"),
+    }
+
+
+def build_recent_halt_failure_events_table(
+    store: StateStore,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows = []
+    for row in store.list_system_events(limit=100):
+        event_type = str(row.get("event_type") or "")
+        payload = row.get("payload", {})
+        if not _is_halt_or_failure_event(event_type, payload):
+            continue
+        rows.append(_event_row(row))
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def build_live_order_events_table(store: StateStore, limit: int = 20) -> list[dict[str, Any]]:
+    rows = []
+    for row in store.list_system_events(limit=200):
+        event_type = row.get("event_type")
+        if event_type not in {"live_order_status", "live_order_lifecycle"}:
+            continue
+        payload = row.get("payload", {})
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "event_type": event_type,
+                "status": payload.get("status")
+                or (payload.get("snapshot") or {}).get("status")
+                or (payload.get("result") or {}).get("status"),
+                "symbol": payload.get("symbol")
+                or (payload.get("snapshot") or {}).get("symbol")
+                or (payload.get("request") or {}).get("symbol"),
+                "message": payload.get("message") or payload.get("failed_reason"),
+                "payload": payload,
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def build_fill_reconciliation_table(store: StateStore, limit: int = 20) -> list[dict[str, Any]]:
+    rows = []
+    for row in store.list_system_events_by_type("fill_reconciliation", limit=limit):
+        payload = row.get("payload", {})
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "applied_fills": len(payload.get("applied_fills", [])),
+                "skipped_fills": len(payload.get("skipped_fills", [])),
+                "portfolio_updated": payload.get("portfolio_updated"),
+                "cash": payload.get("cash"),
+                "positions_count": len(payload.get("positions", {})),
+                "payload": payload,
+            }
+        )
+    return rows
+
+
+def build_daily_live_order_usage(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
+    today = utc_now().date().isoformat()
+    count = 0
+    notional = 0.0
+    for row in store.list_system_events_by_type("live_order_result", limit=1000):
+        payload = row.get("payload", {})
+        if payload.get("submitted_date") != today:
+            continue
+        count += 1
+        notional += float(payload.get("notional", 0.0))
+    return {
+        "date": today,
+        "order_count": count,
+        "max_daily_live_order_count": config.execution.max_daily_live_order_count,
+        "notional": notional,
+        "max_daily_live_notional": config.execution.max_daily_live_notional,
+    }
+
+
 def build_system_events_table(store: StateStore, limit: int = 20) -> list[dict[str, Any]]:
     rows = []
     for row in store.list_system_events(limit=limit):
@@ -147,3 +314,23 @@ def build_system_events_table(store: StateStore, limit: int = 20) -> list[dict[s
             }
         )
     return rows
+
+
+def _event_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload", {})
+    return {
+        "created_at": row.get("created_at"),
+        "run_id": row.get("run_id"),
+        "event_type": row.get("event_type"),
+        "state": payload.get("state"),
+        "reason": payload.get("reason"),
+        "error_type": payload.get("error_type"),
+        "error_message": payload.get("error_message") or payload.get("error"),
+        "payload": payload,
+    }
+
+
+def _is_halt_or_failure_event(event_type: str, payload: dict[str, Any]) -> bool:
+    if "halt" in event_type or "failure" in event_type or "failed" in event_type:
+        return True
+    return payload.get("state") in {"halted", "killed"}

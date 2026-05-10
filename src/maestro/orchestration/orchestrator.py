@@ -1,5 +1,4 @@
 import traceback
-from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -23,14 +22,23 @@ from maestro.execution.live_orders import (
     LiveOrderStatusClient,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.data_quality import (
+    data_quality_issues as collect_data_quality_issues,
+)
+from maestro.orchestration.data_quality import (
+    prices_from_bundle,
+)
+from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.manager import PortfolioManager
 from maestro.risk.manager import RiskManager
 from maestro.safety.controls import SafetyControlService
-from maestro.sdk import StrategyContext, TargetAllocationResult
+from maestro.sdk import CandidateInstrumentRequest, StrategyContext, TargetAllocationResult
 from maestro.signals.validator import SignalValidator
+from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
+from maestro.universe.dynamic import DynamicUniverseService, InstrumentResolver
 
 
 class RunOnceSummary(BaseModel):
@@ -77,28 +85,37 @@ class MaestroOrchestrator:
         current_state = self.state_store.load_latest_portfolio_state()
         valid_results: list[TargetAllocationResult] = []
         strategy_ids = self.registry.strategy_ids
-        validator = SignalValidator(self.config.portfolio.allowed_symbols, strategy_ids)
         data_requests_by_strategy = {}
         data_quality_issues: list[dict[str, Any]] = []
         prices = {"CASH": 1.0}
 
         try:
+            self._record_event(
+                run_id,
+                SystemEventType.MAESTRO_HEARTBEAT,
+                {"mode": self.config.mode.value, "phase": "run_once_started"},
+            )
+            dynamic_symbols = self._evaluate_dynamic_universe(run_id, current_state)
+            run_allowed_symbols = set(self.config.portfolio.allowed_symbols) | dynamic_symbols
+            validator = SignalValidator.with_universe_boundaries(
+                tradable_symbols=run_allowed_symbols,
+                research_only_symbols=set(self.config.universe.research_symbols),
+                strategy_ids=strategy_ids,
+            )
+            risk_manager = (
+                RiskManager(sorted(run_allowed_symbols), self.config.risk)
+                if dynamic_symbols
+                else self.risk_manager
+            )
             for loaded in self.registry.strategies:
-                context = StrategyContext(
-                    cycle_id=run_id,
-                    timestamp=utc_now(),
-                    run_mode=self.config.mode,
-                    strategy_id=loaded.config.id,
-                    portfolio_state=current_state.model_dump(mode="json"),
-                    config=loaded.config.config,
-                )
+                context = self._strategy_context(run_id, loaded, current_state)
                 requests = loaded.plugin.build_data_requests(context)
                 data_requests_by_strategy[loaded.config.id] = [
                     request.model_dump(mode="json") for request in requests
                 ]
                 data_bundle = self.datahub.get_data(requests)
-                data_quality_issues.extend(self._data_quality_issues(data_bundle))
-                prices.update(self._prices_from_bundle(data_bundle))
+                data_quality_issues.extend(collect_data_quality_issues(data_bundle))
+                prices.update(prices_from_bundle(data_bundle))
                 result = loaded.plugin.run(data_bundle, context)
                 validation = validator.validate(result)
                 self.state_store.save_strategy_run(
@@ -116,7 +133,7 @@ class MaestroOrchestrator:
                 valid_results.append(result)
 
             target = self.portfolio_manager.build_target(valid_results)
-            risk_decision = self.risk_manager.check(target)
+            risk_decision = risk_manager.check(target)
             self.state_store.save_risk_decision(
                 run_id,
                 risk_decision.approved,
@@ -125,8 +142,39 @@ class MaestroOrchestrator:
             if not risk_decision.approved:
                 raise ValueError(f"Risk check failed: {risk_decision.violations}")
 
-            orders = self.execution.propose_orders(current_state, risk_decision.target, prices)
             safety_state = self.safety.current_state()
+            if self.config.mode == RunMode.LIVE_APPROVAL and data_quality_issues:
+                live_blocks = self._live_execution_blocks(run_id, [], data_quality_issues)
+                if live_blocks:
+                    self.safety.halt(
+                        run_id,
+                        "Live approval blocked by production hardening gate.",
+                        source="system",
+                    )
+                return self._finish_live_blocked_run(
+                    run_id,
+                    current_state,
+                    prices,
+                    data_requests_by_strategy,
+                    valid_results,
+                    target,
+                    risk_decision,
+                    safety_state,
+                    live_blocks,
+                    "before_order_generation",
+                )
+
+            orders = self.execution.propose_orders(current_state, risk_decision.target, prices)
+            if orders and self.config.mode == RunMode.LIVE_APPROVAL:
+                self._record_live_proposal_data_snapshot(
+                    run_id,
+                    orders,
+                    data_requests_by_strategy,
+                    prices,
+                    data_quality_issues,
+                    target,
+                    risk_decision,
+                )
             live_blocks = self._live_execution_blocks(run_id, orders, data_quality_issues)
             if (
                 orders
@@ -139,43 +187,18 @@ class MaestroOrchestrator:
                         "Live approval blocked by production hardening gate.",
                         source="system",
                     )
-                self.safety.record_blocked_execution(
+                return self._finish_live_blocked_run(
                     run_id,
-                    self.config.mode.value,
+                    current_state,
+                    prices,
+                    data_requests_by_strategy,
+                    valid_results,
+                    target,
+                    risk_decision,
                     safety_state,
+                    live_blocks,
                     "before_approval",
                 )
-                next_state = current_state
-                self.state_store.save_portfolio_snapshot(run_id, next_state)
-                summary = RunOnceSummary(
-                    run_id=run_id,
-                    loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
-                    orders_created=0,
-                    total_value=next_state.total_value(prices),
-                    cash=next_state.cash,
-                )
-                self.audit.log(
-                    run_id,
-                    "run_once_completed",
-                    {
-                        "loaded_strategies": summary.loaded_strategies,
-                        "data_requests": data_requests_by_strategy,
-                        "strategy_results": [
-                            result.model_dump(mode="json") for result in valid_results
-                        ],
-                        "portfolio_target": target.model_dump(mode="json"),
-                        "risk_decision": risk_decision.model_dump(mode="json"),
-                        "approval_request": None,
-                        "approval_decision": None,
-                        "paper_orders": [],
-                        "execution_results": [],
-                        "safety_state": safety_state.model_dump(mode="json"),
-                        "live_blocks": live_blocks,
-                        "execution_skipped": True,
-                        "state_summary": next_state.summary(prices),
-                    },
-                )
-                return summary
             if orders and self.config.mode == RunMode.PAPER and safety_state.blocks_live_execution:
                 self.safety.record_warning(
                     run_id,
@@ -186,7 +209,7 @@ class MaestroOrchestrator:
             if orders and self.config.mode == RunMode.PAPER and data_quality_issues:
                 self._record_event(
                     run_id,
-                    "stale_data_warning",
+                    SystemEventType.STALE_DATA_WARNING,
                     {"issues": data_quality_issues, "mode": self.config.mode.value},
                 )
             approval_request, approval_decision, approval_message = (
@@ -221,7 +244,7 @@ class MaestroOrchestrator:
                     execution_results = []
                     self.state_store.save_system_event(
                         run_id,
-                        "execution_skipped",
+                        SystemEventType.EXECUTION_SKIPPED,
                         {"approval_status": approval_decision.status},
                     )
                 elif self.config.mode == RunMode.LIVE_APPROVAL:
@@ -279,6 +302,15 @@ class MaestroOrchestrator:
                     "state_summary": next_state.summary(prices),
                 },
             )
+            self.state_store.save_system_event(
+                run_id,
+                "run_once_completed",
+                {
+                    "orders_created": summary.orders_created,
+                    "total_value": summary.total_value,
+                    "cash": summary.cash,
+                },
+            )
             return summary
         except Exception as exc:
             self.audit.log(
@@ -302,59 +334,67 @@ class MaestroOrchestrator:
             )
             raise
 
-    def _prices_from_bundle(self, data_bundle) -> dict[str, float]:
-        prices = {}
-        for symbol, payload in data_bundle.data.items():
-            if isinstance(payload, dict) and "price" in payload:
-                prices[symbol] = float(payload["price"])
-            elif isinstance(payload, dict) and isinstance(payload.get("latest_price"), dict):
-                prices[symbol] = float(payload["latest_price"]["price"])
-            elif getattr(payload, "latest_price", None) is not None:
-                prices[symbol] = float(payload.latest_price.price)
-        return prices
+    def _strategy_context(
+        self, run_id: str, loaded, current_state: PortfolioState
+    ) -> StrategyContext:
+        return StrategyContext(
+            cycle_id=run_id,
+            timestamp=utc_now(),
+            run_mode=self.config.mode,
+            strategy_id=loaded.config.id,
+            portfolio_state=current_state.model_dump(mode="json"),
+            config=loaded.config.config,
+        )
 
-    def _data_quality_issues(self, data_bundle) -> list[dict[str, Any]]:
-        issues = []
-        for request in data_bundle.requests:
-            payload = data_bundle.data.get(request.symbol)
-            if not isinstance(payload, dict):
-                issues.append(
-                    {
-                        "symbol": request.symbol,
-                        "data_type": request.data_type,
-                        "source": data_bundle.source,
-                        "timestamp": None,
-                        "reason": "missing_payload",
-                    }
-                )
+    def _evaluate_dynamic_universe(
+        self,
+        run_id: str,
+        current_state: PortfolioState,
+    ) -> set[str]:
+        requests_by_strategy: dict[str, list[CandidateInstrumentRequest]] = {}
+        for loaded in self.registry.strategies:
+            if not loaded.manifest.supports_dynamic_universe:
                 continue
-            latest_price = payload.get("latest_price")
-            timestamp = None
-            source = data_bundle.source
-            if isinstance(latest_price, dict):
-                timestamp = latest_price.get("timestamp")
-                source = latest_price.get("source") or source
-            if payload.get("is_stale"):
-                issues.append(
-                    {
-                        "symbol": request.symbol,
-                        "data_type": request.data_type,
-                        "source": source,
-                        "timestamp": timestamp,
-                        "reason": "stale",
-                    }
+            requests = loaded.plugin.build_candidate_requests(
+                self._strategy_context(run_id, loaded, current_state)
+            )
+            max_candidates = loaded.manifest.max_candidate_symbols
+            if max_candidates is not None and len(requests) > max_candidates:
+                raise ValueError(
+                    f"{loaded.config.id} produced too many candidate symbols: "
+                    f"{len(requests)} > {max_candidates}"
                 )
-            if request.data_type == "price" and latest_price is None:
-                issues.append(
-                    {
-                        "symbol": request.symbol,
-                        "data_type": request.data_type,
-                        "source": source,
-                        "timestamp": timestamp,
-                        "reason": "missing_latest_price",
-                    }
-                )
-        return issues
+            if requests:
+                requests_by_strategy[loaded.config.id] = requests
+        if not requests_by_strategy:
+            return set()
+
+        service = DynamicUniverseService(
+            self.config.universe.policy,
+            InstrumentResolver(self.config.universe.instruments),
+        )
+        approved_symbols: set[str] = set()
+        evaluations_payload = {}
+        for strategy_id, requests in requests_by_strategy.items():
+            evaluations = service.evaluate(requests)
+            evaluations_payload[strategy_id] = [
+                evaluation.model_dump(mode="json") for evaluation in evaluations
+            ]
+            approved_symbols.update(
+                evaluation.instrument.symbol
+                for evaluation in evaluations
+                if evaluation.tradable and evaluation.instrument is not None
+            )
+        self._record_event(
+            run_id,
+            SystemEventType.DYNAMIC_UNIVERSE_EVALUATION,
+            {
+                "strategies": evaluations_payload,
+                "approved_symbols": sorted(approved_symbols),
+                "persistent": False,
+            },
+        )
+        return approved_symbols
 
     def _live_execution_blocks(
         self,
@@ -362,122 +402,112 @@ class MaestroOrchestrator:
         orders: list[OrderIntent],
         data_quality_issues: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        if self.config.mode != RunMode.LIVE_APPROVAL or not orders:
-            return []
-        blocks = []
-        if data_quality_issues:
-            payload = {"issues": data_quality_issues, "mode": self.config.mode.value}
-            self._record_event(run_id, "stale_data_halt", payload)
-            blocks.append({"event_type": "stale_data_halt", **payload})
+        return LiveExecutionGateService(
+            self.config,
+            self.state_store,
+            self.audit,
+            now_fn=utc_now,
+        ).evaluate(
+            run_id,
+            orders,
+            data_quality_issues,
+        )
 
-        reconciliation_block = self._reconciliation_block()
-        if reconciliation_block is not None:
-            self._record_event(run_id, "broker_reconciliation_halt", reconciliation_block)
-            blocks.append({"event_type": "broker_reconciliation_halt", **reconciliation_block})
+    def _prices_from_bundle(self, data_bundle) -> dict[str, float]:
+        return prices_from_bundle(data_bundle)
 
-        limit_block = self._daily_limit_block(orders)
-        if limit_block is not None:
-            self._record_event(run_id, "live_order_limit_halt", limit_block)
-            blocks.append({"event_type": "live_order_limit_halt", **limit_block})
+    def _data_quality_issues(self, data_bundle) -> list[dict[str, Any]]:
+        return collect_data_quality_issues(data_bundle)
 
-        instrument_block = self._instrument_validation_block(orders)
-        if instrument_block is not None:
-            self._record_event(run_id, "instrument_validation_halt", instrument_block)
-            blocks.append({"event_type": "instrument_validation_halt", **instrument_block})
+    def _record_event(
+        self,
+        run_id: str,
+        event_type: SystemEventType | str,
+        payload: dict[str, Any],
+    ) -> None:
+        save_audited_system_event(self.state_store, self.audit, run_id, event_type, payload)
 
-        if self.config.execution.daily_loss_limit is not None:
-            payload = {
-                "reason": "broker_pnl_normalization_unavailable",
-                "daily_loss_limit": self.config.execution.daily_loss_limit,
-            }
-            self._record_event(run_id, "daily_loss_limit_halt", payload)
-            blocks.append({"event_type": "daily_loss_limit_halt", **payload})
-        return blocks
-
-    def _reconciliation_block(self) -> dict[str, Any] | None:
-        if not self.config.execution.require_reconciliation_pass:
-            return None
-        latest = self.state_store.load_latest_system_event("broker_reconciliation")
-        if latest is None:
-            return {"reason": "missing_reconciliation"}
-        if latest["payload"].get("passed") is not True:
-            return {
-                "reason": "failed_reconciliation",
-                "reconciliation": latest["payload"],
-            }
-        created_at = self._parse_store_created_at(latest["created_at"])
-        age_seconds = (utc_now() - created_at).total_seconds()
-        if age_seconds > self.config.reconciliation.max_age_seconds:
-            return {
-                "reason": "stale_reconciliation",
-                "created_at": latest["created_at"],
-                "age_seconds": age_seconds,
-                "max_age_seconds": self.config.reconciliation.max_age_seconds,
-            }
-        return None
-
-    def _daily_limit_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
-        today = utc_now().date().isoformat()
-        existing_notional = 0.0
-        existing_count = 0
-        for row in self.state_store.list_system_events_by_type("live_order_result", limit=1000):
-            payload = row["payload"]
-            if payload.get("submitted_date") == today:
-                existing_count += 1
-                existing_notional += float(payload.get("notional", 0.0))
-        proposed_notional = sum(order.notional for order in orders)
-        proposed_count = len(orders)
-        if existing_notional + proposed_notional > self.config.execution.max_daily_live_notional:
-            return {
-                "reason": "daily_notional_exceeded",
-                "existing_notional": existing_notional,
-                "proposed_notional": proposed_notional,
-                "max_daily_live_notional": self.config.execution.max_daily_live_notional,
-            }
-        max_count = self.config.execution.max_daily_live_order_count
-        if max_count > 0 and existing_count + proposed_count > max_count:
-            return {
-                "reason": "daily_order_count_exceeded",
-                "existing_count": existing_count,
-                "proposed_count": proposed_count,
-                "max_daily_live_order_count": max_count,
-            }
-        return None
-
-    def _instrument_validation_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
-        instruments = {
-            instrument.symbol: instrument for instrument in self.config.universe.instruments
+    def _record_live_proposal_data_snapshot(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        data_requests_by_strategy: dict[str, Any],
+        prices: dict[str, float],
+        data_quality_issues: list[dict[str, Any]],
+        target,
+        risk_decision,
+    ) -> None:
+        order_symbols = {order.symbol for order in orders}
+        payload = {
+            "data_requests": data_requests_by_strategy,
+            "prices": {symbol: prices[symbol] for symbol in sorted(prices) if symbol in prices},
+            "order_prices": {
+                symbol: prices[symbol] for symbol in sorted(order_symbols) if symbol in prices
+            },
+            "data_quality_issues": data_quality_issues,
+            "portfolio_target": target.model_dump(mode="json"),
+            "risk_decision": risk_decision.model_dump(mode="json"),
+            "proposed_orders": [order.model_dump(mode="json") for order in orders],
         }
-        if not instruments:
-            return None
-        for order in orders:
-            instrument = instruments.get(order.symbol)
-            if instrument is None:
-                return {"reason": "missing_instrument", "symbol": order.symbol}
-            if instrument.currency.value != self.config.portfolio.base_currency:
-                return {"reason": "currency_mismatch", "symbol": order.symbol}
-            if instrument.broker_product != self.config.kis.broker_product:
-                return {"reason": "broker_product_mismatch", "symbol": order.symbol}
-            if order.quantity < instrument.min_order_quantity:
-                return {"reason": "min_order_quantity", "symbol": order.symbol}
-            if order.notional < instrument.min_order_notional:
-                return {"reason": "min_order_notional", "symbol": order.symbol}
-            if not self._is_step_multiple(order.quantity, instrument.quantity_step):
-                return {"reason": "quantity_step", "symbol": order.symbol}
-            if not self._is_step_multiple(order.price, instrument.price_tick):
-                return {"reason": "price_tick", "symbol": order.symbol}
-        return None
+        self._record_event(run_id, "live_proposal_data_snapshot", payload)
 
-    def _record_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        self.state_store.save_system_event(run_id, event_type, payload)
-        self.audit.log(run_id, event_type, payload)
-
-    def _parse_store_created_at(self, value: str) -> datetime:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
-
-    def _is_step_multiple(self, value: float, step: float) -> bool:
-        scaled = value / step
-        return abs(scaled - round(scaled)) < 1e-9
+    def _finish_live_blocked_run(
+        self,
+        run_id: str,
+        current_state: PortfolioState,
+        prices: dict[str, float],
+        data_requests_by_strategy: dict[str, Any],
+        valid_results: list[TargetAllocationResult],
+        target,
+        risk_decision,
+        safety_state,
+        live_blocks: list[dict[str, Any]],
+        blocked_at: str,
+    ) -> RunOnceSummary:
+        self.safety.record_blocked_execution(
+            run_id,
+            self.config.mode.value,
+            safety_state,
+            blocked_at,
+        )
+        self.state_store.save_portfolio_snapshot(run_id, current_state)
+        summary = RunOnceSummary(
+            run_id=run_id,
+            loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
+            orders_created=0,
+            total_value=current_state.total_value(prices),
+            cash=current_state.cash,
+        )
+        self.audit.log(
+            run_id,
+            "run_once_completed",
+            {
+                "loaded_strategies": summary.loaded_strategies,
+                "data_requests": data_requests_by_strategy,
+                "strategy_results": [result.model_dump(mode="json") for result in valid_results],
+                "portfolio_target": target.model_dump(mode="json"),
+                "risk_decision": risk_decision.model_dump(mode="json"),
+                "approval_request": None,
+                "approval_decision": None,
+                "paper_orders": [],
+                "execution_results": [],
+                "safety_state": safety_state.model_dump(mode="json"),
+                "live_blocks": live_blocks,
+                "execution_skipped": True,
+                "state_summary": current_state.summary(prices),
+            },
+        )
+        self.state_store.save_system_event(
+            run_id,
+            "run_once_completed",
+            {
+                "orders_created": summary.orders_created,
+                "total_value": summary.total_value,
+                "cash": summary.cash,
+                "execution_skipped": True,
+            },
+        )
+        return summary
 
     def _execute_live_approval_orders(
         self,
@@ -495,6 +525,14 @@ class MaestroOrchestrator:
                 "before_lifecycle",
             )
             return [], self.state_store.load_latest_portfolio_state()
+
+        if self.config.execution.live_order_dry_run:
+            return self._record_live_order_dry_run(
+                run_id,
+                orders,
+                approval_id,
+                approval_decision,
+            )
 
         dependencies = build_live_approval_dependencies(
             self.config,
@@ -521,3 +559,32 @@ class MaestroOrchestrator:
             )
             lifecycle_results.append(dependencies.lifecycle_service.run(request, approval_decision))
         return lifecycle_results, self.state_store.load_latest_portfolio_state()
+
+    def _record_live_order_dry_run(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        approval_id: str,
+        approval_decision: ApprovalDecision,
+    ) -> tuple[list[LiveOrderLifecycleResult], PortfolioState]:
+        for order in orders:
+            request = LiveOrderRequest(
+                order_id=order.order_id,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                limit_price=order.price,
+                order_type=OrderType.LIMIT,
+                approval_id=approval_id,
+                run_id=run_id,
+                duplicate_key=f"{run_id}:{order.order_id}",
+            )
+            event = {
+                "request": request.model_dump(mode="json"),
+                "approval_decision": approval_decision.model_dump(mode="json"),
+                "notional": request.notional,
+                "reason": "live_order_dry_run",
+                "broker_submit_skipped": True,
+            }
+            self._record_event(run_id, "live_order_dry_run", event)
+        return [], self.state_store.load_latest_portfolio_state()

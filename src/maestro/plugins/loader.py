@@ -4,6 +4,8 @@ from maestro.config.models import StrategyPluginConfig
 from maestro.core.exceptions import PluginLoadError
 from maestro.sdk import BaseStrategyPlugin
 
+SUPPORTED_SDK_CONTRACT_VERSION = "0.9"
+
 
 def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:
     module_name, class_name = config.entrypoint.split(":", maxsplit=1)
@@ -24,4 +26,21 @@ def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:
         )
     if manifest.result_type != "target_allocation":
         raise PluginLoadError("Maestro v0.1 supports TargetAllocationResult only")
+    if _version_tuple(manifest.sdk_contract_version) > _version_tuple(
+        SUPPORTED_SDK_CONTRACT_VERSION
+    ):
+        raise PluginLoadError(
+            "Strategy requires unsupported Maestro SDK contract version "
+            f"{manifest.sdk_contract_version}"
+        )
     return plugin
+
+
+def _version_tuple(value: str) -> tuple[int, int]:
+    parts = value.split(".")
+    try:
+        major = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else 0
+    except ValueError as exc:
+        raise PluginLoadError(f"Invalid SDK contract version: {value}") from exc
+    return major, minor

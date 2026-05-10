@@ -117,6 +117,40 @@ def test_lifecycle_unknown_status_halts(tmp_path):
     assert notifier.events[-1].status == OrderStatus.HALTED
 
 
+def test_lifecycle_submit_exception_records_recovery_required_and_halts(tmp_path):
+    lifecycle, store, status_client, notifier, request, approval, _ = _context(
+        tmp_path,
+        statuses=[_poll(OrderStatus.FILLED)],
+        submit_client=FailingSubmitClient(),
+    )
+
+    result = lifecycle.run(request, approval)
+
+    assert result.final_status == OrderStatus.HALTED
+    assert "ambiguous" in (result.halt_reason or "")
+    assert status_client.call_count == 0
+    recovery = store.list_system_events_by_type("live_order_recovery_required")[0]["payload"]
+    assert recovery["request"]["order_id"] == request.order_id
+    assert recovery["result"]["raw"]["exception_type"] == "TimeoutError"
+    assert notifier.events[-1].status == OrderStatus.HALTED
+
+
+def test_lifecycle_summary_persistence_is_idempotent_for_same_order(tmp_path):
+    lifecycle, store, _, _, request, approval, _ = _context(
+        tmp_path,
+        statuses=[
+            _poll(OrderStatus.FILLED, filled=2.0, remaining=0.0, average_fill_price=70_000.0)
+        ],
+    )
+
+    first = lifecycle.run(request, approval)
+    second = lifecycle.run(request, approval)
+
+    assert first.final_status == OrderStatus.FILLED
+    assert second.final_status == OrderStatus.FAILED
+    assert len(store.list_system_events_by_type("live_order_lifecycle", limit=100)) == 1
+
+
 def test_lifecycle_max_polls_reached_while_open(tmp_path):
     sleeps: list[float] = []
     lifecycle, _, status_client, _, request, approval, _ = _context(
@@ -193,6 +227,7 @@ def _context(
     max_polls: int = 10,
     poll_interval: float = 0.0,
     sleep_fn=None,
+    submit_client: LiveOrderClient | None = None,
 ):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -228,7 +263,7 @@ def _context(
             ),
             store,
             audit,
-            FakeSubmitClient(),
+            submit_client or FakeSubmitClient(),
         ),
         LiveOrderStatusService(store, audit, status_client),
         PartialFillReconciliationService(store, audit),
@@ -302,6 +337,12 @@ class FakeSubmitClient(LiveOrderClient):
             status=OrderStatus.ACCEPTED_BY_BROKER,
             broker_order=_broker_order(request.order_id),
         )
+
+
+class FailingSubmitClient(LiveOrderClient):
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        del request
+        raise TimeoutError("submit timed out")
 
 
 class FakePollingStatusClient(LiveOrderStatusClient):

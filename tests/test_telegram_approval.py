@@ -1,10 +1,14 @@
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
+from typer.testing import CliRunner
 
 from maestro.approval.manager import ApprovalManager
 from maestro.approval.models import ApprovalRequest
+from maestro.cli import app
 from maestro.config.models import ApprovalConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderStatus, RunMode
@@ -272,6 +276,32 @@ def test_telegram_approval_manager_rejects_live_readonly_mode():
 
     with pytest.raises(ValueError, match="paper or live_approval"):
         manager.request_approval("run_test", [], [], [])
+
+
+def test_live_smoke_telegram_approval_validates_config_without_network(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["execution"]["live_order_enabled"] = False
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "live-smoke",
+            "--config",
+            str(config_path),
+            "--check",
+            "telegram-approval",
+            "--allow-mock",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "check=telegram_approval status=ok provider=telegram mock=true" in result.output
+    assert "chats=1" in result.output
+    assert "whitelisted_users=1" in result.output
 
 
 def test_telegram_live_order_notification_uses_fake_client_only():

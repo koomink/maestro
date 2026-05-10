@@ -42,3 +42,5 @@ def test_sample_strategy_contract_and_sdk_boundary():
     assert "maestro.datahub" not in source
     assert "maestro.orchestration" not in source
     assert "maestro.core" not in source
+    assert "koreainvestment" not in source.lower()
+    assert "telegram" not in source.lower()

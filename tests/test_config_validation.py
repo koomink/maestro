@@ -42,6 +42,7 @@ def test_live_order_config_defaults_are_safe():
     config = load_config("configs/paper.yaml")
 
     assert config.execution.live_order_enabled is False
+    assert config.execution.live_order_dry_run is False
     assert config.execution.require_reconciliation_pass is True
     assert config.execution.max_live_order_notional == 0.0
     assert config.execution.max_daily_live_notional == 0.0
@@ -51,6 +52,29 @@ def test_live_order_config_defaults_are_safe():
     assert config.execution.order_status_poll_interval_seconds == 30.0
     assert config.execution.order_status_max_polls == 20
     assert config.execution.order_status_terminal_timeout_seconds == 1800.0
+    assert config.execution.require_market_session is False
+    assert config.execution.market_session_timezone == "America/New_York"
+    assert config.execution.market_session_open == "09:30"
+    assert config.execution.market_session_close == "16:00"
+    assert config.execution.market_session_weekdays == [0, 1, 2, 3, 4]
+    assert config.execution.market_session_holidays == []
+    assert config.execution.require_broker_quote_validation is False
+    assert config.execution.max_broker_quote_deviation_pct == 0.05
+    assert config.execution.require_broker_risk_validation is False
+    assert config.execution.live_order_fee_buffer_pct == 0.0
+    assert config.execution.heartbeat_max_age_seconds == 0
+    assert config.execution.scheduled_run_max_age_seconds == 0
+    assert config.universe.policy.max_new_symbols_per_run == 1
+    assert [item.value for item in config.universe.policy.allowed_regions] == ["US"]
+    assert [item.value for item in config.universe.policy.allowed_currencies] == ["USD"]
+    assert [item.value for item in config.universe.policy.allowed_broker_products] == [
+        "kis_overseas_stock"
+    ]
+    assert [item.value for item in config.universe.policy.allowed_exchange_codes] == [
+        "NASD",
+        "NYSE",
+        "AMEX",
+    ]
 
 
 def test_live_order_lifecycle_config_validates_positive_max_polls(tmp_path):
@@ -60,6 +84,16 @@ def test_live_order_lifecycle_config_validates_positive_max_polls(tmp_path):
     config_path.write_text(yaml.safe_dump(raw))
 
     with pytest.raises(ValidationError, match="order_status_max_polls"):
+        load_config(config_path)
+
+
+def test_live_order_config_rejects_invalid_market_session_time(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["market_session_open"] = "25:00"
+    config_path = tmp_path / "invalid_market_time.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="market_session_open"):
         load_config(config_path)
 
 

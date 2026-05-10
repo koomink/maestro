@@ -135,7 +135,10 @@ Korea Investment Securities current price lookup may be used as broker-side quot
 ## Project Status
 
 Maestro v0.1.1 is a stabilization patch on top of the v0.1 bootable skeleton. It is
-not a production trading system.
+not a production trading system. The project now has approval-gated KIS overseas
+live-order beta pieces, but repeated real-account operation still requires the
+v0.8.x DataHub, risk, recovery, and operations hardening path documented in
+[docs/ROADMAP.md](docs/ROADMAP.md).
 
 Current runnable modes are:
 
@@ -144,8 +147,8 @@ Current runnable modes are:
 - Optional external DataHub providers such as Yahoo/yfinance, FRED, and RSS when
   explicitly configured
 - Mock `live_readonly` broker scaffolding with `configs/live_readonly.yaml`
-- Live approval infrastructure and safety gates, with real KIS overseas
-  read-only/submit/status adapters still fail-closed until implemented
+- Live approval infrastructure and safety gates, with KIS overseas read-only and
+  approval-gated US stock/ETF limit-order submit/status adapter support
 
 `PaperExecutionEngine` is simulated execution inside Maestro. Mock configs are
 for development and tests, not production readiness.
@@ -205,16 +208,21 @@ Implemented foundations beyond the core v0.1 scope:
 - CLI `approvals`
 - `live_readonly` mode config
 - KIS read-only adapter interface and deterministic mock client
-- KIS read-only REST client foundation for auth and product-specific broker
-  adapter paths; overseas stock/ETF read-only remains fail-closed until fields
-  are verified
+- KIS REST client foundation for auth and product-specific broker adapter paths,
+  including verified overseas stock/ETF read-only and approval-gated US
+  stock/ETF limit-order submit/status payloads
 - CLI `kis-sync` and `kis-account`
 - Product/venue-aware universe config for canonical symbols, broker products,
   exchange codes, currency, and precision rules
+- Dynamic-universe candidate evaluation in `run_once` for SDK plugins that
+  explicitly opt in through `supports_dynamic_universe`
 - Live approval order safety contract and explicit KIS domestic/overseas adapter
   split behind that contract
 - `run_once` live approval wiring through the live order lifecycle service when
   `mode=live_approval`
+- Structural refactor boundaries for system events, live execution gates,
+  live-order services, KIS transport/parser/product adapters, config models,
+  health checks, and operational preflight helpers
 - Persistent safety controls for active, paused, killed, and halted state
 - CLI `safety-status`, `pause`, `resume`, and `kill-switch`
 - Safe live approval example config:
@@ -227,9 +235,8 @@ Deferred real integrations:
 - No live auto-trading
 - No Telegram webhook or inline callback buttons
 - No direct or unguarded KIS buy/sell/order CLI
-- No direct cancel CLI and no real KIS cancel adapter until endpoint details are verified
-- No real KIS overseas-stock submit/status adapter until endpoint paths, TR_IDs,
-  exchange codes, and request/response fields are verified
+- No direct cancel CLI; KIS overseas cancel is available only behind
+  `LiveOrderCancellationService` policy gates
 - No market orders
 - No GDELT/News API or community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
@@ -292,7 +299,7 @@ checks when required, and risk/safety policy. Virtuoso apps can propose
 candidates, but they cannot approve tradability, call broker APIs, submit orders,
 or allocate to research-only symbols.
 
-Planned dynamic-universe flow:
+Dynamic-universe flow:
 
 1. A Virtuoso app declares data needs and candidate symbols through the SDK.
 2. Maestro validates candidates against `UniversePolicy`.
@@ -303,31 +310,34 @@ Planned dynamic-universe flow:
 7. `TargetAllocationResult` allocations are accepted only for approved tradable
    symbols.
 
-Planned `UniversePolicy` fields include `allowed_asset_types`,
-`allowed_regions`, `allowed_currencies`, `allowed_broker_products`,
-`deny_symbols`, `deny_asset_tags` such as leveraged, inverse, OTC, options, and
-futures, `max_new_symbols_per_run`,
-`require_operator_approval_for_new_symbols`,
-`require_broker_tradability_check`, and `require_data_freshness_check`.
+The default `UniversePolicy` is intentionally conservative: US stock/ETF
+candidates only, USD only, `kis_overseas_stock`, NASD/NYSE/AMEX, one new
+tradable symbol per run, operator approval required, and broker tradability plus
+DataHub freshness checks required. Denied symbols and denied asset tags can be
+configured for products such as leveraged, inverse, OTC, options, or futures.
 
-Daily loss limit config exists as a conservative skeleton. When
-`execution.daily_loss_limit` is set, live approval fails closed until broker PnL
-normalization is implemented for the configured overseas stock/ETF broker
-product. Leave it unset until normalized broker PnL is available.
+Daily loss limits are enforced from normalized broker PnL fields in the latest
+broker snapshot. Maestro first uses account-level `daily_pnl`/`today_pnl` style
+fields when present, then falls back to summed position `unrealized_pnl`.
+
+For real-account rehearsals, `execution.require_broker_risk_validation=true`
+adds a broker-snapshot risk gate before approval submission. It checks settled
+buying power with `execution.live_order_fee_buffer_pct`, post-order cash reserve,
+per-symbol exposure, portfolio exposure, pending broker orders, and whether the
+latest broker snapshot is the one that passed reconciliation.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
 and records `fill_reconciliation` system and audit events. Rejected, canceled,
 halted, and unknown statuses do not update the portfolio.
 
-Cancellation policy is defined as an interface only. A cancel request requires
-Telegram approval, the latest broker reconciliation to pass, and the latest
-order status to be `open` or `partially_filled`. Partial-fill cancellation is
-allowed only for the remaining open quantity after fill reconciliation has been
-recorded. Filled, rejected, canceled, halted, and unknown orders cannot be
-canceled; unknown state halts the path instead of attempting cancel. There is no
-direct cancel CLI and no real KIS cancel network call until the KIS endpoint
-path, TR_IDs, and request fields are verified.
+Cancellation is available only behind `LiveOrderCancellationService`. A cancel
+request requires Telegram approval, the latest broker reconciliation to pass, and
+the latest order status to be `open` or `partially_filled`. Partial-fill
+cancellation is allowed only for the remaining open quantity after fill
+reconciliation has been recorded. Filled, rejected, canceled, halted, and
+unknown orders cannot be canceled; unknown state halts the path instead of
+attempting cancel. There is still no direct cancel CLI.
 
 `LiveOrderWorkflowService` composes the safe pieces for one approval-gated
 post-order workflow: submit through the safety service, stop on submit halt, poll
@@ -663,8 +673,55 @@ maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
 maestro reconcile --config configs/live_readonly.yaml
 maestro reconcile-fills --config configs/live_readonly.yaml
+maestro recover-live-order --config configs/live_readonly.yaml --reason "broker truth reconciled"
+maestro heartbeat --config configs/live_readonly.yaml
+maestro ops-alerts --config configs/live_approval.example.yaml --allow-mock
+maestro beta-preflight --config configs/live_approval.example.yaml
 maestro health --config configs/live_readonly.yaml
 ```
+
+`recover-live-order` is an operator recovery marker, not a broker action. It
+requires a latest broker snapshot and a passing broker reconciliation, reruns
+fill reconciliation, records `live_order_recovery_completed`, and allows future
+live approval proposals after `live_order_recovery_required` or incomplete
+lifecycle state has blocked them.
+
+`heartbeat` records `maestro_heartbeat` for operator schedulers. When
+`execution.heartbeat_max_age_seconds` or
+`execution.scheduled_run_max_age_seconds` are set in an operator config,
+`maestro health` fails on missed heartbeat or missed scheduled `run-once`.
+`ops-alerts` sends current health warnings/failures to configured Telegram
+approval chats; `--allow-mock` validates the escalation path without network.
+Audit JSONL entries include a hash chain, and health verifies audit integrity.
+`beta-preflight` is the private production-beta gate. It requires live approval
+mode, real KIS provider, Telegram approval, fresh broker snapshot, passing
+reconciliation, audit integrity, market/session/quote/risk gates, daily loss
+limit, heartbeat monitoring, and scheduled-run monitoring.
+
+For an operator-local real KIS read-only rehearsal:
+
+```bash
+maestro live-smoke --config <operator-readonly-config> --check kis-readonly
+```
+
+For an operator-local Telegram approval channel rehearsal:
+
+```bash
+maestro live-smoke --config <operator-live-approval-config> --check telegram-approval
+```
+
+For an approval-gated dry-run rehearsal that records `live_order_dry_run` events
+without broker submission:
+
+```bash
+maestro live-smoke --config <operator-live-approval-config> --check live-dry-run
+```
+
+The matching pytest smokes are skipped by default and run only when
+`MAESTRO_RUN_KIS_LIVE_SMOKE=1` / `MAESTRO_KIS_LIVE_CONFIG` or
+`MAESTRO_RUN_TELEGRAM_LIVE_SMOKE=1` / `MAESTRO_TELEGRAM_LIVE_CONFIG` or
+`MAESTRO_RUN_LIVE_DRY_RUN_SMOKE=1` / `MAESTRO_LIVE_DRY_RUN_CONFIG` point to
+operator-local configs.
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
 `configs/kis_overseas_readonly.example.yaml` documents the real KIS overseas
@@ -679,9 +736,9 @@ symbols. It uses these environment variable names:
 - `KIS_APP_SECRET`: KIS app secret
 - `KIS_ACCESS_TOKEN`: optional pre-issued access token
 
-The adapter is read-only. It does not submit, cancel, amend, buy, sell, enable
-`live_auto`, or add market orders. Normal tests use fake/fixture KIS responses
-and do not call KIS network endpoints.
+The `live_readonly` adapter is read-only. It does not submit, cancel, amend, buy,
+sell, enable `live_auto`, or add market orders. Normal tests use fake/fixture KIS
+responses and do not call KIS network endpoints.
 
 If `KIS_ACCESS_TOKEN` is unset, Maestro can issue `/oauth2/tokenP` and can
 persist the access token when `kis.token_cache_path` is configured. The cache
@@ -693,21 +750,34 @@ rule.
 The KIS REST layer is split by broker product. `kis_domestic_stock` contains the
 existing domestic endpoint adapter. `kis_overseas_stock` is the strategic target
 for US-listed stocks and ETFs. Real overseas read-only account paths are
-implemented; real overseas submit/status/cancel paths remain fail-closed until
-their endpoint paths, TR_IDs, exchange codes, request fields, and response fields
-are separately verified. There is no direct buy/sell CLI, no market order path,
-and no normal test that calls the KIS network.
+implemented. Overseas live approval supports US exchange limit-order
+submit/status payloads behind the existing approval, reconciliation, safety, and
+daily-limit gates, based on the Korea Investment Securities OpenAPI example
+contract. The overseas cancel adapter is available only behind
+`LiveOrderCancellationService` policy gates after Telegram approval, latest safe
+order status, and reconciliation checks. There is no direct buy/sell/cancel CLI,
+no market order path, and no normal test that calls the KIS network.
 
 `maestro health --config ...` performs local operational checks without live KIS
-network calls. It checks config loading, SQLite state, audit path, safety state,
-recent halt/failure events, DataHub config, KIS env var presence, token cache
-path, latest broker snapshot age, and latest reconciliation status. Missing KIS
-env vars or broker snapshots are reported in health output without printing
-secret values.
+network calls. `maestro live-preflight --config ...` prints only the live
+approval preflight result and exits nonzero when the live approval safety
+configuration fails. Health checks cover config loading, SQLite state, audit
+path, safety state, recent halt/failure events, DataHub config, KIS env var
+presence, token cache path, live approval preflight configuration, latest broker
+snapshot age, and latest reconciliation status. Missing KIS env vars or broker
+snapshots are reported without printing secret values.
+
+For live approval rehearsal, set `execution.live_order_dry_run=true` in an
+operator-local config. `run-once` still performs strategy, risk, reconciliation,
+and approval work, then writes `live_order_dry_run` events instead of calling the
+broker submit adapter.
 
 Operational docs:
 
 - [Deployment guide](docs/deployment.md)
+- [KIS fixture redaction](docs/kis_fixture_redaction.md)
+- [Live account promotion](docs/live_account_promotion.md)
+- [Virtuoso apps](docs/virtuoso_apps.md)
 - [VPS/systemd guide](docs/vps_systemd.md)
 - [Backup/restore guide](docs/backup_restore.md)
 - [Operator runbook](docs/operator_runbook.md)
@@ -716,8 +786,15 @@ To install dashboard dependencies and open the read-only dashboard:
 
 ```bash
 uv sync --extra dashboard
-maestro dashboard --config configs/paper.yaml
+maestro dashboard --config configs/kis_overseas_readonly.example.yaml
 ```
+
+The dashboard is read-only. It shows portfolio state, strategy/order/approval
+tables, safety state, health summary, latest broker snapshot, latest
+reconciliation status, halt/failure events, live order status/lifecycle events,
+fill reconciliation events, and daily live order count/notional usage when those
+events exist. It does not call live KIS endpoints and does not expose write
+controls.
 
 If no CLI entrypoint exists yet during early development, use:
 
@@ -833,7 +910,8 @@ Short direction:
 - v0.7.2: KIS overseas read-only adapter
 - v0.7.3: operational closeout
 - v0.8: KIS overseas live approval beta
-- v0.9: Virtuoso SDK/app integration
+- v0.8.x: real-account promotion, DataHub, risk, recovery, and ops hardening
+- v0.9: Virtuoso SDK/app integration after live-operations hardening
 - v1.0: private approval-gated production beta
 
 ## Dashboard Philosophy

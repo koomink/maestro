@@ -1,169 +1,17 @@
-from typing import Any
+from pydantic import Field, model_validator
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from maestro.core.enums import AssetType, BrokerProduct, OrderType, RunMode, StrategyMode
-from maestro.core.instruments import TradableInstrument
-
-
-class StrictConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class PortfolioConfig(StrictConfigModel):
-    base_currency: str = "KRW"
-    initial_cash: float = Field(gt=0)
-    allowed_symbols: list[str]
-
-
-class UniverseConfig(StrictConfigModel):
-    instruments: list[TradableInstrument] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def validate_unique_symbols(self) -> "UniverseConfig":
-        symbols = [instrument.symbol for instrument in self.instruments]
-        if len(symbols) != len(set(symbols)):
-            raise ValueError("universe instruments must use unique canonical symbols")
-        return self
-
-    def get(self, symbol: str) -> TradableInstrument | None:
-        for instrument in self.instruments:
-            if instrument.symbol == symbol:
-                return instrument
-        return None
-
-
-class StrategyPluginConfig(StrictConfigModel):
-    id: str
-    enabled: bool = True
-    mode: StrategyMode = StrategyMode.PAPER
-    weight: float = Field(ge=0.0)
-    entrypoint: str
-    config: dict[str, Any] = Field(default_factory=dict)
-
-    @field_validator("entrypoint")
-    @classmethod
-    def validate_entrypoint(cls, value: str) -> str:
-        if ":" not in value:
-            raise ValueError("entrypoint must use 'module:ClassName' format")
-        return value
-
-
-class DataHubProviderConfig(StrictConfigModel):
-    name: str
-    provider: str
-    priority: int = Field(default=100, ge=0)
-    enabled: bool = True
-    data_types: list[str] | None = None
-    symbols: list[str] | None = None
-    asset_types: list[AssetType] | None = None
-    run_modes: list[RunMode] | None = None
-    csv_path: str | None = None
-    timeout_seconds: float = Field(default=10.0, gt=0)
-    stale_after_seconds: int | None = Field(default=None, gt=0)
-    symbol_map: dict[str, str] = Field(default_factory=dict)
-    api_key_env: str | None = None
-    feed_urls: list[str] = Field(default_factory=list)
-    source_map: dict[str, str] = Field(default_factory=dict)
-    sentiment_texts: list[str] = Field(default_factory=list)
-    source_name: str | None = None
-
-
-class DataHubConfig(StrictConfigModel):
-    provider: str = "mock"
-    csv_path: str | None = None
-    providers: list[DataHubProviderConfig] = Field(default_factory=list)
-    timeout_seconds: float = Field(default=10.0, gt=0)
-    stale_after_seconds: int | None = Field(default=None, gt=0)
-    symbol_map: dict[str, str] = Field(default_factory=dict)
-    api_key_env: str | None = None
-    feed_urls: list[str] = Field(default_factory=list)
-    source_map: dict[str, str] = Field(default_factory=dict)
-    sentiment_texts: list[str] = Field(default_factory=list)
-    source_name: str | None = None
-
-
-class ExecutionConfig(StrictConfigModel):
-    engine: str = "paper"
-    live_order_enabled: bool = False
-    require_reconciliation_pass: bool = True
-    max_live_order_notional: float = Field(default=0.0, ge=0.0)
-    max_daily_live_notional: float = Field(default=0.0, ge=0.0)
-    max_daily_live_order_count: int = Field(default=0, ge=0)
-    daily_loss_limit: float | None = Field(default=None, gt=0.0)
-    allowed_order_type: OrderType = OrderType.LIMIT
-    order_status_poll_interval_seconds: float = Field(default=30.0, ge=0.0)
-    order_status_max_polls: int = Field(default=20, gt=0)
-    order_status_terminal_timeout_seconds: float = Field(default=1800.0, ge=0.0)
-
-    @field_validator("allowed_order_type")
-    @classmethod
-    def validate_allowed_order_type(cls, value: OrderType) -> OrderType:
-        if value != OrderType.LIMIT:
-            raise ValueError("allowed_order_type must be limit")
-        return value
-
-
-class RiskConfig(StrictConfigModel):
-    max_single_asset_weight: float = Field(gt=0.0, le=1.0)
-    min_cash_weight: float = Field(ge=0.0, le=1.0)
-
-
-class StateConfig(StrictConfigModel):
-    sqlite_path: str
-
-
-class AuditConfig(StrictConfigModel):
-    jsonl_path: str
-
-
-class ApprovalConfig(StrictConfigModel):
-    enabled: bool = False
-    provider: str = "console"
-    require_approval: bool = False
-    default_decision: str = "approved"
-    timeout_seconds: int = Field(default=300, gt=0)
-    whitelisted_user_ids: list[int] = Field(default_factory=list)
-    telegram_bot_token_env: str = "TELEGRAM_BOT_TOKEN"
-    telegram_allowed_chat_ids: list[int] = Field(default_factory=list)
-    telegram_poll_interval_seconds: float = Field(default=1.0, ge=0)
-
-    @field_validator("default_decision")
-    @classmethod
-    def validate_default_decision(cls, value: str) -> str:
-        if value not in {"approved", "rejected", "expired"}:
-            raise ValueError("default_decision must be approved, rejected, or expired")
-        return value
-
-
-class KISConfig(StrictConfigModel):
-    enabled: bool = False
-    provider: str = "mock"
-    broker_product: BrokerProduct = BrokerProduct.KIS_OVERSEAS_STOCK
-    account_id: str | None = None
-    account_id_env: str | None = "KIS_ACCOUNT_ID"
-    app_key_env: str = "KIS_APP_KEY"
-    app_secret_env: str = "KIS_APP_SECRET"
-    access_token_env: str = "KIS_ACCESS_TOKEN"
-    token_cache_path: str | None = None
-    base_url: str | None = None
-    paper_trading: bool = False
-    timeout_seconds: float = Field(default=10.0, gt=0)
-    quote_market_code: str = "J"
-
-    def resolved_base_url(self) -> str:
-        if self.base_url:
-            return self.base_url.rstrip("/")
-        if self.paper_trading:
-            return "https://openapivts.koreainvestment.com:29443"
-        return "https://openapi.koreainvestment.com:9443"
-
-
-class ReconciliationConfig(StrictConfigModel):
-    cash_tolerance: float = Field(default=0.0, ge=0.0)
-    position_quantity_tolerance: float = Field(default=0.0, ge=0.0)
-    value_tolerance: float = Field(default=0.0, ge=0.0)
-    max_age_seconds: int = Field(default=86400, gt=0)
+from maestro.config.approval import ApprovalConfig
+from maestro.config.base import StrictConfigModel
+from maestro.config.broker import KISConfig
+from maestro.config.datahub import DataHubConfig, DataHubProviderConfig
+from maestro.config.execution import ExecutionConfig
+from maestro.config.portfolio import PortfolioConfig
+from maestro.config.reconciliation_config import ReconciliationConfig
+from maestro.config.risk import RiskConfig
+from maestro.config.state_config import AuditConfig, StateConfig
+from maestro.config.strategy import StrategyPluginConfig
+from maestro.config.universe import UniverseConfig, UniversePolicyConfig
+from maestro.core.enums import RunMode
 
 
 class MaestroConfig(StrictConfigModel):
@@ -194,3 +42,22 @@ class MaestroConfig(StrictConfigModel):
                 + ", ".join(missing)
             )
         return self
+
+
+__all__ = [
+    "ApprovalConfig",
+    "AuditConfig",
+    "DataHubConfig",
+    "DataHubProviderConfig",
+    "ExecutionConfig",
+    "KISConfig",
+    "MaestroConfig",
+    "PortfolioConfig",
+    "ReconciliationConfig",
+    "RiskConfig",
+    "StateConfig",
+    "StrategyPluginConfig",
+    "StrictConfigModel",
+    "UniverseConfig",
+    "UniversePolicyConfig",
+]

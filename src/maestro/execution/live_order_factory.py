@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from maestro.config.models import MaestroConfig
 from maestro.core.enums import Currency
-from maestro.execution.brokers.kis.rest_client import build_kis_rest_live_order_client
+from maestro.execution.brokers.kis.live_order_client import build_kis_rest_live_order_client
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
     LiveOrderCancelClient,
@@ -92,9 +92,10 @@ def build_live_approval_dependencies(
         broker_reconciliation,
         notifier,
     )
+    cancel_adapter = cancel_client or _build_cancel_client(config, broker_client)
     cancel_service = (
-        LiveOrderCancellationService(state_store, audit_logger, cancel_client)
-        if cancel_client is not None
+        LiveOrderCancellationService(state_store, audit_logger, cancel_adapter)
+        if cancel_adapter is not None
         else None
     )
     return LiveApprovalDependencies(
@@ -149,3 +150,19 @@ def _build_notification_client(
         client=client,
         chat_ids=config.approval.telegram_allowed_chat_ids,
     )
+
+
+def _build_cancel_client(
+    config: MaestroConfig,
+    live_order_client: LiveOrderClient,
+) -> LiveOrderCancelClient | None:
+    if isinstance(live_order_client, LiveOrderCancelClient):
+        return live_order_client
+    if not live_order_client.__class__.__module__.startswith("maestro.execution.brokers.kis"):
+        return None
+    if config.kis.provider != "kis":
+        return None
+    candidate = build_kis_rest_live_order_client(config.kis, config.universe.instruments)
+    if isinstance(candidate, LiveOrderCancelClient):
+        return candidate
+    return None

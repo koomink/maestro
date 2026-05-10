@@ -1,37 +1,25 @@
+import json
 import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
+from maestro.core.enums import RunMode
+from maestro.monitoring.audit_logger import _event_hash
+from maestro.monitoring.health_models import (
+    HealthCheck,
+    HealthReport,
+    overall_health_status,
+)
+from maestro.monitoring.health_providers import (
+    FunctionHealthCheckProvider,
+    HealthCheckProvider,
+)
+from maestro.monitoring.live_preflight import live_approval_preflight_findings
 from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
-
-
-class HealthCheck(BaseModel):
-    name: str
-    status: str
-    message: str
-    details: dict[str, Any] = Field(default_factory=dict)
-
-
-class HealthReport(BaseModel):
-    status: str
-    generated_at: str
-    checks: list[HealthCheck]
-
-    def text_lines(self) -> list[str]:
-        lines = [f"status={self.status} generated_at={self.generated_at}"]
-        for check in self.checks:
-            detail_text = " ".join(f"{key}={value}" for key, value in check.details.items())
-            suffix = f" {detail_text}" if detail_text else ""
-            lines.append(
-                f"check={check.name} status={check.status} message={check.message}{suffix}"
-            )
-        return lines
 
 
 class HealthService:
@@ -40,23 +28,36 @@ class HealthService:
         self.store = store
 
     def run(self) -> HealthReport:
-        checks = [
-            self._config_check(),
-            self._state_db_check(),
-            self._audit_path_check(),
-            self._safety_state_check(),
-            self._recent_halt_failure_events_check(),
-            self._datahub_check(),
-            self._kis_env_check(),
-            self._token_cache_check(),
-            self._broker_snapshot_check(),
-            self._reconciliation_check(),
-        ]
+        checks = [provider.run() for provider in self._providers()]
         return HealthReport(
-            status=_overall_status(checks),
+            status=overall_health_status(checks),
             generated_at=utc_now().isoformat(),
             checks=checks,
         )
+
+    def _providers(self) -> list[HealthCheckProvider]:
+        return [
+            FunctionHealthCheckProvider("config", self._config_check),
+            FunctionHealthCheckProvider("state_db", self._state_db_check),
+            FunctionHealthCheckProvider("audit_path", self._audit_path_check),
+            FunctionHealthCheckProvider("audit_integrity", self._audit_integrity_check),
+            FunctionHealthCheckProvider("safety_state", self._safety_state_check),
+            FunctionHealthCheckProvider(
+                "recent_halt_failure_events",
+                self._recent_halt_failure_events_check,
+            ),
+            FunctionHealthCheckProvider("heartbeat", self._heartbeat_check),
+            FunctionHealthCheckProvider("scheduled_run", self._scheduled_run_check),
+            FunctionHealthCheckProvider("datahub", self._datahub_check),
+            FunctionHealthCheckProvider("kis_env", self._kis_env_check),
+            FunctionHealthCheckProvider("token_cache", self._token_cache_check),
+            FunctionHealthCheckProvider(
+                "live_approval_preflight",
+                self._live_approval_preflight_check,
+            ),
+            FunctionHealthCheckProvider("broker_snapshot", self._broker_snapshot_check),
+            FunctionHealthCheckProvider("reconciliation", self._reconciliation_check),
+        ]
 
     def _config_check(self) -> HealthCheck:
         return HealthCheck(
@@ -106,6 +107,60 @@ class HealthService:
             details={"path": _path_only(path), "exists": path.exists()},
         )
 
+    def _audit_integrity_check(self) -> HealthCheck:
+        path = Path(self.config.audit.jsonl_path)
+        if not path.exists():
+            return HealthCheck(name="audit_integrity", status="ok", message="missing")
+        previous_hash = None
+        checked = 0
+        legacy = 0
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    checked += 1
+                    event = json.loads(line)
+                    event_hash = event.get("event_hash")
+                    if not event_hash:
+                        legacy += 1
+                        previous_hash = None
+                        continue
+                    if event.get("previous_hash") != previous_hash:
+                        return HealthCheck(
+                            name="audit_integrity",
+                            status="fail",
+                            message="broken_previous_hash",
+                            details={"line": checked},
+                        )
+                    if _event_hash(event) != event_hash:
+                        return HealthCheck(
+                            name="audit_integrity",
+                            status="fail",
+                            message="hash_mismatch",
+                            details={"line": checked},
+                        )
+                    previous_hash = event_hash
+        except (OSError, json.JSONDecodeError) as exc:
+            return HealthCheck(
+                name="audit_integrity",
+                status="fail",
+                message=type(exc).__name__,
+            )
+        if legacy:
+            return HealthCheck(
+                name="audit_integrity",
+                status="warn",
+                message="legacy_unhashed_events",
+                details={"checked": checked, "legacy": legacy},
+            )
+        return HealthCheck(
+            name="audit_integrity",
+            status="ok",
+            message="verified",
+            details={"checked": checked},
+        )
+
     def _safety_state_check(self) -> HealthCheck:
         safety = SafetyControlService(self.store, _NoopAuditLogger()).current_state()
         status = "fail" if safety.blocks_live_execution else "ok"
@@ -130,6 +185,56 @@ class HealthService:
             status="warn",
             message="present",
             details={"count": len(event_types), "latest": event_types[0]},
+        )
+
+    def _heartbeat_check(self) -> HealthCheck:
+        max_age = self.config.execution.heartbeat_max_age_seconds
+        if max_age <= 0:
+            return HealthCheck(name="heartbeat", status="ok", message="not_configured")
+        latest = self.store.load_latest_system_event("maestro_heartbeat")
+        if latest is None:
+            return HealthCheck(
+                name="heartbeat",
+                status="fail",
+                message="missing",
+                details={"max_age_seconds": max_age},
+            )
+        age_seconds = _age_seconds(latest["created_at"])
+        stale = age_seconds is None or age_seconds > max_age
+        return HealthCheck(
+            name="heartbeat",
+            status="fail" if stale else "ok",
+            message="stale" if stale else "fresh",
+            details={
+                "created_at": latest["created_at"],
+                "age_seconds": age_seconds if age_seconds is not None else "unknown",
+                "max_age_seconds": max_age,
+            },
+        )
+
+    def _scheduled_run_check(self) -> HealthCheck:
+        max_age = self.config.execution.scheduled_run_max_age_seconds
+        if max_age <= 0:
+            return HealthCheck(name="scheduled_run", status="ok", message="not_configured")
+        latest = self.store.load_latest_system_event("run_once_completed")
+        if latest is None:
+            return HealthCheck(
+                name="scheduled_run",
+                status="fail",
+                message="missing",
+                details={"max_age_seconds": max_age},
+            )
+        age_seconds = _age_seconds(latest["created_at"])
+        stale = age_seconds is None or age_seconds > max_age
+        return HealthCheck(
+            name="scheduled_run",
+            status="fail" if stale else "ok",
+            message="stale" if stale else "fresh",
+            details={
+                "created_at": latest["created_at"],
+                "age_seconds": age_seconds if age_seconds is not None else "unknown",
+                "max_age_seconds": max_age,
+            },
         )
 
     def _datahub_check(self) -> HealthCheck:
@@ -196,6 +301,35 @@ class HealthService:
             details={"path": _path_only(path), "exists": path.exists()},
         )
 
+    def _live_approval_preflight_check(self) -> HealthCheck:
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            return HealthCheck(
+                name="live_approval_preflight",
+                status="ok",
+                message="not_applicable",
+            )
+
+        failures, warnings = live_approval_preflight_findings(self.config)
+
+        if failures:
+            return HealthCheck(
+                name="live_approval_preflight",
+                status="fail",
+                message="failed",
+                details={
+                    "failures": ",".join(failures),
+                    "warnings": ",".join(warnings) if warnings else "none",
+                },
+            )
+        if warnings:
+            return HealthCheck(
+                name="live_approval_preflight",
+                status="warn",
+                message="warnings",
+                details={"warnings": ",".join(warnings)},
+            )
+        return HealthCheck(name="live_approval_preflight", status="ok", message="ready")
+
     def _broker_snapshot_check(self) -> HealthCheck:
         latest = self.store.load_latest_broker_account_snapshot()
         if latest is None:
@@ -246,14 +380,6 @@ class HealthService:
 class _NoopAuditLogger:
     def log(self, run_id: str, event_type: str, details: dict[str, Any]) -> None:
         return None
-
-
-def _overall_status(checks: list[HealthCheck]) -> str:
-    if any(check.status == "fail" for check in checks):
-        return "fail"
-    if any(check.status == "warn" for check in checks):
-        return "warn"
-    return "ok"
 
 
 def _is_halt_or_failure_event(event_type: str, payload: dict[str, Any]) -> bool:

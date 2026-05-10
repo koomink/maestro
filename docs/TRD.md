@@ -39,6 +39,7 @@ Maestro owns the lifecycle of a portfolio management cycle:
 ```text
 Config
 → Plugin loading
+→ Optional dynamic-universe candidate evaluation
 → Data requests
 → DataHub
 → Strategy execution
@@ -50,6 +51,27 @@ Config
 → State update
 → Audit log
 ```
+
+The current orchestration boundary keeps `MaestroOrchestrator` as the run-cycle
+coordinator while moving live execution hardening checks into
+`orchestration/live_gates.py`. New code should use `state/events.py` for system
+event names and audited event persistence rather than repeating raw event-type
+strings across services.
+
+Live-order code remains backward compatible through
+`maestro.execution.live_orders`, but new imports should prefer the narrower
+`live_order_models.py`, `live_order_ports.py`, `live_order_status.py`,
+`live_order_cancellation.py`, `live_order_fills.py`,
+`live_order_lifecycle.py`, `live_order_safety.py`, and
+`live_order_services.py` boundaries. KIS REST network transport is isolated in
+`execution/brokers/kis/transport.py`; parser helpers live in
+`execution/brokers/kis/parsers.py`; product-level adapter modules split
+domestic/overseas read-only and live-order behavior.
+
+Config models are physically split by domain under `config/`, with
+`config/models.py` retained as the compatibility import surface. Health checks
+use shared health models and a provider wrapper so future checks can be added
+without expanding the `HealthService.run()` list directly.
 
 ## 2. Recommended Repository Structure
 
@@ -247,9 +269,10 @@ database caches, or broker behavior.
 - Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance. Tokens may be stored only in `kis.token_cache_path`, never in state, audit logs, dashboard rows, or tests.
 - KIS REST support is split by broker product. `kis_domestic_stock` contains the
   existing domestic endpoint adapter. `kis_overseas_stock` is the intended first
-  production target for US-listed stocks and ETFs, but real overseas endpoints
-  remain fail-closed until endpoint paths, TR_IDs, exchange codes, and fields are
-  verified.
+  production target for US-listed stocks and ETFs. Overseas read-only account
+  paths and approval-gated US stock/ETF limit-order submit/status payloads are
+  implemented after checking endpoint paths, TR_IDs, exchange codes, and fields
+  against Korea Investment Securities OpenAPI examples.
 - Broker account snapshots are persisted in SQLite and audit JSONL.
 - `maestro reconcile` compares Maestro portfolio state with the latest broker account snapshot and persists a `broker_reconciliation` system event plus audit event.
 - v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.
@@ -273,6 +296,11 @@ database caches, or broker behavior.
   events and audit events; unknown broker status is converted to `halted`.
 - `LiveOrderStatusSnapshot`, `FillEvent`, and `PartialFillSummary` define status
   and partial-fill normalization.
+- `execution.live_order_dry_run=true` keeps the live approval path through
+  strategy, risk, reconciliation, and approval, then persists `live_order_dry_run`
+  events without calling the broker submit adapter.
+- `maestro live-preflight --config ...` exposes the live approval safety
+  preflight as a scriptable CLI gate and exits nonzero on preflight failure.
 - `PartialFillReconciliationService` reads recent `live_order_status` events,
   compares cumulative filled quantity/notional against previous
   `fill_reconciliation` watermarks, applies only new fill deltas to cash and
@@ -283,9 +311,10 @@ database caches, or broker behavior.
   broker state. Rejected, canceled, halted, and unknown statuses never update the
   portfolio.
 - `LiveOrderCancelRequest`, `LiveOrderCancelResult`, and `LiveOrderCancelClient`
-  define the cancellation interface only. There is no direct cancel CLI and no
-  KIS cancel network call in v0.6. The cancel endpoint path, TR_IDs, and body
-  fields need verified project references before implementation.
+  define the cancellation interface. There is no direct cancel CLI. KIS overseas
+  cancel is implemented only behind `LiveOrderCancellationService` after endpoint
+  path, TR_ID, and body fields were checked against Korea Investment Securities
+  OpenAPI examples.
 - Cancellation requires Telegram approval, latest broker reconciliation pass, and
   latest live order status of `open` or `partially_filled`. Partial-fill
   cancellation is only for the remaining open quantity and requires a prior fill
@@ -324,8 +353,11 @@ database caches, or broker behavior.
   for limit orders, and uppercase KIS body keys. It is an explicit domestic
   adapter path, not a core product assumption.
 - `KISRestOverseasStockLiveOrderClient` exists as the strategic adapter boundary
-  for US-listed stocks and ETFs, but raises until overseas endpoint paths, TR_IDs,
-  exchange codes, and request/response fields are verified.
+  for US-listed stocks and ETFs. Its read-only, limit-order submit, status, and
+  cancellation paths are implemented behind approval, reconciliation, safety, and
+  product validation gates after endpoint paths, TR_IDs, exchange codes, and
+  request/response fields were checked against Korea Investment Securities
+  OpenAPI examples.
 - KIS status tracking normalizes accepted, open, partially filled, filled,
   rejected, canceled, and unknown states into Maestro `OrderStatus` inside each
   product adapter.
@@ -334,9 +366,35 @@ database caches, or broker behavior.
   approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
   the bounded live order lifecycle service. This is product-level wiring for
   approval-gated live orders, not live automation.
-- Maestro exposes no direct unguarded buy/sell CLI, no market orders, no dashboard
-  write controls, no live order network smoke test, and no Telegram webhook/buttons
-  in this phase.
+- Maestro exposes no direct unguarded buy/sell CLI, no market orders, and no
+  dashboard write controls. Real KIS and Telegram network checks are
+  operator-triggered smoke/rehearsal procedures, not normal tests.
+
+### 3.7 Production Readiness Boundary
+
+Approval-gated broker submission is not the same as production readiness. Before
+Maestro should be considered ready for repeated real-account operation, the
+roadmap must close the v0.8.x hardening path:
+
+- Real account promotion from paper to read-only, dry-run, minimum-size order,
+  and limited repeated operation.
+- Production DataHub hardening for stale fail-closed behavior, proposal data
+  snapshots, market session checks, provider retry/rate-limit behavior, and
+  broker quote validation.
+- Real risk enforcement now includes an operator-enabled broker snapshot gate for
+  buying power, cash reserve, position exposure, symbol limits, pending orders,
+  fee buffer, settlement/buying-power availability, unreconciled broker
+  activity, and broker PnL based daily loss limits.
+- Live order recovery for ambiguous submit results, process crashes, broker
+  timeout cases, partial-fill mismatches, and idempotency gaps. Recovery is
+  explicit: unresolved submit/lifecycle state records recovery events, blocks
+  later live approval orders, and requires broker truth plus
+  `recover-live-order` completion before continuing.
+- Operations hardening for heartbeat monitoring, Telegram error escalation,
+  audit integrity, backup/restore drills, and halt-recovery rehearsals.
+
+Dynamic universe work should not expand the tradable surface until these
+operator-readiness items are explicit and testable.
 
 ## 4. Public SDK Design
 
@@ -429,8 +487,7 @@ class StrategyManifest(BaseModel):
     can_short: bool = False
 ```
 
-Future dynamic-universe SDK planning should extend the manifest with capability
-fields such as:
+Dynamic-universe SDK planning extends the manifest with capability fields:
 
 ```python
 supports_dynamic_universe: bool = False
@@ -439,9 +496,8 @@ allowed_data_types: list[str] = []
 supported_asset_types: list[AssetType] = []
 ```
 
-These fields are not implemented in the current contract. They document the
-intended direction for v0.9 so Maestro can bound what each Virtuoso app may
-request before candidate symbols are resolved or approved.
+Maestro rejects plugins that require a newer SDK contract version than the
+current supported contract.
 
 ### 5.3 StrategyContext
 
@@ -462,6 +518,7 @@ class DataRequest(BaseModel):
     symbol: str
     asset_type: AssetType
     data_type: str  # e.g., "price", "ohlcv", "macro", "news", "sentiment", "fundamental"
+    intended_use: Literal["research", "tradable"] = "research"
     timeframe: str | None = None
     lookback: int | None = None
     start: datetime | None = None
@@ -471,17 +528,20 @@ class DataRequest(BaseModel):
 
 `broker_quote` is reserved for broker-side reference prices used by execution validation or reconciliation. It should not replace DataHub research feeds for strategy decisions.
 
-Future dynamic-universe work should add a separate candidate request contract:
+Dynamic-universe work adds a separate candidate request contract:
 
 ```python
 class CandidateInstrumentRequest(BaseModel):
     symbol: str
+    asset_type: AssetType
     intended_use: Literal["research", "tradable"]
-    requested_data_types: list[str] = []
-    asset_type: AssetType | None = None
+    data_types: list[str] = ["price"]
     region: str | None = None
     currency: str | None = None
-    metadata: dict[str, Any] = {}
+    broker_product: str | None = None
+    exchange_code: str | None = None
+    broker_symbol: str | None = None
+    reason: str | None = None
 ```
 
 `intended_use: research` covers analysis-only symbols, series, and keywords such
@@ -627,12 +687,12 @@ def on_stop(self, context: StrategyContext) -> None: ...
 def on_error(self, error: Exception, context: StrategyContext) -> None: ...
 ```
 
-Future v0.9 dynamic-universe work may add an optional candidate-discovery method,
-for example `build_candidate_requests(context) -> list[CandidateInstrumentRequest]`.
-That method would let Virtuoso apps propose research inputs and tradable
-candidates, while Maestro remains responsible for validation, metadata
-resolution, DataHub checks, broker tradability checks, operator approval when
-policy requires it, and allocation eligibility.
+v0.9 dynamic-universe work adds an optional candidate-discovery method:
+`build_candidate_requests(context) -> list[CandidateInstrumentRequest]`. That
+method lets Virtuoso apps propose research inputs and tradable candidates, while
+Maestro remains responsible for validation, metadata resolution, DataHub checks,
+broker tradability checks, operator approval when policy requires it, and
+allocation eligibility.
 
 ## 7. Plugin Loading
 
@@ -711,7 +771,7 @@ loudly instead of being ignored.
 
 Static `allowed_symbols` is valid for examples, tests, tutorials, and
 conservative paper configs. It should not be treated as the final production
-universe model. The planned production path uses `UniversePolicy` and an
+universe model. The production path uses `UniversePolicy` and an
 `InstrumentResolver` so Virtuoso apps can propose candidates and Maestro can
 approve only symbols that satisfy research or tradability requirements.
 

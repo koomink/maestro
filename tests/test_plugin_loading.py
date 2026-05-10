@@ -36,3 +36,27 @@ def test_manifest_config_id_mismatch_fails():
 
     with pytest.raises(PluginLoadError, match="does not match manifest id"):
         load_strategy(config)
+
+
+def test_unsupported_sdk_contract_version_fails(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def unsupported_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(update={"sdk_contract_version": "9.0"})
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        unsupported_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+    )
+
+    with pytest.raises(PluginLoadError, match="unsupported Maestro SDK contract version"):
+        load_strategy(config)

@@ -228,7 +228,7 @@
 - [x] Add product/venue-aware universe model for canonical symbols, broker products, exchange codes, currencies, and precision rules
 - [x] Split KIS REST adapters into explicit `kis_domestic_stock` and `kis_overseas_stock` paths
 - [x] Make `kis_overseas_stock` the default KIS broker product and live approval example target
-- [x] Keep KIS overseas-stock real submit/status adapters fail-closed until endpoint paths, TR_IDs, exchange codes, and fields are verified
+- [x] Keep KIS overseas-stock real submit/status adapters fail-closed until v0.8 endpoint paths, TR_IDs, exchange codes, and fields are verified
 - [x] Keep existing KIS domestic-stock limit-order behavior isolated behind the `kis_domestic_stock` adapter path
 - [x] Keep normal tests fake-client based with no KIS network calls
 - [x] Add live order status polling interface
@@ -244,7 +244,7 @@
 - [x] Allow open order and remaining partial-fill cancellation only
 - [x] Forbid cancel for filled/rejected/canceled/halted/unknown states
 - [x] Persist cancel results as system/audit events
-- [x] Keep real KIS cancel network call and direct cancel CLI out of scope
+- [x] Keep direct cancel CLI out of scope
 - [x] Add post-order workflow orchestration service
 - [x] Persist `live_order_workflow` summaries
 - [x] Stop workflow on halted submit/status before polling/fill reconciliation
@@ -261,9 +261,9 @@
 - [x] Add safe-by-default `configs/live_approval.example.yaml`
 - [x] Add `docs/live_approval_release_checklist.md`
 - [x] Document why package metadata remains `0.1.1`
-- [ ] Implement real KIS cancel adapter after endpoint path, TR_IDs, and request fields are verified
+- [x] Implement KIS overseas cancel adapter after endpoint path, TR_IDs, and request fields are verified
 - [x] Implement real KIS overseas-stock read-only adapter after endpoint paths, TR_IDs, exchange codes, and response fields are verified
-- [ ] Implement real KIS overseas-stock submit/status adapters after endpoint paths, TR_IDs, exchange codes, and response fields are verified
+- [x] Implement real KIS overseas-stock submit/status adapters after endpoint paths, TR_IDs, exchange codes, and response fields are verified
 
 ### v0.7 Production Hardening
 
@@ -285,8 +285,10 @@
 - [x] Add daily order count and notional limits
 - [x] Add instrument-aware live order validation for quantity step, price tick, minimums, currency, and broker product
 - [x] Add improved Python logging
-- [ ] Add audit log rotation or hash chain
+- [x] Add audit log rotation or hash chain
 - [x] Add monitoring and health checks
+- [x] Add live approval preflight checks to health output
+- [x] Add `maestro live-preflight --config ...` with nonzero exit on failed live approval preflight
 - [x] Add deployment, VPS/systemd, and backup/restore guides
 - [x] Keep dashboard write controls deferred
 - [x] Keep Telegram pause/kill/admin controls deferred
@@ -326,50 +328,169 @@
 - [x] Keep dashboard write controls deferred
 - [x] Keep Telegram admin controls deferred
 
+### v0.7.4 Dashboard / Observability Refresh
+
+- [x] Keep dashboard read-only
+- [x] Add safety state dashboard read model and panel
+- [x] Add health summary dashboard read model and panel
+- [x] Add latest broker snapshot dashboard read model and panel
+- [x] Add latest reconciliation status dashboard read model and panel
+- [x] Add recent halt/failure event read model and panel
+- [x] Add live order status/lifecycle event read model and panel
+- [x] Add fill reconciliation event read model and panel
+- [x] Add daily live order count/notional usage read model and panel
+- [x] Improve labels for US stock/ETF and KIS overseas read-only workflows
+- [x] Add dashboard read model tests
+- [x] Keep dashboard write controls deferred
+- [x] Keep live auto-trading, market orders, submit/cancel/amend work, Telegram
+      admin controls, and live KIS calls from dashboard/tests deferred
+
 ### v0.8 KIS Overseas Live Approval Beta
 
-- [ ] Verify KIS overseas limit-order submit endpoint paths, TR_IDs, exchange codes, and request fields
-- [ ] Implement KIS overseas limit-order submit adapter behind live approval safety gates
-- [ ] Implement KIS overseas order status adapter
-- [ ] Track fills for US-listed stocks/ETFs
-- [ ] Reconcile fills and broker state after overseas live approval orders
-- [ ] Keep approval-gated `run_once` as the only live submit path
-- [ ] Keep live auto-trading deferred
-- [ ] Keep market orders deferred
-- [ ] Keep direct buy/sell/cancel CLI deferred
-- [ ] Keep real KIS cancel deferred until separately verified and guarded
+- [x] Verify KIS overseas limit-order submit endpoint paths, TR_IDs, exchange codes, and request fields from Korea Investment Securities OpenAPI examples
+- [x] Implement KIS overseas limit-order submit adapter behind live approval safety gates
+- [x] Implement KIS overseas order status adapter
+- [x] Track fills for US-listed stocks/ETFs through existing live status snapshots
+- [x] Reconcile fills and broker state after overseas live approval orders through existing lifecycle services
+- [x] Add fake-client live approval end-to-end tests for approved, rejected, expired, filled, partial-fill, rejected-status, and unknown-status paths
+- [x] Add live approval dry-run mode that records broker submit payloads without calling KIS
+- [x] Add fail-closed tests for KIS error responses, missing broker order IDs, and malformed order status numeric fields
+- [x] Implement KIS overseas cancel adapter behind `LiveOrderCancellationService` policy gates
+- [x] Document KIS real-response fixture redaction rules
+- [x] Keep approval-gated `run_once` as the only live submit path
+- [x] Keep live auto-trading deferred
+- [x] Keep market orders deferred
+- [x] Keep direct buy/sell/cancel CLI deferred
+
+### v0.8.1 Real Account Promotion Path
+
+- [x] Document mock paper -> real-data paper -> KIS read-only -> live dry-run ->
+      minimum-size live order -> limited repeated operation as the required
+      promotion path
+- [x] Add an operator-local live approval config checklist with real account,
+      Telegram, state, audit, and token-cache paths outside source control
+- [x] Add skipped-by-default KIS read-only live smoke procedure
+- [x] Add skipped-by-default Telegram approval live smoke procedure
+- [x] Add skipped-by-default live approval dry-run rehearsal procedure
+- [x] Add first minimum-size approval-gated order checklist
+- [x] Require post-order status polling, fill reconciliation, broker
+      reconciliation, audit review, and dashboard review before repeated
+      operation
+- [x] Keep normal `pytest -q` fake-client/fixture based with no KIS or Telegram
+      network calls
+
+### v0.8.2 Production DataHub Hardening
+
+- [x] Document DataHub as a research/market data boundary, not a completed
+      production market data system
+- [x] Add live-approval fail-closed behavior for stale or missing required
+      `price` data
+- [x] Persist or reference the data snapshot used for each live approval proposal
+- [x] Add market session and holiday checks for live approval execution
+- [x] Add provider-specific retry, timeout, rate-limit, and fallback tests where
+      providers need them
+- [x] Add broker quote validation for execution checks without using KIS as the
+      strategy research data source
+
+### v0.8.3 Real Risk Engine
+
+- [x] Add cash reserve and buying-power checks before live approval submission
+- [x] Add position, per-symbol notional, and portfolio exposure limits
+- [x] Normalize broker PnL enough to enforce `execution.daily_loss_limit`
+- [x] Account for fees, settlement, pending orders, and manual broker activity in
+      live approval safety checks
+- [x] Add fake-client tests for risk fail-closed behavior
+
+### v0.8.4 Live Order Recovery
+
+- [x] Add recovery procedure for ambiguous KIS submit results and transport
+      timeouts
+- [x] Add recovery procedure for process crash after broker submit and before
+      lifecycle persistence completes
+- [x] Reconstruct live order state from broker truth before allowing another live
+      approval order after ambiguous failure
+- [x] Harden idempotency for approval IDs, broker order IDs, duplicate keys, and
+      persisted lifecycle events
+- [x] Add fake-client and redacted-fixture recovery drills
+
+### v0.8.5 Ops, Audit, and Monitoring Hardening
+
+- [x] Add heartbeat and scheduled-run monitoring for operator deployments
+- [x] Add Telegram error escalation for halt, failure, stale data,
+      reconciliation failure, and missed heartbeat events
+- [x] Add audit log rotation or hash-chain integrity checks
+- [x] Exercise backup/restore and halt-recovery runbooks
+- [x] Keep dashboard write controls, Telegram high-risk admin controls,
+      `live_auto`, market orders, and direct broker CLI deferred
 
 ### v0.9 Dynamic Universe & Virtuoso SDK Contract
 
-- [ ] Harden Maestro SDK contracts for external Virtuoso apps
-- [ ] Add `CandidateInstrumentRequest` planning for Virtuoso-proposed candidate
+- [x] Harden Maestro SDK contracts for external Virtuoso apps
+- [x] Add `CandidateInstrumentRequest` planning for Virtuoso-proposed candidate
       symbols and data needs
-- [ ] Add `intended_use: research | tradable` planning to candidate/data
+- [x] Add `intended_use: research | tradable` planning to candidate/data
       requests
-- [ ] Document and implement the research universe versus tradable universe
+- [x] Document and implement the research universe versus tradable universe
       distinction
-- [ ] Add `UniversePolicy` for allowed asset types, regions, currencies, broker
+- [x] Add `UniversePolicy` for allowed asset types, regions, currencies, broker
       products, denied symbols, denied asset tags, max new symbols per run, and
       required approval/data/broker checks
-- [ ] Add `InstrumentResolver` for canonical symbol metadata, venue, currency,
+- [x] Add `InstrumentResolver` for canonical symbol metadata, venue, currency,
       broker product, exchange code, precision, and broker mapping
-- [ ] Add broker tradability checks before candidate symbols can become tradable
-- [ ] Add dynamic symbol approval for temporary or persistent tradable universe
+- [x] Add broker tradability checks before candidate symbols can become tradable
+- [x] Add dynamic symbol approval for temporary or persistent tradable universe
       entries
-- [ ] Reject allocations to research-only, unknown, unresolved, or untradable
+- [x] Reject allocations to research-only, unknown, unresolved, or untradable
       symbols
-- [ ] Extend `StrategyManifest` planning with `supports_dynamic_universe`,
+- [x] Extend `StrategyManifest` planning with `supports_dynamic_universe`,
       `max_candidate_symbols`, `allowed_data_types`, and
       `supported_asset_types`
-- [ ] Add versioned plugin/app compatibility checks
-- [ ] Document external Virtuoso app packaging
-- [ ] Add strategy app data-boundary tests
-- [ ] Document promotion flow from mock paper to real-data paper to live approval
-- [ ] Keep Virtuoso apps proposal-only; Maestro owns data, risk, approval, execution, state, and audit
-- [ ] Keep static `allowed_symbols` configs valid for examples, tests,
+- [x] Add versioned plugin/app compatibility checks
+- [x] Document external Virtuoso app packaging
+- [x] Add strategy app data-boundary tests
+- [x] Verify v0.8.x promotion, DataHub, risk, recovery, and ops hardening are
+      sufficient before expanding the tradable universe
+- [x] Keep Virtuoso apps proposal-only; Maestro owns data, risk, approval, execution, state, and audit
+- [x] Keep static `allowed_symbols` configs valid for examples, tests,
       tutorials, and conservative paper configs
-- [ ] Keep live auto-trading, market orders, direct broker calls from strategy
+- [x] Keep live auto-trading, market orders, direct broker calls from strategy
       apps, and dashboard write controls deferred
+
+### v1.0 Private Approval-gated Production Beta
+
+- [x] Add `maestro beta-preflight --config ...` for private beta readiness
+- [x] Require live approval mode, real KIS provider, Telegram approval, broker
+      snapshot, passing reconciliation, audit integrity, heartbeat monitoring,
+      scheduled-run monitoring, market session checks, broker quote validation,
+      broker risk validation, and daily loss limit before beta readiness
+- [x] Keep beta approval-gated only; no `live_auto`, market orders, direct broker
+      CLI, dashboard write controls, or high-risk Telegram admin controls
+- [x] Add tests for beta preflight pass/fail behavior
+
+### Post-v1.0 Structural Refactor R1-R5
+
+- [x] Add centralized `SystemEventType` names and an audited system-event helper
+      for new code paths
+- [x] Physically split live-order models, ports, status polling, cancellation,
+      workflow, lifecycle, fill reconciliation, and safety services while
+      preserving the existing `maestro.execution.live_orders` compatibility path
+- [x] Extract live approval hardening gates from `MaestroOrchestrator` into
+      `LiveExecutionGateService`
+- [x] Move KIS urllib transport into a dedicated KIS transport module
+- [x] Physically split KIS REST parser helpers plus domestic/overseas read-only
+      and live-order adapters
+- [x] Move private-beta preflight logic out of CLI handlers into `maestro.ops`
+- [x] Move live approval preflight findings out of the monolithic health service
+- [x] Wire dynamic-universe candidate evaluation into `run_once` for strategies
+      that declare `supports_dynamic_universe=true`
+- [x] Move DataHub price extraction and data-quality issue collection out of the
+      orchestrator
+- [x] Split config models into domain modules while keeping
+      `maestro.config.models` backward compatible
+- [x] Add health models and health-check provider structure
+- [x] Keep static universe configs and existing public imports backward
+      compatible
+- [x] Verify with `pytest -q`, `ruff check .`, and `ruff format --check .`
 
 ## Completed / Historical Notes
 

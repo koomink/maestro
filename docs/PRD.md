@@ -227,7 +227,32 @@ And Maestro will:
 - Optional FastAPI read-only API
 - Deployment via systemd or Docker Compose
 
-### Phase 7: Limited Live Automation
+### Phase 7: Practical Live Operations Hardening
+
+- Real account promotion path from mock paper to real-data paper, KIS read-only,
+  live dry-run, first minimum-size live order, and limited repeated operation
+- Production DataHub hardening for freshness, proposal snapshots, market
+  sessions, provider failures, and broker quote validation
+- Operator-enabled broker risk controls for buying power, cash reserve, position
+  exposure, PnL-based daily loss limit, pending orders, fees, settlement, and
+  unreconciled broker activity
+- Live order recovery for ambiguous submit results, process crashes, status
+  persistence gaps, partial fills, broker truth replay, and explicit recovery
+  completion before another live approval order
+- Heartbeat monitoring, Telegram error escalation, audit integrity, and
+  backup/restore drills
+
+### Phase 8: Dynamic Universe and Virtuoso SDK Hardening
+
+- Strategy-proposed candidate instruments through `CandidateInstrumentRequest`
+- Research versus tradable universe separation
+- Conservative universe policy for US stock/ETF, USD, KIS overseas stock,
+  NASD/NYSE/AMEX, one new tradable symbol per run, broker/data checks, and
+  operator approval for new tradable symbols
+- Instrument resolver for canonical metadata and broker mappings
+- Versioned strategy/app compatibility checks
+
+### Phase 9: Limited Live Automation
 
 - Very small auto-approval rules
 - Larger orders remain Telegram-approved
@@ -263,12 +288,12 @@ And Maestro will:
 - Portfolio target must be passed to RiskManager before execution.
 - Static allowed-symbol configs remain valid for examples, tests, tutorials, and
   conservative paper trading, but they are not the intended product ceiling.
-- The planned production design separates a broad research universe from a
-  stricter tradable universe. Research inputs may include symbols, macro series,
-  or keywords used only for analysis. Tradable symbols must pass Maestro
-  validation before allocation or execution.
-- Future Virtuoso apps may propose candidate symbols through the SDK, but Maestro
-  must validate them against `UniversePolicy`, resolve metadata through an
+- The production design separates a broad research universe from a stricter
+  tradable universe. Research inputs may include symbols, macro series, or
+  keywords used only for analysis. Tradable symbols must pass Maestro validation
+  before allocation or execution.
+- Virtuoso apps may propose candidate symbols through the SDK, but Maestro must
+  validate them against `UniversePolicy`, resolve metadata through an
   `InstrumentResolver`, check DataHub availability/freshness, and verify broker
   tradability when required.
 
@@ -282,8 +307,8 @@ And Maestro will:
   - Allowed asset universe
   - Strategy weight limits
 - RiskManager may modify target allocations, but all modifications must be logged.
-- Future dynamic-universe risk checks must reject unknown, unresolved,
-  untradable, and research-only symbols in `TargetAllocationResult`.
+- Dynamic-universe checks reject unknown, unresolved, untradable, and
+  research-only symbols in `TargetAllocationResult`.
 - Virtuoso apps must not directly approve tradability, call broker APIs, submit
   orders, or bypass Maestro safety gates.
 
@@ -329,8 +354,9 @@ Future requirement:
 - KIS current price lookup may be used as `broker_quote` reference data for execution validation or reconciliation.
 - KIS must not be presented as Maestro's main research or strategy data source.
 - The intended first production broker product is overseas stocks/ETFs through
-  `kis_overseas_stock`; real KIS overseas read-only and live submit/status paths
-  must not be claimed until implemented and verified.
+  `kis_overseas_stock`; real KIS overseas read-only and approval-gated US
+  stock/ETF limit-order submit/status paths must not be claimed until
+  implemented and verified.
 - `live_readonly` must expose no callable order submission, cancel, amend, buy, or sell path.
 - Live trading should initially be `live_approval`, not `live_auto`.
 - Only limit orders should be allowed initially.
@@ -411,3 +437,16 @@ Future requirement:
 - Fill results are reconciled and logged.
 - No duplicate orders under retry/error conditions.
 - Live order size remains within configured risk limits.
+
+### Repeated Real-account Operation
+
+- Operator-local config has passed mock paper, real-data paper, KIS read-only,
+  Telegram approval, live dry-run, and first minimum-size live order gates.
+- Required DataHub prices are fresh, auditable, and valid for the market session.
+- Broker reconciliation, fill reconciliation, and dashboard state match broker
+  truth after each live approval order.
+- Buying power, cash reserve, exposure limits, pending orders, and daily loss
+  limits are enforced before submission.
+- Ambiguous broker submit, process crash, timeout, and manual broker
+  intervention procedures are documented and rehearsed.
+- Heartbeat, alerting, audit integrity, backup, and halt recovery are exercised.

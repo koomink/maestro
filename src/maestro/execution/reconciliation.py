@@ -6,6 +6,7 @@ from maestro.config.models import ReconciliationConfig
 from maestro.core.clock import utc_now
 from maestro.core.ids import new_run_id
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -176,12 +177,13 @@ class BrokerReconciliationService:
 
     def _persist(self, result: ReconciliationResult) -> None:
         payload = result.model_dump(mode="json")
-        self.state_store.save_system_event(
+        save_audited_system_event(
+            self.state_store,
+            self.audit_logger,
             result.run_id,
-            "broker_reconciliation",
+            SystemEventType.BROKER_RECONCILIATION,
             payload,
         )
-        self.audit_logger.log(result.run_id, "broker_reconciliation", payload)
 
     def _tolerances(self) -> dict[str, float]:
         return {

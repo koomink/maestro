@@ -11,6 +11,18 @@ portfolio:
     - QQQ
 
 universe:
+  policy:
+    allowed_asset_types: [stock, etf, us_etf]
+    allowed_regions: [US]
+    allowed_currencies: [USD]
+    allowed_broker_products: [kis_overseas_stock]
+    allowed_exchange_codes: [NASD, NYSE, AMEX]
+    denied_symbols: []
+    denied_asset_tags: []
+    max_new_symbols_per_run: 1
+    require_operator_approval_for_tradable: true
+    require_broker_tradability_check: true
+    require_data_freshness_check: true
   instruments:
     - symbol: CASH_USD
       asset_type: cash
@@ -80,6 +92,7 @@ datahub:
 execution:
   engine: paper
   live_order_enabled: false
+  live_order_dry_run: false
   require_reconciliation_pass: true
   max_live_order_notional: 100
   max_daily_live_notional: 300
@@ -89,6 +102,18 @@ execution:
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
+  require_market_session: false
+  market_session_timezone: America/New_York
+  market_session_open: "09:30"
+  market_session_close: "16:00"
+  market_session_weekdays: [0, 1, 2, 3, 4]
+  market_session_holidays: []
+  require_broker_quote_validation: false
+  max_broker_quote_deviation_pct: 0.05
+  require_broker_risk_validation: false
+  live_order_fee_buffer_pct: 0.0
+  heartbeat_max_age_seconds: 0
+  scheduled_run_max_age_seconds: 0
 
 risk:
   max_single_asset_weight: 0.4

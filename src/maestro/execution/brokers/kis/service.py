@@ -5,7 +5,7 @@ from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.mock_client import MockKISReadOnlyClient
 from maestro.execution.brokers.kis.models import KISReadOnlySnapshot
-from maestro.execution.brokers.kis.rest_client import build_kis_rest_readonly_client
+from maestro.execution.brokers.kis.readonly_client import build_kis_rest_readonly_client
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 

@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from typer.testing import CliRunner
 from maestro.cli import app
 from maestro.config.loader import load_config
 from maestro.core.ids import new_run_id
+from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import JsonFormatter
 from maestro.state.store import StateStore
@@ -65,6 +67,161 @@ def test_health_reports_failed_reconciliation(tmp_path):
     assert checks["reconciliation"].status == "fail"
 
 
+def test_health_reports_missing_heartbeat_and_scheduled_run_when_configured(tmp_path):
+    config_path = _live_approval_config(
+        tmp_path,
+        heartbeat_max_age_seconds=60,
+        scheduled_run_max_age_seconds=60,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["heartbeat"].status == "fail"
+    assert checks["heartbeat"].message == "missing"
+    assert checks["scheduled_run"].status == "fail"
+    assert checks["scheduled_run"].message == "missing"
+
+
+def test_heartbeat_cli_records_event_and_hash_chained_audit(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+
+    result = CliRunner().invoke(app, ["heartbeat", "--config", str(config_path)])
+
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit_line = Path(config.audit.jsonl_path).read_text().splitlines()[0]
+    audit_event = json.loads(audit_line)
+    assert result.exit_code == 0
+    assert store.list_system_events_by_type("maestro_heartbeat")
+    assert audit_event["event_type"] == "maestro_heartbeat"
+    assert audit_event["event_hash"]
+
+
+def test_audit_integrity_check_detects_hash_tampering(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    config = load_config(config_path)
+    audit = AuditLogger(config.audit.jsonl_path)
+    audit.log("run_1", "event_1", {"value": 1})
+    audit.log("run_2", "event_2", {"value": 2})
+    path = Path(config.audit.jsonl_path)
+    lines = path.read_text().splitlines()
+    second = json.loads(lines[1])
+    second["details"]["value"] = 3
+    lines[1] = json.dumps(second)
+    path.write_text("\n".join(lines) + "\n")
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["audit_integrity"].status == "fail"
+    assert checks["audit_integrity"].message == "hash_mismatch"
+
+
+def test_ops_alerts_cli_reports_health_alerts_without_network(tmp_path):
+    config_path = _live_approval_config(tmp_path, heartbeat_max_age_seconds=60)
+
+    result = CliRunner().invoke(
+        app,
+        ["ops-alerts", "--config", str(config_path), "--allow-mock"],
+    )
+
+    assert result.exit_code == 0
+    assert "ops_alerts status=ok mock=true" in result.output
+
+
+def test_health_live_approval_preflight_reports_ready_when_config_is_safe(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    config_path = _live_approval_config(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["live_approval_preflight"].status == "ok"
+    assert checks["live_approval_preflight"].message == "ready"
+
+
+def test_live_preflight_cli_exits_zero_when_ready(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    config_path = _live_approval_config(tmp_path)
+
+    result = CliRunner().invoke(app, ["live-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "check=live_approval_preflight status=ok message=ready" in result.output
+
+
+def test_live_preflight_cli_exits_one_when_failed(tmp_path):
+    config_path = _live_approval_config(tmp_path, require_reconciliation_pass=False)
+
+    result = CliRunner().invoke(app, ["live-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "status=fail" in result.output
+    assert "reconciliation_not_required" in result.output
+
+
+def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    config_path = _live_approval_config(
+        tmp_path,
+        require_market_session=True,
+        require_broker_quote_validation=True,
+        require_broker_risk_validation=True,
+        daily_loss_limit=100.0,
+        heartbeat_max_age_seconds=60,
+        scheduled_run_max_age_seconds=60,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_beta_ready_events(store)
+
+    result = CliRunner().invoke(app, ["beta-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "check=private_beta_preflight status=ok message=ready" in result.output
+
+
+def test_beta_preflight_cli_exits_one_when_hardening_missing(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+
+    result = CliRunner().invoke(app, ["beta-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "status=fail" in result.output
+    assert "market_session_not_required" in result.output
+    assert "broker_risk_validation_not_required" in result.output
+
+
+def test_health_live_approval_preflight_fails_unsafe_config(tmp_path):
+    config_path = _live_approval_config(
+        tmp_path,
+        live_order_enabled=False,
+        require_reconciliation_pass=False,
+        max_daily_live_order_count=0,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["live_approval_preflight"].status == "fail"
+    assert "reconciliation_not_required" in checks["live_approval_preflight"].details["failures"]
+    assert "live_order_disabled" in checks["live_approval_preflight"].details["warnings"]
+
+
 def test_structured_logging_redacts_secret_fields():
     formatter = JsonFormatter()
     record = logging.LogRecord(
@@ -92,6 +249,43 @@ def test_structured_logging_redacts_secret_fields():
     assert "AAPL" in output
 
 
+def test_recover_live_order_cli_records_completion_after_reconciliation(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_broker_account_snapshot(
+        "run_snapshot",
+        "BROKER-ACCOUNT",
+        {
+            "account": {
+                "account_id": "BROKER-ACCOUNT",
+                "cash": 100.0,
+                "buying_power": 100.0,
+                "positions": [],
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+    store.save_system_event("run_reconcile", "broker_reconciliation", {"passed": True})
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "recover-live-order",
+            "--config",
+            str(config_path),
+            "--reason",
+            "broker truth reconciled",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "recovery_completed" in result.output
+    assert store.list_system_events_by_type("live_order_recovery_completed")
+
+
 def _readonly_config(tmp_path: Path) -> Path:
     raw = yaml.safe_load(Path("configs/kis_overseas_readonly.example.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
@@ -100,3 +294,61 @@ def _readonly_config(tmp_path: Path) -> Path:
     config_path = tmp_path / "kis_overseas_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+def _live_approval_config(
+    tmp_path: Path,
+    *,
+    live_order_enabled: bool = True,
+    require_reconciliation_pass: bool = True,
+    max_daily_live_order_count: int = 3,
+    require_market_session: bool = False,
+    require_broker_quote_validation: bool = False,
+    require_broker_risk_validation: bool = False,
+    daily_loss_limit: float | None = None,
+    heartbeat_max_age_seconds: int = 0,
+    scheduled_run_max_age_seconds: int = 0,
+) -> Path:
+    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "live_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "live_audit.jsonl")
+    raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")
+    raw["execution"]["live_order_enabled"] = live_order_enabled
+    raw["execution"]["require_reconciliation_pass"] = require_reconciliation_pass
+    raw["execution"]["max_daily_live_order_count"] = max_daily_live_order_count
+    raw["execution"]["require_market_session"] = require_market_session
+    raw["execution"]["require_broker_quote_validation"] = require_broker_quote_validation
+    raw["execution"]["require_broker_risk_validation"] = require_broker_risk_validation
+    raw["execution"]["daily_loss_limit"] = daily_loss_limit
+    raw["execution"]["heartbeat_max_age_seconds"] = heartbeat_max_age_seconds
+    raw["execution"]["scheduled_run_max_age_seconds"] = scheduled_run_max_age_seconds
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
+
+
+def _save_beta_ready_events(store: StateStore) -> None:
+    store.save_system_event("run_heartbeat", "maestro_heartbeat", {"source": "test"})
+    store.save_system_event("run_completed", "run_once_completed", {"orders_created": 0})
+    store.save_broker_account_snapshot(
+        "run_snapshot",
+        "BROKER-ACCOUNT",
+        {
+            "account": {
+                "account_id": "BROKER-ACCOUNT",
+                "cash": 1000.0,
+                "buying_power": 1000.0,
+                "positions": [],
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+    snapshot = store.load_latest_broker_account_snapshot()
+    assert snapshot is not None
+    store.save_system_event(
+        "run_reconcile",
+        "broker_reconciliation",
+        {"passed": True, "issues": [], "broker_snapshot_id": snapshot["id"]},
+    )

@@ -13,6 +13,19 @@ class SignalValidator:
     def __init__(self, allowed_symbols: list[str], strategy_ids: set[str]) -> None:
         self.allowed_symbols = set(allowed_symbols)
         self.strategy_ids = strategy_ids
+        self.research_only_symbols: set[str] = set()
+
+    @classmethod
+    def with_universe_boundaries(
+        cls,
+        *,
+        tradable_symbols: set[str],
+        research_only_symbols: set[str],
+        strategy_ids: set[str],
+    ) -> "SignalValidator":
+        validator = cls(sorted(tradable_symbols), strategy_ids)
+        validator.research_only_symbols = set(research_only_symbols)
+        return validator
 
     def validate(self, result: TargetAllocationResult) -> ValidationResult:
         errors = []
@@ -26,6 +39,8 @@ class SignalValidator:
         for symbol, weight in result.allocations.items():
             if weight < 0:
                 errors.append(f"allocation for {symbol} must be non-negative")
-            if symbol != "CASH" and symbol not in self.allowed_symbols:
+            if symbol in self.research_only_symbols:
+                errors.append(f"allocation symbol {symbol} is research-only")
+            elif symbol != "CASH" and symbol not in self.allowed_symbols:
                 errors.append(f"allocation symbol {symbol} is not in allowed universe")
         return ValidationResult(ok=not errors, errors=errors)

@@ -27,6 +27,7 @@ class TradableInstrument(BaseModel):
     price_tick: float = Field(gt=0)
     min_order_quantity: float = Field(default=1.0, gt=0)
     min_order_notional: float = Field(default=0.0, ge=0)
+    asset_tags: list[str] = Field(default_factory=list)
 
     def broker_mapping(self) -> BrokerSymbolMapping:
         return BrokerSymbolMapping(

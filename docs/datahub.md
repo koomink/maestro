@@ -228,6 +228,12 @@ configured; normal tests remain fake-client and fixture based, and live-network
 smoke tests are skipped by default. Sentiment is intentionally network-free for
 v0.3 and analyzes configured fixture/news text only.
 
+DataHub is not yet a complete production market data system. It is the Maestro
+boundary for research and market data requests. Before repeated real-account
+operation, live approval needs stricter DataHub behavior around freshness,
+session validity, provider failure, proposal snapshots, and broker quote
+validation.
+
 Implemented routing scaffold:
 
 - `DataHubRegistry` records provider capabilities: data types, optional symbols,
@@ -750,6 +756,27 @@ Testing policy for future external providers:
 - Fixtures should include successful payloads, unsupported symbols, stale
   responses, provider-unavailable responses, malformed provider data, and
   rate-limit cases.
+
+Production live-approval hardening:
+
+- Required `price` data for live approval should fail closed when stale, missing,
+  outside the intended market session, or inconsistent with the proposal
+  snapshot.
+- The exact data snapshot used to generate a live approval proposal should be
+  persisted or referenced so an operator can audit the price basis after the
+  order.
+- Market hours and holiday checks should be explicit for the configured venue.
+  Daily OHLCV freshness alone is not enough for intraday live order decisions.
+- Broker-side `broker_quote` checks may validate order prices immediately before
+  execution, but they must not become a fallback strategy research feed.
+- Provider retry and rate-limit behavior should be bounded and provider-specific;
+  partial data must not be silently treated as fresh.
+
+Current v0.8.2 live-approval hardening supports opt-in market-session checks via
+execution config and opt-in broker quote validation from the latest KIS
+read-only snapshot. DataHub provider fallback remains router-owned: tests cover
+provider-unavailable fallback without letting broker quotes satisfy research
+`price` requests.
 
 Remaining real provider work:
 

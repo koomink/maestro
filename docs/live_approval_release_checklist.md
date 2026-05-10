@@ -1,6 +1,7 @@
 # Live Approval Release Checklist
 
-This checklist closes v0.6 `live_approval`. It is not a `live_auto` procedure.
+This checklist covers approval-gated live approval release and real-account
+rehearsal. It is not a `live_auto` procedure.
 Maestro still has no market orders, no direct buy/sell/cancel CLI, no dashboard
 write controls, and no high-risk Telegram admin controls.
 
@@ -9,6 +10,30 @@ the read-only dashboard. Yahoo/yfinance, FRED, RSS feeds, KIS Open API, and
 Telegram Bot API are external systems reached through Maestro adapters.
 Virtuoso apps must request data through Maestro DataHub and must not call broker,
 Telegram, or external data APIs directly.
+
+## Promotion Path
+
+Do not treat KIS network connectivity or a successful single submit as
+production readiness. Promote one operator-local configuration through these
+gates in order:
+
+1. Run mock or CSV paper mode until the strategy and state path are stable.
+2. Run real-data paper mode with the intended DataHub provider and symbols.
+3. Run KIS overseas read-only sync and broker reconciliation against the real
+   account.
+4. Run a real Telegram approval rehearsal without broker submission.
+5. Run `live_order_dry_run=true` through approval and lifecycle preflight.
+6. Submit one minimum-size approval-gated limit order only after every prior
+   gate passes.
+7. Confirm broker status, fill reconciliation, broker reconciliation, audit
+   events, and read-only dashboard state before repeated operation.
+
+Normal automated tests remain fake-client and fixture based. Real KIS and
+Telegram network checks must be explicit operator rehearsals, skipped by default
+in test automation, and run only with operator-local config.
+
+For the complete operator-local promotion runbook, see
+`docs/live_account_promotion.md`.
 
 ## Preflight Checklist
 
@@ -27,8 +52,20 @@ Telegram, or external data APIs directly.
   operator-approved order.
 - Confirm `execution.max_daily_live_order_count` is small enough for the first
   operator-approved run.
-- Leave `execution.daily_loss_limit` unset until broker PnL normalization is
-  implemented for the configured overseas stock/ETF broker product.
+- Enable `execution.require_market_session=true` only after the operator config
+  has the intended venue timezone, open/close times, weekdays, and holiday list.
+- Enable `execution.require_broker_quote_validation=true` only after KIS
+  read-only sync writes current prices for the intended order symbols.
+- Enable `execution.require_broker_risk_validation=true` only after the latest
+  KIS read-only snapshot is reconciled and includes cash, buying power, current
+  prices, positions, and unfilled orders.
+- Set `execution.live_order_fee_buffer_pct` to the operator's conservative
+  commission/fee cushion before the first real order.
+- Set `execution.daily_loss_limit` only after the operator has verified which
+  normalized broker PnL field the account snapshot provides.
+- Set `execution.heartbeat_max_age_seconds` and
+  `execution.scheduled_run_max_age_seconds` in operator deployments that run on a
+  schedule.
 - Confirm required DataHub price data is fresh before live approval.
 - Confirm the dashboard remains read-only.
 - Confirm no strategy plugin imports or calls KIS, Telegram, or other broker APIs
@@ -62,10 +99,10 @@ audit/state records.
 Do not proceed if the read-only account snapshot is missing, stale, points to
 the wrong account, or does not use the intended broker product adapter.
 
-`configs/kis_live_readonly.example.yaml` documents the intended
-`kis_overseas_stock` shape, but real KIS overseas read-only remains fail-closed
-until endpoint paths, TR_IDs, exchange codes, pagination, and response fields are
-verified and implemented.
+`configs/kis_overseas_readonly.example.yaml` documents the intended
+`kis_overseas_stock` shape. KIS overseas read-only uses verified account
+endpoints, and live approval uses verified US stock/ETF limit-order
+submit/status payloads behind the safety gates.
 
 ## Broker Reconciliation Pass
 
@@ -105,6 +142,88 @@ maestro status --config configs/paper.yaml
 For live approval behavior, use injected fake KIS and Telegram clients in tests.
 Do not add normal tests that call KIS or Telegram network endpoints.
 
+Before enabling live orders, run:
+
+```bash
+maestro health --config <live-approval-config>
+```
+
+Confirm `live_approval_preflight` is `ok`. Do not proceed when it reports
+missing reconciliation requirements, non-Telegram approval, missing Telegram
+chat/user allowlists, missing KIS overseas broker product config, unsupported
+exchange codes, or missing live notional caps.
+
+For the final rehearsal before broker submission, set
+`execution.live_order_dry_run=true` in the operator-local config and run:
+
+```bash
+maestro run-once --config <live-approval-config>
+```
+
+Confirm the approval path completes and `live_order_dry_run` events contain the
+expected symbol, side, quantity, limit price, and notional. Then set
+`execution.live_order_dry_run=false` only after the dry-run payload matches the
+intended first order.
+
+Review the matching `live_proposal_data_snapshot` event before approval. It
+records the DataHub requests, price basis, data quality issues, risk decision,
+and proposed orders used to create the live approval proposal.
+
+If real KIS responses are captured for parser fixtures, redact them using
+`docs/kis_fixture_redaction.md` before storing them anywhere in the repository.
+
+## Live Network Smoke Checks
+
+Run these only from an operator environment with real credentials and an
+operator-local config:
+
+- KIS read-only account snapshot: cash, positions, buying power, fills, unfilled
+  orders, and account ID must match the broker UI.
+- Broker reconciliation: the latest `broker_reconciliation` event must pass and
+  be younger than `reconciliation.max_age_seconds`.
+- Telegram approval: only allowed chat IDs receive proposals, only whitelisted
+  users can approve, and rejection/timeout skip execution.
+- Live dry-run: `live_order_dry_run` must show the exact symbol, side, quantity,
+  limit price, notional, approval ID, and broker product expected for the first
+  order.
+- First live order: use the smallest practical notional and order count caps,
+  then verify `live_order_result`, `live_order_status`,
+  `fill_reconciliation`, `broker_reconciliation`, and
+  `live_order_lifecycle` events.
+
+The KIS read-only smoke gate is available as:
+
+```bash
+maestro live-smoke --config <operator-readonly-config> --check kis-readonly
+```
+
+For normal tests this same gate is covered with a mock provider by passing
+`--allow-mock`. The real-network pytest smoke is skipped unless
+`MAESTRO_RUN_KIS_LIVE_SMOKE=1` and `MAESTRO_KIS_LIVE_CONFIG` are set.
+
+The Telegram approval smoke gate sends a non-approval smoke message to the
+configured Telegram chats:
+
+```bash
+maestro live-smoke --config <operator-live-approval-config> --check telegram-approval
+```
+
+For normal tests this gate validates a Telegram-configured approval path with
+`--allow-mock`. The real-network pytest smoke is skipped unless
+`MAESTRO_RUN_TELEGRAM_LIVE_SMOKE=1` and `MAESTRO_TELEGRAM_LIVE_CONFIG` are set.
+
+The live approval dry-run smoke gate runs `run_once`, requires
+`execution.live_order_dry_run=true`, and verifies that `live_order_dry_run`
+events were written without broker submission:
+
+```bash
+maestro live-smoke --config <operator-live-approval-config> --check live-dry-run
+```
+
+For normal tests this gate can run with console/mock approval by passing
+`--allow-mock`. The operator pytest smoke is skipped unless
+`MAESTRO_RUN_LIVE_DRY_RUN_SMOKE=1` and `MAESTRO_LIVE_DRY_RUN_CONFIG` are set.
+
 ## Live Approval Submit Path
 
 1. Copy `configs/live_approval.example.yaml` to an operator-local config.
@@ -114,10 +233,12 @@ Do not add normal tests that call KIS or Telegram network endpoints.
 4. Run KIS read-only sync and broker reconciliation.
 5. Confirm Telegram approval works with the intended operator account.
 6. Set small live notional caps.
-7. Only after all checks pass, set `execution.live_order_enabled=true` in the
+7. Set `execution.live_order_dry_run=true` and run one approved dry-run.
+8. Only after all checks pass, set `execution.live_order_enabled=true` and
+   `execution.live_order_dry_run=false` in the
    operator-local config.
-8. Run `maestro run-once --config <live-approval-config>`.
-9. Approve only if the proposal, limit price, notional, and symbol are expected.
+9. Run `maestro run-once --config <live-approval-config>`.
+10. Approve only if the proposal, limit price, notional, and symbol are expected.
 
 There is no direct or unguarded buy/sell command. The only live submit path is
 approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
@@ -145,21 +266,37 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 ## Halt / Failure Handling
 
 - Halt on unknown submit result or unknown broker status.
+- Treat broker submit timeouts and ambiguous transport failures as unresolved
+  until broker state is checked through read-only KIS queries. Maestro records
+  `live_order_recovery_required` for these paths.
+- If the process dies after broker submit or before lifecycle persistence
+  completes, the next live approval proposal is blocked by
+  `live_order_recovery_halt` until broker order/fill truth is reconstructed.
 - Halt on stale required DataHub data before approval/lifecycle execution.
 - Halt on missing, stale, or failed broker reconciliation when reconciliation is
   required.
 - Halt when daily live notional or order count caps would be exceeded.
 - Halt when a proposed live order violates `universe.instruments` precision,
   minimum, currency, or broker product constraints.
-- Halt when `execution.daily_loss_limit` is configured before broker PnL
-  normalization exists.
+- Halt when broker risk validation detects insufficient buying power, cash
+  reserve breach, symbol or portfolio exposure breach, pending broker orders, or
+  unreconciled broker snapshot/manual broker activity.
+- Halt when `execution.daily_loss_limit` is exceeded or broker PnL is unavailable
+  while the limit is configured.
 - Halt or fail when broker reconciliation fails after a fill update.
 - Do not retry blindly after any halt/failure.
 - Preserve state and audit files for review.
+- Do not clear a halt after manual broker intervention until KIS read-only sync,
+  broker reconciliation, and fill reconciliation have been rerun.
+- Run `maestro ops-alerts --config <live-approval-config>` from the operator
+  alerting path so halt/failure/stale/reconciliation/heartbeat health failures
+  reach the configured Telegram approval chats.
 - Inspect `safety_state`, `safety_execution_blocked`, `stale_data_halt`,
   `broker_reconciliation_halt`, `live_order_limit_halt`,
-  `instrument_validation_halt`, `live_order_result`, `live_order_status`,
-  `fill_reconciliation`, and `live_order_lifecycle` events before the next run.
+  `instrument_validation_halt`, `broker_risk_halt`, `live_order_result`,
+  `live_order_status`, `fill_reconciliation`, `live_order_lifecycle`,
+  `live_order_recovery_required`, `live_order_recovery_halt`, and
+  `live_order_recovery_completed` events before the next run.
 
 ## Halt Recovery
 
@@ -167,9 +304,21 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 2. Review the halt event, audit log, broker account state, latest reconciliation,
    and affected canonical symbols.
 3. Run read-only sync and broker reconciliation again.
-4. Confirm DataHub freshness, universe mappings, precision rules, daily limits,
+4. Run fill reconciliation:
+
+```bash
+maestro reconcile-fills --config <live-approval-config>
+```
+
+5. Record live order recovery completion:
+
+```bash
+maestro recover-live-order --config <live-approval-config> --reason "<broker truth reconciled>"
+```
+
+6. Confirm DataHub freshness, universe mappings, precision rules, daily limits,
    and operator approval path.
-5. Clear only a `halted` state with:
+7. Clear only a `halted` state with:
 
 ```bash
 maestro clear-halt --config <live-approval-config> --reason "<root cause fixed>"
@@ -177,6 +326,23 @@ maestro clear-halt --config <live-approval-config> --reason "<root cause fixed>"
 
 `resume` does not clear halted state. `clear-halt` and `resume` do not clear a
 killed state.
+
+## Monitoring / Audit Checks
+
+Run these from the operator scheduler or deployment monitor:
+
+```bash
+maestro heartbeat --config <live-approval-config>
+maestro health --config <live-approval-config>
+maestro ops-alerts --config <live-approval-config>
+maestro beta-preflight --config <live-approval-config>
+```
+
+Health verifies heartbeat age, scheduled `run-once` age, broker snapshot age,
+reconciliation status, recent halt/failure events, and audit hash-chain
+integrity. `ops-alerts` sends warn/fail health checks to Telegram; use
+`--allow-mock` only for local rehearsal. `beta-preflight` is the final
+private-beta readiness gate for an operator-local live approval config.
 
 ## Rollback / Stop Procedure
 
@@ -186,6 +352,7 @@ killed state.
 4. Use broker-native tools for emergency broker-side action.
 5. Run `maestro kis-sync`, `maestro kis-account`, `maestro reconcile`, and
    `maestro reconcile-fills` after any manual broker action.
-6. Do not use Maestro for live cancel until the KIS cancel endpoint path, TR_IDs,
-   and request fields are verified and implemented behind
-   `LiveOrderCancellationService`.
+6. Use Maestro live cancel only through `LiveOrderCancellationService` after
+   Telegram approval, latest open or partial-fill status, remaining quantity,
+   and a passing broker reconciliation are confirmed. There is still no direct
+   cancel CLI.

@@ -42,3 +42,23 @@ def test_signal_validator_rejects_allocation_sum_above_one():
 
     assert not validation.ok
     assert "allocation sum must be 1.0 or less" in validation.errors
+
+
+def test_signal_validator_rejects_research_only_allocation():
+    validator = SignalValidator.with_universe_boundaries(
+        tradable_symbols={"CASH", "AAPL"},
+        research_only_symbols={"VIX"},
+        strategy_ids={"dynamic_strategy"},
+    )
+    result = TargetAllocationResult(
+        strategy_id="dynamic_strategy",
+        strategy_version="0.1.0",
+        timestamp=datetime.now(UTC),
+        allocations={"VIX": 0.1, "AAPL": 0.4},
+        confidence=0.5,
+    )
+
+    validation = validator.validate(result)
+
+    assert not validation.ok
+    assert "allocation symbol VIX is research-only" in validation.errors
