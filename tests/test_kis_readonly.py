@@ -13,6 +13,7 @@ from maestro.execution.brokers.kis.rest_client import (
     KISRestDomesticStockLiveOrderClient,
     KISRestLiveOrderClient,
     KISRestOverseasStockLiveOrderClient,
+    KISRestOverseasStockReadOnlyClient,
     KISRestReadOnlyClient,
     build_kis_rest_live_order_client,
 )
@@ -240,6 +241,84 @@ def test_kis_provider_defaults_to_overseas_stock_adapter(monkeypatch):
     assert isinstance(client, KISRestOverseasStockLiveOrderClient)
 
 
+def test_kis_overseas_readonly_client_normalizes_us_account(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockReadOnlyClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    snapshot = client.get_account_snapshot()
+    prices = client.get_current_prices(["AAPL", "VOO", "CASH_USD"])
+    fills = client.get_order_fills()
+    unfilled = client.get_unfilled_orders()
+
+    assert snapshot.cash_balance is not None
+    assert snapshot.account_id == "12345678-01"
+    assert snapshot.cash == 2500.0
+    assert snapshot.cash_balance.currency == "USD"
+    assert snapshot.cash_balance.withdrawable_cash == 2400.0
+    assert snapshot.buying_power == 1500.0
+    assert snapshot.positions[0].symbol == "AAPL"
+    assert snapshot.positions[0].quantity == 3.0
+    assert snapshot.positions[0].market_value == 570.0
+    assert prices == {"AAPL": 191.25, "VOO": 500.5, "CASH_USD": 1.0}
+    assert fills[0].symbol == "AAPL"
+    assert fills[0].status == "filled"
+    assert fills[0].average_fill_price == 189.5
+    assert unfilled[0].symbol == "VOO"
+    assert unfilled[0].status == "open"
+    assert any(call["headers"]["tr_id"] == "TTTS3012R" for call in transport.calls)
+    assert any(call["headers"]["tr_id"] == "CTRP6504R" for call in transport.calls)
+    assert any(call["headers"]["tr_id"] == "TTTS3007R" for call in transport.calls)
+    assert any(call["headers"]["tr_id"] == "TTTS3035R" for call in transport.calls)
+    assert any(call["headers"]["tr_id"] == "TTTS3018R" for call in transport.calls)
+    assert not any(call["method"] != "GET" for call in transport.calls)
+    assert not any(
+        "/order" in call["url"] and "inquire" not in call["url"] for call in transport.calls
+    )
+
+
+def test_kis_overseas_readonly_requires_universe_metadata(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    client = KISRestOverseasStockReadOnlyClient(
+        config,
+        transport=FakeKISOverseasTransport(),
+        instruments=[],
+    )
+
+    try:
+        client.get_current_prices(["AAPL"])
+    except ValueError as exc:
+        assert "requires universe metadata" in str(exc)
+    else:
+        raise AssertionError("Expected missing metadata to fail closed")
+
+
 def test_kis_live_order_client_normalizes_open_status(monkeypatch):
     client = _kis_live_order_client(monkeypatch, FakeKISTransport())
 
@@ -336,6 +415,46 @@ def _broker_order(order_id: str) -> BrokerOrderId:
         order_id="ord_live_1",
         submitted_at="2026-05-08T00:00:00+00:00",
     )
+
+
+def _us_instruments() -> list[TradableInstrument]:
+    return [
+        TradableInstrument(
+            symbol="CASH_USD",
+            asset_type="cash",
+            region="US",
+            currency="USD",
+            broker="kis",
+            broker_product="kis_overseas_stock",
+            broker_symbol="USD",
+            quantity_step=0.01,
+            price_tick=0.01,
+        ),
+        TradableInstrument(
+            symbol="AAPL",
+            asset_type="stock",
+            region="US",
+            currency="USD",
+            broker="kis",
+            broker_product="kis_overseas_stock",
+            broker_symbol="AAPL",
+            exchange_code="NASD",
+            quantity_step=1,
+            price_tick=0.01,
+        ),
+        TradableInstrument(
+            symbol="VOO",
+            asset_type="etf",
+            region="US",
+            currency="USD",
+            broker="kis",
+            broker_product="kis_overseas_stock",
+            broker_symbol="VOO",
+            exchange_code="AMEX",
+            quantity_step=1,
+            price_tick=0.01,
+        ),
+    ]
 
 
 class FakeKISTransport:
@@ -480,3 +599,97 @@ class FakeKISTransport:
                 },
             }
         raise AssertionError(f"Unexpected KIS fake URL: {url}")
+
+
+class FakeKISOverseasTransport:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": headers,
+                "params": params or {},
+                "json_body": json_body or {},
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if url.endswith("/inquire-balance"):
+            return {
+                "rt_cd": "0",
+                "output2": [
+                    {
+                        "ovrs_pdno": "AAPL",
+                        "ovrs_item_name": "Apple Inc",
+                        "ovrs_cblc_qty": "3",
+                        "pchs_avg_pric": "180.00",
+                        "now_pric2": "190.00",
+                        "frcr_evlu_pfls_amt": "30.00",
+                        "ovrs_excg_cd": "NASD",
+                    }
+                ],
+            }
+        if url.endswith("/inquire-present-balance"):
+            return {
+                "rt_cd": "0",
+                "output2": {
+                    "crcy_cd": "USD",
+                    "frcr_use_psbl_amt": "2500.00",
+                    "frcr_drwg_psbl_amt_1": "2400.00",
+                },
+                "output3": {
+                    "tot_asst_amt": "3070.00",
+                },
+            }
+        if url.endswith("/inquire-psamount"):
+            assert (params or {})["ITEM_CD"] == "AAPL"
+            return {
+                "rt_cd": "0",
+                "output": {
+                    "ovrs_ord_psbl_amt": "1500.00",
+                    "max_ord_psbl_qty": "7",
+                },
+            }
+        if url.endswith("/quotations/price"):
+            symbol = (params or {})["SYMB"]
+            price = "191.25" if symbol == "AAPL" else "500.50"
+            return {
+                "rt_cd": "0",
+                "output": {
+                    "last": price,
+                },
+            }
+        if url.endswith("/inquire-ccnl"):
+            return {
+                "rt_cd": "0",
+                "output": [
+                    {
+                        "odno": "9001",
+                        "pdno": "AAPL",
+                        "prdt_name": "Apple Inc",
+                        "sll_buy_dvsn_cd": "02",
+                        "ft_ord_qty": "2",
+                        "ft_ccld_qty": "2",
+                        "ft_ccld_unpr3": "189.50",
+                        "prcs_stat_name": "체결",
+                    }
+                ],
+            }
+        if url.endswith("/inquire-nccs"):
+            return {
+                "rt_cd": "0",
+                "output": [
+                    {
+                        "odno": "9002",
+                        "pdno": "VOO",
+                        "sll_buy_dvsn_cd": "02",
+                        "ft_ord_qty": "1",
+                        "ft_ccld_qty": "0",
+                        "nccs_qty": "1",
+                        "ft_ord_unpr3": "500.00",
+                    }
+                ],
+            }
+        raise AssertionError(f"Unexpected KIS overseas fake URL: {url}")

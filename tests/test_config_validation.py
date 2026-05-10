@@ -101,6 +101,7 @@ def test_current_sample_configs_load():
         "configs/telegram_approval_paper.yaml",
         "configs/live_readonly.yaml",
         "configs/kis_live_readonly.example.yaml",
+        "configs/kis_overseas_readonly.example.yaml",
         "configs/live_approval.example.yaml",
         "configs/us_etf_yahoo_paper.yaml",
     ]:
@@ -121,6 +122,28 @@ def test_kis_live_readonly_example_config_uses_real_readonly_provider():
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
     assert config.kis.token_cache_path == "var/kis_access_token.json"
     assert config.kis.paper_trading is False
+
+
+def test_kis_overseas_readonly_example_uses_env_var_names_only():
+    raw_text = Path("configs/kis_overseas_readonly.example.yaml").read_text()
+    config = load_config("configs/kis_overseas_readonly.example.yaml")
+
+    assert config.mode == "live_readonly"
+    assert config.portfolio.base_currency == "USD"
+    assert config.kis.enabled is True
+    assert config.kis.provider == "kis"
+    assert config.kis.broker_product == "kis_overseas_stock"
+    assert config.kis.account_id is None
+    assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
+    assert config.kis.app_key_env == "KIS_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.universe.get("AAPL").exchange_code == "NASD"
+    assert config.universe.get("VOO").exchange_code == "AMEX"
+    assert "12345678" not in raw_text
+    assert "app-key" not in raw_text
+    assert "app-secret" not in raw_text
+    assert "access-token" not in raw_text
 
 
 def test_live_approval_example_config_is_safe_by_default():

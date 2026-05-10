@@ -120,7 +120,12 @@ def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
         raise typer.BadParameter("kis-sync requires mode=live_readonly")
     store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    service = KISReadOnlyService(maestro_config.kis, store, audit)
+    service = KISReadOnlyService(
+        maestro_config.kis,
+        store,
+        audit,
+        instruments=maestro_config.universe.instruments,
+    )
     snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
     typer.echo(
         f"account_id={snapshot.account.account_id} cash={snapshot.account.cash:.2f} "

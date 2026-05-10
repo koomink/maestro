@@ -253,15 +253,17 @@ execution. It should not call KIS for strategy research data.
 
 ## v0.7.2 — KIS Overseas Read-only Adapter
 
-Planned scope:
+Completed scope:
 
-- KIS overseas read-only REST adapter after endpoint paths, TR_IDs, exchange
-  codes, pagination, and response fields are verified
+- KIS overseas read-only REST adapter for verified account endpoints:
+  `inquire-present-balance`, `inquire-balance`, `inquire-psamount`,
+  `inquire-ccnl`, `inquire-nccs`, and overseas quote reference `price`
 - USD cash and foreign-currency balance normalization
 - Overseas positions normalization
 - Overseas buying power normalization
 - Overseas fills and unfilled orders normalization
 - Broker reconciliation for canonical US stock/ETF symbols
+- `configs/kis_overseas_readonly.example.yaml` with env var names only
 - Fake-client and fixture tests only for normal test runs
 
 No order submission, cancel, amend, buy, or sell callable path in this

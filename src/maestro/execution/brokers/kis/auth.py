@@ -65,21 +65,26 @@ class KISAuthManager:
         ]
         if missing:
             raise ValueError(f"Missing KIS credential environment variables: {missing}")
-        if not self.config.account_id:
-            raise ValueError("KIS account_id is required for live_readonly provider")
-        if len(self.config.account_id.replace("-", "")) < 10:
+        account_id = self._account_id()
+        if not account_id:
+            raise ValueError(
+                "KIS account_id is required for live_readonly provider. Set account_id "
+                "or the configured account_id_env environment variable."
+            )
+        if len(account_id.replace("-", "")) < 10:
             raise ValueError("KIS account_id must include account number and product code")
 
     def get_credentials(self) -> KISCredentials:
         self.validate_readonly_credentials()
         app_key = os.environ[self.config.app_key_env]
         app_secret = os.environ[self.config.app_secret_env]
-        if self.config.account_id is None:
+        account_id = self._account_id()
+        if account_id is None:
             raise ValueError("KIS account_id is required for live_readonly provider")
         return KISCredentials(
             app_key=app_key,
             app_secret=app_secret,
-            account_id=self.config.account_id,
+            account_id=account_id,
         )
 
     def get_access_token(self) -> KISToken:
@@ -160,6 +165,13 @@ class KISAuthManager:
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
         path.chmod(0o600)
+
+    def _account_id(self) -> str | None:
+        if self.config.account_id:
+            return self.config.account_id
+        if self.config.account_id_env:
+            return os.getenv(self.config.account_id_env)
+        return None
 
 
 def _parse_kis_datetime(value: Any) -> datetime | None:

@@ -666,15 +666,21 @@ maestro reconcile-fills --config configs/live_readonly.yaml
 ```
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
-`configs/kis_live_readonly.example.yaml` documents the intended overseas
-stock/ETF read-only shape, but the real KIS overseas read-only adapter remains
-fail-closed until endpoint paths, TR_IDs, exchange codes, and response fields
-are verified. When that adapter is implemented, it will use `kis.provider: kis`,
-`kis.account_id`, and these environment variable names:
+`configs/kis_overseas_readonly.example.yaml` documents the real KIS overseas
+stock/ETF read-only shape with env var names only. The `kis_overseas_stock`
+read-only adapter now covers verified overseas account reads for USD/foreign
+cash, positions, buying power, fills, unfilled orders, broker snapshot
+normalization, and reconciliation against Maestro canonical US stock/ETF
+symbols. It uses these environment variable names:
 
+- `KIS_ACCOUNT_ID`: KIS account number and product code
 - `KIS_APP_KEY`: KIS app key
 - `KIS_APP_SECRET`: KIS app secret
 - `KIS_ACCESS_TOKEN`: optional pre-issued access token
+
+The adapter is read-only. It does not submit, cancel, amend, buy, sell, enable
+`live_auto`, or add market orders. Normal tests use fake/fixture KIS responses
+and do not call KIS network endpoints.
 
 If `KIS_ACCESS_TOKEN` is unset, Maestro can issue `/oauth2/tokenP` and can
 persist the access token when `kis.token_cache_path` is configured. The cache
@@ -685,10 +691,11 @@ rule.
 
 The KIS REST layer is split by broker product. `kis_domestic_stock` contains the
 existing domestic endpoint adapter. `kis_overseas_stock` is the strategic target
-for US-listed stocks and ETFs, but real overseas submit/status/read-only calls
-remain fail-closed until endpoint paths, TR_IDs, exchange codes, and fields are
-verified. There is no direct buy/sell CLI, no market order path, and no normal
-test that calls the KIS network.
+for US-listed stocks and ETFs. Real overseas read-only account paths are
+implemented; real overseas submit/status/cancel paths remain fail-closed until
+their endpoint paths, TR_IDs, exchange codes, request fields, and response fields
+are separately verified. There is no direct buy/sell CLI, no market order path,
+and no normal test that calls the KIS network.
 
 To install dashboard dependencies and open the read-only dashboard:
 

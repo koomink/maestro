@@ -1,5 +1,6 @@
 from maestro.config.models import KISConfig
 from maestro.core.ids import new_run_id
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.mock_client import MockKISReadOnlyClient
@@ -16,10 +17,12 @@ class KISReadOnlyService:
         state_store: StateStore,
         audit_logger: AuditLogger,
         client: KISReadOnlyClient | None = None,
+        instruments: list[TradableInstrument] | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
+        self.instruments = instruments or []
         self.client = client or self._build_client(config)
 
     def fetch_and_store_snapshot(self, symbols: list[str]) -> KISReadOnlySnapshot:
@@ -51,5 +54,5 @@ class KISReadOnlyService:
         if config.provider == "mock":
             return MockKISReadOnlyClient(config.account_id or "MOCK-ACCOUNT")
         if config.provider == "kis":
-            return build_kis_rest_readonly_client(config)
+            return build_kis_rest_readonly_client(config, self.instruments)
         raise ValueError(f"Unsupported KIS provider: {config.provider}")

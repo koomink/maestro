@@ -49,6 +49,7 @@ class UrlLibKISTransport:
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
                 response_text = response.read().decode("utf-8")
+                response_headers = dict(response.headers.items())
         except HTTPError as exc:
             raise ValueError(f"KIS request failed with HTTP {exc.code}") from exc
         except URLError as exc:
@@ -59,6 +60,8 @@ class UrlLibKISTransport:
             raise ValueError("KIS response was not valid JSON") from exc
         if not isinstance(payload, dict):
             raise ValueError("KIS response JSON was not an object")
+        if response_headers:
+            payload["__headers__"] = response_headers
         return payload
 
 
@@ -223,7 +226,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
             raise ValueError(f"KIS read-only request failed: {msg_cd} {msg1}")
         return payload
 
-    def _headers(self, tr_id: str, token: KISToken) -> dict[str, str]:
+    def _headers(self, tr_id: str, token: KISToken, *, tr_cont: str = "") -> dict[str, str]:
         return {
             "Content-Type": "application/json",
             "Accept": "text/plain",
@@ -233,7 +236,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
             "appsecret": self.credentials.app_secret,
             "tr_id": tr_id,
             "custtype": "P",
-            "tr_cont": "",
+            "tr_cont": tr_cont,
         }
 
     def _tr_id(self, *, real: str, demo: str) -> str:
@@ -335,36 +338,285 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
         self.auth_manager = auth_manager or KISAuthManager(config, self.transport)
         self.credentials = self.auth_manager.get_credentials()
         self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
+        self._broker_symbol_to_canonical = {
+            instrument.broker_symbol: instrument.symbol for instrument in instruments or []
+        }
 
     def get_account_snapshot(self) -> KISAccountSnapshot:
-        raise NotImplementedError(
-            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        positions, cash_balance = self._fetch_balance()
+        buying_power = self.get_buying_power()
+        return KISAccountSnapshot(
+            account_id=self.credentials.account_id,
+            cash=cash_balance.cash,
+            buying_power=buying_power.cash_buying_power,
+            positions=positions,
+            cash_balance=cash_balance,
+            buying_power_detail=buying_power,
+            fetched_at=utc_now(),
+            source="kis_overseas_stock_readonly",
         )
 
     def get_positions(self) -> list[KISPosition]:
-        raise NotImplementedError(
-            "KIS overseas-stock read-only REST adapter is not implemented yet"
-        )
+        positions, _ = self._fetch_balance()
+        return positions
 
     def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
-        raise NotImplementedError(
-            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        broker_symbol, exchange_code = self._buying_power_symbol(symbol)
+        payload = self._get(
+            "/uapi/overseas-stock/v1/trading/inquire-psamount",
+            self._tr_id(real="TTTS3007R", demo="VTTS3007R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "OVRS_EXCG_CD": exchange_code,
+                "OVRS_ORD_UNPR": "1",
+                "ITEM_CD": broker_symbol,
+            },
+        )
+        output = _first_item(payload.get("output"))
+        return KISBuyingPower(
+            symbol=symbol or self._canonical_symbol(broker_symbol),
+            order_price=_optional_first_float(output, "ovrs_ord_unpr", "ord_unpr"),
+            cash_buying_power=_first_float(
+                output,
+                "ovrs_ord_psbl_amt",
+                "frcr_ord_psbl_amt1",
+                "ord_psbl_amt",
+                "max_ord_psbl_amt",
+            ),
+            max_buy_quantity=_optional_first_float(
+                output,
+                "max_ord_psbl_qty",
+                "ovrs_max_ord_psbl_qty",
+                "ord_psbl_qty",
+            ),
+            source="kis_overseas_stock_readonly",
         )
 
     def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
-        raise NotImplementedError(
-            "KIS overseas-stock read-only REST adapter is not implemented yet"
-        )
+        prices: dict[str, float] = {}
+        for symbol in symbols:
+            if symbol.startswith("CASH"):
+                prices[symbol] = 1.0
+                continue
+            instrument = self._instrument(symbol)
+            payload = self._get(
+                "/uapi/overseas-price/v1/quotations/price",
+                "HHDFS00000300",
+                {
+                    "AUTH": "",
+                    "EXCD": _quote_exchange_code(str(instrument.exchange_code or "")),
+                    "SYMB": instrument.broker_symbol,
+                },
+            )
+            output = _first_item(payload.get("output"))
+            prices[symbol] = _first_float(output, "last", "ovrs_now_pric", "base", "stck_prpr")
+        return prices
 
     def get_order_fills(self) -> list[KISOrderSummary]:
-        raise NotImplementedError(
-            "KIS overseas-stock read-only REST adapter is not implemented yet"
-        )
+        return self._fetch_order_summaries(ccld_nccs_dvsn="01")
 
     def get_unfilled_orders(self) -> list[KISOrderSummary]:
-        raise NotImplementedError(
-            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        payloads = self._get_pages(
+            "/uapi/overseas-stock/v1/trading/inquire-nccs",
+            "TTTS3018R",
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "OVRS_EXCG_CD": "NASD",
+                "SORT_SQN": "DS",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
+            },
         )
+        return [
+            _overseas_order_summary(row, canonical_symbol=self._canonical_symbol)
+            for payload in payloads
+            for row in _as_list(payload.get("output"))
+        ]
+
+    def _fetch_balance(self) -> tuple[list[KISPosition], KISCashBalance]:
+        balance_payloads = self._get_pages(
+            "/uapi/overseas-stock/v1/trading/inquire-balance",
+            self._tr_id(real="TTTS3012R", demo="VTTS3012R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "OVRS_EXCG_CD": "NASD",
+                "TR_CRCY_CD": "USD",
+                "CTX_AREA_FK200": "",
+                "CTX_AREA_NK200": "",
+            },
+        )
+        position_rows = [
+            row for payload in balance_payloads for row in _as_list(payload.get("output2"))
+        ]
+        positions = [
+            _overseas_position(row, canonical_symbol=self._canonical_symbol)
+            for row in position_rows
+            if _first_float(row, "ovrs_cblc_qty", "ord_psbl_qty", "cblc_qty13") > 0
+        ]
+        cash_balance = self._fetch_cash_balance()
+        return positions, cash_balance
+
+    def _fetch_cash_balance(self) -> KISCashBalance:
+        payloads = self._get_pages(
+            "/uapi/overseas-stock/v1/trading/inquire-present-balance",
+            self._tr_id(real="CTRP6504R", demo="VTRP6504R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "WCRC_FRCR_DVSN_CD": "02",
+                "NATN_CD": "840",
+                "TR_MKET_CD": "00",
+                "INQR_DVSN_CD": "00",
+            },
+        )
+        cash_rows = [
+            row
+            for payload in payloads
+            for key in ("output2", "output3")
+            for row in _as_list(payload.get(key))
+        ]
+        merged: dict[str, Any] = {}
+        for row in cash_rows:
+            merged.update(row)
+        cash = _first_float(
+            merged,
+            "frcr_use_psbl_amt",
+            "frcr_dncl_amt_2",
+            "tot_frcr_cblc_smtl",
+            "dncl_amt",
+        )
+        return KISCashBalance(
+            currency="USD",
+            cash=cash,
+            total_asset_value=_optional_first_float(
+                merged,
+                "tot_asst_amt",
+                "frcr_evlu_tota",
+                "tot_frcr_cblc_smtl",
+            ),
+            withdrawable_cash=_optional_first_float(
+                merged,
+                "frcr_drwg_psbl_amt_1",
+                "nxdy_frcr_drwg_psbl_amt",
+                "wdrw_psbl_tot_amt",
+            ),
+        )
+
+    def _fetch_order_summaries(self, ccld_nccs_dvsn: str) -> list[KISOrderSummary]:
+        today = date.today().strftime("%Y%m%d")
+        payloads = self._get_pages(
+            "/uapi/overseas-stock/v1/trading/inquire-ccnl",
+            self._tr_id(real="TTTS3035R", demo="VTTS3035R"),
+            {
+                "CANO": self.credentials.cano,
+                "ACNT_PRDT_CD": self.credentials.account_product_code,
+                "PDNO": "" if self.config.paper_trading else "%",
+                "ORD_STRT_DT": today,
+                "ORD_END_DT": today,
+                "SLL_BUY_DVSN": "00",
+                "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
+                "OVRS_EXCG_CD": "" if self.config.paper_trading else "NASD",
+                "SORT_SQN": "DS",
+                "ORD_DT": "",
+                "ORD_GNO_BRNO": "",
+                "ODNO": "",
+                "CTX_AREA_NK200": "",
+                "CTX_AREA_FK200": "",
+            },
+        )
+        return [
+            _overseas_order_summary(row, canonical_symbol=self._canonical_symbol)
+            for payload in payloads
+            for row in _as_list(payload.get("output"))
+        ]
+
+    def _get_pages(
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
+        *,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        pages: list[dict[str, Any]] = []
+        next_params = dict(params)
+        tr_cont = ""
+        for _ in range(max_pages):
+            payload = self._get(path, tr_id, next_params, tr_cont=tr_cont)
+            pages.append(payload)
+            if _tr_cont(payload) not in {"M", "F"}:
+                return pages
+            next_params["CTX_AREA_FK200"] = str(payload.get("ctx_area_fk200") or "")
+            next_params["CTX_AREA_NK200"] = str(payload.get("ctx_area_nk200") or "")
+            tr_cont = "N"
+        raise ValueError(f"KIS overseas read-only pagination exceeded {max_pages} pages: {path}")
+
+    def _get(
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
+        *,
+        tr_cont: str = "",
+    ) -> dict[str, Any]:
+        token = self.auth_manager.get_access_token()
+        payload = self.transport.request(
+            "GET",
+            f"{self.config.resolved_base_url()}{path}",
+            headers=self._headers(tr_id, token, tr_cont=tr_cont),
+            params=params,
+            timeout_seconds=self.config.timeout_seconds,
+        )
+        if payload.get("rt_cd") not in ("0", None):
+            msg_cd = payload.get("msg_cd", "unknown")
+            msg1 = payload.get("msg1", "KIS request failed")
+            raise ValueError(f"KIS overseas read-only request failed: {msg_cd} {msg1}")
+        return payload
+
+    def _headers(self, tr_id: str, token: KISToken, *, tr_cont: str = "") -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Accept": "text/plain",
+            "charset": "UTF-8",
+            "authorization": f"Bearer {token.access_token}",
+            "appkey": self.credentials.app_key,
+            "appsecret": self.credentials.app_secret,
+            "tr_id": tr_id,
+            "custtype": "P",
+            "tr_cont": tr_cont,
+        }
+
+    def _buying_power_symbol(self, symbol: str | None) -> tuple[str, str]:
+        if symbol is not None:
+            instrument = self._instrument(symbol)
+            return instrument.broker_symbol, str(instrument.exchange_code or "NASD")
+        for instrument in self.instruments.values():
+            if instrument.asset_type.value != "cash":
+                return instrument.broker_symbol, str(instrument.exchange_code or "NASD")
+        raise ValueError(
+            "KIS overseas buying power requires at least one non-cash universe instrument"
+        )
+
+    def _instrument(self, symbol: str) -> TradableInstrument:
+        instrument = self.instruments.get(symbol)
+        if instrument is None:
+            raise ValueError(
+                f"KIS overseas read-only requires universe metadata for canonical symbol: {symbol}"
+            )
+        if instrument.broker_product != BrokerProduct.KIS_OVERSEAS_STOCK:
+            raise ValueError(f"KIS overseas read-only cannot use non-overseas instrument: {symbol}")
+        if instrument.exchange_code is None:
+            raise ValueError(f"KIS overseas read-only requires exchange_code for symbol: {symbol}")
+        return instrument
+
+    def _canonical_symbol(self, broker_symbol: str) -> str:
+        return self._broker_symbol_to_canonical.get(broker_symbol, broker_symbol)
+
+    def _tr_id(self, *, real: str, demo: str) -> str:
+        return demo if self.config.paper_trading else real
 
 
 class KISRestOverseasStockLiveOrderClient(
@@ -432,6 +684,42 @@ def _order_summary(row: dict[str, Any]) -> KISOrderSummary:
     )
 
 
+def _overseas_position(
+    row: dict[str, Any],
+    *,
+    canonical_symbol,
+) -> KISPosition:
+    broker_symbol = str(row.get("ovrs_pdno") or row.get("pdno") or row.get("std_pdno") or "")
+    return KISPosition(
+        symbol=canonical_symbol(broker_symbol),
+        name=_optional_str(row.get("ovrs_item_name") or row.get("prdt_name")),
+        quantity=_first_float(row, "ovrs_cblc_qty", "ord_psbl_qty", "cblc_qty13"),
+        average_price=_first_float(row, "pchs_avg_pric", "avg_unpr3"),
+        current_price=_overseas_position_current_price(row),
+        unrealized_pnl=_optional_first_float(row, "frcr_evlu_pfls_amt", "evlu_pfls_amt2"),
+    )
+
+
+def _overseas_order_summary(
+    row: dict[str, Any],
+    *,
+    canonical_symbol,
+) -> KISOrderSummary:
+    broker_symbol = str(row.get("pdno") or row.get("ovrs_pdno") or "")
+    return KISOrderSummary(
+        order_id=str(row.get("odno") or row.get("orgn_odno") or ""),
+        symbol=canonical_symbol(broker_symbol),
+        name=_optional_str(row.get("prdt_name") or row.get("ovrs_item_name")),
+        side=_side(row.get("sll_buy_dvsn_cd") or row.get("sll_buy_dvsn_cd_name")),
+        quantity=_first_float(row, "ft_ord_qty", "ord_qty"),
+        filled_quantity=_first_float(row, "ft_ccld_qty", "tot_ccld_qty", "ccld_qty", default=0.0),
+        average_fill_price=_optional_first_float(row, "ft_ccld_unpr3", "avg_prvs", "ft_ord_unpr3"),
+        status=_status(row).value,
+        raw_status=_raw_order_status(row),
+        submitted_at=utc_now(),
+    )
+
+
 def _status_snapshot_from_summary(
     broker_order: BrokerOrderId,
     summary: KISOrderSummary,
@@ -492,6 +780,8 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 def _as_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, dict):
+        return [value]
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, dict)]
@@ -542,6 +832,17 @@ def _position_current_price(row: dict[str, Any]) -> float:
     return 0.0
 
 
+def _overseas_position_current_price(row: dict[str, Any]) -> float:
+    price = _optional_first_float(row, "now_pric2", "ovrs_now_pric1", "ovrs_now_pric")
+    if price is not None:
+        return price
+    quantity = _optional_first_float(row, "ovrs_cblc_qty", "cblc_qty13")
+    market_value = _optional_first_float(row, "ovrs_stck_evlu_amt", "frcr_evlu_amt2")
+    if quantity and market_value is not None:
+        return market_value / quantity
+    return 0.0
+
+
 def _side(value: Any) -> str:
     text = str(value or "")
     if text in {"01", "매도", "sell"}:
@@ -556,8 +857,8 @@ def _status(row: dict[str, Any]) -> OrderStatus:
     normalized = _order_status_from_text(raw_status or "")
     if normalized in {OrderStatus.REJECTED, OrderStatus.CANCELED}:
         return normalized
-    ordered = _first_float(row, "ord_qty", default=0.0)
-    filled = _first_float(row, "tot_ccld_qty", "ccld_qty", default=0.0)
+    ordered = _first_float(row, "ord_qty", "ft_ord_qty", default=0.0)
+    filled = _first_float(row, "tot_ccld_qty", "ccld_qty", "ft_ccld_qty", default=0.0)
     if ordered > 0 and filled >= ordered:
         return OrderStatus.FILLED
     if filled > 0:
@@ -569,6 +870,7 @@ def _raw_order_status(row: dict[str, Any]) -> str | None:
     return _optional_str(
         row.get("ord_dvsn_name")
         or row.get("ccld_dvsn_name")
+        or row.get("prcs_stat_name")
         or row.get("rjct_rson")
         or row.get("rjct_rson_name")
         or row.get("ord_tmd")
@@ -610,3 +912,22 @@ def _kis_price(value: float) -> str:
     if not value.is_integer():
         raise ValueError("KIS domestic-stock adapter requires whole-KRW limit prices")
     return str(int(value))
+
+
+def _tr_cont(payload: dict[str, Any]) -> str:
+    headers = _as_dict(payload.get("__headers__"))
+    return str(
+        headers.get("tr_cont")
+        or headers.get("Tr_Cont")
+        or headers.get("TR_CONT")
+        or payload.get("tr_cont")
+        or ""
+    )
+
+
+def _quote_exchange_code(exchange_code: str) -> str:
+    # KIS overseas quote API uses NAS for Nasdaq quotes, while trading/account
+    # APIs use NASD for the broader US/Nasdaq market code.
+    if exchange_code == "NASD":
+        return "NAS"
+    return exchange_code

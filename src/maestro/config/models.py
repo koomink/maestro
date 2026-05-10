@@ -141,6 +141,7 @@ class KISConfig(StrictConfigModel):
     provider: str = "mock"
     broker_product: BrokerProduct = BrokerProduct.KIS_OVERSEAS_STOCK
     account_id: str | None = None
+    account_id_env: str | None = "KIS_ACCOUNT_ID"
     app_key_env: str = "KIS_APP_KEY"
     app_secret_env: str = "KIS_APP_SECRET"
     access_token_env: str = "KIS_ACCESS_TOKEN"

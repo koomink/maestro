@@ -303,14 +303,15 @@
 
 ### v0.7.2 KIS Overseas Read-only Adapter
 
-- [ ] Verify KIS overseas read-only endpoint paths, TR_IDs, exchange codes, pagination, and response fields
-- [ ] Normalize USD cash and foreign-currency balances
-- [ ] Normalize overseas stock/ETF positions to canonical symbols
-- [ ] Normalize overseas buying power
-- [ ] Normalize overseas fills and unfilled orders
-- [ ] Add broker reconciliation for US-listed stock/ETF canonical symbols
-- [ ] Keep read-only mode free of order submission, cancel, amend, buy, and sell paths
-- [ ] Keep normal tests fake-client/fixture based with no KIS network calls
+- [x] Verify KIS overseas read-only endpoint paths, TR_IDs, exchange codes, pagination, and response fields from project references
+- [x] Normalize USD cash and foreign-currency balances
+- [x] Normalize overseas stock/ETF positions to canonical symbols
+- [x] Normalize overseas buying power
+- [x] Normalize overseas fills and unfilled orders
+- [x] Add broker reconciliation for US-listed stock/ETF canonical symbols
+- [x] Add `configs/kis_overseas_readonly.example.yaml` with env var names only
+- [x] Keep read-only mode free of order submission, cancel, amend, buy, and sell paths
+- [x] Keep normal tests fake-client/fixture based with no KIS network calls
 
 ### v0.7.3 Operational Closeout
 
