@@ -16,8 +16,33 @@ class StrategyMode(StrEnum):
 
 class AssetType(StrEnum):
     CASH = "cash"
+    STOCK = "stock"
+    ETF = "etf"
     DOMESTIC_ETF = "domestic_etf"
     US_ETF = "us_etf"
+
+
+class MarketRegion(StrEnum):
+    US = "US"
+    KR = "KR"
+    GLOBAL = "GLOBAL"
+
+
+class BrokerProduct(StrEnum):
+    KIS_DOMESTIC_STOCK = "kis_domestic_stock"
+    KIS_OVERSEAS_STOCK = "kis_overseas_stock"
+
+
+class Currency(StrEnum):
+    KRW = "KRW"
+    USD = "USD"
+
+
+class ExchangeCode(StrEnum):
+    NASD = "NASD"
+    NYSE = "NYSE"
+    AMEX = "AMEX"
+    KRX = "KRX"
 
 
 class OrderSide(StrEnum):

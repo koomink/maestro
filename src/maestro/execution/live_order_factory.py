@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from maestro.config.models import MaestroConfig
-from maestro.execution.brokers.kis.rest_client import KISRestLiveOrderClient
+from maestro.execution.brokers.kis.rest_client import build_kis_rest_live_order_client
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
     LiveOrderCancelClient,
@@ -109,7 +109,7 @@ def build_live_approval_dependencies(
 
 def _build_live_order_client(config: MaestroConfig) -> LiveOrderClient:
     if config.kis.provider == "kis":
-        return KISRestLiveOrderClient(config.kis)
+        return build_kis_rest_live_order_client(config.kis, config.universe.instruments)
     raise ValueError(
         "live_approval requires a real KIS live order client or an injected fake client"
     )
@@ -122,7 +122,12 @@ def _build_status_client(
     if isinstance(live_order_client, LiveOrderStatusClient):
         return live_order_client
     if config.kis.provider == "kis":
-        return KISRestLiveOrderClient(config.kis)
+        status_client = build_kis_rest_live_order_client(
+            config.kis,
+            config.universe.instruments,
+        )
+        if isinstance(status_client, LiveOrderStatusClient):
+            return status_client
     raise ValueError("live_approval requires an injected fake status client")
 
 

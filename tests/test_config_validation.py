@@ -5,6 +5,7 @@ import yaml
 from pydantic import ValidationError
 
 from maestro.config.loader import load_config
+from maestro.core.enums import BrokerProduct
 
 
 def test_invalid_mode_fails(tmp_path):
@@ -107,8 +108,10 @@ def test_kis_live_readonly_example_config_uses_real_readonly_provider():
     config = load_config("configs/kis_live_readonly.example.yaml")
 
     assert config.mode == "live_readonly"
+    assert config.portfolio.base_currency == "USD"
     assert config.kis.enabled is True
     assert config.kis.provider == "kis"
+    assert config.kis.broker_product == "kis_overseas_stock"
     assert config.kis.account_id == "12345678-01"
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
@@ -121,19 +124,41 @@ def test_live_approval_example_config_is_safe_by_default():
     config = load_config("configs/live_approval.example.yaml")
 
     assert config.mode == "live_approval"
+    assert config.portfolio.base_currency == "USD"
+    assert config.portfolio.allowed_symbols == ["CASH_USD", "AAPL", "MSFT", "VOO", "QQQ"]
     assert config.execution.live_order_enabled is False
     assert config.execution.require_reconciliation_pass is True
     assert config.execution.allowed_order_type == "limit"
-    assert config.execution.max_live_order_notional == 100_000.0
-    assert config.execution.max_daily_live_notional == 300_000.0
+    assert config.execution.max_live_order_notional == 100.0
+    assert config.execution.max_daily_live_notional == 300.0
     assert config.approval.enabled is True
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.approval.default_decision == "expired"
     assert config.kis.provider == "kis"
+    assert config.kis.broker_product == "kis_overseas_stock"
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    aapl = config.universe.get("AAPL")
+    voo = config.universe.get("VOO")
+    assert aapl is not None
+    assert aapl.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
+    assert aapl.exchange_code == "NASD"
+    assert aapl.price_tick == 0.01
+    assert aapl.quantity_step == 1
+    assert voo is not None
+    assert voo.asset_type == "etf"
+
+
+def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw["portfolio"]["allowed_symbols"].append("TSLA")
+    config_path = tmp_path / "missing_universe_symbol.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="TSLA"):
+        load_config(config_path)
 
 
 def test_live_approval_example_config_has_no_hardcoded_secrets(

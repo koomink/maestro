@@ -4,7 +4,7 @@ from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.mock_client import MockKISReadOnlyClient
 from maestro.execution.brokers.kis.models import KISReadOnlySnapshot
-from maestro.execution.brokers.kis.rest_client import KISRestReadOnlyClient
+from maestro.execution.brokers.kis.rest_client import build_kis_rest_readonly_client
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 
@@ -51,5 +51,5 @@ class KISReadOnlyService:
         if config.provider == "mock":
             return MockKISReadOnlyClient(config.account_id or "MOCK-ACCOUNT")
         if config.provider == "kis":
-            return KISRestReadOnlyClient(config)
+            return build_kis_rest_readonly_client(config)
         raise ValueError(f"Unsupported KIS provider: {config.provider}")

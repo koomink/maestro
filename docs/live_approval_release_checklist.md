@@ -9,7 +9,12 @@ write controls, and no high-risk Telegram admin controls.
 - Review `configs/live_approval.example.yaml` and keep
   `execution.live_order_enabled=false` until every item below passes.
 - Confirm the strategy universe, DataHub provider, broker account, and
-  `portfolio.allowed_symbols` refer to the same domestic-stock symbols.
+  `portfolio.allowed_symbols` refer to the same canonical symbols.
+- Confirm `universe.instruments` maps each canonical symbol to the intended
+  broker product, broker symbol, exchange code, currency, price tick, and
+  quantity step.
+- For the first production target, confirm US-listed stocks/ETFs use
+  `broker_product=kis_overseas_stock`.
 - Confirm `execution.allowed_order_type=limit`.
 - Confirm `execution.require_reconciliation_pass=true`.
 - Confirm per-order and daily live notional caps are small enough for the first
@@ -40,8 +45,8 @@ audit/state records.
 3. Run `maestro kis-account --config <readonly-config>`.
 4. Confirm cash, positions, buying power, and account ID are expected.
 
-Do not proceed if the read-only account snapshot is missing, stale, or points to
-the wrong account.
+Do not proceed if the read-only account snapshot is missing, stale, points to
+the wrong account, or does not use the intended broker product adapter.
 
 ## Broker Reconciliation Pass
 

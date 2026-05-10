@@ -1,8 +1,9 @@
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from maestro.core.enums import AssetType, OrderType, RunMode, StrategyMode
+from maestro.core.enums import AssetType, BrokerProduct, OrderType, RunMode, StrategyMode
+from maestro.core.instruments import TradableInstrument
 
 
 class StrictConfigModel(BaseModel):
@@ -13,6 +14,23 @@ class PortfolioConfig(StrictConfigModel):
     base_currency: str = "KRW"
     initial_cash: float = Field(gt=0)
     allowed_symbols: list[str]
+
+
+class UniverseConfig(StrictConfigModel):
+    instruments: list[TradableInstrument] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_unique_symbols(self) -> "UniverseConfig":
+        symbols = [instrument.symbol for instrument in self.instruments]
+        if len(symbols) != len(set(symbols)):
+            raise ValueError("universe instruments must use unique canonical symbols")
+        return self
+
+    def get(self, symbol: str) -> TradableInstrument | None:
+        for instrument in self.instruments:
+            if instrument.symbol == symbol:
+                return instrument
+        return None
 
 
 class StrategyPluginConfig(StrictConfigModel):
@@ -119,6 +137,7 @@ class ApprovalConfig(StrictConfigModel):
 class KISConfig(StrictConfigModel):
     enabled: bool = False
     provider: str = "mock"
+    broker_product: BrokerProduct = BrokerProduct.KIS_OVERSEAS_STOCK
     account_id: str | None = None
     app_key_env: str = "KIS_APP_KEY"
     app_secret_env: str = "KIS_APP_SECRET"
@@ -147,6 +166,7 @@ class MaestroConfig(StrictConfigModel):
     mode: RunMode = RunMode.PAPER
     portfolio: PortfolioConfig
     strategies: list[StrategyPluginConfig]
+    universe: UniverseConfig = Field(default_factory=UniverseConfig)
     datahub: DataHubConfig = Field(default_factory=DataHubConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     risk: RiskConfig
@@ -155,3 +175,18 @@ class MaestroConfig(StrictConfigModel):
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     kis: KISConfig = Field(default_factory=KISConfig)
     reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
+
+    @model_validator(mode="after")
+    def validate_universe_matches_portfolio(self) -> "MaestroConfig":
+        if not self.universe.instruments:
+            return self
+        universe_symbols = {instrument.symbol for instrument in self.universe.instruments}
+        missing = [
+            symbol for symbol in self.portfolio.allowed_symbols if symbol not in universe_symbols
+        ]
+        if missing:
+            raise ValueError(
+                "portfolio.allowed_symbols must be present in universe.instruments: "
+                + ", ".join(missing)
+            )
+        return self

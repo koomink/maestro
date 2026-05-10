@@ -215,7 +215,8 @@
 - [x] Keep strategy research data routed through Maestro DataHub, not KIS
 - [x] Keep normal tests fake-client based with no KIS network calls
 - [x] Expose no callable KIS order submission path in v0.5
-- [x] Document domestic-stock read-only-first scope and future overseas/pagination/symbol-map/reconciliation work
+- [x] Document that domestic-stock REST behavior is an adapter path, not the
+  strategic core trading universe
 
 ### v0.6 KIS Live Approval Trading
 
@@ -224,7 +225,11 @@
 - [x] Define limit-order-only behavior and small notional limits
 - [x] Add daily notional limits and duplicate-order prevention
 - [x] Add broker order ID mapping and order status model expansion
-- [x] Add KIS domestic-stock limit-order client skeleton behind the safety interface
+- [x] Add product/venue-aware universe model for canonical symbols, broker products, exchange codes, currencies, and precision rules
+- [x] Split KIS REST adapters into explicit `kis_domestic_stock` and `kis_overseas_stock` paths
+- [x] Make `kis_overseas_stock` the default KIS broker product and live approval example target
+- [x] Keep KIS overseas-stock real submit/status adapters fail-closed until endpoint paths, TR_IDs, exchange codes, and fields are verified
+- [x] Keep existing KIS domestic-stock limit-order behavior isolated behind the `kis_domestic_stock` adapter path
 - [x] Keep normal tests fake-client based with no KIS network calls
 - [x] Add live order status polling interface
 - [x] Persist live order status snapshots as `live_order_status` system/audit events
@@ -257,6 +262,7 @@
 - [x] Add `docs/live_approval_release_checklist.md`
 - [x] Document why package metadata remains `0.1.1`
 - [ ] Implement real KIS cancel adapter after endpoint path, TR_IDs, and request fields are verified
+- [ ] Implement real KIS overseas-stock read-only/submit/status adapters after endpoint paths, TR_IDs, exchange codes, and response fields are verified
 
 ### v0.7 Production Hardening
 

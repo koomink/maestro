@@ -7,7 +7,8 @@ from urllib.request import Request, urlopen
 
 from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderSide, OrderStatus
+from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.auth import KISAuthManager, KISToken
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.models import (
@@ -61,18 +62,20 @@ class UrlLibKISTransport:
         return payload
 
 
-class KISRestReadOnlyClient(KISReadOnlyClient):
+class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
     def __init__(
         self,
         config: KISConfig,
         *,
         transport: UrlLibKISTransport | None = None,
         auth_manager: KISAuthManager | None = None,
+        instruments: list[TradableInstrument] | None = None,
     ) -> None:
         self.config = config
         self.transport = transport or UrlLibKISTransport()
         self.auth_manager = auth_manager or KISAuthManager(config, self.transport)
         self.credentials = self.auth_manager.get_credentials()
+        self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
 
     def get_account_snapshot(self) -> KISAccountSnapshot:
         positions, cash_balance = self._fetch_balance()
@@ -237,7 +240,11 @@ class KISRestReadOnlyClient(KISReadOnlyClient):
         return demo if self.config.paper_trading else real
 
 
-class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient, LiveOrderStatusClient):
+class KISRestDomesticStockLiveOrderClient(
+    KISRestDomesticStockReadOnlyClient,
+    LiveOrderClient,
+    LiveOrderStatusClient,
+):
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         payload = self._post(
             "/uapi/domestic-stock/v1/trading/order-cash",
@@ -245,7 +252,7 @@ class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient, LiveOrderSt
             {
                 "CANO": self.credentials.cano,
                 "ACNT_PRDT_CD": self.credentials.account_product_code,
-                "PDNO": request.symbol,
+                "PDNO": self._broker_symbol(request.symbol),
                 "ORD_DVSN": "00",
                 "ORD_QTY": _kis_quantity(request.quantity),
                 "ORD_UNPR": _kis_price(request.limit_price),
@@ -309,8 +316,102 @@ class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient, LiveOrderSt
                 return summary
         return None
 
+    def _broker_symbol(self, canonical_symbol: str) -> str:
+        instrument = self.instruments.get(canonical_symbol)
+        return instrument.broker_symbol if instrument else canonical_symbol
 
-# TODO(v0.7): Add a KIS LiveOrderCancelClient only after the domestic-stock
+
+class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
+    def __init__(
+        self,
+        config: KISConfig,
+        *,
+        transport: UrlLibKISTransport | None = None,
+        auth_manager: KISAuthManager | None = None,
+        instruments: list[TradableInstrument] | None = None,
+    ) -> None:
+        self.config = config
+        self.transport = transport or UrlLibKISTransport()
+        self.auth_manager = auth_manager or KISAuthManager(config, self.transport)
+        self.credentials = self.auth_manager.get_credentials()
+        self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
+
+    def get_account_snapshot(self) -> KISAccountSnapshot:
+        raise NotImplementedError(
+            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        )
+
+    def get_positions(self) -> list[KISPosition]:
+        raise NotImplementedError(
+            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        )
+
+    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+        raise NotImplementedError(
+            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        )
+
+    def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
+        raise NotImplementedError(
+            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        )
+
+    def get_order_fills(self) -> list[KISOrderSummary]:
+        raise NotImplementedError(
+            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        )
+
+    def get_unfilled_orders(self) -> list[KISOrderSummary]:
+        raise NotImplementedError(
+            "KIS overseas-stock read-only REST adapter is not implemented yet"
+        )
+
+
+class KISRestOverseasStockLiveOrderClient(
+    KISRestOverseasStockReadOnlyClient,
+    LiveOrderClient,
+    LiveOrderStatusClient,
+):
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        raise NotImplementedError(
+            "KIS overseas-stock live approval adapter is not implemented until "
+            "overseas endpoint paths, TR_IDs, exchange codes, and request fields are verified"
+        )
+
+    def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        raise NotImplementedError(
+            "KIS overseas-stock order status adapter is not implemented until "
+            "overseas endpoint paths, TR_IDs, exchange codes, and response fields are verified"
+        )
+
+
+def build_kis_rest_readonly_client(
+    config: KISConfig,
+    instruments: list[TradableInstrument] | None = None,
+) -> KISReadOnlyClient:
+    if config.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK:
+        return KISRestDomesticStockReadOnlyClient(config, instruments=instruments)
+    if config.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK:
+        return KISRestOverseasStockReadOnlyClient(config, instruments=instruments)
+    raise ValueError(f"Unsupported KIS broker product: {config.broker_product}")
+
+
+def build_kis_rest_live_order_client(
+    config: KISConfig,
+    instruments: list[TradableInstrument] | None = None,
+) -> LiveOrderClient:
+    if config.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK:
+        return KISRestDomesticStockLiveOrderClient(config, instruments=instruments)
+    if config.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK:
+        return KISRestOverseasStockLiveOrderClient(config, instruments=instruments)
+    raise ValueError(f"Unsupported KIS broker product: {config.broker_product}")
+
+
+KISRestReadOnlyClient = KISRestDomesticStockReadOnlyClient
+KISRestLiveOrderClient = KISRestDomesticStockLiveOrderClient
+
+
+# TODO(v0.7): Add KIS LiveOrderCancelClient adapters only after each product's
 # cancel endpoint path, TR_IDs, and body fields are verified against project
 # references. Cancellation remains available through injected fake clients and
 # LiveOrderCancellationService policy tests only.
@@ -501,11 +602,11 @@ def _order_side_from_text(value: str) -> OrderSide | None:
 
 def _kis_quantity(value: float) -> str:
     if not value.is_integer():
-        raise ValueError("KIS domestic-stock live orders require whole-share quantities")
+        raise ValueError("KIS domestic-stock adapter requires whole-share quantities")
     return str(int(value))
 
 
 def _kis_price(value: float) -> str:
     if not value.is_integer():
-        raise ValueError("KIS domestic-stock live orders require whole-KRW limit prices")
+        raise ValueError("KIS domestic-stock adapter requires whole-KRW limit prices")
     return str(int(value))

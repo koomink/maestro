@@ -236,10 +236,14 @@ database caches, or broker behavior.
 - KIS integration is isolated under `execution/brokers/kis`.
 - `KISReadOnlyClient` defines account snapshot, positions, buying power, broker-side quote/reference, order/fill, and unfilled order reads.
 - `MockKISReadOnlyClient` provides deterministic no-network responses.
-- `KISRestReadOnlyClient` adapts the reference repo's KIS OAuth token issuance, request headers, TR_IDs, and inquiry payloads for read-only REST calls.
+- KIS REST clients adapt the reference repo's KIS OAuth token issuance, request headers, TR_IDs, and inquiry payloads behind product-specific adapters.
 - App key and secret are read from configured environment variable names only.
 - Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance. Tokens may be stored only in `kis.token_cache_path`, never in state, audit logs, dashboard rows, or tests.
-- v0.5 KIS REST support is domestic-stock read-only first. Overseas stock/ETF endpoints, pagination/continuation, canonical symbol mapping, and full reconciliation are future work.
+- KIS REST support is split by broker product. `kis_domestic_stock` contains the
+  existing domestic endpoint adapter. `kis_overseas_stock` is the intended first
+  production target for US-listed stocks and ETFs, but real overseas endpoints
+  remain fail-closed until endpoint paths, TR_IDs, exchange codes, and fields are
+  verified.
 - Broker account snapshots are persisted in SQLite and audit JSONL.
 - `maestro reconcile` compares Maestro portfolio state with the latest broker account snapshot and persists a `broker_reconciliation` system event plus audit event.
 - v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.
@@ -307,13 +311,18 @@ database caches, or broker behavior.
   high-risk admin controls, or write controls.
 - Safe polling defaults are `order_status_poll_interval_seconds=30`,
   `order_status_max_polls=20`, and `order_status_terminal_timeout_seconds=1800`.
-- `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
-  KIS open-trading-api reference: `POST /uapi/domestic-stock/v1/trading/order-cash`,
-  real TR_IDs `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`,
-  `ORD_DVSN=00` for limit orders, and uppercase KIS body keys.
-- KIS status tracking reuses domestic-stock `inquire-daily-ccld` and the existing
-  unfilled-order inquiry path, then normalizes accepted, open, partially filled,
-  filled, rejected, canceled, and unknown states into Maestro `OrderStatus`.
+- `KISRestDomesticStockLiveOrderClient` adapts the domestic-stock cash order
+  endpoint from the KIS open-trading-api reference:
+  `POST /uapi/domestic-stock/v1/trading/order-cash`, real TR_IDs
+  `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`, `ORD_DVSN=00`
+  for limit orders, and uppercase KIS body keys. It is an explicit domestic
+  adapter path, not a core product assumption.
+- `KISRestOverseasStockLiveOrderClient` exists as the strategic adapter boundary
+  for US-listed stocks and ETFs, but raises until overseas endpoint paths, TR_IDs,
+  exchange codes, and request/response fields are verified.
+- KIS status tracking normalizes accepted, open, partially filled, filled,
+  rejected, canceled, and unknown states into Maestro `OrderStatus` inside each
+  product adapter.
 - `MaestroOrchestrator.run_once()` remains unchanged for paper mode. In
   `live_approval` mode it reuses the proposal and approval path, converts
   approved proposed orders into limit-order `LiveOrderRequest` objects, and runs

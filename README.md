@@ -164,8 +164,10 @@ Implemented foundations beyond the core v0.1 scope:
 - KIS read-only adapter interface and deterministic mock client
 - KIS read-only REST client for auth, balance, positions, buying power, order/fill inquiry, unfilled order inquiry, and broker-side quote lookup
 - CLI `kis-sync` and `kis-account`
-- Live approval order safety contract and KIS domestic-stock limit-order client skeleton
-  behind that contract
+- Product/venue-aware universe config for canonical symbols, broker products,
+  exchange codes, currency, and precision rules
+- Live approval order safety contract and explicit KIS domestic/overseas adapter
+  split behind that contract
 - `run_once` live approval wiring through the live order lifecycle service when
   `mode=live_approval`
 - Persistent safety controls for active, paused, killed, and halted state
@@ -181,6 +183,8 @@ Deferred real integrations:
 - No Telegram webhook or inline callback buttons
 - No direct or unguarded KIS buy/sell/order CLI
 - No direct cancel CLI and no real KIS cancel adapter until endpoint details are verified
+- No real KIS overseas-stock submit/status adapter until endpoint paths, TR_IDs,
+  exchange codes, and request/response fields are verified
 - No market orders
 - No GDELT/News API or community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
@@ -212,6 +216,14 @@ to pass, limit orders only, per-order and daily notional caps, duplicate-order
 prevention, persisted live order status snapshots, and halt-on-unknown
 broker/order state behavior. Normal tests use fake clients and do not call KIS
 or Telegram network endpoints.
+
+Maestro core uses canonical symbols and should remain broker/product agnostic.
+`universe.instruments` describes each tradable symbol's asset type, market
+region, currency, broker product, broker symbol, exchange code, price tick, and
+quantity step. Broker adapters translate canonical symbols into product-specific
+request fields. The intended first production target is US-listed stocks and
+ETFs via `kis_overseas_stock`; the domestic-stock KIS path remains isolated as
+`kis_domestic_stock` for existing adapter tests and is not the strategic default.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
@@ -559,12 +571,12 @@ file is written with owner-only permissions. Access tokens may be stored only in
 dashboard rows, or test fixtures. App secrets follow the same no-persistence
 rule.
 
-The KIS read-only client adapts OAuth/header/TR_ID/payload logic from
-`koomink/open-trading-api` for these inquiry APIs: `inquire-balance`,
-`inquire-psbl-order`, `inquire-daily-ccld`, and `inquire-price`. v0.6 also adds
-a domestic-stock limit-order client skeleton for `order-cash`, but it is intended
-to be called only through `LiveOrderSafetyService`. There is no direct buy/sell
-CLI, no market order path, and no normal test that calls the KIS network.
+The KIS REST layer is split by broker product. `kis_domestic_stock` contains the
+existing domestic endpoint adapter. `kis_overseas_stock` is the strategic target
+for US-listed stocks and ETFs, but real overseas submit/status/read-only calls
+remain fail-closed until endpoint paths, TR_IDs, exchange codes, and fields are
+verified. There is no direct buy/sell CLI, no market order path, and no normal
+test that calls the KIS network.
 
 To install dashboard dependencies and open the read-only dashboard:
 
@@ -581,30 +593,35 @@ python -m maestro.cli run-once --config configs/paper.yaml
 
 ## Configuration
 
-Example `configs/paper.yaml`:
+Example US-listed live approval universe excerpt:
 
 ```yaml
-mode: paper
+mode: live_approval
 
 portfolio:
-  base_currency: KRW
-  initial_cash: 10000000
+  base_currency: USD
+  initial_cash: 10000
   allowed_symbols:
-    - CASH
-    - MOCK_ETF_A
-    - MOCK_ETF_B
+    - CASH_USD
+    - AAPL
+    - MSFT
+    - VOO
+    - QQQ
 
-strategies:
-  - id: sample_static_allocation
-    enabled: true
-    mode: paper
-    weight: 1.0
-    entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
-    config:
-      allocations:
-        CASH: 0.5
-        MOCK_ETF_A: 0.3
-        MOCK_ETF_B: 0.2
+universe:
+  instruments:
+    - symbol: AAPL
+      asset_type: stock
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: AAPL
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+
+strategies: []
 
 datahub:
   provider: mock

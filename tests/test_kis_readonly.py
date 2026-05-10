@@ -6,9 +6,16 @@ from typer.testing import CliRunner
 from maestro.cli import app
 from maestro.config.loader import load_config
 from maestro.config.models import KISConfig
-from maestro.core.enums import OrderSide, OrderStatus
+from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.auth import KISAuthManager
-from maestro.execution.brokers.kis.rest_client import KISRestLiveOrderClient, KISRestReadOnlyClient
+from maestro.execution.brokers.kis.rest_client import (
+    KISRestDomesticStockLiveOrderClient,
+    KISRestLiveOrderClient,
+    KISRestOverseasStockLiveOrderClient,
+    KISRestReadOnlyClient,
+    build_kis_rest_live_order_client,
+)
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import BrokerOrderId, LiveOrderRequest
 from maestro.monitoring.audit_logger import AuditLogger
@@ -164,6 +171,73 @@ def test_kis_live_order_client_uses_domestic_limit_order_payload(monkeypatch):
         "ORD_QTY": "2",
         "ORD_UNPR": "70000",
     }
+
+
+def test_kis_domestic_adapter_maps_canonical_symbol_to_broker_symbol(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+    )
+    transport = FakeKISTransport()
+    client = KISRestDomesticStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=[
+            TradableInstrument(
+                symbol="SAMSUNG",
+                asset_type="stock",
+                region="KR",
+                currency="KRW",
+                broker="kis",
+                broker_product="kis_domestic_stock",
+                broker_symbol="005930",
+                exchange_code="KRX",
+                quantity_step=1,
+                price_tick=1,
+            )
+        ],
+    )
+
+    client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_1",
+            symbol="SAMSUNG",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=70000,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    order_call = [call for call in transport.calls if call["url"].endswith("/trading/order-cash")][
+        0
+    ]
+    assert order_call["json_body"]["PDNO"] == "005930"
+
+
+def test_kis_provider_defaults_to_overseas_stock_adapter(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+    )
+
+    client = build_kis_rest_live_order_client(config, [])
+
+    assert isinstance(client, KISRestOverseasStockLiveOrderClient)
 
 
 def test_kis_live_order_client_normalizes_open_status(monkeypatch):

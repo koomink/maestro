@@ -152,6 +152,10 @@ and full reconciliation remain future work.
 Started scope:
 
 - KIS live order submission behind broker adapter
+- Product/venue-aware universe model for canonical symbols, broker products,
+  exchange codes, currencies, price ticks, and quantity steps
+- Explicit KIS adapter split between `kis_domestic_stock` and
+  `kis_overseas_stock`
 - Telegram approval required
 - Limit orders only
 - Small notional limits
@@ -184,9 +188,14 @@ Started scope:
 
 Remaining scope:
 
+- Real KIS overseas-stock submit/status/read-only adapters after endpoint paths,
+  TR_IDs, exchange codes, and request/response fields are verified
 - Real broker cancel adapter implementation after endpoint path, TR_IDs, and request fields are verified
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
+The intended first production target is US-listed stocks and ETFs through
+`kis_overseas_stock`; domestic KIS behavior is isolated behind
+`kis_domestic_stock` and is not the strategic default.
 Package metadata intentionally remains `0.1.1` until Maestro adopts an explicit
 package release/versioning policy; v0.6 is the roadmap capability milestone.
 
