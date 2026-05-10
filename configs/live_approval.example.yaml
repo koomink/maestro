@@ -1,0 +1,64 @@
+mode: live_approval
+
+portfolio:
+  base_currency: KRW
+  initial_cash: 10000000
+  allowed_symbols:
+    - CASH
+    - "005930"
+
+strategies: []
+
+datahub:
+  provider: mock
+
+execution:
+  engine: paper
+  live_order_enabled: false
+  require_reconciliation_pass: true
+  max_live_order_notional: 100000
+  max_daily_live_notional: 300000
+  allowed_order_type: limit
+  order_status_poll_interval_seconds: 30
+  order_status_max_polls: 20
+  order_status_terminal_timeout_seconds: 1800
+
+risk:
+  max_single_asset_weight: 0.4
+  min_cash_weight: 0.05
+
+state:
+  sqlite_path: var/live_approval_state.db
+
+audit:
+  jsonl_path: var/live_approval_audit.jsonl
+
+approval:
+  enabled: true
+  provider: telegram
+  require_approval: true
+  default_decision: expired
+  timeout_seconds: 300
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_allowed_chat_ids:
+    - 123456789
+  whitelisted_user_ids:
+    - 123456789
+  telegram_poll_interval_seconds: 1.0
+
+kis:
+  enabled: true
+  provider: kis
+  account_id: "00000000-00"
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  access_token_env: KIS_ACCESS_TOKEN
+  token_cache_path: var/kis_access_token.json
+  paper_trading: false
+  timeout_seconds: 10
+  quote_market_code: J
+
+reconciliation:
+  cash_tolerance: 0.0
+  position_quantity_tolerance: 0.0
+  value_tolerance: 0.0

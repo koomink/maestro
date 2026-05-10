@@ -174,6 +174,10 @@ Started scope:
 - Persisted `live_order_lifecycle` summaries
 - Live approval dependency factory with KIS clients when `kis.provider="kis"` and injectable fake clients for tests
 - Product-level `run_once` wiring to live order lifecycle when `mode=live_approval`
+- Safe-by-default live approval example config at
+  `configs/live_approval.example.yaml`
+- v0.6 live approval release checklist at
+  `docs/live_approval_release_checklist.md`
 - Reconciliation before and after orders
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
@@ -181,9 +185,10 @@ Started scope:
 Remaining scope:
 
 - Real broker cancel adapter implementation after endpoint path, TR_IDs, and request fields are verified
-- Operator-facing live approval config example and release checklist
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
+Package metadata intentionally remains `0.1.1` until Maestro adopts an explicit
+package release/versioning policy; v0.6 is the roadmap capability milestone.
 
 ## v0.7 — Production Hardening
 

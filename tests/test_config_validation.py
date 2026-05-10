@@ -98,6 +98,7 @@ def test_current_sample_configs_load():
         "configs/telegram_approval_paper.yaml",
         "configs/live_readonly.yaml",
         "configs/kis_live_readonly.example.yaml",
+        "configs/live_approval.example.yaml",
     ]:
         assert load_config(path)
 
@@ -114,3 +115,47 @@ def test_kis_live_readonly_example_config_uses_real_readonly_provider():
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
     assert config.kis.token_cache_path == "var/kis_access_token.json"
     assert config.kis.paper_trading is False
+
+
+def test_live_approval_example_config_is_safe_by_default():
+    config = load_config("configs/live_approval.example.yaml")
+
+    assert config.mode == "live_approval"
+    assert config.execution.live_order_enabled is False
+    assert config.execution.require_reconciliation_pass is True
+    assert config.execution.allowed_order_type == "limit"
+    assert config.execution.max_live_order_notional == 100_000.0
+    assert config.execution.max_daily_live_notional == 300_000.0
+    assert config.approval.enabled is True
+    assert config.approval.provider == "telegram"
+    assert config.approval.require_approval is True
+    assert config.approval.default_decision == "expired"
+    assert config.kis.provider == "kis"
+    assert config.kis.app_key_env == "KIS_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+
+
+def test_live_approval_example_config_has_no_hardcoded_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("KIS_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
+    monkeypatch.delenv("KIS_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+
+    raw_text = Path("configs/live_approval.example.yaml").read_text()
+    config = load_config("configs/live_approval.example.yaml")
+
+    assert config.kis.app_key_env == "KIS_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.approval.telegram_bot_token_env == "TELEGRAM_BOT_TOKEN"
+    assert "xoxb-" not in raw_text
+    assert "Bearer " not in raw_text
+    assert "ghp_" not in raw_text
+    assert "telegram.org/bot" not in raw_text
+    assert "KIS_APP_KEY:" not in raw_text
+    assert "KIS_APP_SECRET:" not in raw_text
+    assert "KIS_ACCESS_TOKEN:" not in raw_text
+    assert "TELEGRAM_BOT_TOKEN:" not in raw_text

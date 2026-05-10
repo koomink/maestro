@@ -168,12 +168,17 @@ Implemented foundations beyond the core v0.1 scope:
   behind that contract
 - `run_once` live approval wiring through the live order lifecycle service when
   `mode=live_approval`
+- Safe live approval example config:
+  [configs/live_approval.example.yaml](configs/live_approval.example.yaml)
+- v0.6 release checklist:
+  [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 
 Deferred real integrations:
 
 - No live auto-trading
 - No Telegram webhook or inline callback buttons
 - No direct or unguarded KIS buy/sell/order CLI
+- No direct cancel CLI and no real KIS cancel adapter until endpoint details are verified
 - No market orders
 - No GDELT/News API or community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
@@ -200,7 +205,8 @@ order status to be `open` or `partially_filled`. Partial-fill cancellation is
 allowed only for the remaining open quantity after fill reconciliation has been
 recorded. Filled, rejected, canceled, halted, and unknown orders cannot be
 canceled; unknown state halts the path instead of attempting cancel. There is no
-direct cancel CLI and no real KIS cancel network call in this phase.
+direct cancel CLI and no real KIS cancel network call until the KIS endpoint
+path, TR_IDs, and request fields are verified.
 
 `LiveOrderWorkflowService` composes the safe pieces for one approval-gated
 post-order workflow: submit through the safety service, stop on submit halt, poll
@@ -220,6 +226,11 @@ approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
 the bounded lifecycle service. This is product-level wiring for
 approval-gated live orders, not live automation.
 
+Use [configs/live_approval.example.yaml](configs/live_approval.example.yaml) as
+the safe-by-default operator template and follow
+[docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
+before enabling live order submission.
+
 Safe execution config defaults:
 
 ```yaml
@@ -234,6 +245,11 @@ execution:
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
 ```
+
+Package version metadata remains `0.1.1` for now. The v0.2 through v0.6 labels
+are roadmap capability milestones in this repository, not published Python
+package release tags. A package version bump should happen with an explicit
+release/versioning policy and lockfile update.
 
 ## Optional Yahoo/yfinance Provider
 

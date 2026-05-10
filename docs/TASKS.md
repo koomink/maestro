@@ -253,9 +253,10 @@
 - [x] Do not auto-cancel when max polls are reached
 - [x] Add live approval dependency factory with injectable fake clients
 - [x] Wire `MaestroOrchestrator.run_once()` to the bounded live order lifecycle in `live_approval` mode
+- [x] Add safe-by-default `configs/live_approval.example.yaml`
+- [x] Add `docs/live_approval_release_checklist.md`
+- [x] Document why package metadata remains `0.1.1`
 - [ ] Implement real KIS cancel adapter after endpoint path, TR_IDs, and request fields are verified
-- [ ] Add an operator-facing live approval config example after credentials and reconciliation procedure are finalized
-- [ ] Add live approval dry-run/release checklist for broker account reconciliation, approval, submit, status, fill reconciliation, and halt handling
 
 ## Completed / Historical Notes
 
