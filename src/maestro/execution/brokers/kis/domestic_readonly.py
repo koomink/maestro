@@ -18,6 +18,7 @@ from maestro.execution.brokers.kis.parsers import (
     _as_list,
     _first_float,
     _first_item,
+    _kis_price,
     _optional_first_float,
     _optional_float,
     _optional_str,
@@ -60,7 +61,11 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
         positions, _ = self._fetch_balance()
         return positions
 
-    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+    def get_buying_power(
+        self,
+        symbol: str | None = None,
+        order_price: float | None = None,
+    ) -> KISBuyingPower:
         pdno = symbol or ""
         payload = self._get(
             "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
@@ -69,7 +74,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
                 "CANO": self.credentials.cano,
                 "ACNT_PRDT_CD": self.credentials.account_product_code,
                 "PDNO": pdno,
-                "ORD_UNPR": "0",
+                "ORD_UNPR": _kis_price(order_price) if order_price is not None else "0",
                 "ORD_DVSN": "01",
                 "CMA_EVLU_AMT_ICLD_YN": "N",
                 "OVRS_ICLD_YN": "N",

@@ -334,6 +334,8 @@ Planned scope:
 - Add skipped-by-default live smoke procedures for KIS read-only account sync,
   KIS broker reconciliation, Telegram approval, live approval dry-run, and the
   first minimum-size approval-gated order.
+- Add an explicit state-only broker snapshot adoption command for the first
+  verified account baseline before reconciliation rehearsals.
 - Require post-order status, fill reconciliation, broker reconciliation, audit
   review, and dashboard review before repeated operation.
 
@@ -362,6 +364,8 @@ Completed scope:
 - Extend risk controls beyond target weights: cash reserve, buying power,
   position size, symbol exposure, order count, per-symbol notional, and
   portfolio-level exposure.
+- Add KIS overseas pre-submit buying-power validation using the exact live order
+  limit price before calling the broker order endpoint.
 - Normalize broker PnL enough to enforce `execution.daily_loss_limit` instead of
   failing closed when it is configured.
 - Account for fees, settlement, pending orders, and manual broker activity where
@@ -378,6 +382,8 @@ Completed scope:
 
 - Add recovery procedures for ambiguous submit results, process crashes after
   submit, status persistence gaps, KIS timeouts, and partial-fill mismatches.
+- Query KIS overseas order status using the broker submission timestamp's US
+  exchange-local date range to avoid Korea/US date-boundary misses.
 - Reconstruct live order state from broker truth before another live approval
   order is allowed after an ambiguous failure.
 - Harden idempotency around approval IDs, broker order IDs, duplicate keys, and

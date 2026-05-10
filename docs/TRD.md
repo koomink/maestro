@@ -301,6 +301,18 @@ database caches, or broker behavior.
   events without calling the broker submit adapter.
 - `maestro live-preflight --config ...` exposes the live approval safety
   preflight as a scriptable CLI gate and exits nonzero on preflight failure.
+- `maestro adopt-broker-snapshot --config ... --reason ...` is a state-only
+  operator command for the first real-account rehearsal baseline. It copies the
+  latest broker snapshot into Maestro portfolio state, records
+  `broker_snapshot_adopted`, and refuses positions outside
+  `portfolio.allowed_symbols`.
+- KIS overseas live buy orders implement a pre-submit broker validation step:
+  Maestro calls `/uapi/overseas-stock/v1/trading/inquire-psamount` with the
+  request symbol and exact limit price before broker submit. Insufficient KIS
+  buying power or max buy quantity fails before any order endpoint call.
+- KIS overseas order status lookup uses the broker submission timestamp to query
+  the corresponding US exchange-local date range, reducing false unknown states
+  around Korea/US date boundaries.
 - `PartialFillReconciliationService` reads recent `live_order_status` events,
   compares cumulative filled quantity/notional against previous
   `fill_reconciliation` watermarks, applies only new fill deltas to cash and

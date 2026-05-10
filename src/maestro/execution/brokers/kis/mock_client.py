@@ -48,9 +48,14 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
             ),
         ]
 
-    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+    def get_buying_power(
+        self,
+        symbol: str | None = None,
+        order_price: float | None = None,
+    ) -> KISBuyingPower:
         return KISBuyingPower(
             symbol=symbol,
+            order_price=order_price,
             cash_buying_power=5_000_000.0,
             max_buy_quantity=None,
             source="kis_mock",

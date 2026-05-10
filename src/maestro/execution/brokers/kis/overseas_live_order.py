@@ -2,8 +2,11 @@ from typing import Any
 
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus
-from maestro.execution.brokers.kis.models import KISOrderSummary
-from maestro.execution.brokers.kis.overseas_readonly import KISRestOverseasStockReadOnlyClient
+from maestro.execution.brokers.kis.models import KISBuyingPower, KISOrderSummary
+from maestro.execution.brokers.kis.overseas_readonly import (
+    KISRestOverseasStockReadOnlyClient,
+    overseas_order_status_date_range,
+)
 from maestro.execution.brokers.kis.parsers import (
     _as_dict,
     _kis_overseas_price,
@@ -23,6 +26,7 @@ from maestro.execution.live_order_models import (
 from maestro.execution.live_order_ports import (
     LiveOrderCancelClient,
     LiveOrderClient,
+    LiveOrderPreSubmitValidator,
     LiveOrderStatusClient,
 )
 
@@ -32,7 +36,14 @@ class KISRestOverseasStockLiveOrderClient(
     LiveOrderClient,
     LiveOrderStatusClient,
     LiveOrderCancelClient,
+    LiveOrderPreSubmitValidator,
 ):
+    def validate_pre_submit_order(self, request: LiveOrderRequest) -> None:
+        if request.side != OrderSide.BUY:
+            return
+        buying_power = self.get_buying_power(request.symbol, request.limit_price)
+        _validate_buying_power(request, buying_power)
+
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         instrument = self._instrument(request.symbol)
         payload = self._post(
@@ -78,7 +89,7 @@ class KISRestOverseasStockLiveOrderClient(
         )
 
     def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
-        matched = self._find_order_summary(broker_order_id.broker_order_id)
+        matched = self._find_order_summary(broker_order_id)
         if matched is None:
             return _unknown_status_snapshot(
                 broker_order_id,
@@ -89,7 +100,7 @@ class KISRestOverseasStockLiveOrderClient(
         return _status_snapshot_from_summary(broker_order_id, matched)
 
     def cancel_order(self, request: LiveOrderCancelRequest) -> LiveOrderCancelResult:
-        matched = self._find_order_summary(request.broker_order.broker_order_id)
+        matched = self._find_order_summary(request.broker_order)
         if matched is None:
             raise ValueError("KIS overseas cancel requires a latest unfilled order summary")
         instrument = self._instrument(matched.symbol)
@@ -144,12 +155,37 @@ class KISRestOverseasStockLiveOrderClient(
             return self._tr_id(real="TTTT1002U", demo="VTTT1002U")
         return self._tr_id(real="TTTT1006U", demo="VTTT1006U")
 
-    def _find_order_summary(self, order_id: str) -> KISOrderSummary | None:
-        summaries = [*self.get_unfilled_orders(), *self.get_order_fills()]
+    def _find_order_summary(self, broker_order: BrokerOrderId) -> KISOrderSummary | None:
+        start_date, end_date = overseas_order_status_date_range(broker_order.submitted_at)
+        summaries = [
+            *self.get_unfilled_orders(),
+            *self._fetch_order_summaries(
+                ccld_nccs_dvsn="00",
+                start_date=start_date,
+                end_date=end_date,
+            ),
+        ]
         for summary in summaries:
-            if summary.order_id == order_id:
+            if summary.order_id == broker_order.broker_order_id:
                 return summary
         return None
+
+
+def _validate_buying_power(request: LiveOrderRequest, buying_power: KISBuyingPower) -> None:
+    if request.notional > buying_power.cash_buying_power + 1e-9:
+        raise ValueError(
+            "KIS buying power is below requested live order notional: "
+            f"symbol={request.symbol} notional={request.notional:.2f} "
+            f"cash_buying_power={buying_power.cash_buying_power:.2f}"
+        )
+    if buying_power.max_buy_quantity is None:
+        return
+    if request.quantity > buying_power.max_buy_quantity + 1e-9:
+        raise ValueError(
+            "KIS max buy quantity is below requested live order quantity: "
+            f"symbol={request.symbol} quantity={request.quantity} "
+            f"max_buy_quantity={buying_power.max_buy_quantity}"
+        )
 
 
 __all__ = ["KISRestOverseasStockLiveOrderClient"]

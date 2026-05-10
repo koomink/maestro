@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -94,6 +95,66 @@ def test_live_smoke_kis_readonly_runs_sync_and_reconciliation_with_mock(tmp_path
     assert "check=kis_readonly_snapshot status=ok provider=mock" in result.output
     assert "account_id=MOCK-ACCOUNT" in result.output
     assert "check=broker_reconciliation status=ok" in result.output
+
+
+def test_adopt_broker_snapshot_seeds_portfolio_for_reconciliation(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
+    runner = CliRunner()
+
+    sync_result = runner.invoke(app, ["kis-sync", "--config", str(config_path)])
+    adopt_result = runner.invoke(
+        app,
+        [
+            "adopt-broker-snapshot",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator baseline rehearsal",
+        ],
+    )
+    reconcile_result = runner.invoke(app, ["reconcile", "--config", str(config_path)])
+
+    assert sync_result.exit_code == 0
+    assert adopt_result.exit_code == 0
+    assert "adopted run_id=" in adopt_result.output
+    assert "broker_snapshot_id=1" in adopt_result.output
+    assert reconcile_result.exit_code == 0
+    assert "status=passed" in reconcile_result.output
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    state = store.load_latest_portfolio_state()
+    assert state.cash == 5_000_000.0
+    assert state.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
+    events = store.list_system_events_by_type("broker_snapshot_adopted")
+    assert events[0]["payload"]["reason"] == "operator baseline rehearsal"
+
+
+def test_adopt_broker_snapshot_rejects_positions_outside_allowed_symbols(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    raw = config.model_dump(mode="json")
+    raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A"]
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    runner = CliRunner()
+
+    sync_result = runner.invoke(app, ["kis-sync", "--config", str(config_path)])
+    adopt_result = runner.invoke(
+        app,
+        [
+            "adopt-broker-snapshot",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator baseline rehearsal",
+        ],
+    )
+
+    assert sync_result.exit_code == 0
+    assert adopt_result.exit_code == 2
+    assert "positions outside" in adopt_result.output
+    assert "MOCK_ETF_B" in adopt_result.output
 
 
 def test_kis_rest_client_normalizes_readonly_responses(monkeypatch):
@@ -411,6 +472,82 @@ def test_kis_overseas_live_order_client_uses_verified_us_limit_order_payload(mon
     }
 
 
+def test_kis_overseas_pre_submit_uses_order_price_for_buying_power(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    client.validate_pre_submit_order(
+        LiveOrderRequest(
+            order_id="ord_live_us_1",
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=191.25,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    buying_power_call = [
+        call for call in transport.calls if call["url"].endswith("/inquire-psamount")
+    ][0]
+    assert buying_power_call["params"]["OVRS_ORD_UNPR"] == "191.25"
+    assert buying_power_call["params"]["ITEM_CD"] == "AAPL"
+
+
+def test_kis_overseas_pre_submit_rejects_insufficient_max_buy_quantity(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=FakeKISOverseasTransport(max_buy_quantity="1"),
+        instruments=_us_instruments(),
+    )
+
+    try:
+        client.validate_pre_submit_order(
+            LiveOrderRequest(
+                order_id="ord_live_us_1",
+                symbol="AAPL",
+                side=OrderSide.BUY,
+                quantity=2,
+                limit_price=191.25,
+                approval_id="appr_1",
+                run_id="run_1",
+            )
+        )
+    except ValueError as exc:
+        assert "max buy quantity" in str(exc)
+    else:
+        raise AssertionError("Expected KIS max buy quantity to fail closed")
+
+
 def test_kis_overseas_live_order_client_uses_demo_sell_tr_id(monkeypatch):
     monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
     monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
@@ -478,6 +615,42 @@ def test_kis_overseas_live_order_client_normalizes_order_status(monkeypatch):
     assert filled_snapshot.status == OrderStatus.FILLED
     assert filled_snapshot.symbol == "AAPL"
     assert filled_snapshot.fills[0].price == 189.5
+
+
+def test_kis_overseas_order_status_uses_submitted_at_exchange_date_range(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    monkeypatch.setattr(
+        "maestro.execution.brokers.kis.overseas_readonly.utc_now",
+        lambda: datetime(2026, 5, 11, 3, 0, tzinfo=UTC),
+    )
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    client.get_order_status(
+        _overseas_broker_order("9001").model_copy(
+            update={"submitted_at": "2026-05-10T02:30:00+00:00"}
+        )
+    )
+
+    ccnl_call = [call for call in transport.calls if call["url"].endswith("/inquire-ccnl")][0]
+    assert ccnl_call["params"]["ORD_STRT_DT"] == "20260509"
+    assert ccnl_call["params"]["ORD_END_DT"] == "20260510"
+    assert ccnl_call["params"]["CCLD_NCCS_DVSN"] == "00"
 
 
 def test_kis_overseas_live_order_client_fails_on_kis_error_response(monkeypatch):
@@ -928,11 +1101,15 @@ class FakeKISOverseasTransport:
         order_rt_cd: str = "0",
         missing_order_id: bool = False,
         malformed_order: bool = False,
+        buying_power: str = "1500.00",
+        max_buy_quantity: str = "7",
     ) -> None:
         self.calls = []
         self.order_rt_cd = order_rt_cd
         self.missing_order_id = missing_order_id
         self.malformed_order = malformed_order
+        self.buying_power = buying_power
+        self.max_buy_quantity = max_buy_quantity
 
     def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
         self.calls.append(
@@ -977,8 +1154,8 @@ class FakeKISOverseasTransport:
             return {
                 "rt_cd": "0",
                 "output": {
-                    "ovrs_ord_psbl_amt": "1500.00",
-                    "max_ord_psbl_qty": "7",
+                    "ovrs_ord_psbl_amt": self.buying_power,
+                    "max_ord_psbl_qty": self.max_buy_quantity,
                 },
             }
         if url.endswith("/quotations/price"):

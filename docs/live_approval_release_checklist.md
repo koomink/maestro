@@ -59,6 +59,9 @@ For the complete operator-local promotion runbook, see
 - Enable `execution.require_broker_risk_validation=true` only after the latest
   KIS read-only snapshot is reconciled and includes cash, buying power, current
   prices, positions, and unfilled orders.
+- Confirm KIS overseas buy orders perform a pre-submit `/inquire-psamount`
+  check with the exact limit price, and fail closed on insufficient buying power
+  or max buy quantity.
 - Set `execution.live_order_fee_buffer_pct` to the operator's conservative
   commission/fee cushion before the first real order.
 - Set `execution.daily_loss_limit` only after the operator has verified which
@@ -95,9 +98,17 @@ audit/state records.
 2. Run `maestro kis-sync --config <readonly-config>`.
 3. Run `maestro kis-account --config <readonly-config>`.
 4. Confirm cash, positions, buying power, and account ID are expected.
+5. If this is the first rehearsal against the account state, explicitly adopt
+   the verified broker snapshot as Maestro's baseline:
+
+```bash
+maestro adopt-broker-snapshot --config <readonly-config> --reason "operator baseline accepted"
+```
 
 Do not proceed if the read-only account snapshot is missing, stale, points to
 the wrong account, or does not use the intended broker product adapter.
+Do not adopt the snapshot if it contains positions outside
+`portfolio.allowed_symbols` or holdings the strategy is not meant to manage.
 
 `configs/kis_overseas_readonly.example.yaml` documents the intended
 `kis_overseas_stock` shape. KIS overseas read-only uses verified account

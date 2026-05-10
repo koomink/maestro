@@ -18,6 +18,12 @@ class LiveOrderClient(ABC):
         raise NotImplementedError
 
 
+class LiveOrderPreSubmitValidator(ABC):
+    @abstractmethod
+    def validate_pre_submit_order(self, request: LiveOrderRequest) -> None:
+        raise NotImplementedError
+
+
 class LiveOrderStatusClient(ABC):
     @abstractmethod
     def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
@@ -47,5 +53,6 @@ __all__ = [
     "LiveOrderCancelClient",
     "LiveOrderClient",
     "LiveOrderNotificationClient",
+    "LiveOrderPreSubmitValidator",
     "LiveOrderStatusClient",
 ]

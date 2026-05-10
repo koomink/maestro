@@ -1,5 +1,6 @@
-from datetime import date
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
@@ -63,8 +64,13 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
         positions, _ = self._fetch_balance()
         return positions
 
-    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+    def get_buying_power(
+        self,
+        symbol: str | None = None,
+        order_price: float | None = None,
+    ) -> KISBuyingPower:
         broker_symbol, exchange_code = self._buying_power_symbol(symbol)
+        price_text = "1" if order_price is None else _format_kis_decimal(order_price)
         payload = self._get(
             "/uapi/overseas-stock/v1/trading/inquire-psamount",
             self._tr_id(real="TTTS3007R", demo="VTTS3007R"),
@@ -72,14 +78,14 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
                 "CANO": self.credentials.cano,
                 "ACNT_PRDT_CD": self.credentials.account_product_code,
                 "OVRS_EXCG_CD": exchange_code,
-                "OVRS_ORD_UNPR": "1",
+                "OVRS_ORD_UNPR": price_text,
                 "ITEM_CD": broker_symbol,
             },
         )
         output = _first_item(payload.get("output"))
         return KISBuyingPower(
             symbol=symbol or self._canonical_symbol(broker_symbol),
-            order_price=_optional_first_float(output, "ovrs_ord_unpr", "ord_unpr"),
+            order_price=_optional_first_float(output, "ovrs_ord_unpr", "ord_unpr") or order_price,
             cash_buying_power=_first_float(
                 output,
                 "ovrs_ord_psbl_amt",
@@ -208,8 +214,15 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
             ),
         )
 
-    def _fetch_order_summaries(self, ccld_nccs_dvsn: str) -> list[KISOrderSummary]:
-        today = date.today().strftime("%Y%m%d")
+    def _fetch_order_summaries(
+        self,
+        ccld_nccs_dvsn: str,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[KISOrderSummary]:
+        if start_date is None or end_date is None:
+            start_date, end_date = _default_order_date_range()
         payloads = self._get_pages(
             "/uapi/overseas-stock/v1/trading/inquire-ccnl",
             self._tr_id(real="TTTS3035R", demo="VTTS3035R"),
@@ -217,8 +230,8 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
                 "CANO": self.credentials.cano,
                 "ACNT_PRDT_CD": self.credentials.account_product_code,
                 "PDNO": "" if self.config.paper_trading else "%",
-                "ORD_STRT_DT": today,
-                "ORD_END_DT": today,
+                "ORD_STRT_DT": start_date,
+                "ORD_END_DT": end_date,
                 "SLL_BUY_DVSN": "00",
                 "CCLD_NCCS_DVSN": ccld_nccs_dvsn,
                 "OVRS_EXCG_CD": "" if self.config.paper_trading else "NASD",
@@ -320,6 +333,35 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
 
     def _tr_id(self, *, real: str, demo: str) -> str:
         return demo if self.config.paper_trading else real
+
+
+def _default_order_date_range() -> tuple[str, str]:
+    today = utc_now().astimezone(ZoneInfo("America/New_York")).strftime("%Y%m%d")
+    return today, today
+
+
+def overseas_order_status_date_range(submitted_at: str) -> tuple[str, str]:
+    submitted = _parse_submitted_at(submitted_at)
+    now = utc_now().astimezone(ZoneInfo("America/New_York"))
+    submitted_date = submitted.astimezone(ZoneInfo("America/New_York")).date()
+    now_date = now.date()
+    start = min(submitted_date, now_date).strftime("%Y%m%d")
+    end = max(submitted_date, now_date).strftime("%Y%m%d")
+    return start, end
+
+
+def _parse_submitted_at(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return utc_now()
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=utc_now().tzinfo)
+    return parsed
+
+
+def _format_kis_decimal(value: float) -> str:
+    return f"{value:.8f}".rstrip("0").rstrip(".")
 
 
 __all__ = ["KISRestOverseasStockReadOnlyClient"]

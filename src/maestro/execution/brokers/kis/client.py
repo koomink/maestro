@@ -18,7 +18,11 @@ class KISReadOnlyClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_buying_power(self, symbol: str | None = None) -> KISBuyingPower:
+    def get_buying_power(
+        self,
+        symbol: str | None = None,
+        order_price: float | None = None,
+    ) -> KISBuyingPower:
         raise NotImplementedError
 
     @abstractmethod

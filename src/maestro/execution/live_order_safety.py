@@ -4,7 +4,7 @@ from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, Currency, OrderStatus, OrderType
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.live_order_models import LiveOrderRequest, LiveOrderResult
-from maestro.execution.live_order_ports import LiveOrderClient
+from maestro.execution.live_order_ports import LiveOrderClient, LiveOrderPreSubmitValidator
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.store import StateStore
@@ -35,6 +35,8 @@ class LiveOrderSafetyService:
         approval_decision: ApprovalDecision,
     ) -> LiveOrderResult:
         self._validate_safety_contract(request, approval_decision)
+        if isinstance(self.broker_client, LiveOrderPreSubmitValidator):
+            self.broker_client.validate_pre_submit_order(request)
         try:
             result = self.broker_client.submit_limit_order(request)
         except Exception as exc:

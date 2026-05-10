@@ -324,7 +324,10 @@ For real-account rehearsals, `execution.require_broker_risk_validation=true`
 adds a broker-snapshot risk gate before approval submission. It checks settled
 buying power with `execution.live_order_fee_buffer_pct`, post-order cash reserve,
 per-symbol exposure, portfolio exposure, pending broker orders, and whether the
-latest broker snapshot is the one that passed reconciliation.
+latest broker snapshot is the one that passed reconciliation. For KIS overseas
+buy orders, the live-order adapter also rechecks `/inquire-psamount` with the
+actual limit price immediately before broker submit and rejects the order if KIS
+reports insufficient buying power or max buy quantity.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
@@ -671,6 +674,7 @@ To run the KIS read-only adapter:
 ```bash
 maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
+maestro adopt-broker-snapshot --config configs/live_readonly.yaml --reason "operator baseline accepted"
 maestro reconcile --config configs/live_readonly.yaml
 maestro reconcile-fills --config configs/live_readonly.yaml
 maestro recover-live-order --config configs/live_readonly.yaml --reason "broker truth reconciled"
@@ -685,6 +689,12 @@ requires a latest broker snapshot and a passing broker reconciliation, reruns
 fill reconciliation, records `live_order_recovery_completed`, and allows future
 live approval proposals after `live_order_recovery_required` or incomplete
 lifecycle state has blocked them.
+
+`adopt-broker-snapshot` is also a state-only operator action. It copies the
+latest read-only broker snapshot into Maestro's portfolio state after the
+operator has accepted that snapshot as the rehearsal baseline, records
+`broker_snapshot_adopted`, and refuses broker positions outside
+`portfolio.allowed_symbols`.
 
 `heartbeat` records `maestro_heartbeat` for operator schedulers. When
 `execution.heartbeat_max_age_seconds` or
@@ -753,7 +763,9 @@ for US-listed stocks and ETFs. Real overseas read-only account paths are
 implemented. Overseas live approval supports US exchange limit-order
 submit/status payloads behind the existing approval, reconciliation, safety, and
 daily-limit gates, based on the Korea Investment Securities OpenAPI example
-contract. The overseas cancel adapter is available only behind
+contract. Status lookup uses the broker order submission timestamp to query the
+relevant US exchange-local date range, avoiding a Korea/US date-boundary miss.
+The overseas cancel adapter is available only behind
 `LiveOrderCancellationService` policy gates after Telegram approval, latest safe
 order status, and reconciliation checks. There is no direct buy/sell/cancel CLI,
 no market order path, and no normal test that calls the KIS network.

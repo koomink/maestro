@@ -8,6 +8,7 @@ from maestro.core.ids import new_run_id
 from maestro.execution.live_orders import (
     BrokerOrderId,
     LiveOrderClient,
+    LiveOrderPreSubmitValidator,
     LiveOrderRequest,
     LiveOrderResult,
     LiveOrderSafetyService,
@@ -131,6 +132,17 @@ def test_live_order_persists_accepted_result(tmp_path):
     assert events[0]["payload"]["result"]["broker_order"]["broker_order_id"] == "KIS-1"
 
 
+def test_live_order_runs_pre_submit_validation_before_broker_submit(tmp_path):
+    service, request, approval, broker = _context(tmp_path, broker=FakePreSubmitRejectingClient())
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    with pytest.raises(ValueError, match="pre-submit"):
+        service.submit_approved_order(request, approval)
+
+    assert broker.requests == []
+    assert service.state_store.list_system_events_by_type("live_order_recovery_required") == []
+
+
 def test_live_order_halts_on_unknown_broker_state(tmp_path):
     service, request, approval, broker = _context(tmp_path, broker_status=OrderStatus.UNKNOWN)
     _save_passed_reconciliation(service.state_store, request.run_id)
@@ -187,6 +199,7 @@ def _context(
     max_order: float = 200_000,
     max_daily: float = 300_000,
     broker_status: OrderStatus = OrderStatus.ACCEPTED_BY_BROKER,
+    broker: "FakeLiveOrderClient | None" = None,
 ):
     run_id = new_run_id()
     request = LiveOrderRequest(
@@ -202,7 +215,7 @@ def _context(
     approval = _approval(request)
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
-    broker = FakeLiveOrderClient(broker_status)
+    broker = broker or FakeLiveOrderClient(broker_status)
     service = LiveOrderSafetyService(
         ExecutionConfig(
             live_order_enabled=enabled,
@@ -266,6 +279,14 @@ class FakeLiveOrderClient(LiveOrderClient):
             status=self.status,
             broker_order=broker_order,
         )
+
+
+class FakePreSubmitRejectingClient(FakeLiveOrderClient, LiveOrderPreSubmitValidator):
+    def __init__(self) -> None:
+        super().__init__(OrderStatus.ACCEPTED_BY_BROKER)
+
+    def validate_pre_submit_order(self, request: LiveOrderRequest) -> None:
+        raise ValueError("pre-submit rejected")
 
 
 class FakeLiveOrderStatusClient(LiveOrderStatusClient):

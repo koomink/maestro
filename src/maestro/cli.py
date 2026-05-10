@@ -19,6 +19,8 @@ from maestro.monitoring.logging import configure_structured_logging
 from maestro.ops.preflight import private_beta_failures
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
+from maestro.state.events import SystemEventType, save_audited_system_event
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 app = typer.Typer()
@@ -460,6 +462,48 @@ def reconcile(config: Path = typer.Option(..., "--config")) -> None:
         raise typer.Exit(1)
 
 
+@app.command("adopt-broker-snapshot")
+def adopt_broker_snapshot(
+    config: Path = typer.Option(..., "--config"),
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    maestro_config = load_config(config)
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter("adopt-broker-snapshot requires live_readonly or live_approval")
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    latest = store.load_latest_broker_account_snapshot()
+    if latest is None:
+        raise typer.BadParameter("adopt-broker-snapshot requires a latest broker snapshot")
+
+    account = latest["payload"]["account"]
+    state = _portfolio_state_from_broker_account(
+        account,
+        allowed_symbols=maestro_config.portfolio.allowed_symbols,
+    )
+    run_id = new_run_id()
+    store.save_portfolio_snapshot(run_id, state)
+    payload = {
+        "reason": reason,
+        "broker_snapshot_id": latest["id"],
+        "broker_account_id": account.get("account_id"),
+        "cash": state.cash,
+        "positions": state.positions,
+    }
+    save_audited_system_event(
+        store,
+        audit,
+        run_id,
+        SystemEventType.BROKER_SNAPSHOT_ADOPTED,
+        payload,
+    )
+    typer.echo(
+        f"adopted run_id={run_id} broker_snapshot_id={latest['id']} "
+        f"account_id={account.get('account_id') or 'none'} cash={state.cash:.2f} "
+        f"positions={len(state.positions)}"
+    )
+
+
 @app.command("reconcile-fills")
 def reconcile_fills(config: Path = typer.Option(..., "--config")) -> None:
     maestro_config = load_config(config)
@@ -564,6 +608,31 @@ def _validate_live_smoke_secret_redaction(maestro_config, snapshot_payload: dict
             raise typer.BadParameter(
                 "KIS read-only smoke audit log contains configured secret values"
             )
+
+
+def _portfolio_state_from_broker_account(
+    account: dict,
+    *,
+    allowed_symbols: list[str],
+) -> PortfolioState:
+    positions: dict[str, float] = {}
+    unknown_symbols: list[str] = []
+    allowed = set(allowed_symbols)
+    for position in account.get("positions", []):
+        symbol = str(position.get("symbol") or "")
+        quantity = float(position.get("quantity", 0.0))
+        if not symbol or quantity == 0:
+            continue
+        if symbol not in allowed:
+            unknown_symbols.append(symbol)
+            continue
+        positions[symbol] = positions.get(symbol, 0.0) + quantity
+    if unknown_symbols:
+        raise typer.BadParameter(
+            "broker snapshot contains positions outside portfolio.allowed_symbols: "
+            + ",".join(sorted(set(unknown_symbols)))
+        )
+    return PortfolioState(cash=float(account.get("cash", 0.0)), positions=positions)
 
 
 def _configured_secret_values(maestro_config) -> list[str]:

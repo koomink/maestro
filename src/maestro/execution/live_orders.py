@@ -22,6 +22,7 @@ from maestro.execution.live_order_ports import (
     LiveOrderCancelClient,
     LiveOrderClient,
     LiveOrderNotificationClient,
+    LiveOrderPreSubmitValidator,
     LiveOrderStatusClient,
 )
 from maestro.execution.live_order_safety import LiveOrderSafetyService
@@ -43,6 +44,7 @@ __all__ = [
     "LiveOrderLifecycleResult",
     "LiveOrderLifecycleService",
     "LiveOrderNotificationClient",
+    "LiveOrderPreSubmitValidator",
     "LiveOrderRequest",
     "LiveOrderResult",
     "LiveOrderSafetyService",

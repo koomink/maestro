@@ -370,6 +370,8 @@
 - [x] Add an operator-local live approval config checklist with real account,
       Telegram, state, audit, and token-cache paths outside source control
 - [x] Add skipped-by-default KIS read-only live smoke procedure
+- [x] Add explicit `maestro adopt-broker-snapshot` operator baseline command
+      before live account reconciliation rehearsals
 - [x] Add skipped-by-default Telegram approval live smoke procedure
 - [x] Add skipped-by-default live approval dry-run rehearsal procedure
 - [x] Add first minimum-size approval-gated order checklist
@@ -395,6 +397,8 @@
 ### v0.8.3 Real Risk Engine
 
 - [x] Add cash reserve and buying-power checks before live approval submission
+- [x] Add KIS overseas pre-submit buying-power check using the exact live order
+      limit price
 - [x] Add position, per-symbol notional, and portfolio exposure limits
 - [x] Normalize broker PnL enough to enforce `execution.daily_loss_limit`
 - [x] Account for fees, settlement, pending orders, and manual broker activity in
@@ -405,6 +409,8 @@
 
 - [x] Add recovery procedure for ambiguous KIS submit results and transport
       timeouts
+- [x] Query KIS overseas order status over the broker submission
+      exchange-local date range to avoid Korea/US date-boundary misses
 - [x] Add recovery procedure for process crash after broker submit and before
       lifecycle persistence completes
 - [x] Reconstruct live order state from broker truth before allowing another live
