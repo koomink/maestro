@@ -9,6 +9,10 @@ from typing import Any, Protocol
 
 from maestro.approval.models import ApprovalDecision, ApprovalRequest
 from maestro.core.clock import utc_now
+from maestro.execution.live_orders import (
+    LiveOrderLifecycleNotification,
+    LiveOrderNotificationClient,
+)
 from maestro.integrations.telegram.formatter import format_approval_request
 
 
@@ -74,6 +78,19 @@ class TelegramApprovalNotifier:
 
     def send_approval_request(self, request: ApprovalRequest) -> str:
         return format_approval_request(request)
+
+
+class TelegramLiveOrderNotificationClient(LiveOrderNotificationClient):
+    def __init__(self, *, client: TelegramBotClient, chat_ids: Sequence[int]) -> None:
+        if not chat_ids:
+            raise ValueError("telegram_allowed_chat_ids is required for live order notifications")
+        self.client = client
+        self.chat_ids = list(chat_ids)
+
+    def notify(self, event: LiveOrderLifecycleNotification) -> None:
+        text = _format_live_order_notification(event)
+        for chat_id in self.chat_ids:
+            self.client.send_message(chat_id, text)
 
 
 class TelegramApprovalService:
@@ -183,3 +200,17 @@ class TelegramApprovalService:
         if command == "reject":
             return "rejected"
         return None
+
+
+def _format_live_order_notification(event: LiveOrderLifecycleNotification) -> str:
+    broker_order = event.broker_order_id or "pending"
+    return "\n".join(
+        [
+            "Maestro live order update",
+            f"run_id: {event.run_id}",
+            f"order_id: {event.order_id}",
+            f"broker_order_id: {broker_order}",
+            f"status: {event.status.value}",
+            f"message: {event.message}",
+        ]
+    )

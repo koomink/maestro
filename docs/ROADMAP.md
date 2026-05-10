@@ -170,15 +170,18 @@ Started scope:
 - Persisted `live_order_workflow` summaries
 - Bounded multi-poll order lifecycle loop
 - Operator notification interface with fake-client coverage
+- Telegram lifecycle/fill/error notification adapter through the existing Bot API boundary
 - Persisted `live_order_lifecycle` summaries
+- Live approval dependency factory with KIS clients when `kis.provider="kis"` and injectable fake clients for tests
+- Product-level `run_once` wiring to live order lifecycle when `mode=live_approval`
 - Reconciliation before and after orders
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
 
 Remaining scope:
 
-- Real broker cancel adapter implementation
-- Real operator notification adapter implementation
+- Real broker cancel adapter implementation after endpoint path, TR_IDs, and request fields are verified
+- Operator-facing live approval config example and release checklist
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
 

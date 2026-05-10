@@ -157,7 +157,8 @@ Implemented foundations beyond the core v0.1 scope:
 - Optional Streamlit read-only dashboard
 - Approval request/decision gate before paper fills
 - Telegram approval message formatter and notifier stub
-- Telegram Bot API polling approval MVP for paper mode
+- Telegram Bot API polling approval MVP for paper and live approval modes
+- Telegram Bot API live order lifecycle notification adapter
 - CLI `approvals`
 - `live_readonly` mode config
 - KIS read-only adapter interface and deterministic mock client
@@ -165,6 +166,8 @@ Implemented foundations beyond the core v0.1 scope:
 - CLI `kis-sync` and `kis-account`
 - Live approval order safety contract and KIS domestic-stock limit-order client skeleton
   behind that contract
+- `run_once` live approval wiring through the live order lifecycle service when
+  `mode=live_approval`
 
 Deferred real integrations:
 
@@ -184,7 +187,7 @@ contract requires a Telegram approval decision, the latest broker reconciliation
 to pass, limit orders only, per-order and daily notional caps, duplicate-order
 prevention, persisted live order status snapshots, and halt-on-unknown
 broker/order state behavior. Normal tests use fake clients and do not call KIS
-network endpoints.
+or Telegram network endpoints.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
@@ -210,6 +213,12 @@ until a terminal status or max polls, reconciles fills after every poll, runs
 broker reconciliation after fill updates when configured, emits operator
 notifications through `LiveOrderNotificationClient`, and records a
 `live_order_lifecycle` summary. Max polls do not auto-cancel.
+
+`MaestroOrchestrator.run_once()` remains paper-mode by default, but in
+`live_approval` mode it uses the existing proposal and approval path, converts
+approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
+the bounded lifecycle service. This is product-level wiring for
+approval-gated live orders, not live automation.
 
 Safe execution config defaults:
 

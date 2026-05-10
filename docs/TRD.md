@@ -226,7 +226,9 @@ database caches, or broker behavior.
 - Paper fills execute only when approval is not required or the approval decision is `approved`.
 - Approval decisions are persisted in SQLite and audit JSONL.
 - `approval.default_decision` supports `approved`, `rejected`, and `expired` for the Phase 2 no-network stub.
-- Telegram integration currently formats approval messages without calling Bot API.
+- Telegram approval uses the Bot API polling boundary in paper and live approval
+  modes when configured; normal tests inject fake clients and do not call the
+  network.
 
 ### 3.5 Current KIS Read-only Foundation
 
@@ -272,7 +274,8 @@ database caches, or broker behavior.
   portfolio.
 - `LiveOrderCancelRequest`, `LiveOrderCancelResult`, and `LiveOrderCancelClient`
   define the cancellation interface only. There is no direct cancel CLI and no
-  KIS cancel network call in v0.6.3.
+  KIS cancel network call in v0.6. The cancel endpoint path, TR_IDs, and body
+  fields need verified project references before implementation.
 - Cancellation requires Telegram approval, latest broker reconciliation pass, and
   latest live order status of `open` or `partially_filled`. Partial-fill
   cancellation is only for the remaining open quantity and requires a prior fill
@@ -293,8 +296,15 @@ database caches, or broker behavior.
   after every poll, optionally runs broker reconciliation after fill updates, and
   persists a `live_order_lifecycle` system/audit summary. Reaching max polls is
   non-terminal and does not auto-cancel.
-- `LiveOrderNotificationClient` is an operator notification abstraction only.
-  v0.6.5 has no real Telegram notification implementation, webhook, or buttons.
+- `build_live_approval_dependencies()` wires the live approval service graph:
+  state store, audit logger, safety service, status service, fill
+  reconciliation, optional broker reconciliation, optional notifications, KIS
+  live order/status clients when `kis.provider="kis"`, and injected fake clients
+  for tests.
+- `LiveOrderNotificationClient` is implemented for Telegram lifecycle
+  notifications through the existing Bot API client boundary. It sends lifecycle,
+  fill-status, halt, and failure messages only; it does not add buttons,
+  high-risk admin controls, or write controls.
 - Safe polling defaults are `order_status_poll_interval_seconds=30`,
   `order_status_max_polls=20`, and `order_status_terminal_timeout_seconds=1800`.
 - `KISRestLiveOrderClient` adapts the domestic-stock cash order endpoint from the
@@ -304,6 +314,11 @@ database caches, or broker behavior.
 - KIS status tracking reuses domestic-stock `inquire-daily-ccld` and the existing
   unfilled-order inquiry path, then normalizes accepted, open, partially filled,
   filled, rejected, canceled, and unknown states into Maestro `OrderStatus`.
+- `MaestroOrchestrator.run_once()` remains unchanged for paper mode. In
+  `live_approval` mode it reuses the proposal and approval path, converts
+  approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
+  the bounded live order lifecycle service. This is product-level wiring for
+  approval-gated live orders, not live automation.
 - Maestro exposes no direct unguarded buy/sell CLI, no market orders, no dashboard
   write controls, no live order network smoke test, and no Telegram webhook/buttons
   in this phase.

@@ -310,6 +310,12 @@ class KISRestLiveOrderClient(KISRestReadOnlyClient, LiveOrderClient, LiveOrderSt
         return None
 
 
+# TODO(v0.7): Add a KIS LiveOrderCancelClient only after the domestic-stock
+# cancel endpoint path, TR_IDs, and body fields are verified against project
+# references. Cancellation remains available through injected fake clients and
+# LiveOrderCancellationService policy tests only.
+
+
 def _order_summary(row: dict[str, Any]) -> KISOrderSummary:
     return KISOrderSummary(
         order_id=str(row.get("odno") or row.get("orgn_odno") or ""),

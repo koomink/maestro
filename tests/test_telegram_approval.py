@@ -7,8 +7,13 @@ from maestro.approval.manager import ApprovalManager
 from maestro.approval.models import ApprovalRequest
 from maestro.config.models import ApprovalConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import RunMode
-from maestro.integrations.telegram.bot import TelegramApprovalService, TelegramBotAPIClient
+from maestro.core.enums import OrderStatus, RunMode
+from maestro.execution.live_orders import LiveOrderLifecycleNotification
+from maestro.integrations.telegram.bot import (
+    TelegramApprovalService,
+    TelegramBotAPIClient,
+    TelegramLiveOrderNotificationClient,
+)
 from maestro.state.store import StateStore
 
 
@@ -231,7 +236,28 @@ def test_telegram_service_rejects_malformed_get_updates_response():
         service.request_decision(request)
 
 
-def test_telegram_approval_manager_is_paper_only():
+def test_telegram_approval_manager_allows_live_approval_mode(monkeypatch: pytest.MonkeyPatch):
+    request = approval_request()
+    monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: request.approval_id)
+    manager = ApprovalManager(
+        ApprovalConfig(
+            enabled=True,
+            provider="telegram",
+            require_approval=True,
+            telegram_allowed_chat_ids=[100],
+            timeout_seconds=1,
+        ),
+        run_mode=RunMode.LIVE_APPROVAL,
+        telegram_client=FakeTelegramClient([update(f"approve {request.approval_id}")]),
+    )
+
+    _, decision, _ = manager.request_approval("run_test", [], [], [])
+
+    assert decision is not None
+    assert decision.status == "approved"
+
+
+def test_telegram_approval_manager_rejects_live_readonly_mode():
     manager = ApprovalManager(
         ApprovalConfig(
             enabled=True,
@@ -244,8 +270,27 @@ def test_telegram_approval_manager_is_paper_only():
         telegram_client=FakeTelegramClient([]),
     )
 
-    with pytest.raises(ValueError, match="paper-mode only"):
+    with pytest.raises(ValueError, match="paper or live_approval"):
         manager.request_approval("run_test", [], [], [])
+
+
+def test_telegram_live_order_notification_uses_fake_client_only():
+    client = FakeTelegramClient([])
+    notifier = TelegramLiveOrderNotificationClient(client=client, chat_ids=[100, 200])
+
+    notifier.notify(
+        LiveOrderLifecycleNotification(
+            run_id="run_live",
+            order_id="ord_live",
+            broker_order_id="KIS-1",
+            status=OrderStatus.FILLED,
+            message="Live order status polled.",
+        )
+    )
+
+    assert [item["chat_id"] for item in client.sent_messages] == [100, 200]
+    assert "status: filled" in client.sent_messages[0]["text"]
+    assert "KIS-1" in client.sent_messages[0]["text"]
 
 
 def test_telegram_token_value_is_not_in_missing_env_error(monkeypatch: pytest.MonkeyPatch):

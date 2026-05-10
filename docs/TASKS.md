@@ -248,8 +248,14 @@
 - [x] Add bounded multi-poll lifecycle service
 - [x] Add safe order status polling config defaults
 - [x] Add operator notification abstraction with fake-client tests
+- [x] Add Telegram lifecycle/fill/error notification adapter behind the existing Bot API boundary
 - [x] Persist `live_order_lifecycle` summaries
 - [x] Do not auto-cancel when max polls are reached
+- [x] Add live approval dependency factory with injectable fake clients
+- [x] Wire `MaestroOrchestrator.run_once()` to the bounded live order lifecycle in `live_approval` mode
+- [ ] Implement real KIS cancel adapter after endpoint path, TR_IDs, and request fields are verified
+- [ ] Add an operator-facing live approval config example after credentials and reconciliation procedure are finalized
+- [ ] Add live approval dry-run/release checklist for broker account reconciliation, approval, submit, status, fill reconciliation, and halt handling
 
 ## Completed / Historical Notes
 

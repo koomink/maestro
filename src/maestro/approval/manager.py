@@ -54,8 +54,8 @@ class ApprovalManager:
             risk_violations=risk_violations,
         )
         if self.config.provider == "telegram":
-            if self.run_mode != RunMode.PAPER:
-                raise ValueError("Telegram approval MVP is paper-mode only")
+            if self.run_mode not in {RunMode.PAPER, RunMode.LIVE_APPROVAL}:
+                raise ValueError("Telegram approval requires paper or live_approval mode")
             client = self.telegram_client or TelegramBotAPIClient(
                 token_env=self.config.telegram_bot_token_env,
                 timeout_seconds=self.config.timeout_seconds,
