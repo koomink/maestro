@@ -18,15 +18,21 @@ Strategy plugins
     ▼
 datahub/
     market and research data: price, ohlcv, macro, news, sentiment, fundamental
-    future providers: Yahoo Finance/yfinance-style OHLCV, FRED, CSV/local,
-    RSS/GDELT/News API, sentiment/community data, crypto exchange market data
+    providers/adapters: mock, CSV/local, Yahoo/yfinance-style OHLCV, FRED,
+    RSS, rule-based sentiment, future GDELT/News API and community providers
 
 execution/brokers/
     broker account and execution data: auth, balances, positions, buying power,
     orders, fills, reconciliation, broker_quote reference data
 ```
 
-Strategy plugins must request data through Maestro DataHub and must not call external research data APIs or broker APIs directly. KIS current price lookup may be used as broker-side `broker_quote` reference data for execution validation or reconciliation, but KIS is not the primary strategy or research data source.
+DataHub, execution, broker adapters, approval, state, audit, and dashboard are
+Maestro internal modules. Yahoo/yfinance, FRED, RSS feeds, KIS Open API, and
+Telegram Bot API are external systems reached through internal adapters.
+Strategy plugins must request data through Maestro DataHub and must not call
+external research data APIs or broker APIs directly. KIS current price lookup may
+be used as broker-side `broker_quote` reference data for execution validation or
+reconciliation, but KIS is not the primary strategy or research data source.
 
 Maestro owns the lifecycle of a portfolio management cycle:
 

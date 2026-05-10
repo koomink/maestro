@@ -5,7 +5,12 @@
 - Maestro is not a strategy; it is the portfolio operating system.
 - Virtuoso apps propose; Maestro validates, constructs, protects, executes, and records.
 - Safety-first progression: mock -> paper -> DataHub providers -> approval-gated paper -> read-only broker -> approval-gated live trading.
-- DataHub is the research/market data layer; broker adapters are the account/execution layer.
+- DataHub is a Maestro internal research/market data layer; broker adapters are
+  Maestro internal account/execution/reconciliation adapters.
+- Yahoo/yfinance, FRED, RSS feeds, KIS Open API, and Telegram Bot API are
+  external systems reached only through Maestro adapters.
+- Virtuoso apps are external strategy plugins/apps. They request data through
+  Maestro DataHub and must not call data providers or broker APIs directly.
 - Dashboard should remain read-only initially.
 - Telegram should be used for approval and urgent notifications, not high-risk administration.
 - Live auto-trading is explicitly deferred.
@@ -127,7 +132,7 @@ Scope:
 
 Still no live trading in v0.4.
 
-## v0.5 — KIS Read-only Broker Integration
+## v0.5 — KIS Read-only Broker Foundation
 
 Scope:
 
@@ -144,8 +149,9 @@ Scope:
 - `live_readonly` mode hardening
 
 Read-only only. No order submission, cancel, amend, buy, or sell callable path.
-Overseas stock/ETF endpoints, pagination/continuation, canonical symbol mapping,
-and full reconciliation remain future work.
+The implemented REST behavior is an explicit domestic adapter path. Overseas
+stock/ETF endpoints, pagination/continuation, and full reconciliation remain
+future work.
 
 ## v0.6 — KIS Live Approval Trading
 
@@ -222,11 +228,7 @@ Remaining scope:
 
 - Unknown order status halt
 - Improved Python logging
-- Audit log rotation or hash chain
 - Monitoring and health checks
-- Deployment guide
-- VPS/systemd guide
-- Backup/restore guide
 - Optional KIS WebSocket
 - Performance attribution
 
@@ -234,9 +236,96 @@ This milestone prepares Maestro for more serious operation but should still pref
 The dashboard remains read-only, Telegram admin controls remain deferred, and
 live auto-trading remains out of scope.
 
+## v0.7.1 — Real-data US Stock/ETF Paper Mode
+
+Planned scope:
+
+- Yahoo/yfinance paper config for US-listed stocks and ETFs
+- USD base-currency paper universe
+- AAPL, MSFT, VOO, QQQ, and SGOV-style example instruments
+- DataHub symbol mapping examples for external provider symbols
+- Freshness policy for real market data in paper mode
+- Clear docs that paper execution is simulated inside Maestro
+
+This milestone proves the overseas stock/ETF research-data path without broker
+execution. It should not call KIS for strategy research data.
+
+## v0.7.2 — KIS Overseas Read-only Adapter
+
+Planned scope:
+
+- KIS overseas read-only REST adapter after endpoint paths, TR_IDs, exchange
+  codes, pagination, and response fields are verified
+- USD cash and foreign-currency balance normalization
+- Overseas positions normalization
+- Overseas buying power normalization
+- Overseas fills and unfilled orders normalization
+- Broker reconciliation for canonical US stock/ETF symbols
+- Fake-client and fixture tests only for normal test runs
+
+No order submission, cancel, amend, buy, or sell callable path in this
+milestone.
+
+## v0.7.3 — Operational Closeout
+
+Planned scope:
+
+- `maestro health` CLI
+- Structured Python logging
+- Deployment guide
+- VPS/systemd guide
+- Backup/restore guide for SQLite state, audit logs, and local config
+- Operator runbooks for halt recovery and broker reconciliation
+
+No dashboard write controls and no Telegram admin controls.
+
+## v0.8 — KIS Overseas Live Approval Beta
+
+Planned scope:
+
+- KIS overseas limit-order submit adapter after endpoint paths, TR_IDs, exchange
+  codes, and request fields are verified
+- KIS overseas order status adapter
+- Fill tracking and reconciliation for US-listed stocks/ETFs
+- Approval-gated `run_once` only
+- Safety gates from v0.7 remain mandatory
+
+No `live_auto`, no market orders, no direct buy/sell/cancel CLI, and no real KIS
+cancel adapter unless separately verified and guarded.
+
+## v0.9 — Virtuoso SDK/App Integration
+
+Planned scope:
+
+- Harden Maestro SDK contracts for external Virtuoso apps
+- Versioned plugin/app compatibility checks
+- Example Virtuoso app packaging guidance
+- Strategy app data-boundary tests
+- Documentation for external app installation and promotion from paper to live
+  approval
+
+Virtuoso apps continue to propose only; Maestro owns data access, risk,
+approval, execution, state, and audit.
+
+## v1.0 — Private Approval-gated Production Beta
+
+Planned scope:
+
+- Private operator beta for approval-gated overseas stock/ETF workflows
+- Read-only dashboard
+- Telegram approval and notifications only
+- Health checks, backup/restore, and deployment docs complete
+- Broker reconciliation and halt recovery runbooks exercised
+
+This is not autonomous trading. Live auto-trading remains deferred.
+
 ## Deferred / Explicitly Out of Scope for Now
 
 - Fully autonomous live trading
+- Market orders
+- Direct or unguarded buy/sell/cancel CLI
+- Real KIS cancel until endpoint path, TR_IDs, request fields, and safety policy
+  are verified
 - Strategy-specific logic inside Maestro core
 - High-risk admin controls through Telegram
 - Write-capable dashboard controls

@@ -4,6 +4,12 @@ This checklist closes v0.6 `live_approval`. It is not a `live_auto` procedure.
 Maestro still has no market orders, no direct buy/sell/cancel CLI, no dashboard
 write controls, and no high-risk Telegram admin controls.
 
+Maestro owns DataHub, execution, approval, broker adapters, state, audit, and
+the read-only dashboard. Yahoo/yfinance, FRED, RSS feeds, KIS Open API, and
+Telegram Bot API are external systems reached through Maestro adapters.
+Virtuoso apps must request data through Maestro DataHub and must not call broker,
+Telegram, or external data APIs directly.
+
 ## Preflight Checklist
 
 - Review `configs/live_approval.example.yaml` and keep
@@ -27,6 +33,8 @@ write controls, and no high-risk Telegram admin controls.
 - Confirm the dashboard remains read-only.
 - Confirm no strategy plugin imports or calls KIS, Telegram, or other broker APIs
   directly.
+- Confirm no strategy plugin calls Yahoo/yfinance, FRED, RSS, or other external
+  research APIs directly; all research data must flow through Maestro DataHub.
 - Confirm `var/` state, audit, and token cache paths are owner-controlled and not
   committed.
 
@@ -45,13 +53,19 @@ audit/state records.
 
 ## KIS Read-Only Sync
 
-1. Start from a read-only config such as `configs/kis_live_readonly.example.yaml`.
+1. Start from a read-only config such as `configs/live_readonly.yaml` for the
+   deterministic mock KIS path.
 2. Run `maestro kis-sync --config <readonly-config>`.
 3. Run `maestro kis-account --config <readonly-config>`.
 4. Confirm cash, positions, buying power, and account ID are expected.
 
 Do not proceed if the read-only account snapshot is missing, stale, points to
 the wrong account, or does not use the intended broker product adapter.
+
+`configs/kis_live_readonly.example.yaml` documents the intended
+`kis_overseas_stock` shape, but real KIS overseas read-only remains fail-closed
+until endpoint paths, TR_IDs, exchange codes, pagination, and response fields are
+verified and implemented.
 
 ## Broker Reconciliation Pass
 

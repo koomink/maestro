@@ -204,7 +204,7 @@
 - [ ] Add webhook handling after polling MVP
 - [ ] Add fill/error Telegram notifications
 
-### v0.5 KIS Read-only Broker Integration
+### v0.5 KIS Read-only Broker Foundation
 
 - [x] Plan real KIS read-only REST client boundary
 - [x] Plan OAuth token management and token persistence
@@ -290,6 +290,60 @@
 - [ ] Keep dashboard write controls deferred
 - [ ] Keep Telegram pause/kill/admin controls deferred
 - [ ] Keep live auto-trading out of scope
+
+### v0.7.1 Real-data US Stock/ETF Paper Mode
+
+- [ ] Add Yahoo/yfinance paper config for US-listed stocks and ETFs
+- [ ] Add USD universe example with AAPL, MSFT, VOO, QQQ, and SGOV-style instruments
+- [ ] Document DataHub symbol mapping for external provider symbols
+- [ ] Validate paper-mode freshness behavior with real-data providers
+- [ ] Confirm `PaperExecutionEngine` remains simulated execution inside Maestro
+- [ ] Keep KIS out of strategy research data
+- [ ] Keep normal tests fake-client/fixture based
+
+### v0.7.2 KIS Overseas Read-only Adapter
+
+- [ ] Verify KIS overseas read-only endpoint paths, TR_IDs, exchange codes, pagination, and response fields
+- [ ] Normalize USD cash and foreign-currency balances
+- [ ] Normalize overseas stock/ETF positions to canonical symbols
+- [ ] Normalize overseas buying power
+- [ ] Normalize overseas fills and unfilled orders
+- [ ] Add broker reconciliation for US-listed stock/ETF canonical symbols
+- [ ] Keep read-only mode free of order submission, cancel, amend, buy, and sell paths
+- [ ] Keep normal tests fake-client/fixture based with no KIS network calls
+
+### v0.7.3 Operational Closeout
+
+- [ ] Add `maestro health` CLI
+- [ ] Add structured Python logging
+- [ ] Add deployment guide
+- [ ] Add VPS/systemd guide
+- [ ] Add backup/restore guide for SQLite state, audit logs, and local config
+- [ ] Add operator runbooks for halt recovery and broker reconciliation
+- [ ] Keep dashboard write controls deferred
+- [ ] Keep Telegram admin controls deferred
+
+### v0.8 KIS Overseas Live Approval Beta
+
+- [ ] Verify KIS overseas limit-order submit endpoint paths, TR_IDs, exchange codes, and request fields
+- [ ] Implement KIS overseas limit-order submit adapter behind live approval safety gates
+- [ ] Implement KIS overseas order status adapter
+- [ ] Track fills for US-listed stocks/ETFs
+- [ ] Reconcile fills and broker state after overseas live approval orders
+- [ ] Keep approval-gated `run_once` as the only live submit path
+- [ ] Keep live auto-trading deferred
+- [ ] Keep market orders deferred
+- [ ] Keep direct buy/sell/cancel CLI deferred
+- [ ] Keep real KIS cancel deferred until separately verified and guarded
+
+### v0.9 Virtuoso SDK/App Integration
+
+- [ ] Harden Maestro SDK contracts for external Virtuoso apps
+- [ ] Add versioned plugin/app compatibility checks
+- [ ] Document external Virtuoso app packaging
+- [ ] Add strategy app data-boundary tests
+- [ ] Document promotion flow from mock paper to real-data paper to live approval
+- [ ] Keep Virtuoso apps proposal-only; Maestro owns data, risk, approval, execution, state, and audit
 
 ## Completed / Historical Notes
 

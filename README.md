@@ -49,6 +49,7 @@ Symphony Ecosystem
 │
 ├── Maestro OS
 │   ├── DataHub
+│   │   └── Provider adapters
 │   ├── Plugin Manager
 │   ├── Strategy Orchestrator
 │   ├── Signal Validator
@@ -56,29 +57,48 @@ Symphony Ecosystem
 │   ├── Risk Manager
 │   ├── Approval Manager
 │   ├── Execution Engine
+│   │   ├── PaperExecutionEngine
+│   │   └── Live approval lifecycle
+│   ├── Broker Adapters
+│   │   └── KIS adapter
 │   ├── State Manager
 │   ├── Audit Logger
 │   ├── Dashboard / API
-│   └── Integrations
-│       ├── Telegram
-│       └── Korea Investment Securities Open API
+│   └── Notification Adapters
+│       └── Telegram adapter
 │
-└── Virtuoso Apps
-    ├── Ataraxia
-    ├── TechAgora
-    ├── Macro
-    ├── Fundamental
-    └── TradingAgents
+├── Virtuoso Apps
+│   ├── Ataraxia
+│   ├── TechAgora
+│   ├── Macro
+│   ├── Fundamental
+│   └── TradingAgents
+│
+└── External Systems
+    ├── Yahoo/yfinance
+    ├── FRED
+    ├── RSS feeds
+    ├── Korea Investment Securities Open API
+    └── Telegram Bot API
 ```
+
+Maestro internal modules include DataHub, provider adapters, the execution
+engine, broker adapters, approval manager, risk manager, state store, audit
+logger, and dashboard. Virtuoso apps are external strategy plugins/apps loaded
+through the Maestro SDK contract. External systems are services Maestro may call
+through internal adapters; they are not Maestro modules.
 
 ## Data and Execution Boundaries
 
 Maestro separates research/market data from broker account and execution data.
 
 ```text
-Research / strategy data
-Yahoo Finance, FRED, CSV/local, RSS feeds,
-rule-based sentiment, future GDELT/News API and community APIs
+External market/research data
+Yahoo/yfinance, FRED, RSS feeds, CSV/local files,
+future GDELT/News API and community APIs
+        │
+        ▼
+Maestro DataHub provider adapters
         │
         ▼
 Maestro DataHub
@@ -90,15 +110,25 @@ Virtuoso strategy plugins
 Portfolio / risk / approval
         │
         ▼
-Execution engine
+Maestro execution engine
         │
         ▼
-Broker adapters, including KIS
+Maestro broker adapters, including KIS
 auth, balances, positions, buying power, orders, fills, reconciliation,
 and broker-side quote/reference data for execution checks
+        │
+        ▼
+External broker APIs, including KIS Open API
 ```
 
-DataHub is the market and research data layer. Broker adapters are the account and execution layer. Strategy plugins must request data through Maestro DataHub and should not call external market, macro, news, sentiment, or broker APIs directly.
+DataHub is the Maestro market and research data layer. Its providers may call
+external systems such as Yahoo/yfinance, FRED, RSS feeds, or local CSV files.
+Broker adapters are the Maestro account, execution, and reconciliation layer.
+Execution is internal to Maestro: paper execution is simulated inside Maestro,
+while live approval execution goes through broker adapters.
+
+Strategy plugins must request data through Maestro DataHub and must not call
+external market, macro, news, sentiment, Telegram, or broker APIs directly.
 
 Korea Investment Securities current price lookup may be used as broker-side quote/reference data for execution validation or reconciliation, but KIS is not the primary strategy or research data source.
 
@@ -106,6 +136,19 @@ Korea Investment Securities current price lookup may be used as broker-side quot
 
 Maestro v0.1.1 is a stabilization patch on top of the v0.1 bootable skeleton. It is
 not a production trading system.
+
+Current runnable modes are:
+
+- Mock paper mode with `configs/paper.yaml`
+- CSV-backed paper mode with `configs/csv_paper.yaml`
+- Optional external DataHub providers such as Yahoo/yfinance, FRED, and RSS when
+  explicitly configured
+- Mock `live_readonly` broker scaffolding with `configs/live_readonly.yaml`
+- Live approval infrastructure and safety gates, with real KIS overseas
+  read-only/submit/status adapters still fail-closed until implemented
+
+`PaperExecutionEngine` is simulated execution inside Maestro. Mock configs are
+for development and tests, not production readiness.
 
 Official v0.1 release scope:
 
@@ -162,7 +205,9 @@ Implemented foundations beyond the core v0.1 scope:
 - CLI `approvals`
 - `live_readonly` mode config
 - KIS read-only adapter interface and deterministic mock client
-- KIS read-only REST client for auth, balance, positions, buying power, order/fill inquiry, unfilled order inquiry, and broker-side quote lookup
+- KIS read-only REST client foundation for auth and product-specific broker
+  adapter paths; overseas stock/ETF read-only remains fail-closed until fields
+  are verified
 - CLI `kis-sync` and `kis-account`
 - Product/venue-aware universe config for canonical symbols, broker products,
   exchange codes, currency, and precision rules
@@ -568,8 +613,10 @@ maestro reconcile-fills --config configs/live_readonly.yaml
 ```
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
-For the real KIS read-only REST provider, start from
-`configs/kis_live_readonly.example.yaml`, set `kis.provider: kis`,
+`configs/kis_live_readonly.example.yaml` documents the intended overseas
+stock/ETF read-only shape, but the real KIS overseas read-only adapter remains
+fail-closed until endpoint paths, TR_IDs, exchange codes, and response fields
+are verified. When that adapter is implemented, it will use `kis.provider: kis`,
 `kis.account_id`, and these environment variable names:
 
 - `KIS_APP_KEY`: KIS app key
@@ -698,9 +745,15 @@ Short direction:
 - v0.2: DataHub and read-only dashboard foundation
 - v0.3: external research data providers
 - v0.4: Telegram approval in paper mode
-- v0.5: KIS read-only broker integration
+- v0.5: KIS read-only broker foundation
 - v0.6: KIS live approval trading
 - v0.7: production hardening
+- v0.7.1: real-data US stock/ETF paper mode
+- v0.7.2: KIS overseas read-only adapter
+- v0.7.3: operational closeout
+- v0.8: KIS overseas live approval beta
+- v0.9: Virtuoso SDK/app integration
+- v1.0: private approval-gated production beta
 
 ## Dashboard Philosophy
 

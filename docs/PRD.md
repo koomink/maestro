@@ -314,6 +314,9 @@ Future requirement:
 - KIS adapter must manage auth, balances, positions, buying power, fills, reconciliation, errors, and rate limit handling.
 - KIS current price lookup may be used as `broker_quote` reference data for execution validation or reconciliation.
 - KIS must not be presented as Maestro's main research or strategy data source.
+- The intended first production broker product is overseas stocks/ETFs through
+  `kis_overseas_stock`; real KIS overseas read-only and live submit/status paths
+  must not be claimed until implemented and verified.
 - `live_readonly` must expose no callable order submission, cancel, amend, buy, or sell path.
 - Live trading should initially be `live_approval`, not `live_auto`.
 - Only limit orders should be allowed initially.
@@ -382,14 +385,15 @@ Future requirement:
 
 - 30+ successful paper cycles.
 - Telegram approval flow tested with paper execution.
-- KIS read-only reconciliation works.
+- KIS overseas read-only reconciliation works after the adapter is implemented.
 - Dashboard displays portfolio and system status.
 - Kill switch behavior tested.
 
 ### Live Approval
 
 - User receives order proposal via Telegram.
-- User approval triggers KIS live order.
+- User approval triggers KIS overseas live order only after the overseas submit
+  and status adapters are implemented and verified.
 - Fill results are reconciled and logged.
 - No duplicate orders under retry/error conditions.
 - Live order size remains within configured risk limits.

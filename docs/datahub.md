@@ -32,6 +32,14 @@ shape of each symbol payload inside `DataBundle.data` is more explicit.
 
 ## Semantics
 
+- DataHub is an internal Maestro module. Its providers are internal adapters
+  that may call external market/research systems such as Yahoo/yfinance, FRED,
+  RSS feeds, or local CSV files.
+- External systems are not part of Maestro. Strategy plugins never call them
+  directly.
+- Broker adapters, including KIS, are not DataHub providers for strategy
+  research data. They belong to Maestro's account, execution, and reconciliation
+  boundary.
 - `latest_price` is the current reference price Maestro should use for paper
   order sizing and valuation.
 - `bars` are historical OHLCV records, sorted by timestamp.
@@ -136,10 +144,12 @@ Maestro should use canonical symbols inside strategies, portfolio targets, risk,
 and execution. Provider-specific symbols should be mapped at the DataHub
 boundary.
 
-The lightweight v0.2 `SymbolMetadata` model is the starting point. A future
-symbol registry can add provider aliases, exchange identifiers, currency, asset
-type, tradability, quantity constraints, and minimum notional rules. Strategies
-should not carry provider-specific ticker translation logic.
+`universe.instruments` is now the product/venue-aware source for tradable
+instrument metadata such as currency, broker product, exchange code, broker
+symbol, price tick, quantity step, minimum quantity, and minimum notional.
+DataHub provider symbol maps translate Maestro canonical symbols into
+provider-specific research symbols. Strategies should not carry provider-specific
+ticker translation logic.
 
 ### Schema Compatibility
 
@@ -191,19 +201,23 @@ price, ohlcv, macro, news, sentiment, fundamental, broker_quote
 
 Current provider status:
 
-- `mock`: supports `price` and `ohlcv` fixture-style payloads.
+- `mock`: supports `price` and `ohlcv` fixture-style payloads for development
+  and tests; it is not production market data.
 - `csv`: supports `price` and `ohlcv` from local CSV files.
 - `yahoo` / `yfinance`: supports `price` and `ohlcv` through a small
-  Yahoo/yfinance-style client wrapper.
+  Yahoo/yfinance-style client wrapper and can call external Yahoo/yfinance data
+  when configured.
 - `fred`: supports `macro` through a small stdlib HTTP client wrapper.
 - `rss`: supports `news` through a small stdlib HTTP/XML client wrapper.
 - `sentiment`: supports `sentiment` through configured fixture/news text and a
   lightweight rule-based analyzer.
 
 No GDELT, News API, Reddit/X/Discord/Telegram/community API, crypto, or KIS
-network research provider is implemented. GDELT/News API and community
-sentiment APIs remain future provider work. Crypto is explicitly deferred
-because the current supported universe is stocks and ETFs only.
+network research provider is implemented. KIS current price data may be used as
+`broker_quote` reference data by broker/execution/reconciliation logic, not as
+the primary strategy research feed. GDELT/News API and community sentiment APIs
+remain future provider work. Crypto is explicitly deferred because the current
+supported universe is stocks and ETFs only.
 
 ### Multi-Provider Config
 
