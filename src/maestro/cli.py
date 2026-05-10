@@ -12,6 +12,7 @@ from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
 
 app = typer.Typer()
@@ -61,6 +62,46 @@ def approvals(
             f"{row['created_at']} approval_id={row['approval_id']} "
             f"run_id={row['run_id']} status={decision['status']}"
         )
+
+
+@app.command("safety-status")
+def safety_status(config: Path = typer.Option(..., "--config")) -> None:
+    maestro_config = load_config(config)
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    current = SafetyControlService(store, audit).current_state()
+    typer.echo(
+        f"state={current.state.value} source={current.source} "
+        f"reason={current.reason} created_at={current.created_at} "
+        f"updated_at={current.updated_at}"
+    )
+
+
+@app.command("pause")
+def pause(
+    config: Path = typer.Option(..., "--config"),
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    current = _safety_service(config).pause(new_run_id(), reason)
+    typer.echo(f"state={current.state.value} reason={current.reason}")
+
+
+@app.command("resume")
+def resume(
+    config: Path = typer.Option(..., "--config"),
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    current = _safety_service(config).resume(new_run_id(), reason)
+    typer.echo(f"state={current.state.value} reason={current.reason}")
+
+
+@app.command("kill-switch")
+def kill_switch(
+    config: Path = typer.Option(..., "--config"),
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    current = _safety_service(config).kill_switch(new_run_id(), reason)
+    typer.echo(f"state={current.state.value} reason={current.reason}")
 
 
 @app.command("kis-sync")
@@ -150,6 +191,13 @@ def dashboard(config: Path = typer.Option(Path("configs/paper.yaml"), "--config"
         str(config),
     ]
     raise typer.Exit(subprocess.call(command))
+
+
+def _safety_service(config: Path) -> SafetyControlService:
+    maestro_config = load_config(config)
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    return SafetyControlService(store, audit)
 
 
 if __name__ == "__main__":

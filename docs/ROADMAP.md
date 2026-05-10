@@ -192,10 +192,18 @@ package release/versioning policy; v0.6 is the roadmap capability milestone.
 
 ## v0.7 — Production Hardening
 
-Scope:
+Started scope:
 
-- Kill switch
-- Pause/resume trading
+- Persistent global safety state for `active`, `paused`, `killed`, and `halted`
+- CLI safety controls: `safety-status`, `pause`, `resume`, and `kill-switch`
+- Safety gate in `MaestroOrchestrator.run_once()` before paper or live execution
+- Live approval submission blocked before approval/lifecycle execution when
+  safety state is paused, killed, or halted
+- Safety transition, blocked execution, and paper warning events persisted to
+  system events and audit logs
+
+Remaining scope:
+
 - Stale data halt
 - Reconciliation mismatch halt
 - Unknown order status halt
@@ -211,6 +219,8 @@ Scope:
 - Performance attribution
 
 This milestone prepares Maestro for more serious operation but should still prefer safety over autonomy.
+The dashboard remains read-only, Telegram admin controls remain deferred, and
+live auto-trading remains out of scope.
 
 ## Deferred / Explicitly Out of Scope for Now
 

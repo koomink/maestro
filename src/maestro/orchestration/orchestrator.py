@@ -24,6 +24,7 @@ from maestro.monitoring.audit_logger import AuditLogger
 from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.manager import PortfolioManager
 from maestro.risk.manager import RiskManager
+from maestro.safety.controls import SafetyControlService
 from maestro.sdk import StrategyContext, TargetAllocationResult
 from maestro.signals.validator import SignalValidator
 from maestro.state.models import PortfolioState
@@ -62,6 +63,7 @@ class MaestroOrchestrator:
         )
         self.state_store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
         self.audit = AuditLogger(config.audit.jsonl_path)
+        self.safety = SafetyControlService(self.state_store, self.audit)
         self.live_order_client = live_order_client
         self.live_order_status_client = live_order_status_client
         self.live_order_notification_client = live_order_notification_client
@@ -120,6 +122,55 @@ class MaestroOrchestrator:
                 raise ValueError(f"Risk check failed: {risk_decision.violations}")
 
             orders = self.execution.propose_orders(current_state, risk_decision.target, prices)
+            safety_state = self.safety.current_state()
+            if (
+                orders
+                and self.config.mode == RunMode.LIVE_APPROVAL
+                and safety_state.blocks_live_execution
+            ):
+                self.safety.record_blocked_execution(
+                    run_id,
+                    self.config.mode.value,
+                    safety_state,
+                    "before_approval",
+                )
+                next_state = current_state
+                self.state_store.save_portfolio_snapshot(run_id, next_state)
+                summary = RunOnceSummary(
+                    run_id=run_id,
+                    loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
+                    orders_created=0,
+                    total_value=next_state.total_value(prices),
+                    cash=next_state.cash,
+                )
+                self.audit.log(
+                    run_id,
+                    "run_once_completed",
+                    {
+                        "loaded_strategies": summary.loaded_strategies,
+                        "data_requests": data_requests_by_strategy,
+                        "strategy_results": [
+                            result.model_dump(mode="json") for result in valid_results
+                        ],
+                        "portfolio_target": target.model_dump(mode="json"),
+                        "risk_decision": risk_decision.model_dump(mode="json"),
+                        "approval_request": None,
+                        "approval_decision": None,
+                        "paper_orders": [],
+                        "execution_results": [],
+                        "safety_state": safety_state.model_dump(mode="json"),
+                        "execution_skipped": True,
+                        "state_summary": next_state.summary(prices),
+                    },
+                )
+                return summary
+            if orders and self.config.mode == RunMode.PAPER and safety_state.blocks_live_execution:
+                self.safety.record_warning(
+                    run_id,
+                    self.config.mode.value,
+                    safety_state,
+                    "before_paper_execution",
+                )
             approval_request, approval_decision, approval_message = (
                 self.approval_manager.request_approval(
                     run_id,
@@ -251,6 +302,16 @@ class MaestroOrchestrator:
         approval_id: str,
         approval_decision: ApprovalDecision,
     ) -> tuple[list[LiveOrderLifecycleResult], PortfolioState]:
+        safety_state = self.safety.current_state()
+        if safety_state.blocks_live_execution:
+            self.safety.record_blocked_execution(
+                run_id,
+                self.config.mode.value,
+                safety_state,
+                "before_lifecycle",
+            )
+            return [], self.state_store.load_latest_portfolio_state()
+
         dependencies = build_live_approval_dependencies(
             self.config,
             self.state_store,

@@ -168,6 +168,8 @@ Implemented foundations beyond the core v0.1 scope:
   behind that contract
 - `run_once` live approval wiring through the live order lifecycle service when
   `mode=live_approval`
+- Persistent safety controls for active, paused, killed, and halted state
+- CLI `safety-status`, `pause`, `resume`, and `kill-switch`
 - Safe live approval example config:
   [configs/live_approval.example.yaml](configs/live_approval.example.yaml)
 - v0.6 release checklist:
@@ -185,6 +187,23 @@ Deferred real integrations:
 - No web dashboard write controls
 
 ## Live Approval Safety
+
+Global safety state is persisted in SQLite as `safety_state` system events and
+mirrored to the JSONL audit log. The default state is `active`. Operators can
+inspect and change state with CLI commands:
+
+```bash
+maestro safety-status --config configs/paper.yaml
+maestro pause --config configs/live_approval.example.yaml --reason "operator maintenance"
+maestro resume --config configs/live_approval.example.yaml --reason "checks passed"
+maestro kill-switch --config configs/live_approval.example.yaml --reason "emergency stop"
+```
+
+`paused`, `killed`, and `halted` block `live_approval` order submission before
+approval or lifecycle execution and record `safety_execution_blocked` events.
+Paper mode currently records a `safety_gate_warning` and continues so local
+simulation remains usable. The kill switch is intentionally not reset by
+`resume`; recovery needs an explicit future safe method.
 
 v0.6 starts `live_approval` infrastructure, not `live_auto`. Live order submission
 is disabled by default and is available only through the safety interface. The
@@ -225,6 +244,10 @@ notifications through `LiveOrderNotificationClient`, and records a
 approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
 the bounded lifecycle service. This is product-level wiring for
 approval-gated live orders, not live automation.
+
+The dashboard remains read-only. Telegram approval and lifecycle notifications
+remain available, but Telegram pause, resume, kill-switch, and other high-risk
+admin controls are still deferred.
 
 Use [configs/live_approval.example.yaml](configs/live_approval.example.yaml) as
 the safe-by-default operator template and follow
@@ -696,13 +719,14 @@ Initial allowed actions:
 - Receive fill notification
 - Receive error/kill switch notification
 
-Future allowed actions may include:
+Deferred future actions may include:
 
 - `/status`
 - `/portfolio`
 - `/pause`
 - `/kill-switch`
 
+Telegram pause and kill-switch commands are not implemented in v0.7 start.
 High-risk actions such as enabling live auto mode or changing risk limits should not be available through Telegram.
 
 ## KIS Integration Philosophy

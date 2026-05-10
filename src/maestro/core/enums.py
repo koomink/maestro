@@ -43,3 +43,10 @@ class OrderStatus(StrEnum):
     UNKNOWN = "unknown"
     HALTED = "halted"
     FAILED = "failed"
+
+
+class SafetyState(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    KILLED = "killed"
+    HALTED = "halted"

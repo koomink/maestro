@@ -258,6 +258,31 @@
 - [x] Document why package metadata remains `0.1.1`
 - [ ] Implement real KIS cancel adapter after endpoint path, TR_IDs, and request fields are verified
 
+### v0.7 Production Hardening
+
+- [x] Add persistent safety state model for active, paused, killed, and halted states
+- [x] Persist safety transitions as SQLite system events and audit events
+- [x] Add `maestro safety-status --config ...`
+- [x] Add `maestro pause --config ... --reason "..."`
+- [x] Add `maestro resume --config ... --reason "..."`
+- [x] Add `maestro kill-switch --config ... --reason "..."`
+- [x] Gate `MaestroOrchestrator.run_once()` before live approval submission
+- [x] Record live execution skips caused by paused, killed, or halted state
+- [x] Keep paper mode runnable while recording a safety warning event
+- [x] Prevent casual kill-switch reset through `resume`
+- [ ] Add explicit halted-state recovery procedure
+- [ ] Add stale data halt
+- [ ] Add reconciliation mismatch halt
+- [ ] Add daily loss limit
+- [ ] Add daily order count and notional limits
+- [ ] Add improved Python logging
+- [ ] Add audit log rotation or hash chain
+- [ ] Add monitoring and health checks
+- [ ] Add deployment, VPS/systemd, and backup/restore guides
+- [ ] Keep dashboard write controls deferred
+- [ ] Keep Telegram pause/kill/admin controls deferred
+- [ ] Keep live auto-trading out of scope
+
 ## Completed / Historical Notes
 
 - v0.1.0 delivered the bootable paper-mode skeleton described in [ROADMAP.md](ROADMAP.md).
