@@ -1,9 +1,10 @@
+import os
 from pathlib import Path
 
 import yaml
 from typer.testing import CliRunner
 
-from maestro.cli import app
+from maestro.cli import _load_dotenv, app
 from maestro.config.loader import load_config
 from maestro.state.store import StateStore
 
@@ -46,6 +47,27 @@ def test_init_personal_refuses_overwrite_without_force(tmp_path):
     assert result.exit_code == 2
     assert "output already exists" in result.output
     assert output.read_text() == "existing"
+
+
+def test_cli_loads_dotenv_without_overriding_shell_env(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
+    monkeypatch.setenv("KIS_APP_KEY", "shell-app-key")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "KIS_ACCOUNT_ID=12345678-01",
+                "KIS_APP_KEY=dotenv-app-key",
+                "TELEGRAM_BOT_TOKEN=dotenv-telegram-token",
+            ]
+        )
+    )
+
+    _load_dotenv()
+
+    assert os.environ["KIS_ACCOUNT_ID"] == "12345678-01"
+    assert os.environ["KIS_APP_KEY"] == "shell-app-key"
+    assert os.environ["TELEGRAM_BOT_TOKEN"] == "dotenv-telegram-token"
 
 
 def test_personal_check_reports_default_blocked_stages(tmp_path):

@@ -760,6 +760,11 @@ symbols. It uses these environment variable names:
 - `KIS_APP_SECRET`: KIS app secret
 - `KIS_ACCESS_TOKEN`: optional pre-issued access token
 
+Maestro CLI commands load `.env` from the current working directory when the
+file exists and do not override variables already set by the shell. For local
+operator rehearsals, copy `.env.example` to `.env`, fill the KIS and Telegram
+values, and run Maestro from the repository root.
+
 The `live_readonly` adapter is read-only. It does not submit, cancel, amend, buy,
 sell, enable `live_auto`, or add market orders. Normal tests use fake/fixture KIS
 responses and do not call KIS network endpoints.

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import typer
 import yaml
+from dotenv import load_dotenv
 
 from maestro.config.loader import load_config
 from maestro.config.models import MaestroConfig
@@ -28,9 +29,14 @@ from maestro.state.store import StateStore
 app = typer.Typer()
 
 
+def _load_dotenv() -> None:
+    load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
+
+
 @app.callback()
 def main() -> None:
     """Maestro command line interface."""
+    _load_dotenv()
     configure_structured_logging()
 
 

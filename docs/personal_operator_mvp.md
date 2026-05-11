@@ -40,6 +40,11 @@ export KIS_APP_SECRET=...
 export TELEGRAM_BOT_TOKEN=...
 ```
 
+Maestro CLI commands automatically load `.env` from the current working
+directory without overriding environment variables already set by the shell.
+For local operation from the repository root, copy `.env.example` to `.env` and
+fill the real values there instead of exporting them every time.
+
 `KIS_ACCESS_TOKEN` is optional. If it is absent, Maestro can use the configured
 token cache path.
 
