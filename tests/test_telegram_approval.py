@@ -26,6 +26,7 @@ class FakeTelegramClient:
         self.updates = updates
         self.sent_messages: list[dict[str, Any]] = []
         self.get_updates_calls: list[dict[str, Any]] = []
+        self.answered_callbacks: list[dict[str, str]] = []
 
     def send_message(
         self,
@@ -41,6 +42,10 @@ class FakeTelegramClient:
         if len(self.get_updates_calls) == 1:
             return {"ok": True, "result": self.updates}
         return {"ok": True, "result": []}
+
+    def answer_callback_query(self, callback_query_id: str, text: str) -> dict[str, Any]:
+        self.answered_callbacks.append({"callback_query_id": callback_query_id, "text": text})
+        return {"ok": True, "result": True}
 
 
 def approval_request() -> ApprovalRequest:
@@ -154,6 +159,9 @@ def test_telegram_service_receives_button_approval():
     assert decision.status == "approved"
     assert decision.decided_by == "telegram:approver"
     assert decision.reason == "Telegram button approved callback."
+    assert client.answered_callbacks == [
+        {"callback_query_id": "callback-1", "text": "Approval approved."}
+    ]
 
 
 def test_telegram_service_receives_button_rejection():
@@ -169,6 +177,9 @@ def test_telegram_service_receives_button_rejection():
     decision, _ = service.request_decision(request)
 
     assert decision.status == "rejected"
+    assert client.answered_callbacks == [
+        {"callback_query_id": "callback-1", "text": "Approval rejected."}
+    ]
 
 
 def test_telegram_service_ignores_button_from_wrong_user_and_chat():
@@ -190,6 +201,33 @@ def test_telegram_service_ignores_button_from_wrong_user_and_chat():
     decision, _ = service.request_decision(request)
 
     assert decision.status == "approved"
+    assert client.answered_callbacks == [
+        {"callback_query_id": "callback-3", "text": "Approval approved."}
+    ]
+
+
+def test_telegram_service_answers_stale_button_callback():
+    request = approval_request()
+    client = FakeTelegramClient(
+        [
+            callback_update("approve:appr_stale", update_id=1),
+            callback_update(f"approve:{request.approval_id}", update_id=2),
+        ]
+    )
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
+    assert client.answered_callbacks == [
+        {"callback_query_id": "callback-1", "text": "This approval request is no longer active."},
+        {"callback_query_id": "callback-2", "text": "Approval approved."},
+    ]
 
 
 def test_telegram_service_sends_request_to_all_configured_chats():

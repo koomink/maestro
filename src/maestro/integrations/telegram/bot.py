@@ -28,6 +28,9 @@ class TelegramBotClient(Protocol):
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> Mapping[str, Any]:
         """Fetch Telegram updates."""
 
+    def answer_callback_query(self, callback_query_id: str, text: str) -> Mapping[str, Any]:
+        """Acknowledge a Telegram inline button callback."""
+
 
 class TelegramBotAPIClient:
     def __init__(self, *, token_env: str, timeout_seconds: float = 10.0) -> None:
@@ -56,6 +59,15 @@ class TelegramBotAPIClient:
         if offset is not None:
             payload["offset"] = offset
         return self._post("getUpdates", payload)
+
+    def answer_callback_query(self, callback_query_id: str, text: str) -> Mapping[str, Any]:
+        return self._post(
+            "answerCallbackQuery",
+            {
+                "callback_query_id": callback_query_id,
+                "text": text,
+            },
+        )
 
     def _post(self, method: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         data = urllib.parse.urlencode(payload).encode("utf-8")
@@ -232,8 +244,10 @@ class TelegramApprovalService:
             return None
         status = self._parse_callback_status(data, request.approval_id)
         if status is None:
+            self._answer_callback_query(callback, "This approval request is no longer active.")
             return None
 
+        self._answer_callback_query(callback, f"Approval {status}.")
         username = user.get("username") if isinstance(user.get("username"), str) else None
         decided_by = f"telegram:{username or user_id}"
         return ApprovalDecision(
@@ -278,6 +292,15 @@ class TelegramApprovalService:
             return self.client.send_message(chat_id, text, reply_markup=reply_markup)
         except TypeError:
             return self.client.send_message(chat_id, text)
+
+    def _answer_callback_query(self, callback: Mapping[str, Any], text: str) -> None:
+        callback_id = callback.get("id")
+        if not isinstance(callback_id, str):
+            return
+        answer_callback_query = getattr(self.client, "answer_callback_query", None)
+        if not callable(answer_callback_query):
+            return
+        answer_callback_query(callback_id, text)
 
 
 def _approval_reply_markup(approval_id: str) -> dict[str, Any]:
