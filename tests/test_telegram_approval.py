@@ -27,6 +27,7 @@ class FakeTelegramClient:
         self.sent_messages: list[dict[str, Any]] = []
         self.get_updates_calls: list[dict[str, Any]] = []
         self.answered_callbacks: list[dict[str, str]] = []
+        self.edited_messages: list[dict[str, Any]] = []
 
     def send_message(
         self,
@@ -46,6 +47,23 @@ class FakeTelegramClient:
     def answer_callback_query(self, callback_query_id: str, text: str) -> dict[str, Any]:
         self.answered_callbacks.append({"callback_query_id": callback_query_id, "text": text})
         return {"ok": True, "result": True}
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.edited_messages.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": reply_markup,
+            }
+        )
+        return {"ok": True, "result": {"message_id": message_id}}
 
 
 def approval_request() -> ApprovalRequest:
@@ -102,13 +120,15 @@ def callback_update(
     update_id: int = 1,
     user_id: int = 10,
     chat_id: int = 100,
+    message_id: int = 50,
+    text: str = "Maestro approval request",
 ) -> dict[str, Any]:
     return {
         "update_id": update_id,
         "callback_query": {
             "id": f"callback-{update_id}",
             "data": data,
-            "message": {"chat": {"id": chat_id}},
+            "message": {"chat": {"id": chat_id}, "message_id": message_id, "text": text},
             "from": {"id": user_id, "username": "approver"},
         },
     }
@@ -162,6 +182,19 @@ def test_telegram_service_receives_button_approval():
     assert client.answered_callbacks == [
         {"callback_query_id": "callback-1", "text": "Approval approved."}
     ]
+    assert client.edited_messages == [
+        {
+            "chat_id": 100,
+            "message_id": 50,
+            "text": (
+                "Maestro approval request\n\n"
+                f"Decision: approved by telegram:approver at {decision.decided_at.isoformat()}"
+            ),
+            "reply_markup": {
+                "inline_keyboard": [[{"text": "Approved", "callback_data": "decision:appr_test"}]]
+            },
+        }
+    ]
 
 
 def test_telegram_service_receives_button_rejection():
@@ -180,6 +213,9 @@ def test_telegram_service_receives_button_rejection():
     assert client.answered_callbacks == [
         {"callback_query_id": "callback-1", "text": "Approval rejected."}
     ]
+    assert client.edited_messages[0]["reply_markup"] == {
+        "inline_keyboard": [[{"text": "Rejected", "callback_data": "decision:appr_test"}]]
+    }
 
 
 def test_telegram_service_ignores_button_from_wrong_user_and_chat():
@@ -204,6 +240,7 @@ def test_telegram_service_ignores_button_from_wrong_user_and_chat():
     assert client.answered_callbacks == [
         {"callback_query_id": "callback-3", "text": "Approval approved."}
     ]
+    assert len(client.edited_messages) == 1
 
 
 def test_telegram_service_answers_stale_button_callback():
@@ -228,6 +265,7 @@ def test_telegram_service_answers_stale_button_callback():
         {"callback_query_id": "callback-1", "text": "This approval request is no longer active."},
         {"callback_query_id": "callback-2", "text": "Approval approved."},
     ]
+    assert len(client.edited_messages) == 1
 
 
 def test_telegram_service_sends_request_to_all_configured_chats():

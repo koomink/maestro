@@ -31,6 +31,15 @@ class TelegramBotClient(Protocol):
     def answer_callback_query(self, callback_query_id: str, text: str) -> Mapping[str, Any]:
         """Acknowledge a Telegram inline button callback."""
 
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """Edit a Telegram message."""
+
 
 class TelegramBotAPIClient:
     def __init__(self, *, token_env: str, timeout_seconds: float = 10.0) -> None:
@@ -68,6 +77,22 @@ class TelegramBotAPIClient:
                 "text": text,
             },
         )
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        return self._post("editMessageText", payload)
 
     def _post(self, method: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         data = urllib.parse.urlencode(payload).encode("utf-8")
@@ -247,10 +272,9 @@ class TelegramApprovalService:
             self._answer_callback_query(callback, "This approval request is no longer active.")
             return None
 
-        self._answer_callback_query(callback, f"Approval {status}.")
         username = user.get("username") if isinstance(user.get("username"), str) else None
         decided_by = f"telegram:{username or user_id}"
-        return ApprovalDecision(
+        decision = ApprovalDecision(
             approval_id=request.approval_id,
             run_id=request.run_id,
             status=status,
@@ -258,6 +282,9 @@ class TelegramApprovalService:
             decided_by=decided_by,
             reason=f"Telegram button {status} callback.",
         )
+        self._answer_callback_query(callback, f"Approval {status}.")
+        self._edit_callback_message(callback, decision)
+        return decision
 
     def _parse_status(self, text: str, approval_id: str) -> str | None:
         parts = text.strip().split()
@@ -302,6 +329,42 @@ class TelegramApprovalService:
             return
         answer_callback_query(callback_id, text)
 
+    def _edit_callback_message(
+        self,
+        callback: Mapping[str, Any],
+        decision: ApprovalDecision,
+    ) -> None:
+        message = callback.get("message")
+        if not isinstance(message, Mapping):
+            return
+        chat = message.get("chat")
+        if not isinstance(chat, Mapping):
+            return
+        chat_id = chat.get("id")
+        message_id = message.get("message_id")
+        text = message.get("text")
+        if (
+            not isinstance(chat_id, int)
+            or not isinstance(message_id, int)
+            or not isinstance(text, str)
+        ):
+            return
+        edit_message_text = getattr(self.client, "edit_message_text", None)
+        if not callable(edit_message_text):
+            return
+
+        updated_text = _append_decision_log(text, decision)
+        reply_markup = _decision_reply_markup(decision.status, decision.approval_id)
+        try:
+            edit_message_text(
+                chat_id,
+                message_id,
+                updated_text,
+                reply_markup=reply_markup,
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            return
+
 
 def _approval_reply_markup(approval_id: str) -> dict[str, Any]:
     return {
@@ -312,6 +375,24 @@ def _approval_reply_markup(approval_id: str) -> dict[str, Any]:
             ]
         ]
     }
+
+
+def _decision_reply_markup(status: str, approval_id: str) -> dict[str, Any]:
+    label = "Approved" if status == "approved" else "Rejected"
+    return {"inline_keyboard": [[{"text": label, "callback_data": f"decision:{approval_id}"}]]}
+
+
+def _append_decision_log(text: str, decision: ApprovalDecision) -> str:
+    base_text = text.split("\n\nDecision:", 1)[0]
+    return "\n\n".join(
+        [
+            base_text,
+            (
+                f"Decision: {decision.status} by {decision.decided_by} "
+                f"at {decision.decided_at.isoformat()}"
+            ),
+        ]
+    )
 
 
 def _format_live_order_notification(event: LiveOrderLifecycleNotification) -> str:
