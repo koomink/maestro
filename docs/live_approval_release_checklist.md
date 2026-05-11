@@ -3,7 +3,8 @@
 This checklist covers approval-gated live approval release and real-account
 rehearsal. It is not a `live_auto` procedure.
 Maestro still has no market orders, no direct buy/sell/cancel CLI, no dashboard
-write controls, and no high-risk Telegram admin controls.
+write controls, and no high-risk Telegram resume, clear-halt, live enablement,
+direct trading, or risk-change controls.
 
 Maestro owns DataHub, execution, approval, broker adapters, state, audit, and
 the read-only dashboard. Yahoo/yfinance, FRED, RSS feeds, KIS Open API, and
@@ -137,6 +138,18 @@ failed, or older than `reconciliation.max_age_seconds`.
 Telegram must not expose commands to bypass risk limits, enable live orders,
 disable reconciliation, place market orders, or call cancel directly.
 
+Operator UI safety checklist:
+
+- Confirm Telegram command handling enforces the configured user whitelist.
+- Confirm account IDs are masked in Telegram responses.
+- Confirm read-only commands use Maestro state/read models or the latest stored
+  broker snapshot and do not call broker network endpoints.
+- Confirm `/pause` and `/kill-switch` require confirmation callbacks before
+  changing safety state.
+- Confirm recovery commands such as `resume`, `clear-halt`, broker sync,
+  reconciliation triggers, live enablement, dry-run disablement, and risk
+  changes remain CLI/runbook only.
+
 ## Dry-Run / Fake-Client Test Path
 
 Normal tests are fake-client and fixture based. Before a real broker submit,
@@ -194,6 +207,9 @@ operator-local config:
   be younger than `reconciliation.max_age_seconds`.
 - Telegram approval: only allowed chat IDs receive proposals, only whitelisted
   users can approve, and rejection/timeout skip execution.
+- Telegram operator UI: command whitelist is enforced, account IDs are masked,
+  read-only commands avoid broker network calls, `/pause` and `/kill-switch`
+  require confirmation, and recovery commands remain CLI/runbook only.
 - Live dry-run: `live_order_dry_run` must show the exact symbol, side, quantity,
   limit price, notional, approval ID, and broker product expected for the first
   order.

@@ -291,7 +291,8 @@
 - [x] Add `maestro live-preflight --config ...` with nonzero exit on failed live approval preflight
 - [x] Add deployment, VPS/systemd, and backup/restore guides
 - [x] Keep dashboard write controls deferred
-- [x] Keep Telegram pause/kill/admin controls deferred
+- [x] Keep Telegram pause, kill-switch, resume, clear-halt, live enablement,
+      direct trading, and risk-change controls deferred
 - [x] Keep live auto-trading out of scope
 
 ### v0.7.1 Real-data US Stock/ETF Paper Mode
@@ -326,7 +327,8 @@
 - [x] Add operator runbooks for halt recovery and broker reconciliation
 - [x] Keep health local by default with no live KIS network calls
 - [x] Keep dashboard write controls deferred
-- [x] Keep Telegram admin controls deferred
+- [x] Keep Telegram resume, clear-halt, live enablement, direct trading, and
+      risk-change controls deferred
 
 ### v0.7.4 Dashboard / Observability Refresh
 
@@ -470,7 +472,8 @@
       scheduled-run monitoring, market session checks, broker quote validation,
       broker risk validation, and daily loss limit before beta readiness
 - [x] Keep beta approval-gated only; no `live_auto`, market orders, direct broker
-      CLI, dashboard write controls, or high-risk Telegram admin controls
+      CLI, dashboard write controls, or high-risk Telegram resume, clear-halt,
+      live enablement, direct trading, or risk-change controls
 - [x] Add tests for beta preflight pass/fail behavior
 
 ### Post-v1.0 Structural Refactor R1-R5
@@ -506,9 +509,27 @@
 - [x] Add `maestro personal-check --config ...` staged readiness output for paper, KIS read-only, Telegram approval, live dry-run, and minimum-size live order gates
 - [x] Keep `personal-check` local and free of broker submit or Telegram send side effects
 - [x] Document the personal operator workflow in `docs/personal_operator_mvp.md`
-- [x] Keep live auto-trading, market orders, direct broker trading CLI, dashboard write controls, and Telegram admin controls deferred
+- [x] Keep live auto-trading, market orders, direct broker trading CLI, dashboard
+      write controls, and Telegram resume, clear-halt, live enablement, direct
+      trading, and risk-change controls deferred
 - [x] Add KIS domestic+overseas multi-product operator config with KRW/USD
       currency sleeves and symbol-level broker-product routing
+
+### Telegram Operator UI
+
+- [ ] Add Telegram command router with whitelist enforcement
+- [ ] Add `/help`
+- [ ] Add `/status`
+- [ ] Add `/health`
+- [ ] Add `/account` from latest broker snapshot only
+- [ ] Add `/portfolio` from Maestro state only
+- [ ] Add `/apps` from configured strategies and latest strategy runs
+- [ ] Add `/orders` and `/approvals`
+- [ ] Add `/pause` with confirmation button
+- [ ] Add `/kill-switch` with confirmation button
+- [ ] Persist Telegram command audit/system events
+- [ ] Keep KIS sync, reconcile, resume, clear-halt, direct trading, live enable,
+      dry-run disablement, and risk changes out of Telegram
 
 ## Completed / Historical Notes
 

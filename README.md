@@ -381,8 +381,9 @@ the bounded lifecycle service. This is product-level wiring for
 approval-gated live orders, not live automation.
 
 The dashboard remains read-only. Telegram approval and lifecycle notifications
-remain available, but Telegram pause, resume, kill-switch, and other high-risk
-admin controls are still deferred.
+remain available. Telegram resume, clear-halt, live enablement, direct trading,
+and risk changes remain deferred; `/pause` and `/kill-switch` are limited future
+operator controls that require confirmation and audit.
 
 Use [configs/live_approval.example.yaml](configs/live_approval.example.yaml) as
 the safe-by-default operator template and follow
@@ -1011,7 +1012,7 @@ Dashboard should not initially allow:
 
 ## Telegram Philosophy
 
-Telegram is the approval and urgent notification channel.
+Telegram is the approval, urgent notification, and limited operator UI channel.
 
 Initial allowed actions:
 
@@ -1022,15 +1023,28 @@ Initial allowed actions:
 - Receive fill notification
 - Receive error/kill switch notification
 
-Deferred future actions may include:
+Planned operator commands:
 
+- `/help`
 - `/status`
+- `/health`
+- `/account`
 - `/portfolio`
+- `/apps`
+- `/orders`
+- `/approvals`
 - `/pause`
 - `/kill-switch`
 
-Telegram pause and kill-switch commands are not implemented in v0.7 start.
-High-risk actions such as enabling live auto mode or changing risk limits should not be available through Telegram.
+Telegram operator commands are intentionally constrained. Read commands must use
+stored SQLite state or the latest broker snapshot only; they must not call KIS
+or other broker network endpoints directly. `/pause` and `/kill-switch` require
+a whitelisted user, confirmation button, and persisted audit/system event.
+
+Excluded Telegram commands include `/resume`, `/clear-halt`, `/live-on`,
+`/dry-run-off`, `/buy`, `/sell`, `/cancel`, reconciliation triggers, direct
+broker sync, and risk limit changes. High-risk actions such as enabling live
+auto mode or changing risk limits should not be available through Telegram.
 
 ## KIS Integration Philosophy
 

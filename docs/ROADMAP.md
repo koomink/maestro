@@ -221,8 +221,9 @@ Completed scope:
 - Unknown order status halt behavior
 
 This milestone prepares Maestro for more serious operation but should still prefer safety over autonomy.
-The dashboard remains read-only, Telegram admin controls remain deferred, and
-live auto-trading remains out of scope.
+The dashboard remains read-only, Telegram resume/clear-halt/live enable/risk
+change/direct trading controls remain deferred, and live auto-trading remains
+out of scope.
 
 ## v0.7.1 — Real-data US Stock/ETF Paper Mode
 
@@ -269,7 +270,8 @@ Completed scope:
 - Operator runbooks for halt recovery and broker reconciliation
 
 Health is local by default and does not call live KIS endpoints. No dashboard
-write controls and no Telegram admin controls.
+write controls and no Telegram resume, clear-halt, live enablement, direct
+trading, or risk-change controls.
 
 ## v0.7.4 — Dashboard / Observability Refresh
 
@@ -284,8 +286,8 @@ Completed scope:
 - Dashboard read model tests for observability tables
 
 The dashboard remains read-only, does not call live KIS endpoints, and does not
-add dashboard write controls, Telegram admin controls, live auto-trading, market
-orders, or submit/cancel/amend paths.
+add dashboard write controls, Telegram resume/clear-halt/live enable/risk-change
+controls, live auto-trading, market orders, or submit/cancel/amend paths.
 
 ## v0.8 — KIS Overseas Live Approval Beta
 
@@ -402,7 +404,8 @@ Completed scope:
 - Add audit hash-chain integrity checks for JSONL audit events.
 - Exercise backup/restore and halt-recovery runbooks with explicit recovery
   commands.
-- Keep dashboard read-only and keep Telegram high-risk admin controls deferred.
+- Keep dashboard read-only and keep Telegram resume/clear-halt/live enable/risk
+  change/direct trading controls deferred.
 
 ## v0.9 — Dynamic Universe & Virtuoso SDK Contract
 
@@ -470,7 +473,26 @@ Completed scope:
 
 This milestone packages the existing private beta pieces for one operator. It
 does not add `live_auto`, market orders, direct broker trading CLI commands,
-dashboard write controls, or high-risk Telegram admin controls.
+dashboard write controls, or high-risk Telegram controls such as resume,
+clear-halt, live enablement, direct trading, or risk changes.
+
+## Post-v1.1 — Telegram Operator UI
+
+Planned scope:
+
+- Add read-only Telegram operator commands: `/help`, `/status`, `/health`,
+  `/account`, `/portfolio`, `/apps`, `/orders`, and `/approvals`.
+- Back read-only responses with Maestro SQLite state and the latest stored
+  broker snapshot only; Telegram commands must not call KIS live network
+  endpoints directly.
+- Add limited safety controls: `/pause` and `/kill-switch`, each requiring a
+  whitelisted user, confirmation button, and persisted audit/system event.
+- Keep `/resume`, `/clear-halt`, live enablement, dry-run disablement,
+  broker sync/reconciliation triggers, direct buy/sell/cancel, and risk limit
+  changes out of Telegram.
+
+This milestone treats Telegram as a constrained mobile operator console, not a
+general administration surface. Recovery remains CLI/runbook driven.
 
 ## Post-v1.0 — Structural Refactor R1-R5
 
@@ -505,7 +527,9 @@ unchanged.
 - Market orders
 - Direct or unguarded buy/sell/cancel CLI
 - Strategy-specific logic inside Maestro core
-- High-risk admin controls through Telegram
+- High-risk Telegram controls: resume, clear-halt, live enablement, dry-run
+  disablement, risk changes, direct trading, and broker sync/reconciliation
+  triggers
 - Write-capable dashboard controls
 - Optional KIS WebSocket
 - Performance attribution

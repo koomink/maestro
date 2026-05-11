@@ -996,7 +996,7 @@ Each line should be a JSON object:
 
 ## 15. Telegram Integration Future Design
 
-Telegram is the action and notification channel.
+Telegram is the approval, urgent notification, and limited operator UI channel.
 
 Initial future components:
 
@@ -1019,8 +1019,18 @@ Requirements:
 - Support approve/reject/detail inline buttons.
 - Expire proposals after timeout.
 - Log all decisions.
-- Allow future `/status`, `/portfolio`, `/pause`, `/kill-switch` commands.
-- Do not allow Telegram to disable risk limits or enable live auto mode.
+- Keep the first implementation polling based; webhook handling remains
+  deferred.
+- Put command parsing behind the Telegram adapter boundary.
+- Back `/help`, `/status`, `/health`, `/account`, `/portfolio`, `/apps`,
+  `/orders`, and `/approvals` responses with Maestro state/read models and the
+  latest stored broker snapshot.
+- Require confirmation callbacks for `/pause` and `/kill-switch`.
+- Persist Telegram command execution to audit/system events.
+- Do not allow Telegram commands to submit or cancel broker orders, call KIS
+  live read endpoints directly, disable risk limits, enable live mode, disable
+  dry-run mode, change risk limits, resume, clear halted state, or trigger
+  broker sync/reconciliation.
 
 ## 16. KIS Adapter Future Design
 
