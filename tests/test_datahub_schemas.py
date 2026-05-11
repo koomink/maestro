@@ -4,7 +4,13 @@ import pytest
 from pydantic import ValidationError
 
 from maestro.core.enums import AssetType
-from maestro.datahub.schemas import OHLCVBar, PricePoint, SymbolData, SymbolMetadata
+from maestro.datahub.schemas import (
+    SUPPORTED_DATA_TYPES,
+    OHLCVBar,
+    PricePoint,
+    SymbolData,
+    SymbolMetadata,
+)
 
 
 def test_price_point_requires_positive_price():
@@ -46,3 +52,11 @@ def test_symbol_metadata_is_lightweight():
 
     assert metadata.currency == "KRW"
     assert metadata.tradable is True
+
+
+def test_supported_data_types_include_llm_research_contract_needs():
+    assert {
+        "technical_indicators",
+        "financial_statements",
+        "insider_transactions",
+    }.issubset(SUPPORTED_DATA_TYPES)

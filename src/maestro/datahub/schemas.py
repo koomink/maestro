@@ -12,6 +12,9 @@ SUPPORTED_DATA_TYPES = frozenset(
         "news",
         "sentiment",
         "fundamental",
+        "technical_indicators",
+        "financial_statements",
+        "insider_transactions",
         "broker_quote",
     }
 )

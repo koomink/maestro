@@ -4,7 +4,7 @@ from maestro.config.models import StrategyPluginConfig
 from maestro.core.exceptions import PluginLoadError
 from maestro.sdk import BaseStrategyPlugin
 
-SUPPORTED_SDK_CONTRACT_VERSION = "0.9"
+SUPPORTED_SDK_CONTRACT_VERSION = "1.0"
 
 
 def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:
@@ -25,7 +25,9 @@ def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:
             f"Strategy config id {config.id!r} does not match manifest id {manifest.strategy_id!r}"
         )
     if manifest.result_type != "target_allocation":
-        raise PluginLoadError("Maestro v0.1 supports TargetAllocationResult only")
+        raise PluginLoadError(
+            "Maestro execution pipeline currently supports target_allocation results only"
+        )
     if _version_tuple(manifest.sdk_contract_version) > _version_tuple(
         SUPPORTED_SDK_CONTRACT_VERSION
     ):

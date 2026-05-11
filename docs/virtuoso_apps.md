@@ -1,9 +1,9 @@
 # Virtuoso Apps
 
 Virtuoso apps are external strategy packages. They propose data needs,
-candidate instruments, and target allocations through `maestro.sdk`; Maestro
-owns DataHub access, universe approval, risk, approval, execution, state, and
-audit.
+candidate instruments, strategy signals, and target allocations through
+`maestro.sdk`; Maestro owns DataHub access, universe approval, risk, approval,
+execution, state, and audit.
 
 ## SDK Boundary
 
@@ -16,6 +16,27 @@ audit.
   when a strategy needs research or tradable candidates.
 - Keep `StrategyManifest.sdk_contract_version` at or below the Maestro-supported
   SDK contract version.
+- Set `StrategyManifest.requires_llm`, `supported_llm_providers`,
+  `required_env_vars`, `estimated_runtime_seconds`, and
+  `allow_direct_external_data_calls` when an app has LLM or external network
+  requirements.
+
+## SDK Contract 1.0
+
+SDK contract `1.0` keeps `TargetAllocationResult` as the only result type the
+current Maestro execution pipeline can run end-to-end. The public SDK also
+defines `StrategySignalResult` for LLM research apps, but plugins declaring
+`StrategyManifest.result_type = "strategy_signal"` are rejected at load time
+until Maestro has a signal-to-allocation policy in the execution pipeline.
+
+`DataRequest` supports predeclared data needs and richer runtime-tool shapes:
+`start`, `end`, `as_of`, `indicator`, `limit`, `query`, `statement_type`,
+`frequency`, `provider_hint`, `source_hint`, and `fields`. These fields let apps
+describe TradingAgents-style requests without importing DataHub internals.
+
+`TargetAllocationResult.metadata` is available for structured source signals,
+ratings, report summaries, tool traces, and model details that should travel
+with the final allocation proposal.
 
 ## Dynamic Universe
 

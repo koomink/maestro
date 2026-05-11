@@ -1060,6 +1060,8 @@ Good:
 ```python
 if result.result_type == "target_allocation":
     process_target_allocation(result)
+elif result.result_type == "strategy_signal":
+    process_strategy_signal(result)
 ```
 
 Maestro should understand contracts and capabilities, not individual strategy internals.

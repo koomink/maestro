@@ -198,11 +198,12 @@ plugins request data through Maestro DataHub and receive normalized payloads;
 they should not call Yahoo, FRED, news APIs, crypto exchanges, KIS, or other
 external APIs directly.
 
-Future SDK planning should add `CandidateInstrumentRequest`,
-`intended_use: research | tradable`, and `StrategyManifest` capability fields such as
-`supports_dynamic_universe`, `max_candidate_symbols`, `allowed_data_types`, and
-`supported_asset_types`. These are design notes, not implemented behavior in the
-current docs-covered release.
+SDK contract 1.0 includes `CandidateInstrumentRequest`,
+`intended_use: research | tradable`, richer `DataRequest` fields for
+TradingAgents-style research requests, `TargetAllocationResult.metadata`, and
+`StrategyManifest` capability fields such as `supports_dynamic_universe`,
+`max_candidate_symbols`, `allowed_data_types`, `requires_llm`,
+`supported_llm_providers`, and `estimated_runtime_seconds`.
 
 For v0.2 compatibility, the orchestrator can still extract prices from legacy
 payloads shaped as `{"price": 100.0}`. New providers should emit the explicit

@@ -6,7 +6,7 @@ from maestro.sdk.schemas import (
     DataRequest,
     StrategyContext,
     StrategyManifest,
-    TargetAllocationResult,
+    StrategyResult,
 )
 
 
@@ -27,5 +27,5 @@ class BaseStrategyPlugin(ABC):
         return []
 
     @abstractmethod
-    def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> StrategyResult:
         raise NotImplementedError

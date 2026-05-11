@@ -4,6 +4,8 @@ from maestro.sdk.schemas import (
     DataRequest,
     StrategyContext,
     StrategyManifest,
+    StrategyResult,
+    StrategySignalResult,
     TargetAllocationResult,
 )
 from maestro.sdk.strategy import BaseStrategyPlugin
@@ -15,5 +17,7 @@ __all__ = [
     "DataRequest",
     "StrategyContext",
     "StrategyManifest",
+    "StrategyResult",
+    "StrategySignalResult",
     "TargetAllocationResult",
 ]

@@ -485,6 +485,7 @@ class OrderStatus(str, Enum):
 
 ```python
 class StrategyManifest(BaseModel):
+    sdk_contract_version: str = "1.0"
     strategy_id: str
     name: str
     version: str
@@ -492,25 +493,26 @@ class StrategyManifest(BaseModel):
     author: str | None = None
     supported_modes: list[StrategyMode]
     supported_asset_types: list[AssetType]
-    result_type: Literal["target_allocation"]
+    result_type: Literal["target_allocation", "strategy_signal"] = "target_allocation"
     requires_data: list[str] = []
     default_time_horizon: str | None = None
     can_run_live: bool = False
     can_use_leverage: bool = False
     can_short: bool = False
-```
-
-Dynamic-universe SDK planning extends the manifest with capability fields:
-
-```python
-supports_dynamic_universe: bool = False
-max_candidate_symbols: int | None = None
-allowed_data_types: list[str] = []
-supported_asset_types: list[AssetType] = []
+    supports_dynamic_universe: bool = False
+    max_candidate_symbols: int | None = None
+    allowed_data_types: list[str] = []
+    requires_llm: bool = False
+    supported_llm_providers: list[str] = []
+    required_env_vars: list[str] = []
+    estimated_runtime_seconds: int | None = None
+    allow_direct_external_data_calls: bool = False
 ```
 
 Maestro rejects plugins that require a newer SDK contract version than the
-current supported contract.
+current supported contract. `strategy_signal` is public SDK structure for LLM
+research apps, but the current execution pipeline loads only `target_allocation`
+plugins until a Maestro-owned signal-to-allocation policy exists.
 
 ### 5.3 StrategyContext
 
@@ -536,6 +538,14 @@ class DataRequest(BaseModel):
     lookback: int | None = None
     start: datetime | None = None
     end: datetime | None = None
+    as_of: datetime | None = None
+    indicator: str | None = None
+    limit: int | None = None
+    query: str | None = None
+    statement_type: Literal["balance_sheet", "cashflow", "income_statement"] | None = None
+    frequency: Literal["annual", "quarterly", "trailing"] | None = None
+    provider_hint: str | None = None
+    source_hint: str | None = None
     fields: list[str] = []
 ```
 
@@ -589,12 +599,38 @@ class TargetAllocationResult(BaseModel):
     metadata: dict[str, Any] = {}
 ```
 
-`TargetAllocationResult` currently contains allocations only. Future
-dynamic-universe support must validate those allocations against Maestro's
-approved tradable universe. Maestro should reject allocations to research-only,
+`TargetAllocationResult.metadata` carries structured source signals, ratings,
+report summaries, tool traces, and model details when an app converts a signal
+into executable target weights. Maestro rejects allocations to research-only,
 unknown, unresolved, or broker-untradable symbols. Virtuoso apps may propose
 candidate symbols, but they cannot directly approve tradability or execute
 orders.
+
+### 5.6.1 StrategySignalResult
+
+SDK contract 1.0 defines a directional signal result for LLM research apps.
+
+```python
+class StrategySignalResult(BaseModel):
+    strategy_id: str
+    strategy_version: str
+    timestamp: datetime
+    symbol: str
+    action: Literal["buy", "hold", "sell"]
+    rating: str | None = None
+    confidence: float = Field(ge=0.0, le=1.0)
+    price_target: float | None = None
+    stop_loss: float | None = None
+    time_horizon: str | None = None
+    position_sizing: str | None = None
+    rationale: str | None = None
+    risk_flags: list[str] = []
+    metadata: dict[str, Any] = {}
+```
+
+The current orchestration path does not execute `strategy_signal` plugins
+directly. A plugin can either return `TargetAllocationResult` with signal
+details in `metadata`, or wait for Maestro to add a signal-to-allocation policy.
 
 ### 5.7 PortfolioTarget
 
@@ -687,7 +723,13 @@ class BaseStrategyPlugin(Protocol):
     def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
         ...
 
-    def run(self, data: DataBundle, context: StrategyContext) -> TargetAllocationResult:
+    def build_candidate_requests(
+        self,
+        context: StrategyContext,
+    ) -> list[CandidateInstrumentRequest]:
+        ...
+
+    def run(self, data: DataBundle, context: StrategyContext) -> StrategyResult:
         ...
 ```
 
@@ -700,9 +742,9 @@ def on_stop(self, context: StrategyContext) -> None: ...
 def on_error(self, error: Exception, context: StrategyContext) -> None: ...
 ```
 
-v0.9 dynamic-universe work adds an optional candidate-discovery method:
-`build_candidate_requests(context) -> list[CandidateInstrumentRequest]`. That
-method lets Virtuoso apps propose research inputs and tradable candidates, while
+The optional candidate-discovery method
+`build_candidate_requests(context) -> list[CandidateInstrumentRequest]` lets
+Virtuoso apps propose research inputs and tradable candidates, while
 Maestro remains responsible for validation, metadata resolution, DataHub checks,
 broker tradability checks, operator approval when policy requires it, and
 allocation eligibility.

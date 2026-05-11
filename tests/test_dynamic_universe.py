@@ -21,10 +21,15 @@ def test_sdk_dynamic_universe_contract_defaults_are_backward_compatible():
     data_request = DataRequest(symbol="AAPL", asset_type="stock", data_type="price")
     candidate = CandidateInstrumentRequest(symbol="AAPL", asset_type="stock")
 
-    assert manifest.sdk_contract_version == "0.9"
+    assert manifest.sdk_contract_version == "1.0"
     assert manifest.supports_dynamic_universe is False
     assert manifest.max_candidate_symbols is None
     assert manifest.allowed_data_types == []
+    assert manifest.requires_llm is False
+    assert manifest.supported_llm_providers == []
+    assert manifest.required_env_vars == []
+    assert manifest.estimated_runtime_seconds is None
+    assert manifest.allow_direct_external_data_calls is False
     assert data_request.intended_use == "research"
     assert candidate.intended_use == "research"
     assert candidate.data_types == ["price"]

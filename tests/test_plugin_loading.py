@@ -60,3 +60,27 @@ def test_unsupported_sdk_contract_version_fails(monkeypatch):
 
     with pytest.raises(PluginLoadError, match="unsupported Maestro SDK contract version"):
         load_strategy(config)
+
+
+def test_strategy_signal_manifest_is_public_sdk_but_not_executable_yet(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def signal_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(update={"result_type": "strategy_signal"})
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        signal_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+    )
+
+    with pytest.raises(PluginLoadError, match="target_allocation results only"):
+        load_strategy(config)
