@@ -16,24 +16,26 @@ class SampleStaticAllocationStrategy(BaseStrategyPlugin):
             version="0.1.0",
             description="Reference Virtuoso app that proposes a fixed target allocation.",
             supported_modes=["paper"],
-            supported_asset_types=["cash", "domestic_etf"],
+            supported_asset_types=["cash", "stock", "etf", "domestic_etf", "us_etf"],
             result_type="target_allocation",
             requires_data=["price"],
         )
 
     def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
-        allocations = self._allocations(context)
+        allocations = self._request_allocations(context)
         return [
             DataRequest(symbol=symbol, asset_type=self._asset_type(symbol), data_type="price")
             for symbol in allocations
         ]
 
     def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
+        allocation_sleeves = self._allocation_sleeves(context)
         return TargetAllocationResult(
             strategy_id="sample_static_allocation",
             strategy_version=self.manifest().version,
             timestamp=context.timestamp,
-            allocations=self._allocations(context),
+            allocations={} if allocation_sleeves else self._allocations(context),
+            allocation_sleeves=allocation_sleeves or None,
             confidence=1.0,
             time_horizon="static",
             rationale="Reference fixed allocation for Maestro v0.1.",
@@ -49,5 +51,19 @@ class SampleStaticAllocationStrategy(BaseStrategyPlugin):
             },
         )
 
+    def _allocation_sleeves(self, context: StrategyContext) -> dict[str, dict[str, float]]:
+        return context.config.get("allocation_sleeves", {})
+
+    def _request_allocations(self, context: StrategyContext) -> dict[str, float]:
+        allocation_sleeves = self._allocation_sleeves(context)
+        if not allocation_sleeves:
+            return self._allocations(context)
+        symbols: dict[str, float] = {}
+        for allocations in allocation_sleeves.values():
+            symbols.update(allocations)
+        return symbols
+
     def _asset_type(self, symbol: str) -> str:
-        return "cash" if symbol == "CASH" or symbol.startswith("CASH_") else "etf"
+        if symbol == "CASH" or symbol.startswith("CASH_"):
+            return "cash"
+        return "etf"
