@@ -49,6 +49,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
         return KISAccountSnapshot(
             account_id=self.credentials.account_id,
             cash=cash_balance.cash,
+            cash_by_currency={"KRW": cash_balance.cash},
             buying_power=buying_power.cash_buying_power,
             positions=positions,
             cash_balance=cash_balance,
@@ -92,7 +93,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
     def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         prices: dict[str, float] = {}
         for symbol in symbols:
-            if symbol == "CASH":
+            if symbol.startswith("CASH"):
                 prices[symbol] = 1.0
                 continue
             payload = self._get(
@@ -100,7 +101,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
                 "FHKST01010100",
                 {
                     "FID_COND_MRKT_DIV_CODE": self.config.quote_market_code,
-                    "FID_INPUT_ISCD": symbol,
+                    "FID_INPUT_ISCD": self._broker_symbol(symbol),
                 },
             )
             output = _as_dict(payload.get("output"))
@@ -208,6 +209,10 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
 
     def _tr_id(self, *, real: str, demo: str) -> str:
         return demo if self.config.paper_trading else real
+
+    def _broker_symbol(self, canonical_symbol: str) -> str:
+        instrument = self.instruments.get(canonical_symbol)
+        return instrument.broker_symbol if instrument else canonical_symbol
 
 
 __all__ = ["KISRestDomesticStockReadOnlyClient"]

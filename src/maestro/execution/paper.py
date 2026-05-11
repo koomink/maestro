@@ -1,4 +1,5 @@
 from maestro.core.enums import OrderSide, OrderStatus
+from maestro.core.symbols import is_cash_symbol
 from maestro.execution.base import ExecutionResult, OrderIntent
 from maestro.execution.order_builder import OrderBuilder
 from maestro.portfolio.manager import PortfolioTarget
@@ -6,8 +7,11 @@ from maestro.state.models import PortfolioState
 
 
 class PaperExecutionEngine:
-    def __init__(self) -> None:
-        self.order_builder = OrderBuilder()
+    def __init__(self, *, instruments=None, currency_sleeves=None) -> None:
+        self.order_builder = OrderBuilder(
+            instruments=instruments,
+            currency_sleeves=currency_sleeves,
+        )
 
     def propose_orders(
         self,
@@ -26,10 +30,20 @@ class PaperExecutionEngine:
         for order in orders:
             signed_notional = order.notional if order.side == OrderSide.BUY else -order.notional
             signed_quantity = order.quantity if order.side == OrderSide.BUY else -order.quantity
-            next_state.cash -= signed_notional
+            if order.currency and next_state.cash_by_currency:
+                currency = order.currency.value
+                next_state.cash_by_currency[currency] = (
+                    next_state.cash_by_currency.get(currency, 0.0) - signed_notional
+                )
+                if currency == "KRW":
+                    next_state.cash = next_state.cash_by_currency[currency]
+            else:
+                next_state.cash -= signed_notional
             next_state.positions[order.symbol] = (
                 next_state.positions.get(order.symbol, 0.0) + signed_quantity
             )
+            if is_cash_symbol(order.symbol):
+                next_state.positions.pop(order.symbol, None)
         results = [
             ExecutionResult(
                 order_id=order.order_id,

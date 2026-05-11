@@ -136,6 +136,7 @@ def test_current_sample_configs_load():
         "configs/live_readonly.yaml",
         "configs/kis_live_readonly.example.yaml",
         "configs/kis_overseas_readonly.example.yaml",
+        "configs/kis_multi_asset_live_approval.example.yaml",
         "configs/live_approval.example.yaml",
         "configs/us_etf_yahoo_paper.yaml",
     ]:

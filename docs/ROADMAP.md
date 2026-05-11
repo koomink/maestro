@@ -193,9 +193,9 @@ Completed scope:
 - Safe defaults keep live orders disabled unless explicitly configured
 
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
-The intended first production target is US-listed stocks and ETFs through
-`kis_overseas_stock`; domestic KIS behavior is isolated behind
-`kis_domestic_stock` and is not the strategic default.
+KIS support covers US-listed stocks/ETFs through `kis_overseas_stock` and KRX
+stocks/ETFs through `kis_domestic_stock`. Multi-product operator configs can
+enable both broker products with independent KRW/USD currency sleeves.
 Package metadata intentionally remains `0.1.1` until Maestro adopts an explicit
 package release/versioning policy; v0.6 is the roadmap capability milestone.
 

@@ -69,7 +69,8 @@ class TargetAllocationResult(BaseModel):
     strategy_id: str
     strategy_version: str
     timestamp: datetime
-    allocations: dict[str, float]
+    allocations: dict[str, float] = Field(default_factory=dict)
+    allocation_sleeves: dict[str, dict[str, float]] | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     time_horizon: str | None = None
     rationale: str | None = None

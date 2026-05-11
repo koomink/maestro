@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 
 from maestro.config.models import MaestroConfig
-from maestro.core.enums import Currency
+from maestro.core.enums import BrokerProduct, Currency
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.live_order_client import build_kis_rest_live_order_client
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
@@ -10,6 +11,7 @@ from maestro.execution.live_orders import (
     LiveOrderClient,
     LiveOrderLifecycleService,
     LiveOrderNotificationClient,
+    LiveOrderPreSubmitValidator,
     LiveOrderSafetyService,
     LiveOrderStatusClient,
     LiveOrderStatusService,
@@ -70,6 +72,7 @@ def build_live_approval_dependencies(
         broker_client,
         instruments=config.universe.instruments,
         broker_product=config.kis.broker_product,
+        broker_products=config.kis.effective_broker_products(),
         base_currency=Currency(config.portfolio.base_currency),
     )
     status_service = LiveOrderStatusService(state_store, audit_logger, order_status_client)
@@ -114,6 +117,9 @@ def build_live_approval_dependencies(
 
 def _build_live_order_client(config: MaestroConfig) -> LiveOrderClient:
     if config.kis.provider == "kis":
+        products = config.kis.effective_broker_products()
+        if len(products) > 1:
+            return ProductRoutingKISLiveOrderClient(config)
         return build_kis_rest_live_order_client(config.kis, config.universe.instruments)
     raise ValueError(
         "live_approval requires a real KIS live order client or an injected fake client"
@@ -127,6 +133,8 @@ def _build_status_client(
     if isinstance(live_order_client, LiveOrderStatusClient):
         return live_order_client
     if config.kis.provider == "kis":
+        if len(config.kis.effective_broker_products()) > 1:
+            return ProductRoutingKISLiveOrderClient(config)
         status_client = build_kis_rest_live_order_client(
             config.kis,
             config.universe.instruments,
@@ -162,7 +170,72 @@ def _build_cancel_client(
         return None
     if config.kis.provider != "kis":
         return None
+    if len(config.kis.effective_broker_products()) > 1:
+        return None
     candidate = build_kis_rest_live_order_client(config.kis, config.universe.instruments)
     if isinstance(candidate, LiveOrderCancelClient):
         return candidate
     return None
+
+
+class ProductRoutingKISLiveOrderClient(
+    LiveOrderClient,
+    LiveOrderStatusClient,
+    LiveOrderPreSubmitValidator,
+):
+    def __init__(self, config: MaestroConfig) -> None:
+        self.config = config
+        self.instruments = {
+            instrument.symbol: instrument for instrument in config.universe.instruments
+        }
+        self.clients = {
+            product: build_kis_rest_live_order_client(
+                config.kis.model_copy(update={"broker_product": product, "broker_products": []}),
+                _instruments_for_product(config.universe.instruments, product),
+            )
+            for product in config.kis.effective_broker_products()
+        }
+        self.submitted_products: dict[str, BrokerProduct] = {}
+
+    def submit_limit_order(self, request) -> object:
+        client = self._client_for_request(request)
+        result = client.submit_limit_order(request)
+        if result.broker_order is not None and result.broker_order.broker_product is not None:
+            self.submitted_products[result.broker_order.broker_order_id] = (
+                result.broker_order.broker_product
+            )
+        return result
+
+    def validate_pre_submit_order(self, request) -> None:
+        client = self._client_for_request(request)
+        if isinstance(client, LiveOrderPreSubmitValidator):
+            client.validate_pre_submit_order(request)
+
+    def get_order_status(self, broker_order_id):
+        product = broker_order_id.broker_product or self.submitted_products.get(
+            broker_order_id.broker_order_id
+        )
+        if product is None:
+            raise ValueError("KIS multi-product status requires broker_product")
+        client = self.clients[product]
+        if not isinstance(client, LiveOrderStatusClient):
+            raise ValueError(f"KIS client does not support order status: {product}")
+        return client.get_order_status(broker_order_id)
+
+    def _client_for_request(self, request):
+        product = request.broker_product
+        if product is None:
+            instrument = self.instruments.get(request.symbol)
+            product = instrument.broker_product if instrument else None
+        if product is None:
+            raise ValueError(f"Cannot route KIS order without broker product: {request.symbol}")
+        if product not in self.clients:
+            raise ValueError(f"KIS broker product is not enabled: {product}")
+        return self.clients[product]
+
+
+def _instruments_for_product(
+    instruments: list[TradableInstrument],
+    product: BrokerProduct,
+) -> list[TradableInstrument]:
+    return [instrument for instrument in instruments if instrument.broker_product == product]

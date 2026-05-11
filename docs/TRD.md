@@ -267,12 +267,13 @@ database caches, or broker behavior.
 - KIS REST clients adapt the reference repo's KIS OAuth token issuance, request headers, TR_IDs, and inquiry payloads behind product-specific adapters.
 - App key and secret are read from configured environment variable names only.
 - Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance. Tokens may be stored only in `kis.token_cache_path`, never in state, audit logs, dashboard rows, or tests.
-- KIS REST support is split by broker product. `kis_domestic_stock` contains the
-  existing domestic endpoint adapter. `kis_overseas_stock` is the intended first
-  production target for US-listed stocks and ETFs. Overseas read-only account
-  paths and approval-gated US stock/ETF limit-order submit/status payloads are
-  implemented after checking endpoint paths, TR_IDs, exchange codes, and fields
-  against Korea Investment Securities OpenAPI examples.
+- KIS REST support is split by broker product. `kis_domestic_stock` covers KRX
+  stock/ETF read-only and approval-gated cash limit orders. `kis_overseas_stock`
+  covers US-listed stock/ETF read-only and approval-gated limit orders.
+  Multi-product configs use `kis.broker_products` and route each order by
+  `TradableInstrument.broker_product` after checking endpoint paths, TR_IDs,
+  exchange codes, and fields against Korea Investment Securities OpenAPI
+  examples.
 - Broker account snapshots are persisted in SQLite and audit JSONL.
 - `maestro reconcile` compares Maestro portfolio state with the latest broker account snapshot and persists a `broker_reconciliation` system event plus audit event.
 - v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.

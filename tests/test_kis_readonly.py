@@ -61,6 +61,23 @@ def test_kis_cli_sync_and_account(tmp_path):
     assert "positions=2" in account_result.output
 
 
+def test_kis_cli_sync_reports_missing_credentials_without_traceback(monkeypatch, tmp_path):
+    monkeypatch.delenv("KIS_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
+    monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
+    config_path = tmp_path / "maestro_personal.yaml"
+    init_result = CliRunner().invoke(app, ["init-personal", "--output", str(config_path)])
+    assert init_result.exit_code == 0, init_result.output
+
+    result = CliRunner().invoke(app, ["kis-sync", "--config", str(config_path)])
+
+    assert result.exit_code == 2
+    assert "kis-sync failed" in result.output
+    assert "KIS_APP_KEY" in result.output
+    assert "KIS_APP_SECRET" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_live_smoke_kis_readonly_allows_mock_only_when_explicit(tmp_path):
     config = _live_readonly_config(tmp_path)
     config_path = tmp_path / "live_readonly.yaml"

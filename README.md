@@ -147,8 +147,9 @@ Current runnable modes are:
 - Optional external DataHub providers such as Yahoo/yfinance, FRED, and RSS when
   explicitly configured
 - Mock `live_readonly` broker scaffolding with `configs/live_readonly.yaml`
-- Live approval infrastructure and safety gates, with KIS overseas read-only and
-  approval-gated US stock/ETF limit-order submit/status adapter support
+- Live approval infrastructure and safety gates, with KIS domestic and overseas
+  read-only plus approval-gated stock/ETF limit-order submit/status adapter
+  support
 
 For a single-user operator workflow, start with
 [docs/personal_operator_mvp.md](docs/personal_operator_mvp.md):
@@ -217,8 +218,8 @@ Implemented foundations beyond the core v0.1 scope:
 - `live_readonly` mode config
 - KIS read-only adapter interface and deterministic mock client
 - KIS REST client foundation for auth and product-specific broker adapter paths,
-  including verified overseas stock/ETF read-only and approval-gated US
-  stock/ETF limit-order submit/status payloads
+  including domestic and overseas stock/ETF read-only plus approval-gated
+  limit-order submit/status payloads
 - CLI `kis-sync` and `kis-account`
 - Product/venue-aware universe config for canonical symbols, broker products,
   exchange codes, currency, and precision rules
@@ -288,9 +289,12 @@ Maestro core uses canonical symbols and should remain broker/product agnostic.
 `universe.instruments` describes each tradable symbol's asset type, market
 region, currency, broker product, broker symbol, exchange code, price tick, and
 quantity step. Broker adapters translate canonical symbols into product-specific
-request fields. The intended first production target is US-listed stocks and
-ETFs via `kis_overseas_stock`; the domestic-stock KIS path remains isolated as
-`kis_domestic_stock` for existing adapter tests and is not the strategic default.
+request fields. Maestro supports KIS domestic and overseas stock/ETF products as
+explicit broker adapter paths. Single-product configs continue to use
+`kis.broker_product`. Multi-product operator configs use `kis.broker_products`
+and `portfolio.allocation_mode=currency_sleeves` so KRW and USD sleeves
+rebalance independently without automatic FX conversion or cross-currency
+orders.
 
 Current example configs use static `portfolio.allowed_symbols` and
 `universe.instruments` lists such as `AAPL`, `MSFT`, `VOO`, `QQQ`, and `SGOV`.
@@ -767,14 +771,15 @@ file is written with owner-only permissions. Access tokens may be stored only in
 dashboard rows, or test fixtures. App secrets follow the same no-persistence
 rule.
 
-The KIS REST layer is split by broker product. `kis_domestic_stock` contains the
-existing domestic endpoint adapter. `kis_overseas_stock` is the strategic target
-for US-listed stocks and ETFs. Real overseas read-only account paths are
-implemented. Overseas live approval supports US exchange limit-order
-submit/status payloads behind the existing approval, reconciliation, safety, and
-daily-limit gates, based on the Korea Investment Securities OpenAPI example
-contract. Status lookup uses the broker order submission timestamp to query the
-relevant US exchange-local date range, avoiding a Korea/US date-boundary miss.
+The KIS REST layer is split by broker product. `kis_domestic_stock` covers KRX
+stock/ETF account, quote, order/fill, buying-power, and cash limit-order paths.
+`kis_overseas_stock` covers US-listed stock/ETF account, quote, order/fill,
+buying-power, and limit-order paths. Multi-product configs route each order by
+the instrument's `broker_product` behind the existing approval, reconciliation,
+safety, and daily-limit gates, based on Korea Investment Securities OpenAPI
+examples. Overseas status lookup uses the broker order submission timestamp to
+query the relevant US exchange-local date range, avoiding a Korea/US
+date-boundary miss.
 The overseas cancel adapter is available only behind
 `LiveOrderCancellationService` policy gates after Telegram approval, latest safe
 order status, and reconciliation checks. There is no direct buy/sell/cancel CLI,

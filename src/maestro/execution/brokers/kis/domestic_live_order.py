@@ -1,7 +1,7 @@
 from typing import Any
 
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderSide, OrderStatus
+from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
 from maestro.execution.brokers.kis.domestic_readonly import KISRestDomesticStockReadOnlyClient
 from maestro.execution.brokers.kis.models import KISOrderSummary
 from maestro.execution.brokers.kis.parsers import (
@@ -52,6 +52,7 @@ class KISRestDomesticStockLiveOrderClient(
                 broker_order_org_no=broker_order_org_no,
                 order_id=request.order_id,
                 submitted_at=utc_now().isoformat(),
+                broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
             )
         return LiveOrderResult(
             order_id=request.order_id,

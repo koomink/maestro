@@ -80,19 +80,7 @@ class BrokerReconciliationService:
         broker_snapshot_id: int,
     ) -> ReconciliationResult:
         issues: list[ReconciliationIssue] = []
-        broker_cash = float(broker_account.get("cash", 0.0))
-        cash_difference = broker_cash - portfolio_state.cash
-        if abs(cash_difference) > self.config.cash_tolerance:
-            issues.append(
-                ReconciliationIssue(
-                    issue_type="cash_mismatch",
-                    maestro_value=portfolio_state.cash,
-                    broker_value=broker_cash,
-                    difference=cash_difference,
-                    tolerance=self.config.cash_tolerance,
-                    message="Broker cash differs from Maestro cash.",
-                )
-            )
+        cash_difference = self._compare_cash(portfolio_state, broker_account, issues)
 
         broker_positions = _broker_positions_by_symbol(broker_account)
         position_differences: dict[str, float] = {}
@@ -191,6 +179,50 @@ class BrokerReconciliationService:
             "position_quantity_tolerance": self.config.position_quantity_tolerance,
             "value_tolerance": self.config.value_tolerance,
         }
+
+    def _compare_cash(
+        self,
+        portfolio_state: PortfolioState,
+        broker_account: dict[str, Any],
+        issues: list[ReconciliationIssue],
+    ) -> float:
+        broker_cash_by_currency = broker_account.get("cash_by_currency") or {}
+        if portfolio_state.cash_by_currency:
+            total_difference = 0.0
+            currencies = set(portfolio_state.cash_by_currency) | set(broker_cash_by_currency)
+            for currency in sorted(currencies):
+                maestro_cash = float(portfolio_state.cash_by_currency.get(currency, 0.0))
+                broker_cash = float(broker_cash_by_currency.get(currency, 0.0))
+                difference = broker_cash - maestro_cash
+                total_difference += difference
+                if abs(difference) > self.config.cash_tolerance:
+                    issues.append(
+                        ReconciliationIssue(
+                            issue_type="cash_mismatch",
+                            symbol=f"CASH_{currency}",
+                            maestro_value=maestro_cash,
+                            broker_value=broker_cash,
+                            difference=difference,
+                            tolerance=self.config.cash_tolerance,
+                            message="Broker cash differs from Maestro cash.",
+                        )
+                    )
+            return total_difference
+
+        broker_cash = float(broker_account.get("cash", 0.0))
+        difference = broker_cash - portfolio_state.cash
+        if abs(difference) > self.config.cash_tolerance:
+            issues.append(
+                ReconciliationIssue(
+                    issue_type="cash_mismatch",
+                    maestro_value=portfolio_state.cash,
+                    broker_value=broker_cash,
+                    difference=difference,
+                    tolerance=self.config.cash_tolerance,
+                    message="Broker cash differs from Maestro cash.",
+                )
+            )
+        return difference
 
 
 def _broker_positions_by_symbol(broker_account: dict[str, Any]) -> dict[str, float]:

@@ -65,13 +65,21 @@ class MaestroOrchestrator:
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
         self.portfolio_manager = PortfolioManager(config.strategies)
         self.risk_manager = RiskManager(config.portfolio.allowed_symbols, config.risk)
-        self.execution = build_execution_engine(config.execution)
+        self.execution = build_execution_engine(
+            config.execution,
+            instruments=config.universe.instruments,
+            currency_sleeves=config.portfolio.currency_sleeves,
+        )
         self.approval_manager = ApprovalManager(
             config.approval,
             run_mode=config.mode,
             telegram_client=telegram_client,
         )
-        self.state_store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+        self.state_store = StateStore(
+            config.state.sqlite_path,
+            config.portfolio.initial_cash,
+            config.portfolio.cash_by_currency,
+        )
         self.audit = AuditLogger(config.audit.jsonl_path)
         self.safety = SafetyControlService(self.state_store, self.audit)
         self.live_order_client = live_order_client
@@ -556,6 +564,9 @@ class MaestroOrchestrator:
                 approval_id=approval_id,
                 run_id=run_id,
                 duplicate_key=f"{run_id}:{order.order_id}",
+                currency=order.currency,
+                sleeve=order.sleeve,
+                broker_product=order.broker_product,
             )
             lifecycle_results.append(dependencies.lifecycle_service.run(request, approval_decision))
         return lifecycle_results, self.state_store.load_latest_portfolio_state()
@@ -578,6 +589,9 @@ class MaestroOrchestrator:
                 approval_id=approval_id,
                 run_id=run_id,
                 duplicate_key=f"{run_id}:{order.order_id}",
+                currency=order.currency,
+                sleeve=order.sleeve,
+                broker_product=order.broker_product,
             )
             event = {
                 "request": request.model_dump(mode="json"),

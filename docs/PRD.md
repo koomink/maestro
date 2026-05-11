@@ -246,9 +246,10 @@ And Maestro will:
 
 - Strategy-proposed candidate instruments through `CandidateInstrumentRequest`
 - Research versus tradable universe separation
-- Conservative universe policy for US stock/ETF, USD, KIS overseas stock,
-  NASD/NYSE/AMEX, one new tradable symbol per run, broker/data checks, and
-  operator approval for new tradable symbols
+- Conservative universe policies may allow US stock/ETF through
+  `kis_overseas_stock` and KR stock/ETF through `kis_domestic_stock`.
+  Multi-product operator configs rebalance KRW and USD currency sleeves
+  independently; Maestro does not auto-convert FX or move value across sleeves.
 - Instrument resolver for canonical metadata and broker mappings
 - Versioned strategy/app compatibility checks
 

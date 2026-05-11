@@ -19,6 +19,7 @@ class LiveOrderSafetyService:
         broker_client: LiveOrderClient,
         instruments: list[TradableInstrument] | None = None,
         broker_product: BrokerProduct | None = None,
+        broker_products: list[BrokerProduct] | None = None,
         base_currency: Currency | None = None,
     ) -> None:
         self.config = config
@@ -27,6 +28,7 @@ class LiveOrderSafetyService:
         self.broker_client = broker_client
         self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
         self.broker_product = broker_product
+        self.broker_products = broker_products or ([broker_product] if broker_product else [])
         self.base_currency = base_currency
 
     def submit_approved_order(
@@ -131,9 +133,18 @@ class LiveOrderSafetyService:
         instrument = self.instruments.get(request.symbol)
         if instrument is None:
             raise ValueError(f"Live order symbol is not in universe: {request.symbol}")
-        if self.base_currency is not None and instrument.currency != self.base_currency:
-            raise ValueError("Live order currency does not match portfolio base currency")
-        if self.broker_product is not None and instrument.broker_product != self.broker_product:
+        if request.currency is not None and instrument.currency != request.currency:
+            raise ValueError("Live order currency does not match request currency")
+        if self.base_currency is not None and len(self.broker_products) <= 1:
+            if instrument.currency != self.base_currency:
+                raise ValueError("Live order currency does not match portfolio base currency")
+        if self.broker_products and instrument.broker_product not in self.broker_products:
+            raise ValueError("Live order broker product is not enabled for KIS")
+        if (
+            self.broker_product is not None
+            and not self.broker_products
+            and instrument.broker_product != self.broker_product
+        ):
             raise ValueError("Live order broker product does not match KIS adapter product")
         if request.quantity < instrument.min_order_quantity:
             raise ValueError("Live order quantity is below instrument minimum")

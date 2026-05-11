@@ -475,13 +475,16 @@ def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
         raise typer.BadParameter("kis-sync requires mode=live_readonly or live_approval")
     store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    service = KISReadOnlyService(
-        maestro_config.kis,
-        store,
-        audit,
-        instruments=maestro_config.universe.instruments,
-    )
-    snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+    try:
+        service = KISReadOnlyService(
+            maestro_config.kis,
+            store,
+            audit,
+            instruments=maestro_config.universe.instruments,
+        )
+        snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+    except ValueError as exc:
+        raise typer.BadParameter(f"kis-sync failed: {exc}") from exc
     typer.echo(
         f"account_id={snapshot.account.account_id} cash={snapshot.account.cash:.2f} "
         f"buying_power={snapshot.account.buying_power:.2f} "
@@ -557,6 +560,7 @@ def adopt_broker_snapshot(
         "broker_snapshot_id": latest["id"],
         "broker_account_id": account.get("account_id"),
         "cash": state.cash,
+        "cash_by_currency": state.cash_by_currency,
         "positions": state.positions,
     }
     save_audited_system_event(
@@ -701,7 +705,11 @@ def _portfolio_state_from_broker_account(
             "broker snapshot contains positions outside portfolio.allowed_symbols: "
             + ",".join(sorted(set(unknown_symbols)))
         )
-    return PortfolioState(cash=float(account.get("cash", 0.0)), positions=positions)
+    return PortfolioState(
+        cash=float(account.get("cash", 0.0)),
+        cash_by_currency=dict(account.get("cash_by_currency") or {}),
+        positions=positions,
+    )
 
 
 def _configured_secret_values(maestro_config) -> list[str]:

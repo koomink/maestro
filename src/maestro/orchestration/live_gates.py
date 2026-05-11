@@ -249,9 +249,12 @@ class LiveExecutionGateService:
             instrument = instruments.get(order.symbol)
             if instrument is None:
                 return {"reason": "missing_instrument", "symbol": order.symbol}
-            if instrument.currency.value != self.config.portfolio.base_currency:
+            if (
+                self.config.portfolio.allocation_mode != "currency_sleeves"
+                and instrument.currency.value != self.config.portfolio.base_currency
+            ):
                 return {"reason": "currency_mismatch", "symbol": order.symbol}
-            if instrument.broker_product != self.config.kis.broker_product:
+            if instrument.broker_product not in self.config.kis.effective_broker_products():
                 return {"reason": "broker_product_mismatch", "symbol": order.symbol}
             if order.quantity < instrument.min_order_quantity:
                 return {"reason": "min_order_quantity", "symbol": order.symbol}

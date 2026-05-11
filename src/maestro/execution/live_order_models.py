@@ -2,7 +2,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, model_validator
 
-from maestro.core.enums import OrderSide, OrderStatus, OrderType
+from maestro.core.enums import BrokerProduct, Currency, OrderSide, OrderStatus, OrderType
 
 
 class BrokerOrderId(BaseModel):
@@ -11,6 +11,7 @@ class BrokerOrderId(BaseModel):
     broker_order_org_no: str | None = None
     order_id: str
     submitted_at: str
+    broker_product: BrokerProduct | None = None
 
 
 class LiveOrderRequest(BaseModel):
@@ -23,6 +24,9 @@ class LiveOrderRequest(BaseModel):
     approval_id: str
     run_id: str
     duplicate_key: str | None = None
+    currency: Currency | None = None
+    sleeve: str | None = None
+    broker_product: BrokerProduct | None = None
 
     @property
     def notional(self) -> float:

@@ -52,6 +52,7 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
         return KISAccountSnapshot(
             account_id=self.credentials.account_id,
             cash=cash_balance.cash,
+            cash_by_currency={"USD": cash_balance.cash},
             buying_power=buying_power.cash_buying_power,
             positions=positions,
             cash_balance=cash_balance,

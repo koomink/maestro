@@ -8,6 +8,7 @@ class KISConfig(StrictConfigModel):
     enabled: bool = False
     provider: str = "mock"
     broker_product: BrokerProduct = BrokerProduct.KIS_OVERSEAS_STOCK
+    broker_products: list[BrokerProduct] = Field(default_factory=list)
     account_id: str | None = None
     account_id_env: str | None = "KIS_ACCOUNT_ID"
     app_key_env: str = "KIS_APP_KEY"
@@ -25,6 +26,9 @@ class KISConfig(StrictConfigModel):
         if self.paper_trading:
             return "https://openapivts.koreainvestment.com:29443"
         return "https://openapi.koreainvestment.com:9443"
+
+    def effective_broker_products(self) -> list[BrokerProduct]:
+        return self.broker_products or [self.broker_product]
 
 
 __all__ = ["KISConfig"]

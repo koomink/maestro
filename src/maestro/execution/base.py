@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 
-from maestro.core.enums import OrderSide, OrderStatus, OrderType
+from maestro.core.enums import BrokerProduct, Currency, OrderSide, OrderStatus, OrderType
 
 
 class OrderIntent(BaseModel):
@@ -11,6 +11,9 @@ class OrderIntent(BaseModel):
     price: float
     notional: float
     order_type: OrderType = OrderType.MARKET
+    currency: Currency | None = None
+    sleeve: str | None = None
+    broker_product: BrokerProduct | None = None
 
 
 class ExecutionResult(BaseModel):

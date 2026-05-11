@@ -507,6 +507,8 @@
 - [x] Keep `personal-check` local and free of broker submit or Telegram send side effects
 - [x] Document the personal operator workflow in `docs/personal_operator_mvp.md`
 - [x] Keep live auto-trading, market orders, direct broker trading CLI, dashboard write controls, and Telegram admin controls deferred
+- [x] Add KIS domestic+overseas multi-product operator config with KRW/USD
+      currency sleeves and symbol-level broker-product routing
 
 ## Completed / Historical Notes
 

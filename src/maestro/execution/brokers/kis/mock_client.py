@@ -24,6 +24,7 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
         return KISAccountSnapshot(
             account_id=self.account_id,
             cash=5_000_000.0,
+            cash_by_currency={"KRW": 5_000_000.0},
             buying_power=buying_power.cash_buying_power,
             positions=positions,
             cash_balance=KISCashBalance(cash=5_000_000.0, withdrawable_cash=5_000_000.0),

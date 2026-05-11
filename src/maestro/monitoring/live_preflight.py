@@ -29,8 +29,12 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
         failures.append("kis_disabled")
     if config.kis.provider != "kis":
         failures.append("kis_provider_not_real")
-    if config.kis.broker_product != BrokerProduct.KIS_OVERSEAS_STOCK:
-        failures.append("kis_broker_product_not_overseas_stock")
+    enabled_products = set(config.kis.effective_broker_products())
+    if not enabled_products <= {
+        BrokerProduct.KIS_DOMESTIC_STOCK,
+        BrokerProduct.KIS_OVERSEAS_STOCK,
+    }:
+        failures.append("kis_broker_product_unsupported")
 
     instruments = {instrument.symbol: instrument for instrument in config.universe.instruments}
     for symbol in config.portfolio.allowed_symbols:
@@ -38,14 +42,18 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
         if instrument is None:
             failures.append(f"missing_instrument:{symbol}")
             continue
-        if instrument.currency.value != config.portfolio.base_currency:
+        if (
+            config.portfolio.allocation_mode != "currency_sleeves"
+            and instrument.currency.value != config.portfolio.base_currency
+        ):
             failures.append(f"currency_mismatch:{symbol}")
-        if instrument.broker_product != config.kis.broker_product:
+        if instrument.broker_product not in enabled_products:
             failures.append(f"broker_product_mismatch:{symbol}")
         if not symbol.startswith("CASH") and instrument.exchange_code not in {
             "NASD",
             "NYSE",
             "AMEX",
+            "KRX",
         }:
             failures.append(f"unsupported_exchange:{symbol}")
     return failures, warnings

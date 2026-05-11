@@ -269,6 +269,9 @@ class HealthService:
             details={
                 "provider": self.config.kis.provider,
                 "broker_product": self.config.kis.broker_product.value,
+                "broker_products": ",".join(
+                    product.value for product in self.config.kis.effective_broker_products()
+                ),
                 "missing": ",".join(missing) if missing else "none",
                 "access_token_present": bool(os.getenv(self.config.kis.access_token_env)),
             },

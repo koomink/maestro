@@ -77,6 +77,14 @@ maestro live-smoke --config ~/maestro-operator/maestro_personal.yaml --check tel
 maestro live-smoke --config ~/maestro-operator/maestro_personal.yaml --check live-dry-run
 ```
 
+For the first R1 rehearsal on a verified broker baseline, adopt the latest
+read-only KIS snapshot before reconciliation:
+
+```bash
+maestro adopt-broker-snapshot --config ~/maestro-operator/maestro_personal.yaml --reason "operator baseline accepted"
+maestro reconcile --config ~/maestro-operator/maestro_personal.yaml
+```
+
 Review the dry-run order, audit log, broker UI, and read-only dashboard before
 changing `execution.live_order_enabled` or `execution.live_order_dry_run`.
 

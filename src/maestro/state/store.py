@@ -7,10 +7,16 @@ from maestro.state.models import PortfolioState
 
 
 class StateStore:
-    def __init__(self, path: str, initial_cash: float) -> None:
+    def __init__(
+        self,
+        path: str,
+        initial_cash: float,
+        initial_cash_by_currency: dict[str, float] | None = None,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.initial_cash = initial_cash
+        self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -100,7 +106,11 @@ class StateStore:
                 "SELECT payload FROM portfolio_snapshots ORDER BY id DESC LIMIT 1"
             ).fetchone()
         if row is None:
-            return PortfolioState(cash=self.initial_cash, positions={})
+            return PortfolioState(
+                cash=self.initial_cash,
+                cash_by_currency=self.initial_cash_by_currency,
+                positions={},
+            )
         return PortfolioState.model_validate_json(row[0])
 
     def save_portfolio_snapshot(self, run_id: str, state: PortfolioState) -> None:

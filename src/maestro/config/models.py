@@ -5,7 +5,7 @@ from maestro.config.base import StrictConfigModel
 from maestro.config.broker import KISConfig
 from maestro.config.datahub import DataHubConfig, DataHubProviderConfig
 from maestro.config.execution import ExecutionConfig
-from maestro.config.portfolio import PortfolioConfig
+from maestro.config.portfolio import CurrencySleeveConfig, PortfolioConfig
 from maestro.config.reconciliation_config import ReconciliationConfig
 from maestro.config.risk import RiskConfig
 from maestro.config.state_config import AuditConfig, StateConfig
@@ -41,12 +41,30 @@ class MaestroConfig(StrictConfigModel):
                 "portfolio.allowed_symbols must be present in universe.instruments: "
                 + ", ".join(missing)
             )
+        if self.portfolio.allocation_mode == "currency_sleeves":
+            if not self.portfolio.currency_sleeves:
+                raise ValueError("currency_sleeves allocation mode requires currency_sleeves")
+            sleeve_symbols = set()
+            for currency, sleeve in self.portfolio.currency_sleeves.items():
+                sleeve_symbols.add(sleeve.cash_symbol)
+                sleeve_symbols.update(sleeve.symbols)
+                if currency not in self.portfolio.cash_by_currency:
+                    raise ValueError(
+                        "cash_by_currency must include every currency_sleeves key: " + currency
+                    )
+            missing_sleeve_symbols = sorted(sleeve_symbols - set(self.portfolio.allowed_symbols))
+            if missing_sleeve_symbols:
+                raise ValueError(
+                    "currency_sleeves symbols must be present in portfolio.allowed_symbols: "
+                    + ", ".join(missing_sleeve_symbols)
+                )
         return self
 
 
 __all__ = [
     "ApprovalConfig",
     "AuditConfig",
+    "CurrencySleeveConfig",
     "DataHubConfig",
     "DataHubProviderConfig",
     "ExecutionConfig",

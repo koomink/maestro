@@ -34,6 +34,7 @@ class KISBuyingPower(BaseModel):
 class KISAccountSnapshot(BaseModel):
     account_id: str
     cash: float
+    cash_by_currency: dict[str, float] = Field(default_factory=dict)
     buying_power: float
     positions: list[KISPosition] = Field(default_factory=list)
     cash_balance: KISCashBalance | None = None
