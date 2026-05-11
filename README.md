@@ -134,11 +134,11 @@ Korea Investment Securities current price lookup may be used as broker-side quot
 
 ## Project Status
 
-Maestro v0.1.1 is a stabilization patch on top of the v0.1 bootable skeleton. It is
-not a production trading system. The project now has approval-gated KIS overseas
-live-order beta pieces, but repeated real-account operation still requires the
-v0.8.x DataHub, risk, recovery, and operations hardening path documented in
-[docs/ROADMAP.md](docs/ROADMAP.md).
+Maestro package metadata is still `0.1.1` until an explicit release/versioning
+policy is adopted. Capability work has advanced through the documented v0.8.x
+DataHub, risk, recovery, and operations hardening path, plus the v1.0 private
+approval-gated beta readiness checks in [docs/ROADMAP.md](docs/ROADMAP.md).
+It is not an autonomous production trading system.
 
 Current runnable modes are:
 
@@ -645,7 +645,7 @@ maestro status --config configs/us_etf_yahoo_paper.yaml
 `CASH_USD`, `VOO`, `QQQ`, and `SGOV` in the sample allocation, with AAPL and
 MSFT included in the static example US universe. Yahoo/yfinance supplies external
 market data through Maestro DataHub. The fixed symbol list is intentionally small
-for a runnable paper example; future production flows should use policy-based
+for a runnable paper example; production live flows should use policy-based
 candidate validation before adding new tradable symbols. Execution remains
 simulated inside
 `PaperExecutionEngine`; this path does not call KIS, does not submit live

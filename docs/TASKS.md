@@ -202,7 +202,7 @@
 - [x] Define paper-only approval behavior before live trading work begins
 - [ ] Add inline approve/reject button callback handling after polling MVP
 - [ ] Add webhook handling after polling MVP
-- [ ] Add fill/error Telegram notifications
+- [x] Add fill/error Telegram notifications
 
 ### v0.5 KIS Read-only Broker Foundation
 

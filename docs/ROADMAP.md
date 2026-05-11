@@ -155,7 +155,7 @@ future work.
 
 ## v0.6 — KIS Live Approval Trading
 
-Started scope:
+Completed scope:
 
 - KIS live order submission behind broker adapter
 - Product/venue-aware universe model for canonical symbols, broker products,
@@ -192,10 +192,6 @@ Started scope:
 - Halt on unknown broker state
 - Safe defaults keep live orders disabled unless explicitly configured
 
-Remaining scope:
-
-- Real broker cancel adapter implementation after endpoint path, TR_IDs, and request fields are verified
-
 Live auto-trading remains deferred. This is `live_approval`, not `live_auto`.
 The intended first production target is US-listed stocks and ETFs through
 `kis_overseas_stock`; domestic KIS behavior is isolated behind
@@ -205,7 +201,7 @@ package release/versioning policy; v0.6 is the roadmap capability milestone.
 
 ## v0.7 — Production Hardening
 
-Started scope:
+Completed scope:
 
 - Persistent global safety state for `active`, `paused`, `killed`, and `halted`
 - CLI safety controls: `safety-status`, `pause`, `resume`, and `kill-switch`
@@ -220,13 +216,9 @@ Started scope:
   reconciliation is required
 - Daily live notional and order count gates use persisted live order events
 - Instrument-aware live order validation uses `universe.instruments`
-- Daily loss limit config fails closed until broker PnL normalization exists
-
-Remaining scope:
-
-- Unknown order status halt
-- Optional KIS WebSocket
-- Performance attribution
+- Daily loss limit config starts fail-closed until broker PnL normalization is
+  available in the v0.8.x hardening path
+- Unknown order status halt behavior
 
 This milestone prepares Maestro for more serious operation but should still prefer safety over autonomy.
 The dashboard remains read-only, Telegram admin controls remain deferred, and
@@ -234,7 +226,7 @@ live auto-trading remains out of scope.
 
 ## v0.7.1 — Real-data US Stock/ETF Paper Mode
 
-Started scope:
+Completed scope:
 
 - Yahoo/yfinance paper config for US-listed stocks and ETFs
 - USD base-currency paper universe
@@ -297,7 +289,7 @@ orders, or submit/cancel/amend paths.
 
 ## v0.8 — KIS Overseas Live Approval Beta
 
-Started scope:
+Completed scope:
 
 - KIS overseas US stock/ETF limit-order submit adapter after endpoint paths,
   TR_IDs, exchange codes, and request fields were checked against Korea
@@ -323,7 +315,7 @@ approval, latest safe status, and reconciliation checks.
 
 ## v0.8.1 — Real Account Promotion Path
 
-Planned scope:
+Completed scope:
 
 - Make the promotion path explicit: mock paper -> real-data paper -> KIS
   read-only -> live approval dry-run -> minimum-size live order -> limited
@@ -344,7 +336,7 @@ operator-triggered rehearsals only.
 
 ## v0.8.2 — Production DataHub Hardening
 
-Planned scope:
+Completed scope:
 
 - Treat DataHub as the research and market data boundary, not as a completed
   production market data system.
@@ -494,6 +486,8 @@ unchanged.
 - Strategy-specific logic inside Maestro core
 - High-risk admin controls through Telegram
 - Write-capable dashboard controls
+- Optional KIS WebSocket
+- Performance attribution
 - SDK split into a separate package
 - Multi-user SaaS deployment
 - Complex portfolio optimization engine
