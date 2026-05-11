@@ -45,8 +45,8 @@ directory without overriding environment variables already set by the shell.
 For local operation from the repository root, copy `.env.example` to `.env` and
 fill the real values there instead of exporting them every time.
 
-`KIS_ACCESS_TOKEN` is optional. If it is absent, Maestro can use the configured
-token cache path.
+`KIS_ACCESS_TOKEN` is optional. Leave it unset unless you have a real pre-issued
+token. If it is absent, Maestro can use the configured token cache path.
 
 ## Readiness Check
 

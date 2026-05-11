@@ -250,7 +250,7 @@ Implemented foundations beyond the core v0.1 scope:
 Deferred real integrations:
 
 - No live auto-trading
-- No Telegram webhook or inline callback buttons
+- No Telegram webhook
 - No direct or unguarded KIS buy/sell/order CLI
 - No direct cancel CLI; KIS overseas cancel is available only behind
   `LiveOrderCancellationService` policy gates
@@ -703,10 +703,10 @@ start from `configs/telegram_approval_paper.yaml`, set
 `TELEGRAM_BOT_TOKEN` in the environment, configure
 `telegram_allowed_chat_ids` and `whitelisted_user_ids`, and keep `mode: paper`.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
-polling for `approve <approval_id>` or `reject <approval_id>` replies. Inline
-keyboards, callback queries, webhooks, dashboard write controls, and live auto
-trading remain deferred. Normal tests use fake Telegram clients and do not call
-the Telegram network.
+polling for inline approve/reject button callbacks or manual
+`approve <approval_id>` / `reject <approval_id>` replies. Webhooks, dashboard
+write controls, and live auto trading remain deferred. Normal tests use fake
+Telegram clients and do not call the Telegram network.
 
 To run the KIS read-only adapter:
 
@@ -783,7 +783,8 @@ symbols. It uses these environment variable names:
 - `KIS_ACCOUNT_ID`: KIS account number and product code
 - `KIS_APP_KEY`: KIS app key
 - `KIS_APP_SECRET`: KIS app secret
-- `KIS_ACCESS_TOKEN`: optional pre-issued access token
+- `KIS_ACCESS_TOKEN`: optional pre-issued access token; leave unset unless it is
+  a real current token
 
 Maestro CLI commands load `.env` from the current working directory when the
 file exists and do not override variables already set by the shell. For local

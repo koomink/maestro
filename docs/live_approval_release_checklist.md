@@ -84,12 +84,12 @@ Set these in the operator environment, not in YAML and not in source control:
 
 - `KIS_APP_KEY`
 - `KIS_APP_SECRET`
-- `KIS_ACCESS_TOKEN` when using an externally issued token
+- `KIS_ACCESS_TOKEN` only when using a real externally issued token
 - `TELEGRAM_BOT_TOKEN`
 
 If `KIS_ACCESS_TOKEN` is absent, the KIS adapter may use `kis.token_cache_path`
-to cache an issued token. The token cache must not be committed or copied into
-audit/state records.
+to cache an issued token. Do not keep placeholder token values in `.env`. The
+token cache must not be committed or copied into audit/state records.
 
 ## KIS Read-Only Sync
 

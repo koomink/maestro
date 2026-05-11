@@ -200,7 +200,7 @@
 - [x] Persist approval decisions and reject duplicate persisted decisions
 - [x] Keep normal tests fake-client based with no Telegram network calls
 - [x] Define paper-only approval behavior before live trading work begins
-- [ ] Add inline approve/reject button callback handling after polling MVP
+- [x] Add inline approve/reject button callback handling after polling MVP
 - [ ] Add webhook handling after polling MVP
 - [x] Add fill/error Telegram notifications
 
