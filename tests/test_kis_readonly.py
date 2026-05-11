@@ -62,6 +62,7 @@ def test_kis_cli_sync_and_account(tmp_path):
 
 
 def test_kis_cli_sync_reports_missing_credentials_without_traceback(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("KIS_APP_KEY", raising=False)
     monkeypatch.delenv("KIS_APP_SECRET", raising=False)
     monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
@@ -430,10 +431,39 @@ def test_kis_overseas_readonly_client_normalizes_us_account(monkeypatch):
     assert any(call["headers"]["tr_id"] == "TTTS3007R" for call in transport.calls)
     assert any(call["headers"]["tr_id"] == "TTTS3035R" for call in transport.calls)
     assert any(call["headers"]["tr_id"] == "TTTS3018R" for call in transport.calls)
+    price_calls = [call for call in transport.calls if call["url"].endswith("/quotations/price")]
+    assert {call["params"]["EXCD"] for call in price_calls} == {"NAS", "AMS"}
     assert not any(call["method"] != "GET" for call in transport.calls)
     assert not any(
         "/order" in call["url"] and "inquire" not in call["url"] for call in transport.calls
     )
+
+
+def test_kis_overseas_readonly_uses_demo_unfilled_order_tr_id(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        paper_trading=True,
+    )
+    transport = FakeKISOverseasTransport()
+    client = KISRestOverseasStockReadOnlyClient(
+        config,
+        transport=transport,
+        instruments=_us_instruments(),
+    )
+
+    client.get_unfilled_orders()
+
+    assert any(call["headers"]["tr_id"] == "VTTS3018R" for call in transport.calls)
+    assert not any(call["headers"]["tr_id"] == "TTTS3018R" for call in transport.calls)
 
 
 def test_kis_overseas_readonly_requires_universe_metadata(monkeypatch):

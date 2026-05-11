@@ -53,13 +53,17 @@ class KISReadOnlyService:
         )
         return snapshot
 
-    def _build_client(self, config: KISConfig) -> KISReadOnlyClient:
+    def _build_client(
+        self,
+        config: KISConfig,
+        instruments: list[TradableInstrument] | None = None,
+    ) -> KISReadOnlyClient:
         if len(config.effective_broker_products()) > 1:
             return None
         if config.provider == "mock":
             return MockKISReadOnlyClient(config.account_id or "MOCK-ACCOUNT")
         if config.provider == "kis":
-            return build_kis_rest_readonly_client(config, self.instruments)
+            return build_kis_rest_readonly_client(config, instruments or self.instruments)
         raise ValueError(f"Unsupported KIS provider: {config.provider}")
 
     def _fetch_multi_product_snapshot(self, symbols: list[str]) -> KISReadOnlySnapshot:
@@ -69,7 +73,8 @@ class KISReadOnlyService:
             product_config = self.config.model_copy(
                 update={"broker_product": product, "broker_products": []}
             )
-            client = self._build_client(product_config)
+            product_instruments = self._instruments_for_product(product)
+            client = self._build_client(product_config, product_instruments)
             product_symbols = self._symbols_for_product(symbols, product)
             account = client.get_account_snapshot()
             snapshots.append(
@@ -97,6 +102,11 @@ class KISReadOnlyService:
             if by_symbol.get(symbol) is None or by_symbol[symbol].broker_product == product
         ]
         return selected
+
+    def _instruments_for_product(self, product) -> list[TradableInstrument]:
+        return [
+            instrument for instrument in self.instruments if instrument.broker_product == product
+        ]
 
 
 def _merge_snapshots(snapshots: list[KISReadOnlySnapshot]) -> KISReadOnlySnapshot:

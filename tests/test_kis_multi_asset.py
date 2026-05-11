@@ -2,13 +2,16 @@ from datetime import UTC, datetime
 
 from maestro.config.loader import load_config
 from maestro.core.enums import BrokerProduct, Currency, OrderSide
+from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_order_factory import ProductRoutingKISLiveOrderClient
 from maestro.execution.order_builder import OrderBuilder
 from maestro.execution.paper import PaperExecutionEngine
+from maestro.monitoring.audit_logger import AuditLogger
 from maestro.portfolio.manager import PortfolioTarget
 from maestro.sdk import TargetAllocationResult
 from maestro.signals.validator import SignalValidator
 from maestro.state.models import PortfolioState
+from maestro.state.store import StateStore
 
 
 def test_multi_asset_example_config_loads_domestic_and_overseas_products():
@@ -124,3 +127,22 @@ def test_kis_live_order_router_builds_product_clients(monkeypatch):
         BrokerProduct.KIS_DOMESTIC_STOCK,
         BrokerProduct.KIS_OVERSEAS_STOCK,
     }
+
+
+def test_kis_multi_product_readonly_service_filters_instruments_by_product(tmp_path):
+    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    store = StateStore(str(tmp_path / "state.db"), config.portfolio.initial_cash)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    service = KISReadOnlyService(
+        config.kis,
+        store,
+        audit,
+        instruments=config.universe.instruments,
+    )
+
+    overseas_symbols = {
+        instrument.symbol
+        for instrument in service._instruments_for_product(BrokerProduct.KIS_OVERSEAS_STOCK)
+    }
+
+    assert overseas_symbols == {"CASH_USD", "AAPL", "VOO"}

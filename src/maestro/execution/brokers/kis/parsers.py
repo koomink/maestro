@@ -310,8 +310,10 @@ def _tr_cont(payload: dict[str, Any]) -> str:
 
 
 def _quote_exchange_code(exchange_code: str) -> str:
-    # KIS overseas quote API uses NAS for Nasdaq quotes, while trading/account
-    # APIs use NASD for the broader US/Nasdaq market code.
-    if exchange_code == "NASD":
-        return "NAS"
-    return exchange_code
+    # KIS overseas quote API uses shorter exchange codes than trading/account
+    # APIs for US markets.
+    return {
+        "NASD": "NAS",
+        "NYSE": "NYS",
+        "AMEX": "AMS",
+    }.get(exchange_code, exchange_code)

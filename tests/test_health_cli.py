@@ -20,6 +20,7 @@ def test_health_cli_reports_local_checks_without_kis_network(monkeypatch, tmp_pa
     monkeypatch.delenv("KIS_APP_SECRET", raising=False)
     monkeypatch.delenv("KIS_ACCESS_TOKEN", raising=False)
     config_path = _readonly_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(app, ["health", "--config", str(config_path)])
 

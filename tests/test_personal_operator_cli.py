@@ -52,6 +52,7 @@ def test_init_personal_refuses_overwrite_without_force(tmp_path):
 def test_cli_loads_dotenv_without_overriding_shell_env(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.setenv("KIS_APP_KEY", "shell-app-key")
     (tmp_path / ".env").write_text(
         "\n".join(
