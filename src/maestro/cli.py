@@ -5,8 +5,10 @@ import sys
 from pathlib import Path
 
 import typer
+import yaml
 
 from maestro.config.loader import load_config
+from maestro.config.models import MaestroConfig
 from maestro.core.enums import RunMode
 from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.service import KISReadOnlyService
@@ -150,6 +152,71 @@ def beta_preflight(config: Path = typer.Option(..., "--config")) -> None:
     typer.echo("check=private_beta_preflight status=ok message=ready")
 
 
+@app.command("init-personal")
+def init_personal(
+    output: Path = typer.Option(..., "--output"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    if output.exists() and not force:
+        raise typer.BadParameter("output already exists; pass --force to overwrite")
+    raw = _personal_operator_config(output)
+    MaestroConfig.model_validate(raw)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    typer.echo(f"created config={output}")
+    typer.echo("next=edit Telegram chat/user IDs and set KIS/Telegram environment variables")
+
+
+@app.command("personal-check")
+def personal_check(config: Path = typer.Option(..., "--config")) -> None:
+    maestro_config = load_config(config)
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    report = HealthService(maestro_config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    stages = [
+        _personal_stage(
+            "paper_ready",
+            _worst_status(
+                checks,
+                ["config", "state_db", "audit_path", "audit_integrity", "datahub"],
+            ),
+            "local config, state, audit, and DataHub checks are usable",
+            f"maestro health --config {config}",
+        ),
+        _personal_stage(
+            "readonly_ready",
+            _all_ok(checks, ["kis_env", "broker_snapshot", "reconciliation"]),
+            "KIS env, broker snapshot, and reconciliation are ready",
+            f"maestro live-smoke --config {config} --check kis-readonly",
+        ),
+        _personal_stage(
+            "telegram_ready",
+            _telegram_personal_status(maestro_config),
+            "Telegram approval config and token are ready",
+            f"maestro live-smoke --config {config} --check telegram-approval",
+        ),
+        _personal_stage(
+            "dry_run_ready",
+            _dry_run_personal_status(maestro_config, checks),
+            "approval-gated dry-run config is ready",
+            f"maestro live-smoke --config {config} --check live-dry-run",
+        ),
+        _personal_stage(
+            "minimum_live_ready",
+            _minimum_live_personal_status(maestro_config, report),
+            "minimum-size approval-gated live order gate is ready",
+            f"maestro beta-preflight --config {config}",
+        ),
+    ]
+    typer.echo(f"personal_check status={_overall_personal_status(stages)} config={config}")
+    for stage in stages:
+        typer.echo(
+            f"stage={stage['stage']} status={stage['status']} "
+            f'message={stage["message"]} next="{stage["next"]}"'
+        )
+
+
 @app.command("live-smoke")
 def live_smoke(
     config: Path = typer.Option(..., "--config"),
@@ -170,8 +237,10 @@ def live_smoke(
 
 
 def _run_kis_readonly_live_smoke(maestro_config, allow_mock: bool) -> None:
-    if maestro_config.mode != RunMode.LIVE_READONLY:
-        raise typer.BadParameter("live-smoke --check kis-readonly requires mode=live_readonly")
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter(
+            "live-smoke --check kis-readonly requires mode=live_readonly or live_approval"
+        )
     if not maestro_config.kis.enabled:
         raise typer.BadParameter("live-smoke --check kis-readonly requires kis.enabled=true")
     if maestro_config.kis.provider != "kis" and not allow_mock:
@@ -402,8 +471,8 @@ def clear_halt(
 @app.command("kis-sync")
 def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
     maestro_config = load_config(config)
-    if maestro_config.mode != RunMode.LIVE_READONLY:
-        raise typer.BadParameter("kis-sync requires mode=live_readonly")
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter("kis-sync requires mode=live_readonly or live_approval")
     store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     service = KISReadOnlyService(
@@ -440,8 +509,8 @@ def kis_account(config: Path = typer.Option(..., "--config")) -> None:
 @app.command("reconcile")
 def reconcile(config: Path = typer.Option(..., "--config")) -> None:
     maestro_config = load_config(config)
-    if maestro_config.mode != RunMode.LIVE_READONLY:
-        raise typer.BadParameter("reconcile requires mode=live_readonly")
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter("reconcile requires mode=live_readonly or live_approval")
     store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     result = BrokerReconciliationService(
@@ -658,6 +727,215 @@ def _ops_alert_message(report, alert_checks) -> str:
     for check in alert_checks[:10]:
         lines.append(f"{check.name}: {check.status} {check.message}")
     return "\n".join(lines)
+
+
+def _personal_operator_config(output: Path) -> dict:
+    base_dir = output.parent
+    state_dir = base_dir / "var"
+    return {
+        "mode": "live_approval",
+        "portfolio": {
+            "base_currency": "USD",
+            "initial_cash": 10000,
+            "allowed_symbols": ["CASH_USD", "AAPL", "MSFT", "VOO", "QQQ", "SGOV"],
+        },
+        "universe": {
+            "policy": {
+                "allowed_asset_types": ["stock", "etf", "us_etf"],
+                "allowed_regions": ["US"],
+                "allowed_currencies": ["USD"],
+                "allowed_broker_products": ["kis_overseas_stock"],
+                "allowed_exchange_codes": ["NASD", "NYSE", "AMEX"],
+                "denied_symbols": [],
+                "denied_asset_tags": [],
+                "max_new_symbols_per_run": 1,
+                "require_operator_approval_for_tradable": True,
+                "require_broker_tradability_check": True,
+                "require_data_freshness_check": True,
+            },
+            "instruments": [
+                _personal_instrument("CASH_USD", "cash", "USD", None, 0.01, 0.01, 0.01, 0),
+                _personal_instrument("AAPL", "stock", "AAPL", "NASD", 1, 0.01, 1, 1),
+                _personal_instrument("MSFT", "stock", "MSFT", "NASD", 1, 0.01, 1, 1),
+                _personal_instrument("VOO", "etf", "VOO", "AMEX", 1, 0.01, 1, 1),
+                _personal_instrument("QQQ", "etf", "QQQ", "NASD", 1, 0.01, 1, 1),
+                _personal_instrument("SGOV", "etf", "SGOV", "AMEX", 1, 0.01, 1, 1),
+            ],
+        },
+        "strategies": [
+            {
+                "id": "sample_static_allocation",
+                "enabled": True,
+                "mode": "live_approval",
+                "weight": 1.0,
+                "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+                "config": {
+                    "allocations": {
+                        "CASH_USD": 0.1,
+                        "VOO": 0.45,
+                        "QQQ": 0.25,
+                        "SGOV": 0.2,
+                    }
+                },
+            }
+        ],
+        "datahub": {
+            "provider": "yahoo",
+            "stale_after_seconds": 604800,
+            "symbol_map": {
+                "AAPL": "AAPL",
+                "MSFT": "MSFT",
+                "VOO": "VOO",
+                "QQQ": "QQQ",
+                "SGOV": "SGOV",
+            },
+        },
+        "execution": {
+            "engine": "paper",
+            "live_order_enabled": False,
+            "live_order_dry_run": True,
+            "require_reconciliation_pass": True,
+            "max_live_order_notional": 100,
+            "max_daily_live_notional": 300,
+            "max_daily_live_order_count": 1,
+            "daily_loss_limit": None,
+            "allowed_order_type": "limit",
+            "order_status_poll_interval_seconds": 30,
+            "order_status_max_polls": 20,
+            "order_status_terminal_timeout_seconds": 1800,
+            "require_market_session": True,
+            "market_session_timezone": "America/New_York",
+            "market_session_open": "09:30",
+            "market_session_close": "16:00",
+            "market_session_weekdays": [0, 1, 2, 3, 4],
+            "market_session_holidays": [],
+            "require_broker_quote_validation": False,
+            "max_broker_quote_deviation_pct": 0.05,
+            "require_broker_risk_validation": False,
+            "live_order_fee_buffer_pct": 0.002,
+            "heartbeat_max_age_seconds": 3600,
+            "scheduled_run_max_age_seconds": 86400,
+        },
+        "risk": {"max_single_asset_weight": 0.5, "min_cash_weight": 0.05},
+        "state": {"sqlite_path": str(state_dir / "maestro_personal_state.db")},
+        "audit": {"jsonl_path": str(state_dir / "maestro_personal_audit.jsonl")},
+        "approval": {
+            "enabled": True,
+            "provider": "telegram",
+            "require_approval": True,
+            "default_decision": "expired",
+            "timeout_seconds": 300,
+            "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
+            "telegram_allowed_chat_ids": [],
+            "whitelisted_user_ids": [],
+            "telegram_poll_interval_seconds": 1.0,
+        },
+        "kis": {
+            "enabled": True,
+            "provider": "kis",
+            "broker_product": "kis_overseas_stock",
+            "account_id": None,
+            "account_id_env": "KIS_ACCOUNT_ID",
+            "app_key_env": "KIS_APP_KEY",
+            "app_secret_env": "KIS_APP_SECRET",
+            "access_token_env": "KIS_ACCESS_TOKEN",
+            "token_cache_path": str(state_dir / "kis_access_token.json"),
+            "paper_trading": False,
+            "timeout_seconds": 10,
+        },
+        "reconciliation": {
+            "cash_tolerance": 0.0,
+            "position_quantity_tolerance": 0.0,
+            "value_tolerance": 0.0,
+            "max_age_seconds": 86400,
+        },
+    }
+
+
+def _personal_instrument(
+    symbol: str,
+    asset_type: str,
+    broker_symbol: str,
+    exchange_code: str | None,
+    quantity_step: float,
+    price_tick: float,
+    min_order_quantity: float,
+    min_order_notional: float,
+) -> dict:
+    instrument = {
+        "symbol": symbol,
+        "asset_type": asset_type,
+        "region": "US",
+        "currency": "USD",
+        "broker": "kis",
+        "broker_product": "kis_overseas_stock",
+        "broker_symbol": broker_symbol,
+        "quantity_step": quantity_step,
+        "price_tick": price_tick,
+        "min_order_quantity": min_order_quantity,
+        "min_order_notional": min_order_notional,
+    }
+    if exchange_code:
+        instrument["exchange_code"] = exchange_code
+    return instrument
+
+
+def _personal_stage(stage: str, status: str, message: str, next_command: str) -> dict[str, str]:
+    return {"stage": stage, "status": status, "message": message, "next": next_command}
+
+
+def _overall_personal_status(stages: list[dict[str, str]]) -> str:
+    if all(stage["status"] == "ok" for stage in stages):
+        return "ok"
+    if any(stage["status"] == "fail" for stage in stages):
+        return "blocked"
+    return "warn"
+
+
+def _worst_status(checks: dict, names: list[str]) -> str:
+    selected = [checks[name].status for name in names if name in checks]
+    if not selected or "fail" in selected:
+        return "fail"
+    if "warn" in selected:
+        return "warn"
+    return "ok"
+
+
+def _all_ok(checks: dict, names: list[str]) -> str:
+    if all(checks.get(name) and checks[name].status == "ok" for name in names):
+        return "ok"
+    return "fail"
+
+
+def _telegram_personal_status(config: MaestroConfig) -> str:
+    if not config.approval.enabled or not config.approval.require_approval:
+        return "fail"
+    if config.approval.provider != "telegram":
+        return "fail"
+    if not config.approval.telegram_allowed_chat_ids or not config.approval.whitelisted_user_ids:
+        return "fail"
+    if not os.getenv(config.approval.telegram_bot_token_env):
+        return "fail"
+    return "ok"
+
+
+def _dry_run_personal_status(config: MaestroConfig, checks: dict) -> str:
+    preflight = checks.get("live_approval_preflight")
+    if config.mode != RunMode.LIVE_APPROVAL or not config.execution.live_order_dry_run:
+        return "fail"
+    if preflight is None or preflight.status == "fail":
+        return "fail"
+    if not config.strategies:
+        return "fail"
+    return "ok" if preflight.status == "ok" else "warn"
+
+
+def _minimum_live_personal_status(config: MaestroConfig, report) -> str:
+    if config.mode != RunMode.LIVE_APPROVAL:
+        return "fail"
+    if not config.execution.live_order_enabled or config.execution.live_order_dry_run:
+        return "fail"
+    return "ok" if not private_beta_failures(config, report) else "fail"
 
 
 if __name__ == "__main__":

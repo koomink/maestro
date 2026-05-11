@@ -150,6 +150,14 @@ Current runnable modes are:
 - Live approval infrastructure and safety gates, with KIS overseas read-only and
   approval-gated US stock/ETF limit-order submit/status adapter support
 
+For a single-user operator workflow, start with
+[docs/personal_operator_mvp.md](docs/personal_operator_mvp.md):
+
+```bash
+maestro init-personal --output ~/maestro-operator/maestro_personal.yaml
+maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
+```
+
 `PaperExecutionEngine` is simulated execution inside Maestro. Mock configs are
 for development and tests, not production readiness.
 
@@ -225,6 +233,8 @@ Implemented foundations beyond the core v0.1 scope:
   health checks, and operational preflight helpers
 - Persistent safety controls for active, paused, killed, and halted state
 - CLI `safety-status`, `pause`, `resume`, and `kill-switch`
+- Personal operator config and readiness commands: `init-personal` and
+  `personal-check`
 - Safe live approval example config:
   [configs/live_approval.example.yaml](configs/live_approval.example.yaml)
 - v0.6 release checklist:
@@ -789,6 +799,7 @@ Operational docs:
 - [Deployment guide](docs/deployment.md)
 - [KIS fixture redaction](docs/kis_fixture_redaction.md)
 - [Live account promotion](docs/live_account_promotion.md)
+- [Personal operator MVP](docs/personal_operator_mvp.md)
 - [Virtuoso apps](docs/virtuoso_apps.md)
 - [VPS/systemd guide](docs/vps_systemd.md)
 - [Backup/restore guide](docs/backup_restore.md)

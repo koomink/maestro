@@ -498,6 +498,16 @@
       compatible
 - [x] Verify with `pytest -q`, `ruff check .`, and `ruff format --check .`
 
+### v1.1 Personal Operator MVP
+
+- [x] Add `maestro init-personal --output ...` for safe operator-local config generation
+- [x] Keep generated config secret-free and source-control agnostic
+- [x] Default generated config to live approval, dry-run enabled, live submit disabled, limit orders only, and small live notional caps
+- [x] Add `maestro personal-check --config ...` staged readiness output for paper, KIS read-only, Telegram approval, live dry-run, and minimum-size live order gates
+- [x] Keep `personal-check` local and free of broker submit or Telegram send side effects
+- [x] Document the personal operator workflow in `docs/personal_operator_mvp.md`
+- [x] Keep live auto-trading, market orders, direct broker trading CLI, dashboard write controls, and Telegram admin controls deferred
+
 ## Completed / Historical Notes
 
 - v0.1.0 delivered the bootable paper-mode skeleton described in [ROADMAP.md](ROADMAP.md).

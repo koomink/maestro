@@ -11,6 +11,7 @@ complete.
 - Real-data US stock/ETF paper: `configs/us_etf_yahoo_paper.yaml`
 - Mock KIS read-only: `configs/live_readonly.yaml`
 - KIS overseas read-only: `configs/kis_overseas_readonly.example.yaml`
+- Personal operator live approval config generated with `maestro init-personal`
 
 Do not enable `live_auto`, market orders, direct buy/sell/cancel CLI paths,
 dashboard write controls, or Telegram admin controls.
@@ -31,6 +32,15 @@ uv pip install -e examples/sample_static_allocation
 6. Keep `var/` owner-readable only when it contains broker state, audit logs, or
    token cache files.
 
+For a single-user operator setup, generate an untracked config first:
+
+```bash
+maestro init-personal --output ~/maestro-operator/maestro_personal.yaml
+maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
+```
+
+Then follow `docs/personal_operator_mvp.md` before enabling any live submission.
+
 ## Health Check
 
 Run local health checks before and after scheduled jobs:
@@ -43,6 +53,10 @@ maestro health --config configs/kis_overseas_readonly.example.yaml
 state, audit path, safety state, recent halt/failure events, DataHub config, KIS
 environment variable presence, token cache path, broker snapshot age, and latest
 reconciliation status.
+
+`personal-check` summarizes the same local gates as a staged product-readiness
+view: paper, read-only KIS, Telegram approval, live dry-run, and minimum-size
+approval-gated live order readiness. It does not submit broker orders.
 
 ## Logging
 

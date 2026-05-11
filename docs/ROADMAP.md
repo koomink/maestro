@@ -451,6 +451,27 @@ Completed scope:
 
 This is not autonomous trading. Live auto-trading remains deferred.
 
+## v1.1 — Personal Operator MVP
+
+Completed scope:
+
+- `maestro init-personal --output ...` creates an operator-local, secret-free
+  live approval config scaffold outside source control.
+- Generated configs default to dry-run enabled, live submission disabled, limit
+  orders only, small notional caps, Telegram approval, and KIS overseas
+  stock/ETF broker product.
+- `maestro personal-check --config ...` reports staged readiness for local
+  paper/config health, KIS read-only reconciliation, Telegram approval, live
+  dry-run, and minimum-size approval-gated live order readiness.
+- `personal-check` is local and does not submit broker orders or send Telegram
+  messages.
+- `docs/personal_operator_mvp.md` documents the single-user operating loop,
+  first minimum-size order procedure, and recovery boundary.
+
+This milestone packages the existing private beta pieces for one operator. It
+does not add `live_auto`, market orders, direct broker trading CLI commands,
+dashboard write controls, or high-risk Telegram admin controls.
+
 ## Post-v1.0 — Structural Refactor R1-R5
 
 Completed scope:

@@ -97,6 +97,33 @@ def test_live_smoke_kis_readonly_runs_sync_and_reconciliation_with_mock(tmp_path
     assert "check=broker_reconciliation status=ok" in result.output
 
 
+def test_live_approval_config_can_run_readonly_sync_and_reconciliation_with_mock(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    raw = config.model_dump(mode="json")
+    raw["mode"] = "live_approval"
+    config_path = tmp_path / "live_approval_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    runner = CliRunner()
+
+    sync_result = runner.invoke(app, ["kis-sync", "--config", str(config_path)])
+    adopt_result = runner.invoke(
+        app,
+        [
+            "adopt-broker-snapshot",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator baseline rehearsal",
+        ],
+    )
+    reconcile_result = runner.invoke(app, ["reconcile", "--config", str(config_path)])
+
+    assert sync_result.exit_code == 0, sync_result.output
+    assert adopt_result.exit_code == 0, adopt_result.output
+    assert reconcile_result.exit_code == 0, reconcile_result.output
+    assert "status=passed" in reconcile_result.output
+
+
 def test_adopt_broker_snapshot_seeds_portfolio_for_reconciliation(tmp_path):
     config = _live_readonly_config(tmp_path)
     config_path = tmp_path / "live_readonly.yaml"
