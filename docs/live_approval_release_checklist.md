@@ -144,7 +144,7 @@ Operator UI safety checklist:
 - Confirm account IDs are masked in Telegram responses.
 - Confirm read-only commands use Maestro state/read models or the latest stored
   broker snapshot and do not call broker network endpoints.
-- Confirm `/pause` and `/kill-switch` require confirmation callbacks before
+- Confirm `/pause` and `/kill_switch` require confirmation callbacks before
   changing safety state.
 - Confirm recovery commands such as `resume`, `clear-halt`, broker sync,
   reconciliation triggers, live enablement, dry-run disablement, and risk
@@ -208,7 +208,7 @@ operator-local config:
 - Telegram approval: only allowed chat IDs receive proposals, only whitelisted
   users can approve, and rejection/timeout skip execution.
 - Telegram operator UI: command whitelist is enforced, account IDs are masked,
-  read-only commands avoid broker network calls, `/pause` and `/kill-switch`
+  read-only commands avoid broker network calls, `/pause` and `/kill_switch`
   require confirmation, and recovery commands remain CLI/runbook only.
 - Live dry-run: `live_order_dry_run` must show the exact symbol, side, quantity,
   limit price, notional, approval ID, and broker product expected for the first

@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import typer
@@ -16,6 +17,10 @@ from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.integrations.telegram.bot import TelegramBotAPIClient
+from maestro.integrations.telegram.handlers import (
+    TelegramOperatorCommandRouter,
+    telegram_bot_commands,
+)
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
@@ -142,6 +147,70 @@ def live_preflight(config: Path = typer.Option(..., "--config")) -> None:
     )
     if preflight.status == "fail":
         raise typer.Exit(1)
+
+
+@app.command("telegram-operator")
+def telegram_operator(
+    config: Path = typer.Option(..., "--config"),
+    once: bool = typer.Option(False, "--once"),
+    timeout_seconds: int = typer.Option(10, "--timeout-seconds"),
+) -> None:
+    maestro_config = load_config(config)
+    if maestro_config.approval.provider != "telegram":
+        raise typer.BadParameter("telegram-operator requires approval.provider=telegram")
+    if not maestro_config.approval.telegram_allowed_chat_ids:
+        raise typer.BadParameter("telegram-operator requires telegram_allowed_chat_ids")
+    if not maestro_config.approval.whitelisted_user_ids:
+        raise typer.BadParameter("telegram-operator requires whitelisted_user_ids")
+    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_operator status=fail message=missing_bot_token")
+        raise typer.Exit(1)
+
+    store = StateStore(
+        maestro_config.state.sqlite_path,
+        maestro_config.portfolio.initial_cash,
+        maestro_config.portfolio.cash_by_currency,
+    )
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    router = TelegramOperatorCommandRouter(
+        config=maestro_config,
+        store=store,
+        audit=audit,
+        client=TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=max(float(timeout_seconds) + 5.0, 10.0),
+        ),
+    )
+
+    offset = None
+    while True:
+        try:
+            offset = router.poll_once(offset=offset, timeout_seconds=timeout_seconds)
+            typer.echo(f"telegram_operator status=ok offset={offset or 'none'}")
+            if once:
+                return
+        except (RuntimeError, TimeoutError) as exc:
+            typer.echo(f"telegram_operator status=warn message={exc}")
+            if once:
+                raise typer.Exit(1) from exc
+        if maestro_config.approval.telegram_poll_interval_seconds > 0:
+            time.sleep(maestro_config.approval.telegram_poll_interval_seconds)
+
+
+@app.command("telegram-set-commands")
+def telegram_set_commands(config: Path = typer.Option(..., "--config")) -> None:
+    maestro_config = load_config(config)
+    if maestro_config.approval.provider != "telegram":
+        raise typer.BadParameter("telegram-set-commands requires approval.provider=telegram")
+    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_set_commands status=fail message=missing_bot_token")
+        raise typer.Exit(1)
+    commands = telegram_bot_commands()
+    TelegramBotAPIClient(
+        token_env=maestro_config.approval.telegram_bot_token_env,
+        timeout_seconds=10.0,
+    ).set_my_commands(commands)
+    typer.echo(f"telegram_set_commands status=ok commands={len(commands)}")
 
 
 @app.command("beta-preflight")

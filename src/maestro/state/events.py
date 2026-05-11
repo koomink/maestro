@@ -33,6 +33,7 @@ class SystemEventType(StrEnum):
     BROKER_RISK_HALT = "broker_risk_halt"
     FILL_RECONCILIATION = "fill_reconciliation"
     DYNAMIC_UNIVERSE_EVALUATION = "dynamic_universe_evaluation"
+    TELEGRAM_COMMAND = "telegram_command"
 
 
 def save_audited_system_event(

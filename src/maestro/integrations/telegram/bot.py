@@ -25,7 +25,13 @@ class TelegramBotClient(Protocol):
     ) -> Mapping[str, Any]:
         """Send a Telegram message."""
 
-    def get_updates(self, *, offset: int | None, timeout_seconds: int) -> Mapping[str, Any]:
+    def get_updates(
+        self,
+        *,
+        offset: int | None,
+        timeout_seconds: int,
+        allowed_updates: Sequence[str] | None = None,
+    ) -> Mapping[str, Any]:
         """Fetch Telegram updates."""
 
     def answer_callback_query(self, callback_query_id: str, text: str) -> Mapping[str, Any]:
@@ -39,6 +45,9 @@ class TelegramBotClient(Protocol):
         reply_markup: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         """Edit a Telegram message."""
+
+    def set_my_commands(self, commands: Sequence[Mapping[str, str]]) -> Mapping[str, Any]:
+        """Register bot slash commands."""
 
 
 class TelegramBotAPIClient:
@@ -63,10 +72,18 @@ class TelegramBotAPIClient:
             payload["reply_markup"] = json.dumps(reply_markup)
         return self._post("sendMessage", payload)
 
-    def get_updates(self, *, offset: int | None, timeout_seconds: int) -> Mapping[str, Any]:
+    def get_updates(
+        self,
+        *,
+        offset: int | None,
+        timeout_seconds: int,
+        allowed_updates: Sequence[str] | None = None,
+    ) -> Mapping[str, Any]:
         payload: dict[str, Any] = {"timeout": timeout_seconds}
         if offset is not None:
             payload["offset"] = offset
+        if allowed_updates is not None:
+            payload["allowed_updates"] = json.dumps(list(allowed_updates))
         return self._post("getUpdates", payload)
 
     def answer_callback_query(self, callback_query_id: str, text: str) -> Mapping[str, Any]:
@@ -93,6 +110,9 @@ class TelegramBotAPIClient:
         if reply_markup is not None:
             payload["reply_markup"] = json.dumps(reply_markup)
         return self._post("editMessageText", payload)
+
+    def set_my_commands(self, commands: Sequence[Mapping[str, str]]) -> Mapping[str, Any]:
+        return self._post("setMyCommands", {"commands": json.dumps(list(commands))})
 
     def _post(self, method: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         data = urllib.parse.urlencode(payload).encode("utf-8")
@@ -280,7 +300,10 @@ class TelegramApprovalService:
         answer_callback_query = getattr(self.client, "answer_callback_query", None)
         if not callable(answer_callback_query):
             return
-        answer_callback_query(callback_id, text)
+        try:
+            answer_callback_query(callback_id, text)
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            return
 
     def _edit_callback_message(
         self,

@@ -478,14 +478,14 @@ clear-halt, live enablement, direct trading, or risk changes.
 
 ## Post-v1.1 — Telegram Operator UI
 
-Planned scope:
+Implemented scope:
 
-- Add read-only Telegram operator commands: `/help`, `/status`, `/health`,
+- Read-only Telegram operator commands: `/help`, `/status`, `/health`,
   `/account`, `/portfolio`, `/apps`, `/orders`, and `/approvals`.
 - Back read-only responses with Maestro SQLite state and the latest stored
   broker snapshot only; Telegram commands must not call KIS live network
   endpoints directly.
-- Add limited safety controls: `/pause` and `/kill-switch`, each requiring a
+- Limited safety controls: `/pause` and `/kill_switch`, each requiring a
   whitelisted user, confirmation button, and persisted audit/system event.
 - Keep `/resume`, `/clear-halt`, live enablement, dry-run disablement,
   broker sync/reconciliation triggers, direct buy/sell/cancel, and risk limit

@@ -994,11 +994,11 @@ Each line should be a JSON object:
 }
 ```
 
-## 15. Telegram Integration Future Design
+## 15. Telegram Integration Design
 
 Telegram is the approval, urgent notification, and limited operator UI channel.
 
-Initial future components:
+Current components:
 
 ```text
 approval/
@@ -1025,7 +1025,7 @@ Requirements:
 - Back `/help`, `/status`, `/health`, `/account`, `/portfolio`, `/apps`,
   `/orders`, and `/approvals` responses with Maestro state/read models and the
   latest stored broker snapshot.
-- Require confirmation callbacks for `/pause` and `/kill-switch`.
+- Require confirmation callbacks for `/pause` and `/kill_switch`.
 - Persist Telegram command execution to audit/system events.
 - Do not allow Telegram commands to submit or cancel broker orders, call KIS
   live read endpoints directly, disable risk limits, enable live mode, disable

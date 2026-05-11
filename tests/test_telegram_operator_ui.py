@@ -1,0 +1,332 @@
+from pathlib import Path
+from typing import Any
+
+import yaml
+from typer.testing import CliRunner
+
+from maestro.cli import app
+from maestro.config.loader import load_config
+from maestro.core.enums import SafetyState
+from maestro.integrations.telegram.handlers import (
+    TelegramOperatorCommandRouter,
+    telegram_bot_commands,
+)
+from maestro.monitoring.audit_logger import AuditLogger
+from maestro.safety.controls import SafetyControlService
+from maestro.state.store import StateStore
+
+
+def test_telegram_operator_read_commands_send_state_responses(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_order(
+        "run_order",
+        "ord_1",
+        {
+            "symbol": "MOCK_ETF_A",
+            "side": "buy",
+            "quantity": 1,
+            "approval_status": "approved",
+        },
+    )
+    store.save_approval(
+        "run_approval",
+        "appr_1",
+        {
+            "request": {"order_count": 1, "estimated_notional": 100.0},
+            "decision": {"status": "approved", "decided_by": "telegram:operator"},
+        },
+    )
+
+    for command in (
+        "/help",
+        "/status",
+        "/health",
+        "/portfolio",
+        "/apps",
+        "/orders",
+        "/approvals",
+    ):
+        assert router.process_update(message_update(command))
+
+    sent_text = "\n\n".join(message["text"] for message in client.sent_messages)
+    assert "Maestro Telegram commands" in sent_text
+    assert "Maestro status" in sent_text
+    assert "Maestro health" in sent_text
+    assert "Maestro portfolio" in sent_text
+    assert "Maestro apps" in sent_text
+    assert "Recent orders" in sent_text
+    assert "Recent approvals" in sent_text
+    assert len(store.list_system_events_by_type("telegram_command", limit=20)) == 7
+
+
+def test_telegram_operator_account_masks_account_id(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "12345678-01",
+        {
+            "account": {
+                "account_id": "12345678-01",
+                "cash": 1000.0,
+                "buying_power": 900.0,
+                "positions": [{"symbol": "AAPL", "quantity": 1}],
+                "source": "fixture",
+            }
+        },
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "Broker account snapshot" in text
+    assert "12345678-01" not in text
+    assert "positions: 1" in text
+
+
+def test_telegram_operator_enforces_chat_and_user_whitelist(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+
+    assert router.process_update(message_update("/status", chat_id=999, user_id=100))
+    assert router.process_update(message_update("/status", chat_id=100, user_id=999))
+
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"] == "Unauthorized Telegram user."
+    events = store.list_system_events_by_type("telegram_command", limit=2)
+    assert {event["payload"]["status"] for event in events} == {"denied_chat", "denied_user"}
+
+
+def test_telegram_operator_pause_and_kill_switch_require_confirmation(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+
+    assert router.process_update(message_update("/pause"))
+    assert client.sent_messages[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == (
+        "operator:confirm:pause"
+    )
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.ACTIVE
+
+    assert router.process_update(callback_update("operator:confirm:pause"))
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.PAUSED
+    assert client.edited_messages[-1]["text"].startswith("Safety state changed: paused")
+
+    assert router.process_update(message_update("/kill_switch"))
+    assert client.sent_messages[-1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == (
+        "operator:confirm:kill-switch"
+    )
+    assert router.process_update(callback_update("operator:confirm:kill-switch"))
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.KILLED
+
+    statuses = [
+        event["payload"]["status"]
+        for event in store.list_system_events_by_type("telegram_command", limit=10)
+    ]
+    assert "handled" in statuses
+    assert "confirmed" in statuses
+
+
+def test_telegram_operator_poll_once_routes_updates(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient(updates=[message_update("/status", update_id=5)])
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+
+    next_offset = router.poll_once(offset=None, timeout_seconds=0)
+
+    assert next_offset == 6
+    assert client.update_requests[0]["allowed_updates"] == ["message", "callback_query"]
+    assert client.sent_messages[-1]["text"].startswith("Maestro status")
+
+
+def test_telegram_bot_commands_cover_operator_commands():
+    commands = telegram_bot_commands()
+
+    assert {"command": "status", "description": "Show Maestro status summary"} in commands
+    assert {"command": "health", "description": "Show health checks"} in commands
+    assert {
+        "command": "kill_switch",
+        "description": "Confirm emergency live execution stop",
+    } in commands
+    assert all(not item["command"].startswith("/") for item in commands)
+
+
+def test_telegram_set_commands_cli_registers_bot_commands(
+    tmp_path,
+    monkeypatch,
+):
+    config_path = _telegram_config_path(tmp_path)
+    fake_clients: list[FakeTelegramClient] = []
+
+    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
+        assert token_env == "TELEGRAM_BOT_TOKEN"
+        assert timeout_seconds == 10.0
+        client = FakeTelegramClient()
+        fake_clients.append(client)
+        return client
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+
+    result = CliRunner().invoke(
+        app,
+        ["telegram-set-commands", "--config", str(config_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "telegram_set_commands status=ok commands=" in result.output
+    assert fake_clients[0].registered_commands == telegram_bot_commands()
+
+
+class FakeTelegramClient:
+    def __init__(self, updates: list[dict[str, Any]] | None = None) -> None:
+        self.updates = list(updates or [])
+        self.update_requests: list[dict[str, Any]] = []
+        self.sent_messages: list[dict[str, Any]] = []
+        self.answered_callbacks: list[dict[str, Any]] = []
+        self.edited_messages: list[dict[str, Any]] = []
+        self.registered_commands: list[dict[str, str]] = []
+
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+        return {"ok": True, "result": {"message_id": len(self.sent_messages)}}
+
+    def get_updates(
+        self,
+        *,
+        offset: int | None,
+        timeout_seconds: int,
+        allowed_updates: list[str] | None = None,
+    ) -> dict[str, Any]:
+        self.update_requests.append(
+            {
+                "offset": offset,
+                "timeout_seconds": timeout_seconds,
+                "allowed_updates": allowed_updates,
+            }
+        )
+        return {"ok": True, "result": self.updates}
+
+    def answer_callback_query(self, callback_query_id: str, text: str) -> dict[str, Any]:
+        self.answered_callbacks.append({"callback_query_id": callback_query_id, "text": text})
+        return {"ok": True}
+
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.edited_messages.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": reply_markup,
+            }
+        )
+        return {"ok": True}
+
+    def set_my_commands(self, commands: list[dict[str, str]]) -> dict[str, Any]:
+        self.registered_commands = list(commands)
+        return {"ok": True, "result": True}
+
+
+def message_update(
+    text: str,
+    *,
+    update_id: int = 1,
+    chat_id: int = 100,
+    user_id: int = 100,
+) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "message": {
+            "chat": {"id": chat_id},
+            "from": {"id": user_id, "username": "operator"},
+            "text": text,
+        },
+    }
+
+
+def callback_update(
+    data: str,
+    *,
+    update_id: int = 2,
+    chat_id: int = 100,
+    user_id: int = 100,
+) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"callback-{update_id}",
+            "data": data,
+            "message": {
+                "chat": {"id": chat_id},
+                "message_id": 10,
+                "text": "Confirm operator command",
+            },
+            "from": {"id": user_id, "username": "operator"},
+        },
+    }
+
+
+def _telegram_config_path(tmp_path) -> Path:
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+    }
+    config_path = tmp_path / "telegram_operator.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path

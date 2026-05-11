@@ -327,15 +327,19 @@ And Maestro will:
 - Events must include cycle ID, timestamps, component, event type, details, and severity.
 - Dashboard-readiness should be considered from v0.1.
 
-### 8.7 Telegram Approval
+### 8.7 Telegram Approval and Operator UI
 
-Future requirement:
+Requirements:
 
 - Telegram will be used for approval and notifications.
 - Telegram must whitelist allowed user IDs.
 - Trading approval requests must include proposal ID, portfolio changes, risk result, estimated order list, and approval buttons.
 - Approval must expire after a configured timeout.
 - Rejected, expired, and approved proposals must be logged.
+- Telegram operator commands may expose read-only state and the limited
+  `/pause` and `/kill_switch` safety controls.
+- Telegram must not expose live enablement, dry-run disablement, broker sync,
+  direct trading, recovery, or risk-limit changes.
 
 ### 8.8 Dashboard
 

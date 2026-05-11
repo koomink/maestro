@@ -517,18 +517,18 @@
 
 ### Telegram Operator UI
 
-- [ ] Add Telegram command router with whitelist enforcement
-- [ ] Add `/help`
-- [ ] Add `/status`
-- [ ] Add `/health`
-- [ ] Add `/account` from latest broker snapshot only
-- [ ] Add `/portfolio` from Maestro state only
-- [ ] Add `/apps` from configured strategies and latest strategy runs
-- [ ] Add `/orders` and `/approvals`
-- [ ] Add `/pause` with confirmation button
-- [ ] Add `/kill-switch` with confirmation button
-- [ ] Persist Telegram command audit/system events
-- [ ] Keep KIS sync, reconcile, resume, clear-halt, direct trading, live enable,
+- [x] Add Telegram command router with whitelist enforcement
+- [x] Add `/help`
+- [x] Add `/status`
+- [x] Add `/health`
+- [x] Add `/account` from latest broker snapshot only
+- [x] Add `/portfolio` from Maestro state only
+- [x] Add `/apps` from configured strategies and latest strategy runs
+- [x] Add `/orders` and `/approvals`
+- [x] Add `/pause` with confirmation button
+- [x] Add `/kill_switch` with confirmation button
+- [x] Persist Telegram command audit/system events
+- [x] Keep KIS sync, reconcile, resume, clear-halt, direct trading, live enable,
       dry-run disablement, and risk changes out of Telegram
 
 ## Completed / Historical Notes

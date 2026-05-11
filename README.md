@@ -380,10 +380,10 @@ approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
 the bounded lifecycle service. This is product-level wiring for
 approval-gated live orders, not live automation.
 
-The dashboard remains read-only. Telegram approval and lifecycle notifications
-remain available. Telegram resume, clear-halt, live enablement, direct trading,
-and risk changes remain deferred; `/pause` and `/kill-switch` are limited future
-operator controls that require confirmation and audit.
+The dashboard remains read-only. Telegram approval, lifecycle notifications,
+and the constrained Telegram operator UI remain available. Telegram resume,
+clear-halt, live enablement, direct trading, and risk changes remain deferred;
+`/pause` and `/kill_switch` are the only Telegram safety controls.
 
 Use [configs/live_approval.example.yaml](configs/live_approval.example.yaml) as
 the safe-by-default operator template and follow
@@ -1023,7 +1023,7 @@ Initial allowed actions:
 - Receive fill notification
 - Receive error/kill switch notification
 
-Planned operator commands:
+Implemented operator commands:
 
 - `/help`
 - `/status`
@@ -1034,12 +1034,18 @@ Planned operator commands:
 - `/orders`
 - `/approvals`
 - `/pause`
-- `/kill-switch`
+- `/kill_switch`
 
 Telegram operator commands are intentionally constrained. Read commands must use
 stored SQLite state or the latest broker snapshot only; they must not call KIS
-or other broker network endpoints directly. `/pause` and `/kill-switch` require
+or other broker network endpoints directly. `/pause` and `/kill_switch` require
 a whitelisted user, confirmation button, and persisted audit/system event.
+Run the polling operator UI with:
+
+```bash
+maestro telegram-set-commands --config <operator-live-approval-config>
+maestro telegram-operator --config <operator-live-approval-config>
+```
 
 Excluded Telegram commands include `/resume`, `/clear-halt`, `/live-on`,
 `/dry-run-off`, `/buy`, `/sell`, `/cancel`, reconciliation triggers, direct
