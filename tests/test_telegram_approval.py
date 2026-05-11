@@ -27,8 +27,13 @@ class FakeTelegramClient:
         self.sent_messages: list[dict[str, Any]] = []
         self.get_updates_calls: list[dict[str, Any]] = []
 
-    def send_message(self, chat_id: int, text: str) -> dict[str, Any]:
-        self.sent_messages.append({"chat_id": chat_id, "text": text})
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"ok": True, "result": {"message_id": len(self.sent_messages)}}
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> dict[str, Any]:
@@ -86,6 +91,24 @@ def update(
     }
 
 
+def callback_update(
+    data: str,
+    *,
+    update_id: int = 1,
+    user_id: int = 10,
+    chat_id: int = 100,
+) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"callback-{update_id}",
+            "data": data,
+            "message": {"chat": {"id": chat_id}},
+            "from": {"id": user_id, "username": "approver"},
+        },
+    }
+
+
 def test_telegram_service_sends_request_and_receives_approval():
     request = approval_request()
     client = FakeTelegramClient([update(f"approve {request.approval_id}")])
@@ -102,10 +125,71 @@ def test_telegram_service_sends_request_and_receives_approval():
     assert decision.decided_by == "telegram:approver"
     assert message == client.sent_messages[0]["text"]
     assert client.sent_messages[0]["chat_id"] == 100
+    assert client.sent_messages[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [
+                {"text": "Approve", "callback_data": "approve:appr_test"},
+                {"text": "Reject", "callback_data": "reject:appr_test"},
+            ]
+        ]
+    }
     assert "proposed_orders:" in message
     assert "buy MOCK_ETF_A notional=600.00" in message
     assert "approve appr_test" in message
     assert "reject appr_test" in message
+
+
+def test_telegram_service_receives_button_approval():
+    request = approval_request()
+    client = FakeTelegramClient([callback_update(f"approve:{request.approval_id}")])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
+    assert decision.decided_by == "telegram:approver"
+    assert decision.reason == "Telegram button approved callback."
+
+
+def test_telegram_service_receives_button_rejection():
+    request = approval_request()
+    client = FakeTelegramClient([callback_update(f"reject:{request.approval_id}")])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "rejected"
+
+
+def test_telegram_service_ignores_button_from_wrong_user_and_chat():
+    request = approval_request()
+    client = FakeTelegramClient(
+        [
+            callback_update(f"approve:{request.approval_id}", update_id=1, user_id=99),
+            callback_update(f"approve:{request.approval_id}", update_id=2, chat_id=999),
+            callback_update(f"approve:{request.approval_id}", update_id=3),
+        ]
+    )
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
 
 
 def test_telegram_service_sends_request_to_all_configured_chats():

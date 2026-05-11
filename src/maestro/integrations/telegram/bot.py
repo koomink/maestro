@@ -17,7 +17,12 @@ from maestro.integrations.telegram.formatter import format_approval_request
 
 
 class TelegramBotClient(Protocol):
-    def send_message(self, chat_id: int, text: str) -> Mapping[str, Any]:
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         """Send a Telegram message."""
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> Mapping[str, Any]:
@@ -32,14 +37,19 @@ class TelegramBotAPIClient:
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.timeout_seconds = timeout_seconds
 
-    def send_message(self, chat_id: int, text: str) -> Mapping[str, Any]:
-        return self._post(
-            "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-            },
-        )
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "text": text,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        return self._post("sendMessage", payload)
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> Mapping[str, Any]:
         payload: dict[str, Any] = {"timeout": timeout_seconds}
@@ -112,8 +122,9 @@ class TelegramApprovalService:
 
     def request_decision(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
         message = format_approval_request(request)
+        reply_markup = _approval_reply_markup(request.approval_id)
         for chat_id in self.chat_ids:
-            self.client.send_message(chat_id, message)
+            self._send_message(chat_id, message, reply_markup)
 
         offset = None
         while utc_now() < request.expires_at:
@@ -152,6 +163,9 @@ class TelegramApprovalService:
     ) -> ApprovalDecision | None:
         if request.approval_id in self._decided_approval_ids:
             return None
+        callback_decision = self._decision_from_callback_query(update, request)
+        if callback_decision is not None:
+            return callback_decision
 
         message = update.get("message")
         if not isinstance(message, Mapping):
@@ -188,6 +202,49 @@ class TelegramApprovalService:
             reason=f"Telegram {status} command.",
         )
 
+    def _decision_from_callback_query(
+        self,
+        update: Mapping[str, Any],
+        request: ApprovalRequest,
+    ) -> ApprovalDecision | None:
+        callback = update.get("callback_query")
+        if not isinstance(callback, Mapping):
+            return None
+
+        message = callback.get("message")
+        if not isinstance(message, Mapping):
+            return None
+        chat = message.get("chat")
+        if not isinstance(chat, Mapping) or chat.get("id") not in self.chat_ids:
+            return None
+
+        user = callback.get("from")
+        if not isinstance(user, Mapping):
+            return None
+        user_id = user.get("id")
+        if not isinstance(user_id, int):
+            return None
+        if self.allowed_user_ids and user_id not in self.allowed_user_ids:
+            return None
+
+        data = callback.get("data")
+        if not isinstance(data, str):
+            return None
+        status = self._parse_callback_status(data, request.approval_id)
+        if status is None:
+            return None
+
+        username = user.get("username") if isinstance(user.get("username"), str) else None
+        decided_by = f"telegram:{username or user_id}"
+        return ApprovalDecision(
+            approval_id=request.approval_id,
+            run_id=request.run_id,
+            status=status,
+            decided_at=utc_now(),
+            decided_by=decided_by,
+            reason=f"Telegram button {status} callback.",
+        )
+
     def _parse_status(self, text: str, approval_id: str) -> str | None:
         parts = text.strip().split()
         if len(parts) != 2:
@@ -200,6 +257,38 @@ class TelegramApprovalService:
         if command == "reject":
             return "rejected"
         return None
+
+    def _parse_callback_status(self, data: str, approval_id: str) -> str | None:
+        command, separator, callback_approval_id = data.partition(":")
+        if separator != ":" or callback_approval_id != approval_id:
+            return None
+        if command == "approve":
+            return "approved"
+        if command == "reject":
+            return "rejected"
+        return None
+
+    def _send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            return self.client.send_message(chat_id, text, reply_markup=reply_markup)
+        except TypeError:
+            return self.client.send_message(chat_id, text)
+
+
+def _approval_reply_markup(approval_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "Approve", "callback_data": f"approve:{approval_id}"},
+                {"text": "Reject", "callback_data": f"reject:{approval_id}"},
+            ]
+        ]
+    }
 
 
 def _format_live_order_notification(event: LiveOrderLifecycleNotification) -> str:

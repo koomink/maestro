@@ -26,6 +26,7 @@ def format_approval_request(request: ApprovalRequest) -> str:
     lines.extend(
         [
             "",
+            "Tap Approve or Reject, or reply manually:",
             f"Reply with: approve {request.approval_id}",
             f"Or reply with: reject {request.approval_id}",
         ]
