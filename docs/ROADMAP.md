@@ -466,8 +466,10 @@ Completed scope:
 - `maestro personal-check --config ...` reports staged readiness for local
   paper/config health, KIS read-only reconciliation, Telegram approval, live
   dry-run, and minimum-size approval-gated live order readiness.
-- `personal-check` is local and does not submit broker orders or send Telegram
-  messages.
+- `maestro operator-evidence --config ... --output ...` records a read-only
+  readiness evidence report for operator rehearsals.
+- `personal-check` and `operator-evidence` are local and do not submit broker
+  orders, send Telegram messages, or run strategies.
 - `docs/personal_operator_mvp.md` documents the single-user operating loop,
   first minimum-size order procedure, and recovery boundary.
 

@@ -68,7 +68,9 @@ Use a config whose `telegram_allowed_chat_ids` and `whitelisted_user_ids`
 match the operator account. This service handles read-only Telegram commands
 and the limited `/pause` and `/kill_switch` confirmations. Approval request
 polling still happens inside `maestro run-once` when an approval-gated run is
-active.
+active. Telegram Bot API polling allows only one active `getUpdates` consumer
+per bot token, so stop this service during approval-gated `run-once` or
+`live-smoke --check live-dry-run` rehearsals when they use the same bot.
 
 Register the slash command menu once after bot setup or command changes:
 

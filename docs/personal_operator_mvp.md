@@ -53,6 +53,7 @@ token. If it is absent, Maestro can use the configured token cache path.
 Run one local readiness summary:
 
 ```bash
+maestro operator-evidence --config ~/maestro-operator/maestro_personal.yaml --output ~/maestro-operator/evidence-before.json
 maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 ```
 
@@ -65,9 +66,12 @@ The output reports these stages:
 - `minimum_live_ready`: private beta gate is ready for one minimum-size
   approval-gated live order.
 
-`personal-check` does not call broker submit endpoints and does not send
-Telegram messages. Use the `next="..."` command printed for the first failing
-stage.
+`operator-evidence` and `personal-check` do not call broker submit endpoints,
+do not send Telegram messages, and do not run strategies. `operator-evidence`
+stores a JSON snapshot of readiness stages, health checks, latest broker and
+reconciliation state, latest approval/proposal/dry-run events, lifecycle
+events, fill reconciliation, and recovery markers. Use the `next="..."`
+command printed for the first failing stage.
 
 ## Daily Operating Loop
 
@@ -79,8 +83,15 @@ maestro health --config ~/maestro-operator/maestro_personal.yaml
 maestro kis-sync --config ~/maestro-operator/maestro_personal.yaml
 maestro reconcile --config ~/maestro-operator/maestro_personal.yaml
 maestro live-smoke --config ~/maestro-operator/maestro_personal.yaml --check telegram-approval
+systemctl stop maestro-telegram-operator.service
 maestro live-smoke --config ~/maestro-operator/maestro_personal.yaml --check live-dry-run
+systemctl restart maestro-telegram-operator.service
+maestro operator-evidence --config ~/maestro-operator/maestro_personal.yaml --output ~/maestro-operator/evidence-after.json
 ```
+
+The polling Telegram operator service and approval polling cannot use the same
+bot token at the same time. Stop `maestro-telegram-operator.service` before
+approval-gated dry-run or `run-once` rehearsals, then restart it afterward.
 
 For the first R1 rehearsal on a verified broker baseline, adopt the latest
 read-only KIS snapshot before reconciliation:
@@ -103,9 +114,11 @@ Only after `personal-check` reports `minimum_live_ready status=ok`:
 3. Set `execution.live_order_dry_run=false`.
 4. Set `execution.live_order_enabled=true`.
 5. Run `maestro beta-preflight --config <operator-config>`.
-6. Run one `maestro run-once --config <operator-config>`.
-7. Approve only the exact expected Telegram proposal.
-8. Stop scheduled runs after the first order.
+6. Stop `maestro-telegram-operator.service` if it uses the same Telegram bot.
+7. Run one `maestro run-once --config <operator-config>`.
+8. Approve only the exact expected Telegram proposal.
+9. Restart `maestro-telegram-operator.service`.
+10. Stop scheduled runs after the first order.
 
 After the order, verify broker status, fill reconciliation, broker
 reconciliation, audit events, dashboard state, and the broker UI before any

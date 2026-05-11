@@ -44,10 +44,15 @@ or Telegram admin controls.
 
 ## First Minimum-size Order Checklist
 
+- Run `maestro operator-evidence --config <operator-live-approval-config> --output <evidence-before.json>`.
 - Run `maestro live-preflight --config <operator-live-approval-config>`.
 - Run `maestro live-smoke --config <operator-readonly-config> --check kis-readonly`.
 - Run `maestro live-smoke --config <operator-live-approval-config> --check telegram-approval`.
+- Stop `maestro-telegram-operator.service` if it uses the same Telegram bot
+  token as approval polling.
 - Run `maestro live-smoke --config <operator-live-approval-config> --check live-dry-run`.
+- Restart `maestro-telegram-operator.service`.
+- Run `maestro operator-evidence --config <operator-live-approval-config> --output <evidence-after.json>`.
 - Review `live_proposal_data_snapshot` and confirm symbol, side, limit price,
   quantity, notional, DataHub price basis, and broker product.
 - Enable live submission only for the intended order, approve only the expected

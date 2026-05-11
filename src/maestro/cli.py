@@ -24,6 +24,7 @@ from maestro.integrations.telegram.handlers import (
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
+from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
@@ -290,6 +291,33 @@ def personal_check(config: Path = typer.Option(..., "--config")) -> None:
             f"stage={stage['stage']} status={stage['status']} "
             f'message={stage["message"]} next="{stage["next"]}"'
         )
+
+
+@app.command("operator-evidence")
+def operator_evidence(
+    config: Path = typer.Option(..., "--config"),
+    output: Path | None = typer.Option(None, "--output"),
+) -> None:
+    maestro_config = load_config(config)
+    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    evidence = build_operator_evidence(maestro_config, store, config_path=config)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    output_text = str(output) if output is not None else "none"
+    typer.echo(
+        f"operator_evidence status={evidence['overall_status']} "
+        f"config={config} output={output_text}"
+    )
+    for stage in evidence["stages"]:
+        typer.echo(
+            f"stage={stage['stage']} status={stage['status']} "
+            f'message={stage["message"]} next="{stage["next"]}"'
+        )
+    beta = evidence["private_beta"]
+    failures = ",".join(beta["failures"]) if beta["failures"] else "none"
+    typer.echo(f"private_beta status={beta['status']} failures={failures}")
 
 
 @app.command("live-smoke")
@@ -1017,6 +1045,8 @@ def _minimum_live_personal_status(config: MaestroConfig, report) -> str:
     if config.mode != RunMode.LIVE_APPROVAL:
         return "fail"
     if not config.execution.live_order_enabled or config.execution.live_order_dry_run:
+        return "fail"
+    if _telegram_personal_status(config) != "ok":
         return "fail"
     return "ok" if not private_beta_failures(config, report) else "fail"
 

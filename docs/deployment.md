@@ -36,6 +36,7 @@ For a single-user operator setup, generate an untracked config first:
 
 ```bash
 maestro init-personal --output ~/maestro-operator/maestro_personal.yaml
+maestro operator-evidence --config ~/maestro-operator/maestro_personal.yaml --output ~/maestro-operator/evidence-before.json
 maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 ```
 
@@ -56,7 +57,9 @@ reconciliation status.
 
 `personal-check` summarizes the same local gates as a staged product-readiness
 view: paper, read-only KIS, Telegram approval, live dry-run, and minimum-size
-approval-gated live order readiness. It does not submit broker orders.
+approval-gated live order readiness. `operator-evidence` writes the same
+readiness shape plus latest state evidence to JSON. Neither command submits
+broker orders, sends Telegram messages, or runs strategies.
 
 ## Logging
 

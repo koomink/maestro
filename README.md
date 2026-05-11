@@ -158,6 +158,7 @@ For a single-user operator workflow, start with
 
 ```bash
 maestro init-personal --output ~/maestro-operator/maestro_personal.yaml
+maestro operator-evidence --config ~/maestro-operator/maestro_personal.yaml --output ~/maestro-operator/evidence-before.json
 maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 ```
 
@@ -750,6 +751,11 @@ Audit JSONL entries include a hash chain, and health verifies audit integrity.
 mode, real KIS provider, Telegram approval, fresh broker snapshot, passing
 reconciliation, audit integrity, market/session/quote/risk gates, daily loss
 limit, heartbeat monitoring, and scheduled-run monitoring.
+`operator-evidence` is a read-only evidence snapshot. It summarizes readiness
+stages, health checks, private-beta failures, latest broker/reconciliation
+state, latest approvals, proposal snapshots, dry-run events, lifecycle events,
+fill reconciliation, and recovery markers without calling KIS, sending
+Telegram messages, submitting broker orders, or running strategies.
 
 For an operator-local real KIS read-only rehearsal:
 
@@ -768,6 +774,7 @@ without broker submission:
 
 ```bash
 maestro live-smoke --config <operator-live-approval-config> --check live-dry-run
+maestro operator-evidence --config <operator-live-approval-config> --output <operator-evidence-after.json>
 ```
 
 The matching pytest smokes are skipped by default and run only when

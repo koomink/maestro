@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -87,6 +88,40 @@ def test_personal_check_reports_default_blocked_stages(tmp_path):
     assert "stage=minimum_live_ready status=fail" in result.output
 
 
+def test_operator_evidence_writes_blocked_readiness_report(tmp_path):
+    config_path = tmp_path / "maestro_personal.yaml"
+    init = CliRunner().invoke(app, ["init-personal", "--output", str(config_path)])
+    assert init.exit_code == 0, init.output
+    output_path = tmp_path / "evidence-before.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "operator-evidence",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "operator_evidence status=blocked" in result.output
+    assert "stage=paper_ready status=ok" in result.output
+    assert "private_beta status=fail" in result.output
+    evidence = json.loads(output_path.read_text())
+    assert evidence["overall_status"] == "blocked"
+    assert evidence["config"]["mode"] == "live_approval"
+    assert evidence["latest"]["broker_snapshot"] is None
+    assert {stage["stage"] for stage in evidence["stages"]} == {
+        "paper_ready",
+        "readonly_ready",
+        "telegram_ready",
+        "dry_run_ready",
+        "minimum_live_ready",
+    }
+
+
 def test_personal_check_reports_ready_operator_gates(monkeypatch, tmp_path):
     monkeypatch.setenv("KIS_ACCOUNT_ID", "12345678-01")
     monkeypatch.setenv("KIS_APP_KEY", "app-key")
@@ -136,6 +171,103 @@ def test_personal_check_reports_ready_operator_gates(monkeypatch, tmp_path):
     assert "app-key" not in result.output
     assert "app-secret" not in result.output
     assert "telegram-token" not in result.output
+
+
+def test_operator_evidence_summarizes_ready_state_without_secrets(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIS_ACCOUNT_ID", "12345678-01")
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    config_path = _personal_config(
+        tmp_path,
+        live_order_enabled=True,
+        live_order_dry_run=False,
+        require_broker_quote_validation=True,
+        require_broker_risk_validation=True,
+        daily_loss_limit=100.0,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event("run_heartbeat", "maestro_heartbeat", {"source": "test"})
+    store.save_system_event("run_completed", "run_once_completed", {"orders_created": 0})
+    store.save_broker_account_snapshot(
+        "run_snapshot",
+        "BROKER-ACCOUNT",
+        {
+            "account": {
+                "account_id": "BROKER-ACCOUNT",
+                "cash": 1000.0,
+                "buying_power": 1000.0,
+                "positions": [{"symbol": "MOCK_ETF_A", "quantity": 1}],
+            },
+            "current_prices": {"MOCK_ETF_A": 100.0},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+    snapshot = store.load_latest_broker_account_snapshot()
+    assert snapshot is not None
+    store.save_system_event(
+        "run_reconcile",
+        "broker_reconciliation",
+        {
+            "passed": True,
+            "issues": [],
+            "broker_snapshot_id": snapshot["id"],
+            "broker_account_id": "BROKER-ACCOUNT",
+        },
+    )
+    store.save_approval(
+        "run_approval",
+        "approval_1",
+        {
+            "request": {"order_count": 1, "estimated_notional": 100.0},
+            "decision": {"status": "approved", "decided_by": "telegram:operator"},
+        },
+    )
+    store.save_system_event(
+        "run_dry",
+        "live_order_dry_run",
+        {
+            "request": {
+                "order_id": "order_1",
+                "symbol": "MOCK_ETF_A",
+                "side": "buy",
+                "quantity": 1,
+                "limit_price": 100.0,
+                "approval_id": "approval_1",
+            },
+            "approval_decision": {"status": "approved"},
+            "notional": 100.0,
+            "broker_submit_skipped": True,
+        },
+    )
+    output_path = tmp_path / "evidence-after.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "operator-evidence",
+            "--config",
+            str(config_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "operator_evidence status=ok" in result.output
+    evidence_text = output_path.read_text()
+    assert "app-key" not in evidence_text
+    assert "app-secret" not in evidence_text
+    assert "telegram-token" not in evidence_text
+    assert "12345678-01" not in evidence_text
+    assert "BROKER-ACCOUNT" not in evidence_text
+    evidence = json.loads(evidence_text)
+    assert evidence["latest"]["broker_snapshot"]["account_id"].startswith("BR")
+    assert evidence["latest"]["reconciliation"]["passed"] is True
+    assert evidence["latest"]["approval"]["status"] == "approved"
+    assert evidence["latest"]["live_order_dry_run"]["broker_submit_skipped"] is True
 
 
 def _personal_config(
