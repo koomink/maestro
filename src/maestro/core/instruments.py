@@ -16,6 +16,7 @@ class BrokerSymbolMapping(BaseModel):
 
 class TradableInstrument(BaseModel):
     symbol: str = Field(min_length=1)
+    name: str | None = None
     asset_type: AssetType
     region: MarketRegion
     currency: Currency

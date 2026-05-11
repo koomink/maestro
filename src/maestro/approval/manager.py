@@ -5,6 +5,7 @@ from maestro.config.models import ApprovalConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
 from maestro.core.ids import new_approval_id
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.base import OrderIntent
 from maestro.integrations.telegram.bot import (
     TelegramApprovalNotifier,
@@ -20,10 +21,12 @@ class ApprovalManager:
         config: ApprovalConfig,
         *,
         run_mode: RunMode = RunMode.PAPER,
+        instruments: list[TradableInstrument] | None = None,
         telegram_client: TelegramBotClient | None = None,
     ) -> None:
         self.config = config
         self.run_mode = run_mode
+        self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
         self.notifier = TelegramApprovalNotifier()
         self.telegram_client = telegram_client
 
@@ -49,7 +52,7 @@ class ApprovalManager:
             channel=self.config.provider,
             order_count=len(orders),
             estimated_notional=sum(order.notional for order in orders),
-            proposed_orders=[order.model_dump(mode="json") for order in orders],
+            proposed_orders=[self._proposed_order_payload(order) for order in orders],
             risk_modifications=risk_modifications,
             risk_violations=risk_violations,
         )
@@ -78,3 +81,15 @@ class ApprovalManager:
             reason="Configured Phase 2 approval stub decision.",
         )
         return request, decision, message
+
+    def _proposed_order_payload(self, order: OrderIntent) -> dict:
+        payload = order.model_dump(mode="json")
+        instrument = self.instruments.get(order.symbol)
+        if instrument is None:
+            return payload
+        if instrument.name:
+            payload["name"] = instrument.name
+        payload["broker_symbol"] = instrument.broker_symbol
+        if instrument.exchange_code is not None:
+            payload["exchange_code"] = instrument.exchange_code.value
+        return payload

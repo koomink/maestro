@@ -73,6 +73,7 @@ class MaestroOrchestrator:
         self.approval_manager = ApprovalManager(
             config.approval,
             run_mode=config.mode,
+            instruments=config.universe.instruments,
             telegram_client=telegram_client,
         )
         self.state_store = StateStore(

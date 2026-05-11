@@ -18,6 +18,7 @@ from maestro.integrations.telegram.bot import (
     TelegramBotAPIClient,
     TelegramLiveOrderNotificationClient,
 )
+from maestro.integrations.telegram.formatter import format_approval_request
 from maestro.state.store import StateStore
 
 
@@ -162,6 +163,32 @@ def test_telegram_service_sends_request_and_receives_approval():
     assert "buy MOCK_ETF_A notional=600.00" in message
     assert "approve appr_test" in message
     assert "reject appr_test" in message
+
+
+def test_telegram_approval_message_shows_instrument_names():
+    request = approval_request().model_copy(
+        update={
+            "proposed_orders": [
+                {
+                    "symbol": "133690",
+                    "name": "TIGER 미국나스닥100",
+                    "side": "buy",
+                    "notional": 600.0,
+                },
+                {
+                    "symbol": "QLD",
+                    "name": "ProShares Ultra QQQ",
+                    "side": "buy",
+                    "notional": 400.0,
+                },
+            ]
+        }
+    )
+
+    message = format_approval_request(request)
+
+    assert "buy 133690 TIGER 미국나스닥100 notional=600.00" in message
+    assert "buy QLD ProShares Ultra QQQ notional=400.00" in message
 
 
 def test_telegram_service_receives_button_approval():

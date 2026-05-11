@@ -19,10 +19,10 @@ def format_approval_request(request: ApprovalRequest) -> str:
     if request.proposed_orders:
         lines.append("proposed_orders:")
         for order in request.proposed_orders:
-            symbol = order.get("symbol", "unknown")
             side = order.get("side", "unknown")
             notional = float(order.get("notional", 0.0))
-            lines.append(f"- {side} {symbol} notional={notional:.2f}")
+            label = _order_label(order)
+            lines.append(f"- {side} {label} notional={notional:.2f}")
     lines.extend(
         [
             "",
@@ -32,3 +32,14 @@ def format_approval_request(request: ApprovalRequest) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _order_label(order: dict) -> str:
+    symbol = str(order.get("symbol") or "unknown")
+    name = order.get("name")
+    broker_symbol = order.get("broker_symbol")
+    if isinstance(name, str) and name:
+        return f"{symbol} {name}"
+    if isinstance(broker_symbol, str) and broker_symbol and broker_symbol != symbol:
+        return f"{symbol} ({broker_symbol})"
+    return symbol
