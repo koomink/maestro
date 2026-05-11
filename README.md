@@ -146,6 +146,8 @@ Current runnable modes are:
 - CSV-backed paper mode with `configs/csv_paper.yaml`
 - Optional external DataHub providers such as Yahoo/yfinance, FRED, and RSS when
   explicitly configured
+- Yahoo/yfinance-backed fundamentals, financial statements, and OHLCV-derived
+  technical indicators for advanced LLM trading agents
 - Mock `live_readonly` broker scaffolding with `configs/live_readonly.yaml`
 - Live approval infrastructure and safety gates, with KIS domestic and overseas
   read-only plus approval-gated stock/ETF limit-order submit/status adapter
@@ -195,7 +197,11 @@ v0.2 DataHub and dashboard foundation adds:
 
 v0.3 DataHub provider work adds:
 
-- Optional Yahoo/yfinance-style `price` and `ohlcv` provider behind Maestro DataHub
+- Optional Yahoo/yfinance-style `price`, `ohlcv`, `fundamental`, and
+  `financial_statements` provider behind Maestro DataHub
+- Native `technical_indicators` support derived from OHLCV bars, covering RSI,
+  MACD, SMA, EMA, and Bollinger Bands for LLM trading agents such as
+  TradingAgents, Vibe-Trading, and QuantAgent
 - FRED `macro` provider behind Maestro DataHub, using API keys from environment variables
 - RSS `news` provider behind Maestro DataHub
 - Network-free rule-based `sentiment` provider over configured fixture/news text
@@ -408,7 +414,8 @@ release/versioning policy and lockfile update.
 ## Optional Yahoo/yfinance Provider
 
 The Yahoo/yfinance provider is optional and is not required for core Maestro
-usage:
+usage. When configured, it supports price history, fundamentals, financial
+statements, and OHLCV-derived technical indicators behind Maestro DataHub:
 
 ```bash
 pip install "maestro[yahoo]"
@@ -434,6 +441,24 @@ datahub:
 For multiple providers, use `datahub.providers` with lower `priority` values
 preferred first. Strategy plugins still request data through Maestro DataHub and
 do not call yfinance directly.
+
+Example LLM-agent requests:
+
+```python
+DataRequest(
+    symbol="AAPL",
+    asset_type="stock",
+    data_type="financial_statements",
+    statement_type="income_statement",
+)
+DataRequest(
+    symbol="AAPL",
+    asset_type="stock",
+    data_type="technical_indicators",
+    indicator="macd",
+    lookback=30,
+)
+```
 
 ## FRED Macro Provider
 

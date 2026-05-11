@@ -227,9 +227,9 @@ directly.
 | TradingAgents need | Current Maestro status | Gap |
 | --- | --- | --- |
 | OHLCV prices | Supported through Yahoo/CSV providers | Low |
-| Technical indicators | Not supported as a first-class DataHub type/provider | High |
-| Company fundamentals | `fundamental` is recognized, but no complete provider exists | High |
-| Financial statements | No first-class type/provider | High |
+| Technical indicators | `technical_indicators` provider derives RSI, MACD, SMA, EMA, and Bollinger values from OHLCV | Low |
+| Company fundamentals | Yahoo/yfinance provider returns key `Ticker.info` metrics through `fundamental` | Low |
+| Financial statements | Yahoo/yfinance provider returns balance sheet, income statement, and cashflow rows through `financial_statements` | Low |
 | Ticker-specific news | RSS exists, but filtering and source coverage are weaker than TradingAgents expects | Medium |
 | Global news | RSS exists, but no TradingAgents-equivalent tool contract | Medium |
 | Insider transactions | Not supported | High |
@@ -378,16 +378,17 @@ represented without ad hoc fields:
 
 ### 6.4 DataHub Provider Expansion
 
-Add or complete providers/data types for:
+Provider/data type implementation status:
 
 - `technical_indicators`
 - `fundamental`
 - `financial_statements`
 - `insider_transactions`
 
-The first implementation can derive technical indicators from OHLCV and extend
-the existing Yahoo-style provider surface for fundamentals/statements/insider
-data. Alpha Vantage parity can come later.
+The first three are implemented through the Yahoo/yfinance provider family.
+`insider_transactions` remains recognized by the SDK/DataHub type registry but
+does not yet have a provider implementation. Alpha Vantage parity can come
+later.
 
 ### 6.5 App Runtime Services
 
@@ -492,8 +493,8 @@ Use this only if TradingAgents becomes a strategic first-class app.
 2. Add a structured signal/metadata contract so TradingAgents decisions are not
    collapsed into weights too early.
 3. Add Maestro-backed runtime data tools for the TradingAgents tool surface.
-4. Expand DataHub for technical indicators, fundamentals, financial statements,
-   and insider transactions.
+4. Add an `insider_transactions` provider and broaden Yahoo/Alpha Vantage parity
+   where needed.
 5. Add app runtime services for storage, artifacts, checkpointing, timeout, and
    telemetry.
 6. Add LLM capability and permission declarations to the app manifest/config.

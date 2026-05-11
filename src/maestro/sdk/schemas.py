@@ -53,7 +53,9 @@ class DataRequest(BaseModel):
     indicator: str | None = None
     limit: int | None = Field(default=None, ge=0)
     query: str | None = None
-    statement_type: Literal["balance_sheet", "cashflow", "income_statement"] | None = None
+    statement_type: Literal["balance_sheet", "cashflow", "cash_flow", "income_statement"] | None = (
+        None
+    )
     frequency: Literal["annual", "quarterly", "trailing"] | None = None
     provider_hint: str | None = None
     source_hint: str | None = None

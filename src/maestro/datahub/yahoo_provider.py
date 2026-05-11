@@ -22,6 +22,18 @@ class YahooHistoryClient(Protocol):
     ) -> Any:
         """Return Yahoo/yfinance-style OHLCV history for one provider symbol."""
 
+    def info(self, symbol: str, *, timeout_seconds: float) -> Mapping[str, Any]:
+        """Return Yahoo/yfinance-style fundamental info for one provider symbol."""
+
+    def financial_statement(
+        self,
+        symbol: str,
+        *,
+        statement_type: str,
+        timeout_seconds: float,
+    ) -> Any:
+        """Return one Yahoo/yfinance-style financial statement table."""
+
 
 class YFinanceClient:
     def history(
@@ -52,6 +64,58 @@ class YFinanceClient:
                 f"Yahoo provider is unavailable for symbol: {symbol}"
             ) from exc
 
+    def info(self, symbol: str, *, timeout_seconds: float) -> Mapping[str, Any]:
+        del timeout_seconds
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ProviderUnavailableError("yfinance package is not installed") from exc
+
+        try:
+            info = yf.Ticker(symbol).info
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {symbol}"
+            ) from exc
+        if not isinstance(info, Mapping):
+            raise ValueError(f"Malformed Yahoo info payload for {symbol}: expected mapping")
+        return info
+
+    def financial_statement(
+        self,
+        symbol: str,
+        *,
+        statement_type: str,
+        timeout_seconds: float,
+    ) -> Any:
+        del timeout_seconds
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ProviderUnavailableError("yfinance package is not installed") from exc
+
+        try:
+            ticker = yf.Ticker(symbol)
+            if statement_type == "balance_sheet":
+                return ticker.balance_sheet
+            if statement_type == "income_statement":
+                return ticker.financials
+            if statement_type == "cashflow":
+                return ticker.cashflow
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {symbol}"
+            ) from exc
+        raise ValueError(f"Unsupported Yahoo financial statement type: {statement_type}")
+
 
 class YahooDataProvider(BaseDataProvider):
     source = "yahoo"
@@ -73,6 +137,22 @@ class YahooDataProvider(BaseDataProvider):
         generated_at = utc_now()
         data: dict[str, Any] = {}
         for request in requests:
+            if request.data_type == "fundamental":
+                provider_symbol = self.symbol_map.get(request.symbol, request.symbol)
+                data[request.symbol] = self._fundamental_payload(
+                    request,
+                    provider_symbol,
+                    generated_at,
+                )
+                continue
+            if request.data_type == "financial_statements":
+                provider_symbol = self.symbol_map.get(request.symbol, request.symbol)
+                data[request.symbol] = self._financial_statement_payload(
+                    request,
+                    provider_symbol,
+                    generated_at,
+                )
+                continue
             if request.symbol.startswith("CASH"):
                 data[request.symbol] = SymbolData(
                     symbol=request.symbol,
@@ -123,6 +203,180 @@ class YahooDataProvider(BaseDataProvider):
         return DataBundle(
             requests=requests, data=data, generated_at=generated_at, source=self.source
         )
+
+    def _fundamental_payload(
+        self,
+        request: DataRequest,
+        provider_symbol: str,
+        generated_at: datetime,
+    ) -> dict[str, Any]:
+        try:
+            raw = self.client.info(provider_symbol, timeout_seconds=self.timeout_seconds)
+        except ProviderUnavailableError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {request.symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {request.symbol}"
+            ) from exc
+        if not raw:
+            raise ValueError(f"No Yahoo fundamental data for symbol: {request.symbol}")
+
+        metrics = {
+            "trailing_pe": self._clean_value(raw.get("trailingPE")),
+            "forward_pe": self._clean_value(raw.get("forwardPE")),
+            "price_to_book": self._clean_value(raw.get("priceToBook")),
+            "market_cap": self._clean_value(raw.get("marketCap")),
+            "dividend_yield": self._clean_value(raw.get("dividendYield")),
+            "beta": self._clean_value(raw.get("beta")),
+            "enterprise_value": self._clean_value(raw.get("enterpriseValue")),
+            "profit_margins": self._clean_value(raw.get("profitMargins")),
+            "return_on_equity": self._clean_value(raw.get("returnOnEquity")),
+            "revenue_growth": self._clean_value(raw.get("revenueGrowth")),
+        }
+        selected_fields = request.fields or list(metrics)
+        filtered_metrics = {field: metrics[field] for field in selected_fields if field in metrics}
+        raw_info = (
+            {key: self._clean_value(value) for key, value in raw.items() if key in request.fields}
+            if request.fields
+            else {}
+        )
+        fundamental = {"metrics": filtered_metrics, "raw_info": raw_info}
+
+        return {
+            "symbol": request.symbol,
+            "provider_symbol": provider_symbol,
+            "data_type": "fundamental",
+            "fundamental": fundamental,
+            "metrics": filtered_metrics,
+            "raw_info": raw_info,
+            "timestamp": generated_at.isoformat(),
+            "source": self.source,
+            "is_stale": False,
+            "warnings": [],
+        }
+
+    def _financial_statement_payload(
+        self,
+        request: DataRequest,
+        provider_symbol: str,
+        generated_at: datetime,
+    ) -> dict[str, Any]:
+        statement_type = self._statement_type_for(request)
+        try:
+            raw = self.client.financial_statement(
+                provider_symbol,
+                statement_type=statement_type,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except ProviderUnavailableError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {request.symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {request.symbol}"
+            ) from exc
+        statement = self._normalize_statement(raw, request.symbol)
+        if not statement:
+            raise ValueError(f"No Yahoo financial statement data for symbol: {request.symbol}")
+        statement_payload = {
+            "statement_type": statement_type,
+            "frequency": request.frequency or "annual",
+            "statement": statement,
+        }
+
+        return {
+            "symbol": request.symbol,
+            "provider_symbol": provider_symbol,
+            "data_type": "financial_statements",
+            "statement_type": statement_type,
+            "frequency": request.frequency or "annual",
+            "statement": statement,
+            "financial_statements": {statement_type: statement_payload},
+            "timestamp": generated_at.isoformat(),
+            "source": self.source,
+            "is_stale": False,
+            "warnings": [],
+        }
+
+    def _statement_type_for(self, request: DataRequest) -> str:
+        if request.statement_type is None:
+            raise ValueError(
+                "financial_statements requests require statement_type "
+                "(balance_sheet, income_statement, or cashflow)"
+            )
+        statement_type = (
+            "cashflow" if request.statement_type == "cash_flow" else request.statement_type
+        )
+        if statement_type not in {"balance_sheet", "income_statement", "cashflow"}:
+            raise ValueError(f"Unsupported financial statement type: {request.statement_type}")
+        return statement_type
+
+    def _normalize_statement(self, raw: Any, symbol: str) -> list[dict[str, Any]]:
+        if raw is None:
+            return []
+        if hasattr(raw, "empty") and raw.empty:
+            return []
+        if hasattr(raw, "to_dict"):
+            try:
+                return self._statement_from_dict(raw.to_dict(orient="index"))
+            except TypeError:
+                return self._statement_from_dict(raw.to_dict())
+        if isinstance(raw, Mapping):
+            return self._statement_from_dict(raw)
+        if isinstance(raw, Sequence) and not isinstance(raw, str | bytes):
+            normalized = []
+            for item in raw:
+                if not isinstance(item, Mapping):
+                    raise ValueError(
+                        f"Malformed Yahoo financial statement payload for {symbol}: "
+                        "rows must be mappings"
+                    )
+                normalized.append(
+                    {str(key): self._clean_value(value) for key, value in item.items()}
+                )
+            return normalized
+        raise ValueError(
+            f"Malformed Yahoo financial statement payload for {symbol}: expected table"
+        )
+
+    def _statement_from_dict(self, raw: Mapping[Any, Any]) -> list[dict[str, Any]]:
+        rows_by_period: dict[str, dict[str, Any]] = {}
+        for metric, values in raw.items():
+            metric_name = str(metric)
+            if isinstance(values, Mapping):
+                for period, value in values.items():
+                    period_key = self._period_key(period)
+                    row = rows_by_period.setdefault(period_key, {"period": period_key})
+                    row[metric_name] = self._clean_value(value)
+            else:
+                row = rows_by_period.setdefault("current", {"period": "current"})
+                row[metric_name] = self._clean_value(values)
+        return list(rows_by_period.values())
+
+    def _period_key(self, value: Any) -> str:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value)
+
+    def _clean_value(self, value: Any) -> Any:
+        if value is None:
+            return None
+        if hasattr(value, "item"):
+            value = value.item()
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        if isinstance(value, float) and value != value:
+            return None
+        if isinstance(value, (int, float, str, bool)):
+            return value
+        return str(value)
 
     def _fetch_rows(self, request: DataRequest, provider_symbol: str) -> list[Mapping[str, Any]]:
         try:

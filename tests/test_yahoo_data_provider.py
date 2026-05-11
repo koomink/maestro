@@ -9,9 +9,17 @@ from maestro.sdk import DataRequest
 
 
 class FakeYahooClient:
-    def __init__(self, payloads: dict[str, Any], error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        payloads: dict[str, Any],
+        error: Exception | None = None,
+        info_payloads: dict[str, Any] | None = None,
+        statement_payloads: dict[tuple[str, str], Any] | None = None,
+    ) -> None:
         self.payloads = payloads
         self.error = error
+        self.info_payloads = info_payloads or {}
+        self.statement_payloads = statement_payloads or {}
         self.calls: list[dict[str, Any]] = []
 
     def history(
@@ -33,6 +41,37 @@ class FakeYahooClient:
         if self.error is not None:
             raise self.error
         return self.payloads.get(symbol, [])
+
+    def info(self, symbol: str, *, timeout_seconds: float) -> Any:
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "method": "info",
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.info_payloads.get(symbol, {})
+
+    def financial_statement(
+        self,
+        symbol: str,
+        *,
+        statement_type: str,
+        timeout_seconds: float,
+    ) -> Any:
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "method": "financial_statement",
+                "statement_type": statement_type,
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.statement_payloads.get((symbol, statement_type), {})
 
 
 def request(
@@ -203,3 +242,101 @@ def test_yahoo_provider_maps_timeout_to_provider_unavailable():
 
     with pytest.raises(ProviderUnavailableError, match="timed out"):
         provider.get_data([request()])
+
+
+def test_yahoo_provider_returns_fundamental_metrics_from_info_payload():
+    client = FakeYahooClient(
+        {},
+        info_payloads={
+            "AAPL": {
+                "trailingPE": 28.5,
+                "forwardPE": 25.1,
+                "priceToBook": 39.2,
+                "marketCap": 3_000_000_000_000,
+                "dividendYield": 0.004,
+            }
+        },
+    )
+    provider = YahooDataProvider(client=client, timeout_seconds=4.0)
+
+    bundle = provider.get_data(
+        [
+            DataRequest(
+                symbol="AAPL",
+                asset_type="stock",
+                data_type="fundamental",
+                fields=["trailing_pe", "market_cap", "dividend_yield"],
+            )
+        ]
+    )
+
+    payload = bundle.data["AAPL"]
+    assert payload["data_type"] == "fundamental"
+    assert payload["metrics"] == {
+        "trailing_pe": 28.5,
+        "market_cap": 3_000_000_000_000,
+        "dividend_yield": 0.004,
+    }
+    assert payload["fundamental"]["metrics"]["trailing_pe"] == 28.5
+    assert payload["source"] == "yahoo"
+    assert client.calls == [{"symbol": "AAPL", "method": "info", "timeout_seconds": 4.0}]
+
+
+def test_yahoo_provider_returns_financial_statement_rows():
+    client = FakeYahooClient(
+        {},
+        statement_payloads={
+            (
+                "AAPL",
+                "income_statement",
+            ): {
+                "Total Revenue": {
+                    datetime(2025, 12, 31, tzinfo=UTC): 391_000_000_000,
+                    datetime(2024, 12, 31, tzinfo=UTC): 383_000_000_000,
+                },
+                "Net Income": {
+                    datetime(2025, 12, 31, tzinfo=UTC): 96_000_000_000,
+                    datetime(2024, 12, 31, tzinfo=UTC): 94_000_000_000,
+                },
+            }
+        },
+    )
+    provider = YahooDataProvider(client=client)
+
+    bundle = provider.get_data(
+        [
+            DataRequest(
+                symbol="AAPL",
+                asset_type="stock",
+                data_type="financial_statements",
+                statement_type="income_statement",
+                frequency="annual",
+            )
+        ]
+    )
+
+    payload = bundle.data["AAPL"]
+    assert payload["data_type"] == "financial_statements"
+    assert payload["statement_type"] == "income_statement"
+    assert payload["statement"][0]["period"] == "2025-12-31T00:00:00+00:00"
+    assert payload["statement"][0]["Total Revenue"] == 391_000_000_000
+    assert payload["statement"][0]["Net Income"] == 96_000_000_000
+    assert (
+        payload["financial_statements"]["income_statement"]["statement"][0]["Net Income"]
+        == 96_000_000_000
+    )
+
+
+def test_yahoo_provider_requires_statement_type_for_financial_statements():
+    provider = YahooDataProvider(client=FakeYahooClient({}))
+
+    with pytest.raises(ValueError, match="require statement_type"):
+        provider.get_data(
+            [
+                DataRequest(
+                    symbol="AAPL",
+                    asset_type="stock",
+                    data_type="financial_statements",
+                )
+            ]
+        )

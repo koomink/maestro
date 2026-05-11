@@ -284,18 +284,43 @@ def test_build_data_provider_accepts_yahoo_config_without_network_call():
     assert isinstance(provider, DataHubRouter)
 
 
+def test_build_data_provider_accepts_yahoo_llm_research_data_types():
+    config = DataHubConfig(
+        providers=[
+            DataHubProviderConfig(
+                name="yahoo",
+                provider="yahoo",
+                data_types=[
+                    "price",
+                    "ohlcv",
+                    "fundamental",
+                    "financial_statements",
+                    "technical_indicators",
+                ],
+            )
+        ]
+    )
+
+    provider = build_data_provider(config)
+
+    assert isinstance(provider, DataHubRouter)
+    assert provider.registry.registrations_for(request("MOCK_ETF_A", "fundamental"))
+    assert provider.registry.registrations_for(request("MOCK_ETF_A", "financial_statements"))
+    assert provider.registry.registrations_for(request("MOCK_ETF_A", "technical_indicators"))
+
+
 def test_build_data_provider_rejects_unsupported_yahoo_data_types():
     config = DataHubConfig(
         providers=[
             DataHubProviderConfig(
                 name="yahoo",
                 provider="yahoo",
-                data_types=["price", "fundamental"],
+                data_types=["price", "news"],
             )
         ]
     )
 
-    with pytest.raises(ValueError, match="supports only price and ohlcv"):
+    with pytest.raises(ValueError, match="technical_indicators"):
         build_data_provider(config)
 
 

@@ -87,6 +87,9 @@ Planned payload types:
 - `news`: normalized article or event metadata.
 - `sentiment`: normalized sentiment/community signals.
 - `fundamental`: normalized issuer, asset, or financial statement data.
+- `financial_statements`: normalized balance sheet, income statement, or cash
+  flow rows.
+- `technical_indicators`: indicator values derived from OHLCV bars.
 - `broker_quote`: broker-side reference quote used only for execution
   validation or reconciliation.
 
@@ -97,7 +100,14 @@ DataHub should route each request by:
 - `symbol`: Maestro canonical symbol.
 - `asset_type`: equity, ETF, cash, crypto, or another supported asset type.
 - `data_type`: one of the supported payload types above.
-- `timeframe` and `lookback`: used for historical series such as `ohlcv`.
+- `timeframe` and `lookback`: used for historical series such as `ohlcv` and
+  technical indicators.
+- `indicator`: used when requesting `technical_indicators`, such as `rsi`,
+  `macd`, `sma`, `ema`, or `bollinger`.
+- `statement_type`: used when requesting `financial_statements`; supported
+  values are `balance_sheet`, `income_statement`, `cashflow`, and `cash_flow`.
+- `frequency`: optional statement frequency hint such as `annual` or
+  `quarterly`.
 - run mode: research, paper, live-read-only, or future live-approval modes.
 
 Routing must remain deterministic. If no provider can satisfy a request, DataHub
@@ -249,7 +259,8 @@ Implemented routing scaffold:
 The scaffold recognizes these data types:
 
 ```text
-price, ohlcv, macro, news, sentiment, fundamental, broker_quote
+price, ohlcv, macro, news, sentiment, fundamental, financial_statements,
+technical_indicators, insider_transactions, broker_quote
 ```
 
 Current provider status:
@@ -257,9 +268,10 @@ Current provider status:
 - `mock`: supports `price` and `ohlcv` fixture-style payloads for development
   and tests; it is not production market data.
 - `csv`: supports `price` and `ohlcv` from local CSV files.
-- `yahoo` / `yfinance`: supports `price` and `ohlcv` through a small
-  Yahoo/yfinance-style client wrapper and can call external Yahoo/yfinance data
-  when configured.
+- `yahoo` / `yfinance`: supports `price`, `ohlcv`, `fundamental`, and
+  `financial_statements` through a small Yahoo/yfinance-style client wrapper and
+  can call external Yahoo/yfinance data when configured. Yahoo configs also
+  register a `technical_indicators` provider that derives indicators from OHLCV.
 - `fred`: supports `macro` through a small stdlib HTTP client wrapper.
 - `rss`: supports `news` through a small stdlib HTTP/XML client wrapper.
 - `sentiment`: supports `sentiment` through configured fixture/news text and a
@@ -352,26 +364,34 @@ datahub:
       stale_after_seconds: 86400
 ```
 
-The Yahoo/yfinance-style provider is implemented for `price` and `ohlcv` only.
-The FRED provider is implemented for `macro` only. The RSS provider is
-implemented for `news` only. The rule-based sentiment provider is implemented
-for configured fixture/news text only. GDELT, News API, Reddit/X/Discord/Telegram
-community APIs and paid sentiment APIs remain planning examples only. Crypto
-provider work is deferred until the supported universe expands beyond stocks and
-ETFs. The current implementation rejects unsupported provider names until real
-provider adapters are added. Retries, rate limits, and durable cache settings
-remain future design work where each provider needs them.
+The Yahoo/yfinance-style provider is implemented for `price`, `ohlcv`,
+`fundamental`, and `financial_statements`. A separate technical indicator
+provider derives `technical_indicators` from OHLCV bars. The FRED provider is
+implemented for `macro` only. The RSS provider is implemented for `news` only.
+The rule-based sentiment provider is implemented for configured fixture/news
+text only. GDELT, News API, Reddit/X/Discord/Telegram community APIs and paid
+sentiment APIs remain planning examples only. Crypto provider work is deferred
+until the supported universe expands beyond stocks and ETFs. The current
+implementation rejects unsupported provider names until real provider adapters
+are added. Retries, rate limits, and durable cache settings remain future design
+work where each provider needs them.
 
 ### Yahoo/yfinance Provider
 
 The Yahoo/yfinance-style provider is the first real external research provider.
 It remains behind DataHub and normalizes provider rows into `PricePoint`,
-`OHLCVBar`, and `SymbolData`.
+`OHLCVBar`, `SymbolData`, fundamental metrics, and financial statement rows.
 
 Supported behavior:
 
 - `price`: latest close from the selected Yahoo/yfinance history rows.
 - `ohlcv`: normalized OHLCV bars from Yahoo/yfinance history rows.
+- `fundamental`: selected key metrics from `Ticker.info`, including PE, PB,
+  market cap, dividend yield, beta, and profitability/growth fields.
+- `financial_statements`: normalized rows from `balance_sheet`, `financials`,
+  or `cashflow`, routed by `DataRequest.statement_type`.
+- `technical_indicators`: `rsi`, `macd`, `sma`, `ema`, and `bollinger`, derived
+  from Yahoo OHLCV when the Yahoo provider is configured.
 - `timeout_seconds`: passed to the Yahoo/yfinance client wrapper.
 - `stale_after_seconds`: optional freshness threshold that marks payloads stale.
 - `symbol_map`: canonical Maestro symbol to provider-specific Yahoo symbol
@@ -384,6 +404,26 @@ network access or a real Yahoo/yfinance call.
 Malformed provider rows fail loudly. Timeouts and client availability failures
 are normalized as provider-unavailable errors so the router can try the next
 matching provider by priority.
+
+Example strategy data requests:
+
+```python
+DataRequest(
+    symbol="AAPL",
+    asset_type="stock",
+    data_type="financial_statements",
+    statement_type="income_statement",
+    frequency="annual",
+)
+
+DataRequest(
+    symbol="AAPL",
+    asset_type="stock",
+    data_type="technical_indicators",
+    indicator="rsi",
+    lookback=14,
+)
+```
 
 Install the optional runtime dependency before using live Yahoo/yfinance calls:
 

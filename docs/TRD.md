@@ -17,7 +17,8 @@ Strategy plugins
     │ request DataRequest objects through Maestro SDK
     ▼
 datahub/
-    market and research data: price, ohlcv, macro, news, sentiment, fundamental
+    market and research data: price, ohlcv, macro, news, sentiment,
+    fundamental, financial_statements, and technical_indicators
     providers/adapters: mock, CSV/local, Yahoo/yfinance-style OHLCV, FRED,
     RSS, rule-based sentiment, future GDELT/News API and community providers
 
@@ -200,7 +201,7 @@ maestro/
 
 Some future modules may be created as stubs in v0.1 but not fully implemented.
 
-`datahub/` owns research and market data normalization, validation, routing, freshness, and provider selection. Its planned data types include `price`, `ohlcv`, `macro`, `news`, `sentiment`, and `fundamental`.
+`datahub/` owns research and market data normalization, validation, routing, freshness, and provider selection. Its supported data types include `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, `financial_statements`, `technical_indicators`, `insider_transactions`, and `broker_quote`.
 
 `execution/brokers/` owns broker/account/execution integrations. Broker adapters, including KIS, should expose account state, buying power, positions, order submission/status, fills, reconciliation, and optional `broker_quote` data used only for execution validation or reconciliation.
 
@@ -532,7 +533,7 @@ class StrategyContext(BaseModel):
 class DataRequest(BaseModel):
     symbol: str
     asset_type: AssetType
-    data_type: str  # e.g., "price", "ohlcv", "macro", "news", "sentiment", "fundamental"
+    data_type: str  # e.g., "price", "ohlcv", "macro", "news", "technical_indicators"
     intended_use: Literal["research", "tradable"] = "research"
     timeframe: str | None = None
     lookback: int | None = None
@@ -542,7 +543,9 @@ class DataRequest(BaseModel):
     indicator: str | None = None
     limit: int | None = None
     query: str | None = None
-    statement_type: Literal["balance_sheet", "cashflow", "income_statement"] | None = None
+    statement_type: (
+        Literal["balance_sheet", "cashflow", "cash_flow", "income_statement"] | None
+    ) = None
     frequency: Literal["annual", "quarterly", "trailing"] | None = None
     provider_hint: str | None = None
     source_hint: str | None = None
