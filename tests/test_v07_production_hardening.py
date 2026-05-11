@@ -19,6 +19,9 @@ from maestro.execution.live_orders import (
     LiveOrderRequest,
     LiveOrderResult,
     LiveOrderSafetyService,
+    LiveOrderStatusClient,
+    LiveOrderStatusSnapshot,
+    PartialFillSummary,
 )
 from maestro.execution.reconciliation import ReconciliationResult
 from maestro.monitoring.audit_logger import AuditLogger
@@ -539,18 +542,38 @@ class FakeDataHub:
 
 
 class FakeTelegramClient:
-    def send_message(self, chat_id: int, text: str) -> dict[str, Any]:
+    def __init__(self) -> None:
+        self.sent_messages: list[dict[str, Any]] = []
+
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"ok": True, "result": {"message_id": 1}}
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> dict[str, Any]:
+        callback_data = "approve:appr_live"
+        if self.sent_messages:
+            reply_markup = self.sent_messages[-1].get("reply_markup") or {}
+            keyboard = reply_markup.get("inline_keyboard") or []
+            if keyboard and keyboard[0]:
+                callback_data = keyboard[0][0].get("callback_data", callback_data)
         return {
             "ok": True,
             "result": [
                 {
                     "update_id": 1,
-                    "message": {
-                        "text": "approve appr_live",
-                        "chat": {"id": 100},
+                    "callback_query": {
+                        "id": "callback-1",
+                        "data": callback_data,
+                        "message": {
+                            "chat": {"id": 100},
+                            "message_id": 1,
+                            "text": "Maestro approval request",
+                        },
                         "from": {"id": 100, "username": "approver"},
                     },
                 }
@@ -572,6 +595,24 @@ class FakeLiveOrderClient(LiveOrderClient):
                 broker_order_id=f"broker:{request.order_id}",
                 order_id=request.order_id,
                 submitted_at=utc_now().isoformat(),
+            ),
+        )
+
+
+class FakeStatusClient(LiveOrderStatusClient):
+    def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        return LiveOrderStatusSnapshot(
+            broker_order=broker_order_id,
+            status=OrderStatus.FILLED,
+            checked_at=utc_now().isoformat(),
+            symbol="MOCK_ETF_A",
+            side=OrderSide.BUY,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=1.0,
+                filled_quantity=1.0,
+                remaining_quantity=0.0,
+                average_fill_price=1.0,
+                fill_count=1,
             ),
         )
 
@@ -626,6 +667,7 @@ def _live_orchestrator(
     return MaestroOrchestrator(
         load_config(config_path),
         live_order_client=FakeLiveOrderClient(),
+        live_order_status_client=FakeStatusClient(),
         broker_reconciliation_service=FakeBrokerReconciliation(),
         telegram_client=FakeTelegramClient(),
     )

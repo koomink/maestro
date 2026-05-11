@@ -203,41 +203,7 @@ class TelegramApprovalService:
         callback_decision = self._decision_from_callback_query(update, request)
         if callback_decision is not None:
             return callback_decision
-
-        message = update.get("message")
-        if not isinstance(message, Mapping):
-            return None
-
-        chat = message.get("chat")
-        if not isinstance(chat, Mapping) or chat.get("id") not in self.chat_ids:
-            return None
-
-        user = message.get("from")
-        if not isinstance(user, Mapping):
-            return None
-        user_id = user.get("id")
-        if not isinstance(user_id, int):
-            return None
-        if self.allowed_user_ids and user_id not in self.allowed_user_ids:
-            return None
-
-        text = message.get("text")
-        if not isinstance(text, str):
-            return None
-        status = self._parse_status(text, request.approval_id)
-        if status is None:
-            return None
-
-        username = user.get("username") if isinstance(user.get("username"), str) else None
-        decided_by = f"telegram:{username or user_id}"
-        return ApprovalDecision(
-            approval_id=request.approval_id,
-            run_id=request.run_id,
-            status=status,
-            decided_at=utc_now(),
-            decided_by=decided_by,
-            reason=f"Telegram {status} command.",
-        )
+        return None
 
     def _decision_from_callback_query(
         self,
@@ -285,19 +251,6 @@ class TelegramApprovalService:
         self._answer_callback_query(callback, f"Approval {status}.")
         self._edit_callback_message(callback, decision)
         return decision
-
-    def _parse_status(self, text: str, approval_id: str) -> str | None:
-        parts = text.strip().split()
-        if len(parts) != 2:
-            return None
-        command = parts[0].lower().lstrip("/")
-        if parts[1] != approval_id:
-            return None
-        if command == "approve":
-            return "approved"
-        if command == "reject":
-            return "rejected"
-        return None
 
     def _parse_callback_status(self, data: str, approval_id: str) -> str | None:
         command, separator, callback_approval_id = data.partition(":")

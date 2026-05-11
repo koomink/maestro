@@ -194,8 +194,8 @@
 - [x] Add minimal Telegram Bot API polling client behind an interface
 - [x] Add bot token environment-variable config without storing or logging token values
 - [x] Add allowed Telegram user and chat ID config
-- [x] Send order proposal messages with approve/reject commands
-- [x] Receive approve/reject decisions through polling
+- [x] Send order proposal messages with approve/reject buttons
+- [x] Receive approve/reject button decisions through polling
 - [x] Document that `run-once` blocks while polling for approval, rejection, or timeout
 - [x] Persist approval decisions and reject duplicate persisted decisions
 - [x] Keep normal tests fake-client based with no Telegram network calls

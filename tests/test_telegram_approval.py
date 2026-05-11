@@ -11,7 +11,8 @@ from maestro.approval.models import ApprovalRequest
 from maestro.cli import app
 from maestro.config.models import ApprovalConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderStatus, RunMode
+from maestro.core.enums import OrderSide, OrderStatus, RunMode
+from maestro.execution.base import OrderIntent
 from maestro.execution.live_orders import LiveOrderLifecycleNotification
 from maestro.integrations.telegram.bot import (
     TelegramApprovalService,
@@ -137,7 +138,7 @@ def callback_update(
 
 def test_telegram_service_sends_request_and_receives_approval():
     request = approval_request()
-    client = FakeTelegramClient([update(f"approve {request.approval_id}")])
+    client = FakeTelegramClient([callback_update(f"approve:{request.approval_id}")])
     service = TelegramApprovalService(
         client=client,
         chat_ids=[100],
@@ -159,36 +160,90 @@ def test_telegram_service_sends_request_and_receives_approval():
             ]
         ]
     }
-    assert "proposed_orders:" in message
-    assert "buy MOCK_ETF_A notional=600.00" in message
-    assert "approve appr_test" in message
-    assert "reject appr_test" in message
+    assert "📋 Order Details" in message
+    assert "1. 🟢 BUY · unknown" in message
+    assert "종목: MOCK_ETF_A" in message
+    assert "금액: 600.00" in message
+    assert "approve appr_test" not in message
+    assert "reject appr_test" not in message
+    assert "✅ Tap Approve to submit, or Reject to stop this proposal." in message
 
 
-def test_telegram_approval_message_shows_instrument_names():
+def test_telegram_approval_message_shows_order_details_and_strategy_source():
     request = approval_request().model_copy(
         update={
+            "source_strategy_ids": ["sample_static_allocation"],
             "proposed_orders": [
                 {
                     "symbol": "133690",
                     "name": "TIGER 미국나스닥100",
+                    "broker_symbol": "133690",
+                    "exchange_code": "KRX",
+                    "currency": "KRW",
+                    "quantity": 10,
+                    "price": 190000,
                     "side": "buy",
-                    "notional": 600.0,
+                    "notional": 1900000.0,
                 },
                 {
                     "symbol": "QLD",
                     "name": "ProShares Ultra QQQ",
+                    "broker_symbol": "QLD",
+                    "exchange_code": "AMEX",
+                    "broker_product": "kis_overseas_stock",
+                    "currency": "USD",
+                    "quantity": 2,
+                    "price": 90.25,
                     "side": "buy",
-                    "notional": 400.0,
+                    "notional": 180.5,
                 },
-            ]
+            ],
         }
     )
 
     message = format_approval_request(request)
 
-    assert "buy 133690 TIGER 미국나스닥100 notional=600.00" in message
-    assert "buy QLD ProShares Ultra QQQ notional=400.00" in message
+    assert "🧠 Strategy: sample_static_allocation" in message
+    assert "1. 🟢 BUY · 🇰🇷 국내 KRX" in message
+    assert "종목: 133690 TIGER 미국나스닥100" in message
+    assert "코드: 133690" in message
+    assert "수량: 10" in message
+    assert "지정가: 190,000.00 KRW" in message
+    assert "금액: 1,900,000.00 KRW" in message
+    assert "2. 🟢 BUY · 🌐 해외 AMEX" in message
+    assert "종목: QLD ProShares Ultra QQQ" in message
+    assert "지정가: 90.25 USD" in message
+    assert "금액: 180.50 USD" in message
+
+
+def test_approval_manager_records_source_strategy_ids():
+    manager = ApprovalManager(
+        ApprovalConfig(enabled=True, provider="console", require_approval=True),
+        run_mode=RunMode.PAPER,
+    )
+
+    request, decision, message = manager.request_approval(
+        "run_test",
+        [
+            OrderIntent(
+                order_id="ord_test",
+                symbol="AAPL",
+                side=OrderSide.BUY,
+                quantity=1,
+                price=200,
+                notional=200,
+            )
+        ],
+        [],
+        [],
+        source_strategy_ids=["strategy_a", "strategy_b"],
+    )
+
+    assert request is not None
+    assert decision is not None
+    assert message is not None
+    assert request.source_strategy_ids == ["strategy_a", "strategy_b"]
+    assert "🧠 Strategy: strategy_a, strategy_b" in message
 
 
 def test_telegram_service_receives_button_approval():
@@ -245,6 +300,21 @@ def test_telegram_service_receives_button_rejection():
     }
 
 
+def test_telegram_service_ignores_manual_text_commands():
+    request = approval_request()
+    client = FakeTelegramClient([])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision = service._decision_from_update(update(f"approve {request.approval_id}"), request)
+
+    assert decision is None
+
+
 def test_telegram_service_ignores_button_from_wrong_user_and_chat():
     request = approval_request()
     client = FakeTelegramClient(
@@ -297,7 +367,7 @@ def test_telegram_service_answers_stale_button_callback():
 
 def test_telegram_service_sends_request_to_all_configured_chats():
     request = approval_request()
-    client = FakeTelegramClient([update(f"approve {request.approval_id}", chat_id=200)])
+    client = FakeTelegramClient([callback_update(f"approve:{request.approval_id}", chat_id=200)])
     service = TelegramApprovalService(
         client=client,
         chat_ids=[100, 200],
@@ -313,7 +383,7 @@ def test_telegram_service_sends_request_to_all_configured_chats():
 
 def test_telegram_service_receives_rejection():
     request = approval_request()
-    client = FakeTelegramClient([update(f"reject {request.approval_id}")])
+    client = FakeTelegramClient([callback_update(f"reject:{request.approval_id}")])
     service = TelegramApprovalService(
         client=client,
         chat_ids=[100],
@@ -330,9 +400,9 @@ def test_telegram_service_ignores_unapproved_user_and_wrong_chat():
     request = approval_request()
     client = FakeTelegramClient(
         [
-            update(f"approve {request.approval_id}", update_id=1, user_id=99),
-            update(f"approve {request.approval_id}", update_id=2, chat_id=999),
-            update(f"approve {request.approval_id}", update_id=3, user_id=10, chat_id=100),
+            callback_update(f"approve:{request.approval_id}", update_id=1, user_id=99),
+            callback_update(f"approve:{request.approval_id}", update_id=2, chat_id=999),
+            callback_update(f"approve:{request.approval_id}", update_id=3, user_id=10, chat_id=100),
         ]
     )
     service = TelegramApprovalService(
@@ -348,12 +418,12 @@ def test_telegram_service_ignores_unapproved_user_and_wrong_chat():
     assert decision.decided_by == "telegram:approver"
 
 
-def test_telegram_service_returns_one_decision_for_duplicate_updates():
+def test_telegram_service_returns_one_decision_for_duplicate_callbacks():
     request = approval_request()
     client = FakeTelegramClient(
         [
-            update(f"approve {request.approval_id}", update_id=1),
-            update(f"reject {request.approval_id}", update_id=2),
+            callback_update(f"approve:{request.approval_id}", update_id=1),
+            callback_update(f"reject:{request.approval_id}", update_id=2),
         ]
     )
     service = TelegramApprovalService(
@@ -368,12 +438,12 @@ def test_telegram_service_returns_one_decision_for_duplicate_updates():
     assert decision.status == "approved"
 
 
-def test_telegram_service_ignores_wrong_approval_id():
+def test_telegram_service_ignores_wrong_callback_approval_id():
     request = approval_request()
     client = FakeTelegramClient(
         [
-            update("approve appr_other", update_id=1),
-            update(f"approve {request.approval_id}", update_id=2),
+            callback_update("approve:appr_other", update_id=1),
+            callback_update(f"approve:{request.approval_id}", update_id=2),
         ]
     )
     service = TelegramApprovalService(
@@ -439,7 +509,7 @@ def test_telegram_approval_manager_allows_live_approval_mode(monkeypatch: pytest
             timeout_seconds=1,
         ),
         run_mode=RunMode.LIVE_APPROVAL,
-        telegram_client=FakeTelegramClient([update(f"approve {request.approval_id}")]),
+        telegram_client=FakeTelegramClient([callback_update(f"approve:{request.approval_id}")]),
     )
 
     _, decision, _ = manager.request_approval("run_test", [], [], [])

@@ -227,6 +227,7 @@ class MaestroOrchestrator:
                     orders,
                     risk_decision.modifications,
                     risk_decision.violations,
+                    target.source_strategy_ids,
                 )
             )
             if approval_request and approval_decision:

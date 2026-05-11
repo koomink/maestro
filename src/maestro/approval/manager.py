@@ -39,6 +39,7 @@ class ApprovalManager:
         orders: list[OrderIntent],
         risk_modifications: list[str],
         risk_violations: list[str],
+        source_strategy_ids: list[str] | None = None,
     ) -> tuple[ApprovalRequest | None, ApprovalDecision | None, str | None]:
         if not self.config.enabled or not self.config.require_approval:
             return None, None, None
@@ -50,6 +51,7 @@ class ApprovalManager:
             created_at=now,
             expires_at=now + timedelta(seconds=self.config.timeout_seconds),
             channel=self.config.provider,
+            source_strategy_ids=list(source_strategy_ids or []),
             order_count=len(orders),
             estimated_notional=sum(order.notional for order in orders),
             proposed_orders=[self._proposed_order_payload(order) for order in orders],
@@ -90,6 +92,8 @@ class ApprovalManager:
         if instrument.name:
             payload["name"] = instrument.name
         payload["broker_symbol"] = instrument.broker_symbol
+        payload["currency"] = instrument.currency.value
+        payload["broker_product"] = instrument.broker_product.value
         if instrument.exchange_code is not None:
             payload["exchange_code"] = instrument.exchange_code.value
         return payload

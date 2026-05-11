@@ -120,7 +120,7 @@ Scope:
 - Real Telegram Bot API integration
 - Telegram approval channel abstraction
 - Send order proposal messages
-- Polling-based approve/reject command handling for the first MVP
+- Polling-based approve/reject button handling for the first MVP
 - `run-once` blocks while waiting for an approval, rejection, or timeout
 - Inline approve/reject buttons and callback handling after the polling MVP
 - Webhook handling after the polling MVP

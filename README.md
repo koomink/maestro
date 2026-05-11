@@ -703,10 +703,13 @@ start from `configs/telegram_approval_paper.yaml`, set
 `TELEGRAM_BOT_TOKEN` in the environment, configure
 `telegram_allowed_chat_ids` and `whitelisted_user_ids`, and keep `mode: paper`.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
-polling for inline approve/reject button callbacks or manual
-`approve <approval_id>` / `reject <approval_id>` replies. Webhooks, dashboard
-write controls, and live auto trading remain deferred. Normal tests use fake
-Telegram clients and do not call the Telegram network.
+polling for inline approve/reject button callbacks. Manual typed
+`approve <approval_id>` / `reject <approval_id>` replies are ignored. Webhooks,
+dashboard write controls, and live auto trading remain deferred. Normal tests
+use fake Telegram clients and do not call the Telegram network.
+Telegram approval messages include the source strategy IDs and per-order market,
+exchange, ticker/code, instrument name, quantity, price, currency, and notional
+so operators can inspect the proposal before approving it.
 
 To run the KIS read-only adapter:
 

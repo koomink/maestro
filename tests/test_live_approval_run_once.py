@@ -32,8 +32,13 @@ class FakeTelegramClient:
         self.command = command
         self.sent_messages: list[dict[str, Any]] = []
 
-    def send_message(self, chat_id: int, text: str) -> dict[str, Any]:
-        self.sent_messages.append({"chat_id": chat_id, "text": text})
+    def send_message(
+        self,
+        chat_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"ok": True, "result": {"message_id": len(self.sent_messages)}}
 
     def get_updates(self, *, offset: int | None, timeout_seconds: int) -> dict[str, Any]:
@@ -44,9 +49,14 @@ class FakeTelegramClient:
             "result": [
                 {
                     "update_id": 1,
-                    "message": {
-                        "text": f"{self.command} {self.approval_id}",
-                        "chat": {"id": 100},
+                    "callback_query": {
+                        "id": "callback-1",
+                        "data": f"{self.command}:{self.approval_id}",
+                        "message": {
+                            "chat": {"id": 100},
+                            "message_id": 1,
+                            "text": "Maestro approval request",
+                        },
                         "from": {"id": 100, "username": "approver"},
                     },
                 }
