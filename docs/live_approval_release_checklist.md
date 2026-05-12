@@ -86,11 +86,16 @@ Set these in the operator environment, not in YAML and not in source control:
 - `KIS_APP_KEY`
 - `KIS_APP_SECRET`
 - `KIS_ACCESS_TOKEN` only when using a real externally issued token
+- `KIS_APPROVAL_KEY` only when using a real externally issued WebSocket
+  approval key
 - `TELEGRAM_BOT_TOKEN`
 
 If `KIS_ACCESS_TOKEN` is absent, the KIS adapter may use `kis.token_cache_path`
 to cache an issued token. Do not keep placeholder token values in `.env`. The
 token cache must not be committed or copied into audit/state records.
+If `KIS_APPROVAL_KEY` is absent, the KIS adapter can issue `/oauth2/Approval`
+for future WebSocket sessions; treat that key as a secret with the same
+no-audit/no-state rule.
 
 ## KIS Read-Only Sync
 

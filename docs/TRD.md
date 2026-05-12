@@ -20,7 +20,7 @@ datahub/
     market and research data: price, ohlcv, macro, news, sentiment,
     fundamental, financial_statements, and technical_indicators
     providers/adapters: mock, CSV/local, Yahoo/yfinance-style OHLCV, FRED,
-    RSS, rule-based sentiment, future GDELT/News API and community providers
+    RSS, GDELT, NewsAPI, rule-based sentiment, and future community providers
 
 execution/brokers/
     broker account and execution data: auth, balances, positions, buying power,
@@ -268,6 +268,10 @@ database caches, or broker behavior.
 - KIS REST clients adapt the reference repo's KIS OAuth token issuance, request headers, TR_IDs, and inquiry payloads behind product-specific adapters.
 - App key and secret are read from configured environment variable names only.
 - Access tokens can come from an environment variable or an owner-only cache file after `/oauth2/tokenP` issuance. Tokens may be stored only in `kis.token_cache_path`, never in state, audit logs, dashboard rows, or tests.
+- KIS WebSocket approval keys can come from `kis.approval_key_env` or be issued
+  through `/oauth2/Approval` using the OAuth workbook's `grant_type`, `appkey`,
+  and `secretkey` request body. Approval keys are treated as secrets and are not
+  persisted to state, audit logs, dashboard rows, or tests.
 - KIS REST support is split by broker product. `kis_domestic_stock` covers KRX
   stock/ETF read-only and approval-gated cash limit orders. `kis_overseas_stock`
   covers US-listed stock/ETF read-only and approval-gated limit orders.
@@ -363,7 +367,7 @@ database caches, or broker behavior.
 - `KISRestDomesticStockLiveOrderClient` adapts the domestic-stock cash order
   endpoint from the KIS open-trading-api reference:
   `POST /uapi/domestic-stock/v1/trading/order-cash`, real TR_IDs
-  `TTTC0802U`/`TTTC0801U`, demo TR_IDs `VTTC0802U`/`VTTC0801U`, `ORD_DVSN=00`
+  `TTTC0012U`/`TTTC0011U`, demo TR_IDs `VTTC0012U`/`VTTC0011U`, `ORD_DVSN=00`
   for limit orders, and uppercase KIS body keys. It is an explicit domestic
   adapter path, not a core product assumption.
 - `KISRestOverseasStockLiveOrderClient` exists as the strategic adapter boundary

@@ -50,6 +50,12 @@ class KISToken:
         return self.expires_at > utc_now() + timedelta(minutes=5)
 
 
+@dataclass(frozen=True)
+class KISApprovalKey:
+    approval_key: str
+    source: str
+
+
 class KISAuthManager:
     def __init__(self, config: KISConfig, transport: KISTransport | None = None) -> None:
         self.config = config
@@ -107,6 +113,19 @@ class KISAuthManager:
         self._write_cached_token(token)
         return token
 
+    def get_websocket_approval_key(self) -> KISApprovalKey:
+        if self.config.provider == "mock":
+            return KISApprovalKey(approval_key="mock-approval-key", source="mock")
+        approval_key_from_env = os.getenv(self.config.approval_key_env)
+        if approval_key_from_env:
+            return KISApprovalKey(approval_key=approval_key_from_env, source="env")
+        if self.transport is None:
+            raise ValueError(
+                "KIS websocket approval key is unavailable. Set the configured approval "
+                "key environment variable or provide an approval-key-capable transport."
+            )
+        return self._issue_websocket_approval_key()
+
     def _issue_access_token(self) -> KISToken:
         credentials = self.get_credentials()
         base_url = self.config.resolved_base_url()
@@ -119,9 +138,8 @@ class KISAuthManager:
             "POST",
             f"{base_url}/oauth2/tokenP",
             headers={
-                "Content-Type": "application/json",
+                "Content-Type": "application/json; charset=utf-8",
                 "Accept": "text/plain",
-                "charset": "UTF-8",
             },
             json_body=payload,
             timeout_seconds=self.config.timeout_seconds,
@@ -134,6 +152,29 @@ class KISAuthManager:
             expires_at=_parse_kis_datetime(response.get("access_token_token_expired")),
             source="oauth",
         )
+
+    def _issue_websocket_approval_key(self) -> KISApprovalKey:
+        credentials = self.get_credentials()
+        base_url = self.config.resolved_base_url()
+        payload = {
+            "grant_type": "client_credentials",
+            "appkey": credentials.app_key,
+            "secretkey": credentials.app_secret,
+        }
+        response = self.transport.request(
+            "POST",
+            f"{base_url}/oauth2/Approval",
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+                "Accept": "text/plain",
+            },
+            json_body=payload,
+            timeout_seconds=self.config.timeout_seconds,
+        )
+        approval_key = response.get("approval_key")
+        if not approval_key:
+            raise ValueError("KIS approval key response did not include an approval key")
+        return KISApprovalKey(approval_key=str(approval_key), source="oauth")
 
     def _read_cached_token(self) -> KISToken | None:
         if self.config.token_cache_path is None:

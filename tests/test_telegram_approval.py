@@ -540,6 +540,8 @@ def test_live_smoke_telegram_approval_validates_config_without_network(tmp_path)
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["execution"]["live_order_enabled"] = False
+    raw["approval"]["telegram_allowed_chat_ids"] = [100]
+    raw["approval"]["whitelisted_user_ids"] = [100]
     config_path = tmp_path / "live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 

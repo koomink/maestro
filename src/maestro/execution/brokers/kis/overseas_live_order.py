@@ -154,7 +154,7 @@ class KISRestOverseasStockLiveOrderClient(
             )
         if side == OrderSide.BUY:
             return self._tr_id(real="TTTT1002U", demo="VTTT1002U")
-        return self._tr_id(real="TTTT1006U", demo="VTTT1006U")
+        return self._tr_id(real="TTTT1006U", demo="VTTT1001U")
 
     def _find_order_summary(self, broker_order: BrokerOrderId) -> KISOrderSummary | None:
         start_date, end_date = overseas_order_status_date_range(broker_order.submitted_at)

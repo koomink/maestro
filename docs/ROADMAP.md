@@ -100,14 +100,15 @@ Scope:
 - Symbol registry and provider symbol mapping
 - Data schemas for `price`, `ohlcv`, `macro`, `news`, `sentiment`, `fundamental`, and `broker_quote`
 - Real external research API providers for the current stock/ETF universe:
-  Yahoo Finance/yfinance-style `price` and `ohlcv`, FRED `macro`, and RSS
-  `news`
+  Yahoo Finance/yfinance-style `price` and `ohlcv`, FRED `macro`, and
+  RSS/GDELT/NewsAPI `news`
 - A network-free rule-based `sentiment` provider over configured fixture/news
   text
-- Optional live-network provider smoke tests for Yahoo/yfinance, FRED, and RSS,
-  skipped by default so normal tests remain fake-client and fixture based
-- GDELT/News API and Reddit/X/Discord/Telegram/community sentiment APIs remain
-  future provider options
+- Optional live-network provider smoke tests for Yahoo/yfinance, FRED, RSS,
+  GDELT, and NewsAPI, skipped by default so normal tests remain fake-client and
+  fixture based
+- Reddit/X/Discord/Telegram/community sentiment APIs remain future provider
+  options
 - Crypto exchange market data is deferred because the current supported universe
   is stocks and ETFs only
 

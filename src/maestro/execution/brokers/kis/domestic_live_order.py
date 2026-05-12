@@ -79,8 +79,8 @@ class KISRestDomesticStockLiveOrderClient(
 
     def _order_tr_id(self, side: OrderSide) -> str:
         if side == OrderSide.BUY:
-            return self._tr_id(real="TTTC0802U", demo="VTTC0802U")
-        return self._tr_id(real="TTTC0801U", demo="VTTC0801U")
+            return self._tr_id(real="TTTC0012U", demo="VTTC0012U")
+        return self._tr_id(real="TTTC0011U", demo="VTTC0011U")
 
     def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
         matched = self._find_order_summary(broker_order_id.broker_order_id)

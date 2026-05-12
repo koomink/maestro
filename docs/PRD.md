@@ -276,7 +276,7 @@ And Maestro will:
 - DataHub must process `DataRequest` objects.
 - v0.1 DataHub returns deterministic mock data.
 - Current implementation supports mock and CSV-style DataHub foundations.
-- Future DataHub providers include Yahoo Finance/yfinance-style OHLCV, FRED macro, CSV/local, RSS/GDELT/News API, sentiment/community data, fundamental data, and crypto exchange market data.
+- DataHub providers include Yahoo Finance/yfinance-style OHLCV, FRED macro, CSV/local, RSS/GDELT/NewsAPI, rule-based sentiment, and fundamental data. Future provider options include community sentiment data and crypto exchange market data.
 - Supported and planned DataHub data types include `price`, `ohlcv`, `macro`, `news`, `sentiment`, and `fundamental`.
 - Production strategies must not call external data APIs directly.
 - DataHub is the primary research and strategy data source. Broker adapters may expose `broker_quote` reference data for execution validation or reconciliation, but broker quotes are not the primary research feed.

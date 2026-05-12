@@ -24,6 +24,7 @@ from maestro.execution.brokers.kis.parsers import (
     _optional_str,
     _order_summary,
     _position_current_price,
+    _tr_cont,
 )
 from maestro.execution.brokers.kis.transport import UrlLibKISTransport
 
@@ -156,7 +157,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
 
     def _fetch_order_summaries(self, ccld_dvsn: str) -> list[KISOrderSummary]:
         today = date.today().strftime("%Y%m%d")
-        payload = self._get(
+        payloads = self._get_pages(
             "/uapi/domestic-stock/v1/trading/inquire-daily-ccld",
             self._tr_id(real="TTTC0081R", demo="VTTC0081R"),
             {
@@ -177,14 +178,44 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
                 "EXCG_ID_DVSN_CD": "KRX",
             },
         )
-        return [_order_summary(row) for row in _as_list(payload.get("output1"))]
+        return [
+            _order_summary(row) for payload in payloads for row in _as_list(payload.get("output1"))
+        ]
 
-    def _get(self, path: str, tr_id: str, params: dict[str, str]) -> dict[str, Any]:
+    def _get_pages(
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
+        *,
+        max_pages: int = 10,
+    ) -> list[dict[str, Any]]:
+        pages: list[dict[str, Any]] = []
+        next_params = dict(params)
+        tr_cont = ""
+        for _ in range(max_pages):
+            payload = self._get(path, tr_id, next_params, tr_cont=tr_cont)
+            pages.append(payload)
+            if _tr_cont(payload) not in {"M", "F"}:
+                return pages
+            next_params["CTX_AREA_FK100"] = str(payload.get("ctx_area_fk100") or "")
+            next_params["CTX_AREA_NK100"] = str(payload.get("ctx_area_nk100") or "")
+            tr_cont = "N"
+        raise ValueError(f"KIS domestic read-only pagination exceeded {max_pages} pages: {path}")
+
+    def _get(
+        self,
+        path: str,
+        tr_id: str,
+        params: dict[str, str],
+        *,
+        tr_cont: str = "",
+    ) -> dict[str, Any]:
         token = self.auth_manager.get_access_token()
         payload = self.transport.request(
             "GET",
             f"{self.config.resolved_base_url()}{path}",
-            headers=self._headers(tr_id, token),
+            headers=self._headers(tr_id, token, tr_cont=tr_cont),
             params=params,
             timeout_seconds=self.config.timeout_seconds,
         )
@@ -196,9 +227,8 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
 
     def _headers(self, tr_id: str, token: KISToken, *, tr_cont: str = "") -> dict[str, str]:
         return {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Accept": "text/plain",
-            "charset": "UTF-8",
             "authorization": f"Bearer {token.access_token}",
             "appkey": self.credentials.app_key,
             "appsecret": self.credentials.app_secret,

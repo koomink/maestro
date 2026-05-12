@@ -155,6 +155,7 @@ def test_kis_live_readonly_example_config_uses_real_readonly_provider():
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
     assert config.kis.token_cache_path == "var/kis_access_token.json"
     assert config.kis.paper_trading is False
 
@@ -173,6 +174,7 @@ def test_kis_overseas_readonly_example_uses_env_var_names_only():
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
     assert config.universe.get("AAPL").exchange_code == "NASD"
     assert config.universe.get("VOO").exchange_code == "AMEX"
     assert "12345678" not in raw_text
@@ -261,6 +263,7 @@ def test_live_approval_example_config_has_no_hardcoded_secrets(
     monkeypatch.delenv("KIS_APP_KEY", raising=False)
     monkeypatch.delenv("KIS_APP_SECRET", raising=False)
     monkeypatch.delenv("KIS_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("KIS_APPROVAL_KEY", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
 
     raw_text = Path("configs/live_approval.example.yaml").read_text()
@@ -269,6 +272,7 @@ def test_live_approval_example_config_has_no_hardcoded_secrets(
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
     assert config.approval.telegram_bot_token_env == "TELEGRAM_BOT_TOKEN"
     assert "xoxb-" not in raw_text
     assert "Bearer " not in raw_text
@@ -277,4 +281,5 @@ def test_live_approval_example_config_has_no_hardcoded_secrets(
     assert "KIS_APP_KEY:" not in raw_text
     assert "KIS_APP_SECRET:" not in raw_text
     assert "KIS_ACCESS_TOKEN:" not in raw_text
+    assert "KIS_APPROVAL_KEY:" not in raw_text
     assert "TELEGRAM_BOT_TOKEN:" not in raw_text

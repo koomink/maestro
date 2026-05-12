@@ -13,6 +13,7 @@ KIS_ACCOUNT_ID=...
 KIS_APP_KEY=...
 KIS_APP_SECRET=...
 KIS_ACCESS_TOKEN=
+KIS_APPROVAL_KEY=
 ```
 
 Do not commit this file. Do not paste secret values into tickets, docs, audit
@@ -56,7 +57,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config /opt/maestro/configs/telegram_approval_paper.yaml --timeout-seconds 10
+ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config /etc/maestro/telegram_operator.yaml --timeout-seconds 10
 Restart=always
 RestartSec=5
 
@@ -64,12 +65,16 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Use a config whose `telegram_allowed_chat_ids` and `whitelisted_user_ids`
-match the operator account. This service handles read-only Telegram commands
-and the limited `/pause` and `/kill_switch` confirmations. Approval request
-polling still happens inside `maestro run-once` when an approval-gated run is
-active. Telegram Bot API polling allows only one active `getUpdates` consumer
-per bot token, so stop this service during approval-gated `run-once` or
+Use an operator-local config outside the git checkout, such as
+`/etc/maestro/telegram_operator.yaml` or `/root/maestro-operator/telegram_approval_operator.yaml`.
+Do not point systemd at `configs/telegram_approval_paper.yaml`; that file is a
+repo example and may contain placeholder chat/user IDs. The operator-local
+config must set `telegram_allowed_chat_ids` and `whitelisted_user_ids` to the
+real operator account. This service handles read-only Telegram commands and the
+limited `/pause` and `/kill_switch` confirmations. Approval request polling
+still happens inside `maestro run-once` when an approval-gated run is active.
+Telegram Bot API polling allows only one active `getUpdates` consumer per bot
+token, so stop this service during approval-gated `run-once` or
 `live-smoke --check live-dry-run` rehearsals when they use the same bot.
 
 Register the slash command menu once after bot setup or command changes:

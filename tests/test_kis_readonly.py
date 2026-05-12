@@ -308,7 +308,8 @@ def test_kis_live_order_client_uses_domestic_limit_order_payload(monkeypatch):
     assert result.broker_order is not None
     assert result.broker_order.broker_order_id == "0000000001"
     assert order_call["method"] == "POST"
-    assert order_call["headers"]["tr_id"] == "TTTC0802U"
+    assert order_call["headers"]["tr_id"] == "TTTC0012U"
+    assert order_call["headers"]["Content-Type"] == "application/json; charset=utf-8"
     assert order_call["json_body"] == {
         "CANO": "12345678",
         "ACNT_PRDT_CD": "01",
@@ -439,7 +440,7 @@ def test_kis_overseas_readonly_client_normalizes_us_account(monkeypatch):
     )
 
 
-def test_kis_overseas_readonly_uses_demo_unfilled_order_tr_id(monkeypatch):
+def test_kis_overseas_readonly_avoids_unsupported_demo_unfilled_order_api(monkeypatch):
     monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
     monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
     monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
@@ -462,8 +463,8 @@ def test_kis_overseas_readonly_uses_demo_unfilled_order_tr_id(monkeypatch):
 
     client.get_unfilled_orders()
 
-    assert any(call["headers"]["tr_id"] == "VTTS3018R" for call in transport.calls)
-    assert not any(call["headers"]["tr_id"] == "TTTS3018R" for call in transport.calls)
+    assert any(call["headers"]["tr_id"] == "VTTS3035R" for call in transport.calls)
+    assert not any(call["url"].endswith("/inquire-nccs") for call in transport.calls)
 
 
 def test_kis_overseas_readonly_requires_universe_metadata(monkeypatch):
@@ -656,7 +657,7 @@ def test_kis_overseas_live_order_client_uses_demo_sell_tr_id(monkeypatch):
     )
 
     order_call = [call for call in transport.calls if call["url"].endswith("/trading/order")][0]
-    assert order_call["headers"]["tr_id"] == "VTTT1006U"
+    assert order_call["headers"]["tr_id"] == "VTTT1001U"
     assert order_call["json_body"]["OVRS_EXCG_CD"] == "AMEX"
     assert order_call["json_body"]["SLL_TYPE"] == "00"
 
@@ -902,6 +903,21 @@ def test_kis_live_order_client_normalizes_filled_status(monkeypatch):
     assert snapshot.fills[0].price == 70_000.0
 
 
+def test_kis_domestic_order_summary_uses_continuation_pages(monkeypatch):
+    client = _kis_live_order_client(monkeypatch, FakeKISTransport(paginated_daily=True))
+
+    fills = client.get_order_fills()
+
+    daily_calls = [
+        call for call in client.transport.calls if call["url"].endswith("/inquire-daily-ccld")
+    ]
+    assert [summary.order_id for summary in fills] == ["0001", "0006"]
+    assert daily_calls[0]["headers"]["tr_cont"] == ""
+    assert daily_calls[1]["headers"]["tr_cont"] == "N"
+    assert daily_calls[1]["params"]["CTX_AREA_FK100"] == "next-fk"
+    assert daily_calls[1]["params"]["CTX_AREA_NK100"] == "next-nk"
+
+
 def test_kis_live_order_client_normalizes_partial_fill_status(monkeypatch):
     client = _kis_live_order_client(monkeypatch, FakeKISTransport(partial_order=True))
 
@@ -1031,11 +1047,13 @@ class FakeKISTransport:
         partial_order: bool = False,
         rejected_order: bool = False,
         canceled_order: bool = False,
+        paginated_daily: bool = False,
     ) -> None:
         self.calls = []
         self.partial_order = partial_order
         self.rejected_order = rejected_order
         self.canceled_order = canceled_order
+        self.paginated_daily = paginated_daily
 
     def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
         self.calls.append(
@@ -1097,6 +1115,38 @@ class FakeKISTransport:
                             "ord_qty": "3",
                             "tot_ccld_qty": "0",
                             "ord_unpr": "70000",
+                        }
+                    ],
+                }
+            if self.paginated_daily:
+                if headers.get("tr_cont") == "N":
+                    return {
+                        "rt_cd": "0",
+                        "__headers__": {"tr_cont": "D"},
+                        "output1": [
+                            {
+                                "odno": "0006",
+                                "pdno": "005930",
+                                "sll_buy_dvsn_cd": "02",
+                                "ord_qty": "1",
+                                "tot_ccld_qty": "1",
+                                "avg_prvs": "72000",
+                            }
+                        ],
+                    }
+                return {
+                    "rt_cd": "0",
+                    "__headers__": {"tr_cont": "M"},
+                    "ctx_area_fk100": "next-fk",
+                    "ctx_area_nk100": "next-nk",
+                    "output1": [
+                        {
+                            "odno": "0001",
+                            "pdno": "005930",
+                            "sll_buy_dvsn_cd": "02",
+                            "ord_qty": "2",
+                            "tot_ccld_qty": "2",
+                            "avg_prvs": "70000",
                         }
                     ],
                 }

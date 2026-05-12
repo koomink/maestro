@@ -217,6 +217,22 @@ def test_telegram_set_commands_cli_registers_bot_commands(
     assert fake_clients[0].registered_commands == telegram_bot_commands()
 
 
+def test_telegram_operator_cli_rejects_placeholder_chat_ids(tmp_path):
+    config_path = _telegram_config_path(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["approval"]["telegram_allowed_chat_ids"] = [123456789]
+    raw["approval"]["whitelisted_user_ids"] = [123456789]
+    config_path.write_text(yaml.safe_dump(raw))
+
+    result = CliRunner().invoke(
+        app,
+        ["telegram-operator", "--config", str(config_path), "--once"],
+    )
+
+    assert result.exit_code != 0
+    assert "replace placeholder 123456789" in result.output
+
+
 class FakeTelegramClient:
     def __init__(self, updates: list[dict[str, Any]] | None = None) -> None:
         self.updates = list(updates or [])

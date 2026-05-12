@@ -172,19 +172,27 @@
 - [x] Add rule-based sentiment provider unavailable and malformed-result handling
 - [x] Add fixture-backed tests for sentiment positive, negative, neutral, empty input, malformed input, stale/fresh metadata, config validation, and router integration
 - [x] Confirm Yahoo/yfinance, FRED, and RSS can make live network calls when configured, with skipped-by-default integration tests
+- [x] Add shared bounded retry, process-local TTL cache, and request-spacing controls for Yahoo/yfinance, FRED, and RSS
 - [x] Keep normal tests fake-client and fixture based, with no live network dependency
-- [x] Move GDELT/News API, community sentiment APIs, paid sentiment APIs, and crypto provider work to future milestones
+- [x] Plan GDELT news provider integration
+- [x] Implement GDELT news provider for strategy research/news discovery
+- [x] Add fixture-backed tests for GDELT success, symbol mapping, lookback limiting, malformed payloads, stale/fresh metadata, config validation, and router fallback
+- [x] Add skipped-by-default live GDELT integration-test support
+- [x] Plan NewsAPI provider integration as an opt-in API-key news provider
+- [x] Implement NewsAPI provider for strategy research/news discovery
+- [x] Add fixture-backed tests for NewsAPI success, API-key header usage, symbol mapping, lookback/page-size limiting, optional filters, malformed payloads, stale/fresh metadata, config validation, and router fallback
+- [x] Add skipped-by-default live NewsAPI integration-test support
+- [x] Move community sentiment APIs, paid sentiment APIs, and crypto provider work to future milestones
 
 ## Future Milestones
 
 ### Future DataHub Provider Work
 
-- [ ] Plan GDELT/News API provider integration as future news providers
 - [ ] Plan Reddit/X/Discord/Telegram/community sentiment API integrations as future sentiment providers
 - [ ] Plan paid sentiment API integrations if a concrete provider is selected
 - [ ] Revisit crypto exchange market data provider planning only after stocks/ETFs scope expands
 - [ ] Add provider-specific secrets validation without logging secret values for remaining providers that require credentials
-- [ ] Add provider-specific retry and rate-limit handling where future providers need it
+- [ ] Add provider-specific retry and rate-limit handling where future providers need behavior beyond the shared external-provider wrapper
 - [ ] Add fixture-backed tests for each future real provider adapter
 
 ### v0.4 Telegram Approval

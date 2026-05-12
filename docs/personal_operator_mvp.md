@@ -47,6 +47,9 @@ fill the real values there instead of exporting them every time.
 
 `KIS_ACCESS_TOKEN` is optional. Leave it unset unless you have a real pre-issued
 token. If it is absent, Maestro can use the configured token cache path.
+`KIS_APPROVAL_KEY` is also optional and is needed only when using a pre-issued
+KIS WebSocket approval key; otherwise Maestro can issue `/oauth2/Approval` when
+a future WebSocket path needs it.
 
 ## Readiness Check
 

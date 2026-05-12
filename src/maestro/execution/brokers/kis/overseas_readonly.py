@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import BrokerProduct
+from maestro.core.enums import BrokerProduct, OrderStatus
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.auth import KISAuthManager, KISToken
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
@@ -127,6 +127,17 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
         return self._fetch_order_summaries(ccld_nccs_dvsn="01")
 
     def get_unfilled_orders(self) -> list[KISOrderSummary]:
+        if self.config.paper_trading:
+            return [
+                summary
+                for summary in self._fetch_order_summaries(ccld_nccs_dvsn="00")
+                if summary.status
+                in {
+                    OrderStatus.OPEN.value,
+                    OrderStatus.PARTIALLY_FILLED.value,
+                    OrderStatus.ACCEPTED_BY_BROKER.value,
+                }
+            ]
         payloads = self._get_pages(
             "/uapi/overseas-stock/v1/trading/inquire-nccs",
             self._tr_id(real="TTTS3018R", demo="VTTS3018R"),
@@ -295,9 +306,8 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
 
     def _headers(self, tr_id: str, token: KISToken, *, tr_cont: str = "") -> dict[str, str]:
         return {
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Accept": "text/plain",
-            "charset": "UTF-8",
             "authorization": f"Bearer {token.access_token}",
             "appkey": self.credentials.app_key,
             "appsecret": self.credentials.app_secret,

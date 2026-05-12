@@ -146,6 +146,7 @@ kis:
   app_key_env: KIS_APP_KEY
   app_secret_env: KIS_APP_SECRET
   access_token_env: KIS_ACCESS_TOKEN
+  approval_key_env: KIS_APPROVAL_KEY
   token_cache_path: var/kis_access_token.json
   paper_trading: false
   timeout_seconds: 10

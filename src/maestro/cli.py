@@ -163,6 +163,11 @@ def telegram_operator(
         raise typer.BadParameter("telegram-operator requires telegram_allowed_chat_ids")
     if not maestro_config.approval.whitelisted_user_ids:
         raise typer.BadParameter("telegram-operator requires whitelisted_user_ids")
+    if _uses_placeholder_telegram_ids(maestro_config):
+        raise typer.BadParameter(
+            "telegram-operator requires real Telegram chat/user IDs; replace placeholder "
+            "123456789 in the operator-local config"
+        )
     if not os.getenv(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_operator status=fail message=missing_bot_token")
         raise typer.Exit(1)
@@ -413,6 +418,10 @@ def _run_telegram_approval_live_smoke(maestro_config, allow_mock: bool) -> None:
         raise typer.BadParameter("live-smoke --check telegram-approval requires chat IDs")
     if not maestro_config.approval.whitelisted_user_ids:
         raise typer.BadParameter("live-smoke --check telegram-approval requires whitelisted users")
+    if _uses_placeholder_telegram_ids(maestro_config):
+        raise typer.BadParameter(
+            "live-smoke --check telegram-approval requires real Telegram chat/user IDs"
+        )
 
     if allow_mock:
         typer.echo(
@@ -821,12 +830,20 @@ def _configured_secret_values(maestro_config) -> list[str]:
         maestro_config.kis.app_key_env,
         maestro_config.kis.app_secret_env,
         maestro_config.kis.access_token_env,
+        maestro_config.kis.approval_key_env,
         maestro_config.approval.telegram_bot_token_env,
     ):
         value = os.getenv(env_name)
         if value:
             values.append(value)
     return values
+
+
+def _uses_placeholder_telegram_ids(maestro_config) -> bool:
+    placeholder = 123456789
+    return placeholder in set(
+        maestro_config.approval.telegram_allowed_chat_ids
+    ) or placeholder in set(maestro_config.approval.whitelisted_user_ids)
 
 
 def _ops_alert_message(report, alert_checks) -> str:
@@ -950,6 +967,7 @@ def _personal_operator_config(output: Path) -> dict:
             "app_key_env": "KIS_APP_KEY",
             "app_secret_env": "KIS_APP_SECRET",
             "access_token_env": "KIS_ACCESS_TOKEN",
+            "approval_key_env": "KIS_APPROVAL_KEY",
             "token_cache_path": str(state_dir / "kis_access_token.json"),
             "paper_trading": False,
             "timeout_seconds": 10,

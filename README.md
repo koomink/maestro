@@ -95,7 +95,7 @@ Maestro separates research/market data from broker account and execution data.
 ```text
 External market/research data
 Yahoo/yfinance, FRED, RSS feeds, CSV/local files,
-future GDELT/News API and community APIs
+GDELT/NewsAPI, and future community APIs
         │
         ▼
 Maestro DataHub provider adapters
@@ -256,7 +256,7 @@ Deferred real integrations:
 - No direct cancel CLI; KIS overseas cancel is available only behind
   `LiveOrderCancellationService` policy gates
 - No market orders
-- No GDELT/News API or community sentiment APIs yet
+- No community sentiment APIs yet
 - No crypto market data while the supported universe is stocks and ETFs only
 - No web dashboard write controls
 
@@ -796,6 +796,8 @@ symbols. It uses these environment variable names:
 - `KIS_APP_SECRET`: KIS app secret
 - `KIS_ACCESS_TOKEN`: optional pre-issued access token; leave unset unless it is
   a real current token
+- `KIS_APPROVAL_KEY`: optional pre-issued WebSocket approval key; leave unset
+  unless it is a real current key
 
 Maestro CLI commands load `.env` from the current working directory when the
 file exists and do not override variables already set by the shell. For local
@@ -812,6 +814,12 @@ file is written with owner-only permissions. Access tokens may be stored only in
 `kis.token_cache_path`; they must never be written to state, audit logs,
 dashboard rows, or test fixtures. App secrets follow the same no-persistence
 rule.
+
+For future KIS WebSocket use, Maestro can issue `/oauth2/Approval` when
+`KIS_APPROVAL_KEY` is unset. The request uses `grant_type`, `appkey`, and
+`secretkey` as defined in the KIS OAuth workbook. The returned approval key is
+treated as a secret and must not be written to state, audit logs, dashboard rows,
+or test fixtures.
 
 The KIS REST layer is split by broker product. `kis_domestic_stock` covers KRX
 stock/ETF account, quote, order/fill, buying-power, and cash limit-order paths.

@@ -55,6 +55,7 @@ def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
             stale_after_seconds=config.stale_after_seconds,
             symbol_map=config.symbol_map,
         )
+        yahoo_provider = _wrap_external_provider(yahoo_provider, config)
         registry.register(
             "yahoo",
             yahoo_provider,
@@ -74,11 +75,14 @@ def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
         registry = DataHubRegistry()
         registry.register(
             "fred",
-            FREDDataProvider(
-                api_key_env=config.api_key_env,
-                timeout_seconds=config.timeout_seconds,
-                stale_after_seconds=config.stale_after_seconds,
-                symbol_map=config.symbol_map,
+            _wrap_external_provider(
+                FREDDataProvider(
+                    api_key_env=config.api_key_env,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                ),
+                config,
             ),
             {"macro"},
         )
@@ -91,12 +95,65 @@ def build_data_provider(config: DataHubConfig) -> BaseDataProvider:
         registry = DataHubRegistry()
         registry.register(
             "rss",
-            RSSNewsProvider(
-                feed_urls=config.feed_urls,
-                timeout_seconds=config.timeout_seconds,
-                stale_after_seconds=config.stale_after_seconds,
-                symbol_map=config.symbol_map,
-                source_map=config.source_map,
+            _wrap_external_provider(
+                RSSNewsProvider(
+                    feed_urls=config.feed_urls,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                    source_map=config.source_map,
+                ),
+                config,
+            ),
+            {"news"},
+        )
+        return DataHubRouter(registry)
+    if config.provider == "gdelt":
+        from maestro.datahub.gdelt_provider import GDELTNewsProvider
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
+
+        registry = DataHubRegistry()
+        registry.register(
+            "gdelt",
+            _wrap_external_provider(
+                GDELTNewsProvider(
+                    base_url=config.gdelt_base_url,
+                    timespan=config.gdelt_timespan,
+                    max_records=config.gdelt_max_records,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                ),
+                config,
+            ),
+            {"news"},
+        )
+        return DataHubRouter(registry)
+    if config.provider == "newsapi":
+        from maestro.datahub.newsapi_provider import NewsAPINewsProvider
+        from maestro.datahub.registry import DataHubRegistry
+        from maestro.datahub.router import DataHubRouter
+
+        registry = DataHubRegistry()
+        registry.register(
+            "newsapi",
+            _wrap_external_provider(
+                NewsAPINewsProvider(
+                    base_url=config.newsapi_base_url,
+                    api_key_env=config.newsapi_api_key_env,
+                    page_size=config.newsapi_page_size,
+                    sort_by=config.newsapi_sort_by,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                    language=config.newsapi_language,
+                    search_in=config.newsapi_search_in,
+                    domains=config.newsapi_domains,
+                    exclude_domains=config.newsapi_exclude_domains,
+                    sources=config.newsapi_sources,
+                ),
+                config,
             ),
             {"news"},
         )
@@ -167,6 +224,7 @@ def _register_configured_provider(registry: Any, config: DataHubProviderConfig) 
             stale_after_seconds=config.stale_after_seconds,
             symbol_map=config.symbol_map,
         )
+        yahoo_provider = _wrap_external_provider(yahoo_provider, config)
         if yahoo_data_types:
             registry.register(
                 config.name,
@@ -195,11 +253,14 @@ def _register_configured_provider(registry: Any, config: DataHubProviderConfig) 
         fred_data_types = set(config.data_types or ["macro"])
         registry.register(
             config.name,
-            FREDDataProvider(
-                api_key_env=config.api_key_env,
-                timeout_seconds=config.timeout_seconds,
-                stale_after_seconds=config.stale_after_seconds,
-                symbol_map=config.symbol_map,
+            _wrap_external_provider(
+                FREDDataProvider(
+                    api_key_env=config.api_key_env,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                ),
+                config,
             ),
             _validate_fred_data_types(fred_data_types),
             priority=config.priority,
@@ -215,14 +276,73 @@ def _register_configured_provider(registry: Any, config: DataHubProviderConfig) 
         rss_data_types = set(config.data_types or ["news"])
         registry.register(
             config.name,
-            RSSNewsProvider(
-                feed_urls=config.feed_urls,
-                timeout_seconds=config.timeout_seconds,
-                stale_after_seconds=config.stale_after_seconds,
-                symbol_map=config.symbol_map,
-                source_map=config.source_map,
+            _wrap_external_provider(
+                RSSNewsProvider(
+                    feed_urls=config.feed_urls,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                    source_map=config.source_map,
+                ),
+                config,
             ),
             _validate_rss_data_types(rss_data_types),
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
+    if config.provider == "gdelt":
+        from maestro.datahub.gdelt_provider import GDELTNewsProvider
+
+        gdelt_data_types = set(config.data_types or ["news"])
+        registry.register(
+            config.name,
+            _wrap_external_provider(
+                GDELTNewsProvider(
+                    base_url=config.gdelt_base_url,
+                    timespan=config.gdelt_timespan,
+                    max_records=config.gdelt_max_records,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                ),
+                config,
+            ),
+            _validate_gdelt_data_types(gdelt_data_types),
+            priority=config.priority,
+            symbols=set(config.symbols) if config.symbols is not None else None,
+            asset_types=set(config.asset_types) if config.asset_types is not None else None,
+            run_modes=set(config.run_modes) if config.run_modes is not None else None,
+        )
+        return
+
+    if config.provider == "newsapi":
+        from maestro.datahub.newsapi_provider import NewsAPINewsProvider
+
+        newsapi_data_types = set(config.data_types or ["news"])
+        registry.register(
+            config.name,
+            _wrap_external_provider(
+                NewsAPINewsProvider(
+                    base_url=config.newsapi_base_url,
+                    api_key_env=config.newsapi_api_key_env,
+                    page_size=config.newsapi_page_size,
+                    sort_by=config.newsapi_sort_by,
+                    timeout_seconds=config.timeout_seconds,
+                    stale_after_seconds=config.stale_after_seconds,
+                    symbol_map=config.symbol_map,
+                    language=config.newsapi_language,
+                    search_in=config.newsapi_search_in,
+                    domains=config.newsapi_domains,
+                    exclude_domains=config.newsapi_exclude_domains,
+                    sources=config.newsapi_sources,
+                ),
+                config,
+            ),
+            _validate_newsapi_data_types(newsapi_data_types),
             priority=config.priority,
             symbols=set(config.symbols) if config.symbols is not None else None,
             asset_types=set(config.asset_types) if config.asset_types is not None else None,
@@ -279,8 +399,34 @@ def _validate_rss_data_types(data_types: set[str]) -> set[str]:
     return data_types
 
 
+def _validate_gdelt_data_types(data_types: set[str]) -> set[str]:
+    unsupported = data_types - {"news"}
+    if unsupported:
+        raise ValueError(f"GDELT provider supports only news: {sorted(unsupported)}")
+    return data_types
+
+
+def _validate_newsapi_data_types(data_types: set[str]) -> set[str]:
+    unsupported = data_types - {"news"}
+    if unsupported:
+        raise ValueError(f"NewsAPI provider supports only news: {sorted(unsupported)}")
+    return data_types
+
+
 def _validate_sentiment_data_types(data_types: set[str]) -> set[str]:
     unsupported = data_types - {"sentiment"}
     if unsupported:
         raise ValueError(f"Sentiment provider supports only sentiment: {sorted(unsupported)}")
     return data_types
+
+
+def _wrap_external_provider(provider: BaseDataProvider, config: Any) -> BaseDataProvider:
+    from maestro.datahub.resilience import ResilientDataProvider
+
+    return ResilientDataProvider(
+        provider,
+        retry_max_attempts=config.retry_max_attempts,
+        retry_backoff_seconds=config.retry_backoff_seconds,
+        cache_ttl_seconds=config.cache_ttl_seconds,
+        min_request_interval_seconds=config.min_request_interval_seconds,
+    )

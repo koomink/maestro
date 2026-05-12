@@ -227,17 +227,18 @@ quotes, or support reconciliation.
 
 `broker_quote` is not a primary strategy or research feed. Strategy research
 should use DataHub market/research providers such as CSV/local, Yahoo
-Finance/yfinance-style OHLCV, FRED macro, RSS news, and configured sentiment
-providers. Crypto market data is deferred until the supported universe expands
-beyond stocks and ETFs.
+Finance/yfinance-style OHLCV, FRED macro, RSS/GDELT/NewsAPI news, and configured
+sentiment providers. Crypto market data is deferred until the supported universe
+expands beyond stocks and ETFs.
 
 ## v0.3 Provider Scope
 
 v0.3 closes out real external research providers for the current stock/ETF
-universe. Yahoo/yfinance, FRED, and RSS can make live network calls when
-configured; normal tests remain fake-client and fixture based, and live-network
-smoke tests are skipped by default. Sentiment is intentionally network-free for
-v0.3 and analyzes configured fixture/news text only.
+universe. Yahoo/yfinance, FRED, RSS, GDELT, and opt-in NewsAPI can make live
+network calls when configured; normal tests remain fake-client and fixture
+based, and live-network smoke tests are skipped by default. Sentiment is
+intentionally network-free for v0.3 and analyzes configured fixture/news text
+only.
 
 DataHub is not yet a complete production market data system. It is the Maestro
 boundary for research and market data requests. Before repeated real-account
@@ -274,15 +275,18 @@ Current provider status:
   register a `technical_indicators` provider that derives indicators from OHLCV.
 - `fred`: supports `macro` through a small stdlib HTTP client wrapper.
 - `rss`: supports `news` through a small stdlib HTTP/XML client wrapper.
+- `gdelt`: supports `news` through the GDELT DOC 2.0 article-list API.
+- `newsapi`: supports `news` through NewsAPI `/v2/everything` with an API key.
 - `sentiment`: supports `sentiment` through configured fixture/news text and a
   lightweight rule-based analyzer.
 
-No GDELT, News API, Reddit/X/Discord/Telegram/community API, crypto, or KIS
-network research provider is implemented. KIS current price data may be used as
+No Reddit/X/Discord/Telegram/community API, crypto, or KIS network research
+provider is implemented. KIS current price data may be used as
 `broker_quote` reference data by broker/execution/reconciliation logic, not as
-the primary strategy research feed. GDELT/News API and community sentiment APIs
-remain future provider work. Crypto is explicitly deferred because the current
-supported universe is stocks and ETFs only.
+the primary strategy research feed. NewsAPI is opt-in for strategy research/news
+discovery because it requires an API key and may be plan/quota limited.
+Community sentiment APIs remain future provider work. Crypto is explicitly
+deferred because the current supported universe is stocks and ETFs only.
 
 ### Multi-Provider Config
 
@@ -350,6 +354,16 @@ datahub:
         - https://example.com/rss
       timeout_seconds: 5
       stale_after_seconds: 604800
+    - name: gdelt_news
+      provider: gdelt
+      priority: 45
+      data_types: [news]
+      gdelt_timespan: 24h
+      gdelt_max_records: 25
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      symbol_map:
+        FED: Federal Reserve
     - name: community_sentiment
       provider: sentiment
       priority: 50
@@ -368,13 +382,17 @@ The Yahoo/yfinance-style provider is implemented for `price`, `ohlcv`,
 `fundamental`, and `financial_statements`. A separate technical indicator
 provider derives `technical_indicators` from OHLCV bars. The FRED provider is
 implemented for `macro` only. The RSS provider is implemented for `news` only.
-The rule-based sentiment provider is implemented for configured fixture/news
-text only. GDELT, News API, Reddit/X/Discord/Telegram community APIs and paid
-sentiment APIs remain planning examples only. Crypto provider work is deferred
-until the supported universe expands beyond stocks and ETFs. The current
-implementation rejects unsupported provider names until real provider adapters
-are added. Retries, rate limits, and durable cache settings remain future design
-work where each provider needs them.
+The GDELT and NewsAPI providers are implemented for `news` only and are intended
+for strategy research/news discovery only, not execution, broker validation, or
+direct strategy-side API access. The rule-based sentiment provider is
+implemented for configured fixture/news text only. Reddit/X/Discord/Telegram
+community APIs and paid sentiment APIs remain planning examples only. Crypto
+provider work is deferred until the supported universe expands beyond stocks and
+ETFs. The current implementation rejects unsupported provider names until real
+provider adapters are added. Yahoo, FRED, RSS, GDELT, and NewsAPI can be wrapped
+with bounded retry, in-process TTL cache, and request-spacing controls. Durable
+cache settings remain future design work where a provider needs repeatability
+beyond one process.
 
 ### Yahoo/yfinance Provider
 
@@ -478,6 +496,13 @@ Config fields:
 - `symbol_map`: maps Maestro canonical symbols to Yahoo/yfinance symbols. Keep
   strategy plugins on Maestro symbols and put provider-specific ticker aliases
   here.
+- `retry_max_attempts`: optional bounded retry count for provider-unavailable
+  failures. The default `1` means one attempt and no retry.
+- `retry_backoff_seconds`: optional linear backoff between retry attempts.
+- `cache_ttl_seconds`: optional per-process TTL cache for successful provider
+  responses. Cache hits do not call the upstream provider.
+- `min_request_interval_seconds`: optional minimum spacing between actual
+  upstream calls for this provider instance.
 
 Live integration checks are optional and skipped by default:
 
@@ -553,6 +578,9 @@ Config fields:
 - `stale_after_seconds`: optional threshold for marking the latest observation
   stale.
 - `symbol_map`: maps Maestro canonical macro symbols to FRED series IDs.
+- `retry_max_attempts`, `retry_backoff_seconds`, `cache_ttl_seconds`, and
+  `min_request_interval_seconds`: optional shared external-provider operations
+  controls. Retries apply only to provider-unavailable failures.
 
 Malformed FRED payloads fail loudly. Missing API keys and transport failures are
 normalized as provider-unavailable errors.
@@ -648,6 +676,9 @@ Config fields:
   stale.
 - `symbol_map`: optional request-symbol to keyword mapping. When present, the
   provider filters feed items whose title or summary contains that keyword.
+- `retry_max_attempts`, `retry_backoff_seconds`, `cache_ttl_seconds`, and
+  `min_request_interval_seconds`: optional shared external-provider operations
+  controls. Cache is process-local and not a durable research data store.
 - `source_map`: optional feed URL to display-source mapping. When omitted, the
   feed title or URL is used as the item source.
 
@@ -658,6 +689,239 @@ Live integration checks are optional and skipped by default:
 
 ```bash
 MAESTRO_RUN_RSS_INTEGRATION=1 uv run pytest tests/test_rss_integration.py
+```
+
+Normal `pytest -q` remains fake-client and fixture based, with no live network
+calls.
+
+### GDELT News Provider
+
+The GDELT provider supports searchable `news` requests for strategy research and
+normalizes GDELT DOC 2.0 article-list results into the same RSS-compatible news
+payload shape:
+
+```python
+{
+    "FED": {
+        "symbol": "FED",
+        "latest": {
+            "title": "Latest Federal Reserve story",
+            "url": "https://example.com/story",
+            "published_at": "2026-01-01T00:00:00+00:00",
+            "summary": None,
+            "source": "example.com",
+            "domain": "example.com",
+            "language": "English",
+            "source_country": "United States",
+            "social_image": "https://example.com/image.jpg",
+        },
+        "items": [
+            {
+                "title": "Latest Federal Reserve story",
+                "url": "https://example.com/story",
+                "published_at": "2026-01-01T00:00:00+00:00",
+                "summary": None,
+                "source": "example.com",
+                "domain": "example.com",
+                "language": "English",
+                "source_country": "United States",
+                "social_image": "https://example.com/image.jpg",
+            }
+        ],
+        "is_stale": False,
+        "warnings": [],
+        "source": "gdelt",
+    }
+}
+```
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: gdelt
+  timeout_seconds: 5
+  stale_after_seconds: 604800
+  gdelt_timespan: 24h
+  gdelt_max_records: 25
+  symbol_map:
+    FED: Federal Reserve
+```
+
+Multi-provider example:
+
+```yaml
+datahub:
+  providers:
+    - name: gdelt_news
+      provider: gdelt
+      priority: 40
+      data_types: [news]
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      gdelt_timespan: 24h
+      gdelt_max_records: 25
+      symbol_map:
+        FED: Federal Reserve
+```
+
+Config fields:
+
+- `gdelt_base_url`: GDELT DOC 2.0 endpoint. Defaults to
+  `https://api.gdeltproject.org/api/v2/doc/doc`.
+- `gdelt_timespan`: recent article window to request. Defaults to `24h`.
+- `gdelt_max_records`: max articles requested from GDELT. Defaults to `25` and
+  is capped at `250`.
+- `symbol_map`: maps Maestro request symbols to GDELT query strings. When
+  omitted, the request symbol is used as the query.
+- `timeout_seconds`: maximum time for the GDELT HTTP call. Timeout and
+  transport failures are mapped to provider-unavailable so the router can try a
+  fallback.
+- `stale_after_seconds`: optional threshold for marking the latest article
+  stale.
+- `retry_max_attempts`, `retry_backoff_seconds`, `cache_ttl_seconds`, and
+  `min_request_interval_seconds`: optional shared external-provider operations
+  controls. Cache is process-local and not a durable research data store.
+
+GDELT is for research/news discovery only. Strategy plugins continue to request
+`news` through DataHub and should not call GDELT directly. It is not an
+execution, broker validation, or reconciliation source. Empty article results,
+missing article lists, malformed article fields, malformed JSON, and invalid
+article dates fail loudly.
+
+Live integration checks are optional and skipped by default:
+
+```bash
+MAESTRO_RUN_GDELT_INTEGRATION=1 uv run pytest tests/test_gdelt_integration.py
+```
+
+Normal `pytest -q` remains fake-client and fixture based, with no live network
+calls.
+
+### NewsAPI News Provider
+
+The NewsAPI provider supports searchable `news` requests for strategy research
+and normalizes `/v2/everything` results into the same RSS/GDELT-compatible news
+payload shape:
+
+```python
+{
+    "FED": {
+        "symbol": "FED",
+        "latest": {
+            "title": "Latest Federal Reserve story",
+            "url": "https://example.com/story",
+            "published_at": "2026-01-01T00:00:00+00:00",
+            "summary": "Story description",
+            "source": "Example News",
+            "source_id": "example-news",
+            "author": "Reporter",
+            "url_to_image": "https://example.com/image.jpg",
+            "content": "Article content excerpt",
+        },
+        "items": [
+            {
+                "title": "Latest Federal Reserve story",
+                "url": "https://example.com/story",
+                "published_at": "2026-01-01T00:00:00+00:00",
+                "summary": "Story description",
+                "source": "Example News",
+                "source_id": "example-news",
+                "author": "Reporter",
+                "url_to_image": "https://example.com/image.jpg",
+                "content": "Article content excerpt",
+            }
+        ],
+        "is_stale": False,
+        "warnings": [],
+        "source": "newsapi",
+    }
+}
+```
+
+Single-provider example:
+
+```yaml
+datahub:
+  provider: newsapi
+  timeout_seconds: 5
+  stale_after_seconds: 604800
+  newsapi_api_key_env: NEWSAPI_API_KEY
+  newsapi_page_size: 25
+  newsapi_sort_by: publishedAt
+  newsapi_language: en
+  newsapi_search_in: title,description,content
+  newsapi_domains:
+    - reuters.com
+  symbol_map:
+    FED: Federal Reserve
+```
+
+Multi-provider example:
+
+```yaml
+datahub:
+  providers:
+    - name: newsapi_research
+      provider: newsapi
+      priority: 30
+      data_types: [news]
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      newsapi_api_key_env: NEWSAPI_API_KEY
+      newsapi_page_size: 25
+      newsapi_sort_by: publishedAt
+      newsapi_language: en
+      newsapi_search_in: title,description,content
+      newsapi_sources:
+        - associated-press
+      symbol_map:
+        FED: Federal Reserve
+    - name: gdelt_news
+      provider: gdelt
+      priority: 40
+      data_types: [news]
+      symbol_map:
+        FED: Federal Reserve
+```
+
+Config fields:
+
+- `newsapi_base_url`: NewsAPI endpoint. Defaults to
+  `https://newsapi.org/v2/everything`.
+- `newsapi_api_key_env`: environment variable containing the API key. Defaults
+  to `NEWSAPI_API_KEY`. The key is sent as the `X-Api-Key` header and is not
+  placed in the query string.
+- `newsapi_page_size`: max articles requested from NewsAPI. Defaults to `25`
+  and is capped at `100`.
+- `newsapi_sort_by`: NewsAPI sort mode. Defaults to `publishedAt`; allowed
+  values are `publishedAt`, `relevancy`, and `popularity`.
+- `newsapi_language`: optional NewsAPI language filter such as `en`.
+- `newsapi_search_in`: optional field selector such as
+  `title,description,content`.
+- `newsapi_domains`, `newsapi_exclude_domains`, `newsapi_sources`: optional
+  provider-side filters.
+- `symbol_map`: maps Maestro request symbols to NewsAPI `q` strings. When
+  omitted, the request symbol is used as the query.
+- `timeout_seconds`: maximum time for the NewsAPI HTTP call. Missing API keys,
+  timeout, transport, rate-limit, auth, server, and NewsAPI `status: error`
+  responses are mapped to provider-unavailable so the router can try a fallback.
+- `stale_after_seconds`: optional threshold for marking the latest article
+  stale.
+- `retry_max_attempts`, `retry_backoff_seconds`, `cache_ttl_seconds`, and
+  `min_request_interval_seconds`: optional shared external-provider operations
+  controls. Cache is process-local and not a durable research data store.
+
+NewsAPI is for research/news discovery only. Strategy plugins continue to
+request `news` through DataHub and should not call NewsAPI directly. It is not
+an execution, broker validation, or reconciliation source. Empty article
+results, missing article lists, malformed article fields, malformed JSON, and
+invalid article dates fail loudly.
+
+Live integration checks are optional and skipped by default:
+
+```bash
+MAESTRO_RUN_NEWSAPI_INTEGRATION=1 NEWSAPI_API_KEY=... uv run pytest tests/test_newsapi_integration.py
 ```
 
 Normal `pytest -q` remains fake-client and fixture based, with no live network
@@ -761,9 +1025,11 @@ Secrets handling:
 Timeout, retry, and rate-limit behavior:
 
 - Every network-backed provider should have a small explicit timeout.
-- Retries should be bounded and reserved for transient transport or rate-limit
-  failures. Provider adapters should not retry validation errors, unsupported
-  symbols, or malformed responses.
+- Yahoo, FRED, RSS, GDELT, and NewsAPI are wrapped by a shared resilience layer
+  that can provide bounded retries, linear retry backoff, process-local TTL
+  caching, and per-provider request spacing.
+- Retries are reserved for provider-unavailable failures. Provider adapters do
+  not retry validation errors, unsupported symbols, or malformed responses.
 - Rate-limit responses should become provider-level unavailable or stale-data
   outcomes with clear warnings; they should not silently return partial research
   data as fresh.
@@ -786,14 +1052,15 @@ Provider-unavailable behavior:
 Testing policy for future external providers:
 
 - Unit tests should use fake clients or fixture payloads for Yahoo/yfinance,
-  FRED, RSS news, rule-based sentiment, and future provider adapters.
+  FRED, RSS news, GDELT, NewsAPI, rule-based sentiment, and future provider
+  adapters.
 - Normalization, freshness, timeout, retry, rate-limit, and error mapping should
   be tested without real network calls.
 - Optional integration tests that contact real services should be explicitly
   marked, skipped by default, and isolated from normal `pytest -q` runs.
-- Current skipped-by-default live-network checks cover Yahoo/yfinance, FRED, and
-  RSS. Rule-based sentiment has no live integration test because it has no
-  network source in v0.3.
+- Current skipped-by-default live-network checks cover Yahoo/yfinance, FRED,
+  RSS, GDELT, and NewsAPI. Rule-based sentiment has no live integration test
+  because it has no network source in v0.3.
 - Fixtures should include successful payloads, unsupported symbols, stale
   responses, provider-unavailable responses, malformed provider data, and
   rate-limit cases.
@@ -821,12 +1088,14 @@ provider-unavailable fallback without letting broker quotes satisfy research
 
 Remaining real provider work:
 
-- Implement real provider adapters for GDELT/News API, Reddit/X/Discord/Telegram
-  community sentiment feeds, and paid sentiment APIs.
+- Implement real provider adapters for Reddit/X/Discord/Telegram community
+  sentiment feeds and paid sentiment APIs.
 - Defer crypto market data until stocks/ETFs are no longer the supported
   universe.
 - Add provider-specific config fields only when each adapter needs them.
-- Add bounded timeout/retry/rate-limit code inside each adapter.
+- Reuse the shared external-provider resilience wrapper where it fits, and add
+  provider-specific retry or rate-limit handling only when an adapter needs a
+  different policy.
 - Add provider-specific schema normalization and fixture-backed tests.
-- Add any cache only behind DataHub and only if needed for repeatability or
-  rate-limit protection; v0.3 should not add heavy database infrastructure.
+- Keep cache behind DataHub. Current cache is per-process TTL only; do not add
+  heavy database infrastructure without a concrete repeatability requirement.

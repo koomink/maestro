@@ -14,6 +14,7 @@ class KISConfig(StrictConfigModel):
     app_key_env: str = "KIS_APP_KEY"
     app_secret_env: str = "KIS_APP_SECRET"
     access_token_env: str = "KIS_ACCESS_TOKEN"
+    approval_key_env: str = "KIS_APPROVAL_KEY"
     token_cache_path: str | None = None
     base_url: str | None = None
     paper_trading: bool = False
