@@ -28,6 +28,7 @@ from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
+from maestro.scaffold import create_virtuoso_app_scaffold
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -246,6 +247,35 @@ def init_personal(
     output.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     typer.echo(f"created config={output}")
     typer.echo("next=edit Telegram chat/user IDs and set KIS/Telegram environment variables")
+
+
+@app.command("init-virtuoso-app")
+def init_virtuoso_app(
+    output: Path = typer.Option(..., "--output"),
+    package_name: str = typer.Option(..., "--package-name"),
+    class_name: str = typer.Option(..., "--class-name"),
+    strategy_id: str | None = typer.Option(None, "--strategy-id"),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    try:
+        create_virtuoso_app_scaffold(
+            output=output,
+            package_name=package_name,
+            class_name=class_name,
+            strategy_id=strategy_id,
+            force=force,
+        )
+    except (FileExistsError, NotADirectoryError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    resolved_strategy_id = strategy_id or package_name
+    typer.echo(f"created app={output}")
+    typer.echo(f'next=uv pip install -e "{output}"')
+    typer.echo(
+        "next=add strategy config "
+        f'entrypoint="{package_name}.strategy:{class_name}" id="{resolved_strategy_id}"'
+    )
+    typer.echo(f'next=cd "{output}" && pytest -q')
 
 
 @app.command("personal-check")

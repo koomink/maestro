@@ -601,6 +601,19 @@ from maestro.sdk import (
 
 This keeps strategy apps independent from Maestro internals.
 
+To start a new external Virtuoso app repository, generate a wrapper scaffold:
+
+```bash
+maestro init-virtuoso-app \
+  --output ./my_app \
+  --package-name my_virtuoso_app \
+  --class-name MyVirtuosoStrategy
+```
+
+Strategy-specific wrapper code belongs in that app repository. Maestro core
+owns only the SDK contract, loader, and scaffold; it should not gain
+strategy-by-strategy adapter modules.
+
 ## Plugin Loading
 
 Strategies are configured by entrypoint string:
