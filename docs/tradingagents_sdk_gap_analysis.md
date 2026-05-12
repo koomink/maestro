@@ -152,9 +152,11 @@ structured ratings, tool traces, model details, or intermediate artifact
 references alongside an executable allocation proposal.
 
 The public SDK also defines `StrategySignalResult` for directional LLM research
-outputs. The current Maestro execution pipeline still runs only
-`target_allocation` plugins end-to-end, so `strategy_signal` plugins need a
-signal-to-allocation policy before they can be loaded for execution.
+outputs. Maestro can now load `strategy_signal` plugins when the strategy config
+includes an explicit `signal_to_allocation` policy. The run pipeline normalizes
+the signal to `TargetAllocationResult` immediately after `run()`, then applies
+the existing validator, portfolio construction, risk, approval, and execution
+path.
 
 ## 4. Expected Maestro to TradingAgents App Contract
 
@@ -182,7 +184,9 @@ A minimal TradingAgents Virtuoso wrapper would look like this:
    - Convert Maestro-provided data into the format TradingAgents tools expect,
      or run TradingAgents with Maestro-backed runtime tools.
    - Execute `TradingAgentsGraph.propagate(ticker, trade_date)`.
-   - Convert the final rating into a Maestro `TargetAllocationResult`.
+   - Return either a Maestro `TargetAllocationResult`, or a
+     `StrategySignalResult` when the Maestro strategy config supplies
+     `signal_to_allocation`.
    - Include TradingAgents' rationale in `rationale`; once the SDK supports it,
      include full structured reports in metadata/artifacts.
 
@@ -198,9 +202,10 @@ RATING_TO_WEIGHT = {
 }
 ```
 
-This mapping is app policy, not alpha from Maestro. Maestro should still validate
-the resulting allocation against its universe, risk, approval, and execution
-rules.
+This mapping can live in the app when it returns `TargetAllocationResult`, or in
+Maestro config when the app returns `StrategySignalResult`. Maestro still
+validates the resulting allocation against its universe, risk, approval, and
+execution rules.
 
 ## 5. Gap Analysis
 
@@ -355,10 +360,15 @@ class StrategySignalResult(BaseModel):
     metadata: dict[str, Any] = {}
 ```
 
-The remaining work is to add a Maestro-owned signal-to-allocation policy that is
-explicit, testable, and auditable. Until then, TradingAgents wrappers should
-return `TargetAllocationResult` and include `rating`, `action`, `price_target`,
-`reports`, `model_provider`, and `tool_trace` in `metadata`.
+For a paper POC, a TradingAgents wrapper can return `StrategySignalResult` and
+let Maestro apply an explicit `single_symbol_action_map` policy from strategy
+config. Maestro persists the normalized `TargetAllocationResult` as `"result"`
+and keeps the original signal in `metadata["source_signal"]` and strategy-run
+`"source_signal"`.
+
+Remaining work for a fuller TradingAgents integration is outside this path:
+the wrapper package, LangChain/LangGraph dependencies, runtime Maestro DataHub
+tools, checkpoint/artifact storage, and LLM telemetry.
 
 ### 6.3 Richer DataRequest
 

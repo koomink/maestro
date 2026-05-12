@@ -62,7 +62,7 @@ def test_unsupported_sdk_contract_version_fails(monkeypatch):
         load_strategy(config)
 
 
-def test_strategy_signal_manifest_is_public_sdk_but_not_executable_yet(monkeypatch):
+def test_strategy_signal_manifest_requires_signal_to_allocation_policy(monkeypatch):
     import sample_static_allocation.strategy as strategy_module
 
     original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
@@ -82,5 +82,32 @@ def test_strategy_signal_manifest_is_public_sdk_but_not_executable_yet(monkeypat
         entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
     )
 
-    with pytest.raises(PluginLoadError, match="target_allocation results only"):
+    with pytest.raises(PluginLoadError, match="requires strategy config signal_to_allocation"):
         load_strategy(config)
+
+
+def test_strategy_signal_manifest_loads_with_signal_to_allocation_policy(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def signal_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(update={"result_type": "strategy_signal"})
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        signal_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+        signal_to_allocation={
+            "type": "single_symbol_action_map",
+            "action_target_weights": {"buy": 0.3, "hold": 0.0, "sell": 0.0},
+        },
+    )
+
+    assert load_strategy(config)

@@ -114,7 +114,8 @@ And Maestro will:
 2. Load one external sample strategy plugin from `examples/sample_static_allocation`.
 3. Use `MockDataHub` to return mock data.
 4. Execute the strategy plugin.
-5. Receive a `TargetAllocationResult`.
+5. Receive a `TargetAllocationResult`, or normalize a policy-backed
+   `StrategySignalResult` into one.
 6. Validate the result.
 7. Build a final `PortfolioTarget`.
 8. Apply simple risk constraints.
@@ -126,7 +127,9 @@ And Maestro will:
 ### 6.2 v0.1 Explicit Decisions
 
 - Execution mode: **paper only**.
-- Strategy result type: **TargetAllocationResult only**.
+- Strategy result type: **TargetAllocationResult only** for the v0.1 baseline.
+  Current execution also accepts `StrategySignalResult` when strategy config
+  supplies an explicit `signal_to_allocation` policy.
 - Data provider: **MockDataHub only**.
 - State storage: **SQLite + JSONL audit log**.
 - Sample strategy: **inside `examples/` but structured as an independent installable plugin package**.

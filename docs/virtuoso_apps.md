@@ -108,7 +108,9 @@ The loader currently enforces:
 - the class can be constructed with no arguments
 - the constructed object is an instance of `BaseStrategyPlugin`
 - `plugin.manifest().strategy_id` exactly matches `strategies[*].id`
-- `plugin.manifest().result_type` is `target_allocation`
+- `plugin.manifest().result_type` is `target_allocation`, or is
+  `strategy_signal` with an explicit `strategies[*].signal_to_allocation`
+  policy
 - `plugin.manifest().sdk_contract_version` is at or below Maestro-supported
   contract version `1.0`
 
@@ -135,10 +137,11 @@ it only for dynamic-universe strategies.
 
 ## SDK Contract 1.0
 
-Contract `1.0` supports `TargetAllocationResult` end-to-end. The public SDK also
-defines `StrategySignalResult`, but Maestro currently rejects plugins declaring
-`result_type = "strategy_signal"` until a Maestro-owned signal-to-allocation
-policy exists in the execution pipeline.
+Contract `1.0` supports `TargetAllocationResult` end-to-end. It also supports
+`StrategySignalResult` when the strategy config provides a Maestro-owned
+signal-to-allocation policy. Maestro normalizes the signal immediately after
+`run()` and all validation, portfolio construction, risk, approval, execution,
+state persistence, and audit paths continue to consume `TargetAllocationResult`.
 
 Use these manifest defaults for a new wrapper:
 
@@ -175,9 +178,10 @@ For each `run_once`, Maestro performs this strategy-facing sequence:
 4. Call `build_data_requests(context)`.
 5. Fetch all requested data through Maestro DataHub.
 6. Call `run(data_bundle, context)`.
-7. Validate the returned `TargetAllocationResult`.
-8. Combine strategy outputs using configured strategy weights.
-9. Run risk checks, approval gates, execution, state persistence, and audit.
+7. Normalize `StrategySignalResult` to `TargetAllocationResult` when needed.
+8. Validate the normalized `TargetAllocationResult`.
+9. Combine strategy outputs using configured strategy weights.
+10. Run risk checks, approval gates, execution, state persistence, and audit.
 
 The app does not call these Maestro services directly.
 
@@ -299,6 +303,44 @@ Use `allocation_sleeves` only when the app intentionally emits currency or
 portfolio sleeves. If any strategy returns sleeves, Maestro builds a sleeve
 target from sleeve outputs.
 
+## Strategy Signal Results
+
+Apps that return a single-symbol directional signal can declare
+`result_type="strategy_signal"` and return `StrategySignalResult`. The strategy
+config must include an explicit conversion policy:
+
+```yaml
+strategies:
+  - id: tradingagents
+    enabled: true
+    mode: paper
+    weight: 1.0
+    entrypoint: "tradingagents_app.strategy:TradingAgentsStrategy"
+    signal_to_allocation:
+      type: single_symbol_action_map
+      cash_symbol: CASH
+      action_target_weights:
+        buy: 0.30
+        hold: 0.0
+        sell: 0.0
+```
+
+Only `type: single_symbol_action_map` is supported. The `buy`, `hold`, and
+`sell` keys are all required, and each target weight must be between `0.0` and
+`1.0`. `cash_symbol` defaults to `CASH`.
+
+For a signal with `symbol="NVDA"` and action target weight `w`, Maestro creates:
+
+- `{NVDA: w, CASH: 1.0 - w}` when `w > 0`
+- `{CASH: 1.0}` when `w == 0`
+
+The resulting allocation always sums to `1.0`. Maestro copies `confidence`,
+`time_horizon`, `rationale`, and `risk_flags` onto the normalized
+`TargetAllocationResult`. The original signal is preserved in
+`TargetAllocationResult.metadata["source_signal"]`; strategy run persistence
+stores the normalized `"result"` and, for signal plugins, a top-level
+`"source_signal"` as well.
+
 ## App Package Rules
 
 An app package should expose one stable `BaseStrategyPlugin` implementation
@@ -317,7 +359,8 @@ should verify:
 - the plugin is a `BaseStrategyPlugin`
 - manifest id, SDK contract version, and result type match config expectations
 - data requests have the expected symbols, asset types, and data types
-- `run()` returns `TargetAllocationResult`
+- `run()` returns `TargetAllocationResult`, or returns `StrategySignalResult`
+  with a tested `signal_to_allocation` config
 - allocation outputs pass expected shape and weight rules
 - source imports only `maestro.sdk` from Maestro
 - shell environment secret values are not written into generated files,
@@ -338,9 +381,10 @@ Make `strategies[*].id` and `StrategyManifest.strategy_id` identical.
 The loaded class does not inherit from `BaseStrategyPlugin`, or the environment
 loaded a different class than expected.
 
-`Maestro execution pipeline currently supports target_allocation results only`
+`strategy_signal result requires strategy config signal_to_allocation policy`
 
-Set `result_type="target_allocation"` and return `TargetAllocationResult`.
+Add a `signal_to_allocation` policy to the strategy config, or set
+`result_type="target_allocation"` and return `TargetAllocationResult`.
 
 `Strategy requires unsupported Maestro SDK contract version ...`
 

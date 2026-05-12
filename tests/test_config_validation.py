@@ -5,6 +5,7 @@ import yaml
 from pydantic import ValidationError
 
 from maestro.config.loader import load_config
+from maestro.config.models import StrategyPluginConfig
 from maestro.core.enums import BrokerProduct
 
 
@@ -125,6 +126,70 @@ def test_unknown_top_level_field_fails(tmp_path):
 
     with pytest.raises(ValidationError, match="unexpected"):
         load_config(config_path)
+
+
+def test_signal_to_allocation_type_is_restricted():
+    with pytest.raises(ValidationError, match="single_symbol_action_map"):
+        StrategyPluginConfig(
+            id="signal_strategy",
+            weight=1.0,
+            entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+            signal_to_allocation={
+                "type": "rating_map",
+                "action_target_weights": {"buy": 0.3, "hold": 0.0, "sell": 0.0},
+            },
+        )
+
+
+def test_signal_to_allocation_requires_all_action_weights():
+    with pytest.raises(ValidationError, match="sell"):
+        StrategyPluginConfig(
+            id="signal_strategy",
+            weight=1.0,
+            entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+            signal_to_allocation={
+                "type": "single_symbol_action_map",
+                "action_target_weights": {"buy": 0.3, "hold": 0.0},
+            },
+        )
+
+
+def test_signal_to_allocation_weight_bounds_are_validated():
+    with pytest.raises(ValidationError, match="less than or equal to 1"):
+        StrategyPluginConfig(
+            id="signal_strategy",
+            weight=1.0,
+            entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+            signal_to_allocation={
+                "type": "single_symbol_action_map",
+                "action_target_weights": {"buy": 1.1, "hold": 0.0, "sell": 0.0},
+            },
+        )
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        StrategyPluginConfig(
+            id="signal_strategy",
+            weight=1.0,
+            entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+            signal_to_allocation={
+                "type": "single_symbol_action_map",
+                "action_target_weights": {"buy": 0.3, "hold": -0.1, "sell": 0.0},
+            },
+        )
+
+
+def test_signal_to_allocation_unknown_field_fails():
+    with pytest.raises(ValidationError, match="unexpected"):
+        StrategyPluginConfig(
+            id="signal_strategy",
+            weight=1.0,
+            entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+            signal_to_allocation={
+                "type": "single_symbol_action_map",
+                "cash_symbol": "CASH",
+                "unexpected": True,
+                "action_target_weights": {"buy": 0.3, "hold": 0.0, "sell": 0.0},
+            },
+        )
 
 
 def test_current_sample_configs_load():

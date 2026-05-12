@@ -33,7 +33,13 @@ from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.manager import PortfolioManager
 from maestro.risk.manager import RiskManager
 from maestro.safety.controls import SafetyControlService
-from maestro.sdk import CandidateInstrumentRequest, StrategyContext, TargetAllocationResult
+from maestro.sdk import (
+    CandidateInstrumentRequest,
+    StrategyContext,
+    StrategySignalResult,
+    TargetAllocationResult,
+)
+from maestro.signals.converter import normalize_strategy_result
 from maestro.signals.validator import SignalValidator
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.models import PortfolioState
@@ -125,15 +131,22 @@ class MaestroOrchestrator:
                 data_bundle = self.datahub.get_data(requests)
                 data_quality_issues.extend(collect_data_quality_issues(data_bundle))
                 prices.update(prices_from_bundle(data_bundle))
-                result = loaded.plugin.run(data_bundle, context)
+                raw_result = loaded.plugin.run(data_bundle, context)
+                result = normalize_strategy_result(
+                    raw_result,
+                    loaded.config.signal_to_allocation,
+                )
                 validation = validator.validate(result)
+                strategy_run_payload = {
+                    "result": result.model_dump(mode="json"),
+                    "validation": {"ok": validation.ok, "errors": validation.errors},
+                }
+                if isinstance(raw_result, StrategySignalResult):
+                    strategy_run_payload["source_signal"] = raw_result.model_dump(mode="json")
                 self.state_store.save_strategy_run(
                     run_id,
                     loaded.config.id,
-                    {
-                        "result": result.model_dump(mode="json"),
-                        "validation": {"ok": validation.ok, "errors": validation.errors},
-                    },
+                    strategy_run_payload,
                 )
                 if not validation.ok:
                     raise ValueError(

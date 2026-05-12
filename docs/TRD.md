@@ -516,8 +516,8 @@ class StrategyManifest(BaseModel):
 
 Maestro rejects plugins that require a newer SDK contract version than the
 current supported contract. `strategy_signal` is public SDK structure for LLM
-research apps, but the current execution pipeline loads only `target_allocation`
-plugins until a Maestro-owned signal-to-allocation policy exists.
+research apps and can be loaded when strategy config includes an explicit
+Maestro-owned `signal_to_allocation` policy.
 
 ### 5.3 StrategyContext
 
@@ -635,9 +635,10 @@ class StrategySignalResult(BaseModel):
     metadata: dict[str, Any] = {}
 ```
 
-The current orchestration path does not execute `strategy_signal` plugins
-directly. A plugin can either return `TargetAllocationResult` with signal
-details in `metadata`, or wait for Maestro to add a signal-to-allocation policy.
+The orchestration path normalizes `strategy_signal` results immediately after
+`run()` when the strategy config supplies `signal_to_allocation`. The normalized
+`TargetAllocationResult` then follows the same validator, portfolio, risk,
+approval, and execution path as direct target allocation plugins.
 
 ### 5.7 PortfolioTarget
 
@@ -849,7 +850,8 @@ approve only symbols that satisfy research or tradability requirements.
    - Request data requests.
    - Fetch data from DataHub.
    - Run plugin.
-   - Validate result.
+   - Normalize `StrategySignalResult` to `TargetAllocationResult` when needed.
+   - Validate normalized result.
    - Log strategy run.
 5. Aggregate valid target allocation results.
 6. Build `PortfolioTarget`.
@@ -865,7 +867,8 @@ approve only symbols that satisfy research or tradability requirements.
 
 Inputs:
 
-- Valid `TargetAllocationResult` objects
+- Valid `TargetAllocationResult` objects, including policy-normalized
+  `StrategySignalResult` outputs
 - Strategy weights from config
 
 Algorithm:

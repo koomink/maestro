@@ -9,7 +9,11 @@ from maestro.config.portfolio import CurrencySleeveConfig, PortfolioConfig
 from maestro.config.reconciliation_config import ReconciliationConfig
 from maestro.config.risk import RiskConfig
 from maestro.config.state_config import AuditConfig, StateConfig
-from maestro.config.strategy import StrategyPluginConfig
+from maestro.config.strategy import (
+    SignalActionTargetWeights,
+    SignalToAllocationConfig,
+    StrategyPluginConfig,
+)
 from maestro.config.universe import UniverseConfig, UniversePolicyConfig
 from maestro.core.enums import RunMode
 
@@ -73,6 +77,8 @@ __all__ = [
     "PortfolioConfig",
     "ReconciliationConfig",
     "RiskConfig",
+    "SignalActionTargetWeights",
+    "SignalToAllocationConfig",
     "StateConfig",
     "StrategyPluginConfig",
     "StrictConfigModel",

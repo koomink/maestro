@@ -24,7 +24,8 @@ Implemented scope:
 - External plugin loading by entrypoint
 - Sample static allocation strategy
 - MockDataHub
-- `TargetAllocationResult` only
+- `TargetAllocationResult` only for the v0.1 baseline; current execution can
+  normalize policy-backed `StrategySignalResult` plugins
 - SignalValidator
 - Simple PortfolioManager
 - Simple RiskManager

@@ -24,16 +24,16 @@ def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:
         raise PluginLoadError(
             f"Strategy config id {config.id!r} does not match manifest id {manifest.strategy_id!r}"
         )
-    if manifest.result_type != "target_allocation":
-        raise PluginLoadError(
-            "Maestro execution pipeline currently supports target_allocation results only"
-        )
     if _version_tuple(manifest.sdk_contract_version) > _version_tuple(
         SUPPORTED_SDK_CONTRACT_VERSION
     ):
         raise PluginLoadError(
             "Strategy requires unsupported Maestro SDK contract version "
             f"{manifest.sdk_contract_version}"
+        )
+    if manifest.result_type == "strategy_signal" and config.signal_to_allocation is None:
+        raise PluginLoadError(
+            "strategy_signal result requires strategy config signal_to_allocation policy"
         )
     return plugin
 

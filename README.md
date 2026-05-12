@@ -614,6 +614,11 @@ Strategy-specific wrapper code belongs in that app repository. Maestro core
 owns only the SDK contract, loader, and scaffold; it should not gain
 strategy-by-strategy adapter modules.
 
+Virtuoso apps may return `TargetAllocationResult` directly, or return
+`StrategySignalResult` when their strategy config includes an explicit
+`signal_to_allocation` policy. Maestro normalizes signals to target allocations
+before validation, risk, approval, and execution.
+
 ## Plugin Loading
 
 Strategies are configured by entrypoint string:
