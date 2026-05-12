@@ -38,22 +38,46 @@ def build_portfolio_table(store: StateStore) -> list[dict[str, Any]]:
 def build_strategy_runs_table(store: StateStore, limit: int = 20) -> list[dict[str, Any]]:
     rows = []
     for row in store.list_strategy_runs(limit=limit):
-        payload = row.get("payload", {})
-        validation = payload.get("validation", {})
-        result = payload.get("result", {})
+        payload = _mapping(row.get("payload"))
+        validation = _mapping(payload.get("validation"))
+        result = _mapping(payload.get("result"))
+        source_signal = _source_signal(payload, result)
         rows.append(
             {
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
                 "strategy_id": row.get("strategy_id"),
+                "signal_action": source_signal.get("action"),
+                "signal_symbol": source_signal.get("symbol"),
+                "rating": source_signal.get("rating"),
+                "price_target": source_signal.get("price_target"),
+                "stop_loss": source_signal.get("stop_loss"),
+                "position_sizing": source_signal.get("position_sizing"),
                 "validation_ok": validation.get("ok"),
                 "validation_errors": validation.get("errors", []),
                 "confidence": result.get("confidence"),
                 "allocations": result.get("allocations", {}),
+                "time_horizon": result.get("time_horizon"),
+                "rationale": result.get("rationale"),
+                "risk_flags": result.get("risk_flags", []),
                 "payload": payload,
             }
         )
     return rows
+
+
+def _source_signal(payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    top_level_signal = _mapping(payload.get("source_signal"))
+    if top_level_signal:
+        return top_level_signal
+    metadata = _mapping(result.get("metadata"))
+    return _mapping(metadata.get("source_signal"))
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 def build_orders_table(store: StateStore, limit: int = 20) -> list[dict[str, Any]]:

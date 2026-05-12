@@ -340,6 +340,8 @@ The resulting allocation always sums to `1.0`. Maestro copies `confidence`,
 `TargetAllocationResult.metadata["source_signal"]`; strategy run persistence
 stores the normalized `"result"` and, for signal plugins, a top-level
 `"source_signal"` as well.
+The read-only dashboard surfaces both the normalized allocation result and the
+preserved source-signal fields for operator review.
 
 ## App Package Rules
 

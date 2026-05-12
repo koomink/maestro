@@ -81,8 +81,27 @@ def render(config_path: str | Path) -> None:
     st.subheader("Portfolio")
     st.dataframe(build_portfolio_table(store), width="stretch")
 
-    st.subheader("Recent Strategy Runs")
-    st.dataframe(build_strategy_runs_table(store), width="stretch")
+    st.subheader("Strategy Signals / Results")
+    strategy_runs = build_strategy_runs_table(store)
+    strategy_signal_columns = [
+        "created_at",
+        "run_id",
+        "strategy_id",
+        "signal_action",
+        "signal_symbol",
+        "rating",
+        "confidence",
+        "allocations",
+        "risk_flags",
+        "validation_ok",
+        "validation_errors",
+    ]
+    st.dataframe(
+        [{column: row.get(column) for column in strategy_signal_columns} for row in strategy_runs],
+        width="stretch",
+    )
+    with st.expander("Strategy Run Payloads"):
+        st.json([row.get("payload", {}) for row in strategy_runs])
 
     st.subheader("Recent Paper Orders")
     st.dataframe(build_orders_table(store), width="stretch")

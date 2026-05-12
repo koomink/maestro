@@ -60,17 +60,129 @@ def test_dashboard_read_models_work_after_run(tmp_path):
 
 def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_strategy_run("run_1", "strategy_1", {})
     store.save_order("run_1", "ord_1", {"symbol": "MOCK_ETF_A"})
     store.save_approval("run_1", "appr_1", {"decision": {"status": "approved"}})
     store.save_risk_decision("run_1", True, {"approved": True})
     store.save_system_event("run_1", "event", {})
     store.save_broker_account_snapshot("run_1", "acct", {"account": {"account_id": "acct"}})
 
+    strategy_row = build_strategy_runs_table(store)[0]
+    assert strategy_row["run_id"] == "run_1"
+    assert strategy_row["signal_action"] is None
     assert build_orders_table(store)[0]["symbol"] == "MOCK_ETF_A"
     assert build_approvals_table(store)[0]["status"] == "approved"
     assert build_risk_decisions_table(store)[0]["approved"] is True
     assert build_system_events_table(store)[0]["event_type"] == "event"
     assert build_broker_snapshots_table(store)[0]["account_id"] == "acct"
+
+
+def test_strategy_runs_table_includes_top_level_source_signal(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_strategy_run(
+        "run_signal",
+        "signal_strategy",
+        {
+            "source_signal": {
+                "symbol": "NVDA",
+                "action": "buy",
+                "rating": "strong_buy",
+                "price_target": 1250.0,
+                "stop_loss": 900.0,
+                "position_sizing": "half",
+            },
+            "result": {
+                "confidence": 0.82,
+                "allocations": {"NVDA": 0.4, "CASH": 0.6},
+                "time_horizon": "30d",
+                "rationale": "positive momentum",
+                "risk_flags": ["earnings_window"],
+            },
+            "validation": {"ok": False, "errors": ["symbol not in allowed universe"]},
+        },
+    )
+
+    row = build_strategy_runs_table(store)[0]
+
+    assert row["run_id"] == "run_signal"
+    assert row["signal_action"] == "buy"
+    assert row["signal_symbol"] == "NVDA"
+    assert row["rating"] == "strong_buy"
+    assert row["price_target"] == 1250.0
+    assert row["stop_loss"] == 900.0
+    assert row["position_sizing"] == "half"
+    assert row["confidence"] == 0.82
+    assert row["allocations"] == {"NVDA": 0.4, "CASH": 0.6}
+    assert row["time_horizon"] == "30d"
+    assert row["rationale"] == "positive momentum"
+    assert row["risk_flags"] == ["earnings_window"]
+    assert row["validation_ok"] is False
+    assert row["validation_errors"] == ["symbol not in allowed universe"]
+
+
+def test_strategy_runs_table_reads_metadata_source_signal_fallback(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_strategy_run(
+        "run_metadata_signal",
+        "signal_strategy",
+        {
+            "result": {
+                "confidence": 0.64,
+                "allocations": {"CASH": 1.0},
+                "metadata": {
+                    "source_signal": {
+                        "symbol": "TSLA",
+                        "action": "sell",
+                        "rating": "underperform",
+                        "price_target": 120.0,
+                        "stop_loss": 210.0,
+                        "position_sizing": "zero",
+                    }
+                },
+            },
+            "validation": {"ok": True, "errors": []},
+        },
+    )
+
+    row = build_strategy_runs_table(store)[0]
+
+    assert row["signal_action"] == "sell"
+    assert row["signal_symbol"] == "TSLA"
+    assert row["rating"] == "underperform"
+    assert row["price_target"] == 120.0
+    assert row["stop_loss"] == 210.0
+    assert row["position_sizing"] == "zero"
+    assert row["confidence"] == 0.64
+    assert row["validation_ok"] is True
+
+
+def test_strategy_runs_table_keeps_target_allocation_payload_compatible(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_strategy_run(
+        "run_allocation",
+        "allocation_strategy",
+        {
+            "result": {
+                "confidence": 0.7,
+                "allocations": {"MOCK_ETF_A": 0.5, "MOCK_ETF_B": 0.5},
+                "risk_flags": [],
+            },
+            "validation": {"ok": True, "errors": []},
+        },
+    )
+
+    row = build_strategy_runs_table(store)[0]
+
+    assert row["signal_action"] is None
+    assert row["signal_symbol"] is None
+    assert row["rating"] is None
+    assert row["price_target"] is None
+    assert row["stop_loss"] is None
+    assert row["position_sizing"] is None
+    assert row["confidence"] == 0.7
+    assert row["allocations"] == {"MOCK_ETF_A": 0.5, "MOCK_ETF_B": 0.5}
+    assert row["risk_flags"] == []
+    assert row["validation_ok"] is True
 
 
 def test_dashboard_operational_read_models(tmp_path):
