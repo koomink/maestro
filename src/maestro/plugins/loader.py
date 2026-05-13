@@ -4,7 +4,7 @@ from maestro.config.models import StrategyPluginConfig
 from maestro.core.exceptions import PluginLoadError
 from maestro.sdk import BaseStrategyPlugin
 
-SUPPORTED_SDK_CONTRACT_VERSION = "1.0"
+SUPPORTED_SDK_CONTRACT_VERSION = "1.1"
 
 
 def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:

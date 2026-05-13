@@ -8,6 +8,7 @@ from maestro.sdk.schemas import (
     StrategyManifest,
     StrategyResult,
 )
+from maestro.sdk.runtime import StrategyRuntime
 
 
 class BaseStrategyPlugin(ABC):
@@ -29,3 +30,12 @@ class BaseStrategyPlugin(ABC):
     @abstractmethod
     def run(self, data_bundle: DataBundle, context: StrategyContext) -> StrategyResult:
         raise NotImplementedError
+
+    def run_with_runtime(
+        self,
+        data_bundle: DataBundle,
+        context: StrategyContext,
+        runtime: StrategyRuntime,
+    ) -> StrategyResult:
+        del runtime
+        return self.run(data_bundle, context)

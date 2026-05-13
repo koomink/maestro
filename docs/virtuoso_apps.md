@@ -130,12 +130,19 @@ class BaseStrategyPlugin(ABC):
         context: StrategyContext,
     ) -> list[CandidateInstrumentRequest]: ...
     def run(self, data_bundle: DataBundle, context: StrategyContext) -> StrategyResult: ...
+    def run_with_runtime(
+        self,
+        data_bundle: DataBundle,
+        context: StrategyContext,
+        runtime: StrategyRuntime,
+    ) -> StrategyResult: ...
 ```
 
 `build_candidate_requests()` is optional and defaults to an empty list. Override
-it only for dynamic-universe strategies.
+it only for dynamic-universe strategies. `run_with_runtime()` is optional and
+defaults to delegating to `run()`.
 
-## SDK Contract 1.0
+## SDK Contract 1.0 and 1.1
 
 Contract `1.0` supports `TargetAllocationResult` end-to-end. It also supports
 `StrategySignalResult` when the strategy config provides a Maestro-owned
@@ -143,11 +150,15 @@ signal-to-allocation policy. Maestro normalizes the signal immediately after
 `run()` and all validation, portfolio construction, risk, approval, execution,
 state persistence, and audit paths continue to consume `TargetAllocationResult`.
 
+Contract `1.1` adds `StrategyRuntime`, which lets an app request Maestro
+DataHub data during `run_with_runtime()` without importing `maestro.datahub`
+internals. Runtime requests are audited separately from prefetch requests.
+
 Use these manifest defaults for a new wrapper:
 
 ```python
 StrategyManifest(
-    sdk_contract_version="1.0",
+    sdk_contract_version="1.1",
     strategy_id="my_virtuoso_app",
     name="my_virtuoso_app",
     version="0.1.0",
@@ -177,13 +188,15 @@ For each `run_once`, Maestro performs this strategy-facing sequence:
    candidates through Maestro universe policy.
 4. Call `build_data_requests(context)`.
 5. Fetch all requested data through Maestro DataHub.
-6. Call `run(data_bundle, context)`.
+6. Call `run_with_runtime(data_bundle, context, runtime)`.
 7. Normalize `StrategySignalResult` to `TargetAllocationResult` when needed.
 8. Validate the normalized `TargetAllocationResult`.
 9. Combine strategy outputs using configured strategy weights.
 10. Run risk checks, approval gates, execution, state persistence, and audit.
 
-The app does not call these Maestro services directly.
+The app does not call these Maestro services directly. If it needs data during
+analysis, it calls `runtime.get_data(DataRequest(...))`; Maestro still owns
+provider routing, freshness checks, and audit records.
 
 ## StrategyContext
 
@@ -390,8 +403,8 @@ Add a `signal_to_allocation` policy to the strategy config, or set
 
 `Strategy requires unsupported Maestro SDK contract version ...`
 
-Use `sdk_contract_version="1.0"` until Maestro publishes a newer supported
-contract.
+Use `sdk_contract_version="1.1"` or lower until Maestro publishes a newer
+supported contract.
 
 `allocation symbol ... is not in allowed universe`
 

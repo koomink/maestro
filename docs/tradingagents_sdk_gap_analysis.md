@@ -180,7 +180,7 @@ A minimal TradingAgents Virtuoso wrapper would look like this:
      statements, and insider activity.
    - Request benchmark or macro research data separately from tradable data.
 
-4. `run(data_bundle, context)`
+4. `run_with_runtime(data_bundle, context, runtime)`
    - Convert Maestro-provided data into the format TradingAgents tools expect,
      or run TradingAgents with Maestro-backed runtime tools.
    - Execute `TradingAgentsGraph.propagate(ticker, trade_date)`.
@@ -318,8 +318,9 @@ The remaining practical gaps are:
 
 ### 6.1 Runtime Data Tool Contract
 
-Add an SDK-level way for Virtuoso apps to obtain Maestro-backed runtime tools.
-For TradingAgents, this should cover:
+SDK contract `1.1` adds `StrategyRuntime`, an SDK-level way for Virtuoso apps
+to obtain Maestro-backed runtime data during `run_with_runtime()`. For
+TradingAgents, the adapter maps this runtime access onto:
 
 - `get_stock_data`
 - `get_indicators`
@@ -331,8 +332,9 @@ For TradingAgents, this should cover:
 - `get_global_news`
 - `get_insider_transactions`
 
-This contract should let LangChain/LangGraph tools call Maestro DataHub without
-the app importing `maestro.datahub` internals.
+This contract lets LangChain/LangGraph tools call Maestro DataHub without the
+app importing `maestro.datahub` internals. Runtime requests, response metadata,
+and errors are recorded separately from the initial prefetch requests.
 
 ### 6.2 Structured Signal Result
 
@@ -367,8 +369,7 @@ and keeps the original signal in `metadata["source_signal"]` and strategy-run
 `"source_signal"`.
 
 Remaining work for a fuller TradingAgents integration is outside this path:
-the wrapper package, LangChain/LangGraph dependencies, runtime Maestro DataHub
-tools, checkpoint/artifact storage, and LLM telemetry.
+checkpoint/artifact storage and LLM telemetry.
 
 ### 6.3 Richer DataRequest
 
@@ -503,6 +504,7 @@ Use this only if TradingAgents becomes a strategic first-class app.
 2. Add a structured signal/metadata contract so TradingAgents decisions are not
    collapsed into weights too early.
 3. Add Maestro-backed runtime data tools for the TradingAgents tool surface.
+   Done for the SDK 1.1 paper adapter path.
 4. Add an `insider_transactions` provider and broaden Yahoo/Alpha Vantage parity
    where needed.
 5. Add app runtime services for storage, artifacts, checkpointing, timeout, and
@@ -528,8 +530,9 @@ The right integration path is:
 1. Keep TradingAgents proposal-only.
 2. Keep Maestro responsible for data access, universe validation, risk, approval,
    execution, state, monitoring, and audit.
-3. Add SDK support for runtime DataHub-backed tools, structured signal results,
-   richer data requests, app runtime services, and explicit LLM permissions.
+3. Continue SDK support beyond the existing runtime DataHub-backed tools,
+   structured signal results, and richer data requests by adding app runtime
+   services and explicit LLM permissions.
 
 With those additions, TradingAgents can become a realistic Virtuoso app without
 breaking Maestro's core ownership boundaries.

@@ -62,6 +62,29 @@ def test_unsupported_sdk_contract_version_fails(monkeypatch):
         load_strategy(config)
 
 
+def test_sdk_contract_version_1_1_loads(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def sdk_1_1_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(update={"sdk_contract_version": "1.1"})
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        sdk_1_1_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+    )
+
+    assert load_strategy(config).manifest().sdk_contract_version == "1.1"
+
+
 def test_strategy_signal_manifest_requires_signal_to_allocation_policy(monkeypatch):
     import sample_static_allocation.strategy as strategy_module
 

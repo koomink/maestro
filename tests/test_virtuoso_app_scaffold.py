@@ -143,7 +143,7 @@ def test_generated_virtuoso_app_contract(tmp_path):
     manifest = strategy.manifest()
 
     assert isinstance(strategy, BaseStrategyPlugin)
-    assert manifest.sdk_contract_version == "1.0"
+    assert manifest.sdk_contract_version == "1.1"
     assert manifest.result_type == "target_allocation"
     assert manifest.can_run_live is False
     assert manifest.allow_direct_external_data_calls is False

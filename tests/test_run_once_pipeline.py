@@ -6,7 +6,7 @@ import yaml
 
 from maestro.config.loader import load_config
 from maestro.orchestration.orchestrator import MaestroOrchestrator
-from maestro.sdk import StrategySignalResult
+from maestro.sdk import DataRequest, StrategySignalResult
 from maestro.state.store import StateStore
 
 
@@ -35,6 +35,42 @@ def test_run_once_pipeline(tmp_path):
         "MOCK_ETF_B": 0.2,
     }
     assert len(details["paper_orders"]) == 2
+
+
+def test_run_once_records_runtime_data_requests(tmp_path, monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    def run_with_runtime(self, data_bundle, context, runtime):
+        runtime.get_data(
+            DataRequest(
+                symbol="MOCK_ETF_A",
+                asset_type="domestic_etf",
+                data_type="price",
+                intended_use="tradable",
+            )
+        )
+        return self.run(data_bundle, context)
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "run_with_runtime",
+        run_with_runtime,
+    )
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    config_path = tmp_path / "paper.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    MaestroOrchestrator(load_config(config_path)).run_once()
+
+    audit_event = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[-1])
+    runtime = audit_event["details"]["data_requests"]["sample_static_allocation"]["runtime"]
+
+    assert runtime["requests"][0]["symbol"] == "MOCK_ETF_A"
+    assert runtime["requests"][0]["data_type"] == "price"
+    assert runtime["bundles"][0]["source"] == "mock"
+    assert runtime["errors"] == []
 
 
 def test_run_once_failure_audit_includes_exception_metadata(tmp_path):

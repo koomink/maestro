@@ -36,6 +36,7 @@ from maestro.safety.controls import SafetyControlService
 from maestro.sdk import (
     CandidateInstrumentRequest,
     StrategyContext,
+    StrategyRuntime,
     StrategySignalResult,
     TargetAllocationResult,
 )
@@ -125,13 +126,22 @@ class MaestroOrchestrator:
             for loaded in self.registry.strategies:
                 context = self._strategy_context(run_id, loaded, current_state)
                 requests = loaded.plugin.build_data_requests(context)
-                data_requests_by_strategy[loaded.config.id] = [
-                    request.model_dump(mode="json") for request in requests
-                ]
+                strategy_data_requests = {
+                    "prefetch": [request.model_dump(mode="json") for request in requests],
+                    "runtime": {"requests": [], "bundles": [], "errors": []},
+                }
+                data_requests_by_strategy[loaded.config.id] = strategy_data_requests
                 data_bundle = self.datahub.get_data(requests)
                 data_quality_issues.extend(collect_data_quality_issues(data_bundle))
                 prices.update(prices_from_bundle(data_bundle))
-                raw_result = loaded.plugin.run(data_bundle, context)
+                runtime = StrategyRuntime(self.datahub.get_data, context=context)
+                try:
+                    raw_result = loaded.plugin.run_with_runtime(data_bundle, context, runtime)
+                finally:
+                    strategy_data_requests["runtime"] = runtime.audit_payload()
+                for runtime_bundle in runtime.bundles:
+                    data_quality_issues.extend(collect_data_quality_issues(runtime_bundle))
+                    prices.update(prices_from_bundle(runtime_bundle))
                 result = normalize_strategy_result(
                     raw_result,
                     loaded.config.signal_to_allocation,

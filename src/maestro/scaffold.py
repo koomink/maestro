@@ -182,7 +182,7 @@ def _strategy_py(package_name: str, class_name: str, strategy_id: str) -> str:
         class {class_name}(BaseStrategyPlugin):
             def manifest(self) -> StrategyManifest:
                 return StrategyManifest(
-                    sdk_contract_version="1.0",
+                    sdk_contract_version="1.1",
                     strategy_id="{strategy_id}",
                     name="{package_name}",
                     version="0.1.0",
@@ -312,7 +312,7 @@ def _contract_test_py(package_name: str, class_name: str, strategy_id: str) -> s
             manifest = strategy.manifest()
 
             assert isinstance(strategy, BaseStrategyPlugin)
-            assert manifest.sdk_contract_version == "1.0"
+            assert manifest.sdk_contract_version == "1.1"
             assert manifest.result_type == "target_allocation"
             assert manifest.can_run_live is False
             assert manifest.allow_direct_external_data_calls is False

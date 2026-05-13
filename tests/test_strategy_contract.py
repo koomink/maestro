@@ -10,6 +10,7 @@ from maestro.sdk import (
     DataRequest,
     StrategyContext,
     StrategyManifest,
+    StrategyRuntime,
     StrategySignalResult,
     TargetAllocationResult,
 )
@@ -163,3 +164,87 @@ def test_sdk_contract_supports_llm_signal_and_rich_data_request_fields():
     assert request.statement_type == "income_statement"
     assert signal.metadata["reports"]["market"] == "strong momentum"
     assert allocation.metadata["rating"] == "Buy"
+
+
+def test_strategy_runtime_fetches_data_and_records_audit_payload():
+    timestamp = datetime(2026, 1, 15, tzinfo=UTC)
+    request = DataRequest(symbol="NVDA", asset_type="stock", data_type="price")
+
+    def fetch_data(requests):
+        return DataBundle(
+            requests=requests,
+            data={"NVDA": {"price": 100.0}},
+            generated_at=timestamp,
+            source="fixture",
+        )
+
+    runtime = StrategyRuntime(
+        fetch_data,
+        context=StrategyContext(
+            cycle_id="test",
+            timestamp=timestamp,
+            run_mode=RunMode.PAPER,
+            strategy_id="tradingagents",
+            config={},
+        ),
+    )
+
+    bundle = runtime.get_data(request)
+    payload = runtime.audit_payload()
+
+    assert bundle.data["NVDA"]["price"] == 100.0
+    assert payload["requests"][0]["symbol"] == "NVDA"
+    assert payload["bundles"][0]["source"] == "fixture"
+    assert payload["errors"] == []
+
+
+def test_base_strategy_plugin_runtime_default_delegates_to_run():
+    class RuntimeDefaultStrategy(BaseStrategyPlugin):
+        def manifest(self):
+            return StrategyManifest(
+                strategy_id="runtime_default",
+                name="Runtime Default",
+                version="0.1.0",
+                supported_modes=["paper"],
+                supported_asset_types=["stock"],
+            )
+
+        def build_data_requests(self, context):
+            del context
+            return []
+
+        def run(self, data_bundle, context):
+            del data_bundle
+            return TargetAllocationResult(
+                strategy_id=context.strategy_id,
+                strategy_version="0.1.0",
+                timestamp=context.timestamp,
+                allocations={"CASH": 1.0},
+                confidence=0.5,
+            )
+
+    timestamp = datetime(2026, 1, 15, tzinfo=UTC)
+    context = StrategyContext(
+        cycle_id="test",
+        timestamp=timestamp,
+        run_mode=RunMode.PAPER,
+        strategy_id="runtime_default",
+        config={},
+    )
+    runtime = StrategyRuntime(
+        lambda requests: DataBundle(
+            requests=requests,
+            data={},
+            generated_at=timestamp,
+            source="fixture",
+        ),
+        context=context,
+    )
+
+    result = RuntimeDefaultStrategy().run_with_runtime(
+        DataBundle(requests=[], data={}, generated_at=timestamp, source="fixture"),
+        context,
+        runtime,
+    )
+
+    assert result.allocations == {"CASH": 1.0}

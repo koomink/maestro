@@ -8,6 +8,7 @@ from maestro.sdk.schemas import (
     StrategySignalResult,
     TargetAllocationResult,
 )
+from maestro.sdk.runtime import StrategyRuntime
 from maestro.sdk.strategy import BaseStrategyPlugin
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "StrategyContext",
     "StrategyManifest",
     "StrategyResult",
+    "StrategyRuntime",
     "StrategySignalResult",
     "TargetAllocationResult",
 ]
