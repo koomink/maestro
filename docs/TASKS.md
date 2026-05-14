@@ -556,34 +556,51 @@
       as missing FX instead of force-converting values
 - [ ] Define persisted performance snapshot/read-model schema for account,
       strategy, currency sleeve, and total portfolio returns
-- [ ] Use KIS broker snapshots as the broker-truth source for account equity,
+- [x] Use persisted broker snapshots as the broker-truth source for account equity,
       cash, positions, realized/unrealized PnL, fees, and settlement fields when
       available
 - [x] Preserve KRW and USD return series separately before adding any
       base-currency converted portfolio return
-- [x] Add explicit FX conversion source, timestamp, and missing-FX behavior for
-      cross-currency portfolio views
+- [x] Add explicit missing-FX behavior and reserved FX source/timestamp fields
+      for cross-currency portfolio views
+- [ ] Define the FX source snapshot/config shape for reporting, including
+      source name, rate, as-of timestamp, stale threshold, and supported pairs
+- [ ] Add KRW as the default dashboard performance display currency
+- [ ] Add a read-only KRW/USD display-currency toggle for total portfolio
+      performance charts and tables
+- [ ] Split local sleeve return, FX effect, and converted total return in
+      performance read models
+- [ ] Ensure FX conversion is used only for dashboard/reporting and never for
+      order generation, buying power, reconciliation cash gates, or risk cash
+      checks
+- [ ] Add missing/stale FX dashboard labels and disable converted total return
+      calculations when FX is unavailable or stale
 - [ ] Attribute strategy returns from persisted proposal, order, fill, and
       strategy-run lineage without adding strategy-specific code paths
 - [ ] Define the documented fallback attribution rule for shared holdings until
       lot-level strategy accounting exists
-- [ ] Add account-level daily/cumulative return and drawdown calculations
+- [x] Add account-level daily/cumulative return and drawdown calculations
 - [ ] Add strategy-level daily/cumulative return and drawdown calculations
 - [x] Add currency-sleeve daily/cumulative return and drawdown calculations
 - [x] Add total portfolio daily/cumulative return and drawdown calculations
-- [ ] Add reconciliation gates so performance dashboards mark stale or
-      unreconciled broker data instead of presenting it as fresh truth
-- [ ] Add read-only dashboard charts for account equity/PnL, strategy returns,
-      currency-sleeve returns, total portfolio return, drawdown, and latest
+- [x] Label performance rows with persisted reconciliation pass/fail/missing
+      state
+- [ ] Add freshness-age/stale labels so old broker snapshots or old
+      reconciliations are not presented as fresh truth
+- [x] Add read-only dashboard charts for account value/return/drawdown,
+      currency-sleeve returns, total portfolio return/drawdown, and latest
       reconciliation status
-- [ ] Keep dashboard graphs backed by persisted state/read models only; do not
+- [ ] Add read-only dashboard charts for strategy-level returns after strategy
+      attribution exists
+- [x] Keep dashboard graphs backed by persisted state/read models only; do not
       call KIS live endpoints from dashboard rendering
-- [ ] Add CSV export for performance tables without adding dashboard write
+- [x] Add CSV export for performance tables without adding dashboard write
       controls
-- [ ] Add fixture/fake-client tests for KIS snapshot normalization, performance
-      calculations, attribution, multi-currency behavior, stale data labeling,
-      and dashboard read models
-- [ ] Document operator usage and limitations in README/TRD once implemented
+- [x] Add fixture/fake-client tests for account, currency-sleeve,
+      total-portfolio, multi-currency, and dashboard read model calculations
+- [ ] Add fixture/fake-client tests for strategy attribution and stale data
+      labeling once implemented
+- [x] Document current operator usage and limitations in README/TRD
 
 ## Completed / Historical Notes
 

@@ -5,8 +5,8 @@ import yaml
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
 from maestro.dashboard.read_models import (
-    build_approvals_table,
     build_account_performance_table,
+    build_approvals_table,
     build_broker_account_summary,
     build_broker_position_exposure_table,
     build_broker_snapshot_history_table,
@@ -492,6 +492,50 @@ def test_account_performance_table_tracks_returns_drawdown_and_reconciliation(tm
     assert rows[2]["period_return"] is None
     assert rows[2]["cumulative_return"] == 0.0
     assert rows[2]["reconciliation_status"] == "unreconciled"
+
+
+def test_broker_performance_prefers_broker_total_asset_value_and_currency(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_domestic",
+        "acct",
+        {
+            "account": {
+                "account_id": "acct",
+                "cash": 1_000_000.0,
+                "cash_by_currency": {"KRW": 1_000_000.0},
+                "cash_balance": {
+                    "currency": "KRW",
+                    "cash": 1_000_000.0,
+                    "total_asset_value": 999_990.0,
+                    "withdrawable_cash": 1_000_000.0,
+                },
+                "positions": [
+                    {
+                        "symbol": "KODEX_US_DIVIDEND_DOWJONES",
+                        "quantity": 1.0,
+                        "current_price": 12_905.0,
+                        "average_price": 12_915.0,
+                        "unrealized_pnl": -10.0,
+                    }
+                ],
+                "source": "kis_rest_readonly",
+            }
+        },
+    )
+
+    broker_history = build_broker_snapshot_history_table(store)
+    account_rows = build_account_performance_table(store)
+    currency_rows = build_currency_sleeve_performance_table(store)
+    total_rows = build_total_portfolio_performance_table(store)
+
+    assert broker_history[0]["total_value"] == 999_990.0
+    assert account_rows[0]["currency"] == "KRW"
+    assert account_rows[0]["total_value"] == 999_990.0
+    assert currency_rows[0]["currency"] == "KRW"
+    assert currency_rows[0]["total_value"] == 999_990.0
+    assert total_rows[0]["currency"] == "KRW"
+    assert total_rows[0]["total_value"] == 999_990.0
 
 
 def test_currency_sleeve_performance_preserves_currencies_separately(tmp_path):

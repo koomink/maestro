@@ -301,7 +301,10 @@ explicit broker adapter paths. Single-product configs continue to use
 `kis.broker_product`. Multi-product operator configs use `kis.broker_products`
 and `portfolio.allocation_mode=currency_sleeves` so KRW and USD sleeves
 rebalance independently without automatic FX conversion or cross-currency
-orders.
+orders. FX conversion is a reporting concern only: operators may view
+FX-adjusted total performance in the dashboard, but order generation, buying
+power, reconciliation cash gates, and risk cash checks stay in each sleeve's
+native currency.
 
 Current example configs use static `portfolio.allowed_symbols` and
 `universe.instruments` lists such as `AAPL`, `MSFT`, `VOO`, `QQQ`, and `SGOV`.
@@ -902,7 +905,10 @@ The Performance tab shows broker-snapshot account value, period return,
 cumulative return, drawdown, and reconciliation labeling from persisted state.
 It also keeps KRW/USD currency-sleeve returns separate and marks mixed-currency
 total portfolio rows as requiring an explicit FX source before base-currency
-returns are shown.
+returns are shown. Planned FX reporting keeps KRW as the default base/display
+currency and adds a dashboard display-currency toggle for KRW or USD total
+performance. The toggle changes charts and tables only; it does not change
+portfolio management, risk checks, or order behavior.
 Refresh and CSV download are local UI actions only; the dashboard does not call
 live KIS endpoints and does not expose state-changing write controls.
 
@@ -1046,7 +1052,7 @@ Dashboard should show:
 - Account-level daily/cumulative PnL and return
 - Strategy-level daily/cumulative PnL and return
 - Currency-sleeve KRW/USD PnL and return
-- Total portfolio return and drawdown
+- Total portfolio return and drawdown with a KRW/USD display-currency toggle
 - Recent strategy results
 - Recent orders/proposals
 - Risk status
@@ -1056,9 +1062,10 @@ Dashboard should show:
 
 Planned KIS-backed performance tracking should use persisted broker snapshots,
 broker reconciliation, order/fill events, and Maestro strategy lineage. The
-dashboard should render graphs from persisted read models only; it should not
-call KIS live endpoints during page rendering and should not expose trading or
-admin write controls.
+dashboard should render graphs from persisted read models only, including stored
+FX source, rate, timestamp, and freshness status for converted views; it should
+not call KIS or FX endpoints during page rendering and should not expose trading
+or admin write controls.
 
 Dashboard should not initially allow:
 

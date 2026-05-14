@@ -523,6 +523,11 @@ Planned scope:
   data provides them, daily return, cumulative return, and drawdown.
 - Preserve KRW and USD reporting separately and add a portfolio base-currency
   view only when an explicit FX conversion source and timestamp are available.
+- Keep KRW as the default reporting base currency and add a read-only dashboard
+  toggle to display total portfolio performance in KRW or USD when FX data is
+  fresh.
+- Keep FX conversion strictly in the reporting layer; no automatic FX
+  conversion, cross-sleeve rebalancing, or FX-adjusted buying-power/risk gate.
 - Attribute strategy performance from Maestro-owned proposal/order/fill lineage;
   shared holdings should use a documented allocation rule until lot-level
   strategy accounting exists.

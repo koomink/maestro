@@ -334,9 +334,7 @@ def build_broker_snapshot_history_table(
         positions = _positions(account)
         positions_market_value = sum(_position_market_value(position) for position in positions)
         cash = _float_or_none(account.get("cash"))
-        total_value = _float_or_none(account.get("total_value"))
-        if total_value is None:
-            total_value = (cash or 0.0) + positions_market_value
+        total_value = _account_total_value(account, positions)
         rows.append(
             {
                 "created_at": row.get("created_at"),
@@ -393,7 +391,7 @@ def build_account_performance_table(
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
                 "account_id": row.get("account_id") or account.get("account_id"),
-                "currency": account.get("currency") or payload.get("currency") or "UNKNOWN",
+                "currency": _snapshot_currency(account, payload),
                 "total_value": total_value,
                 "cash": _float_or_none(account.get("cash")),
                 "positions_market_value": sum(
@@ -526,9 +524,7 @@ def build_total_portfolio_performance_table(
                 "daily_return": performance["period_return"],
                 "cumulative_return": performance["cumulative_return"],
                 "drawdown": performance["drawdown"],
-                "reconciliation_status": _combined_reconciliation_status(
-                    reconciliation_statuses
-                ),
+                "reconciliation_status": _combined_reconciliation_status(reconciliation_statuses),
             }
         )
     return list(reversed(rows))
@@ -1005,11 +1001,7 @@ def _is_halt_or_failure_event(event_type: str, payload: dict[str, Any]) -> bool:
 
 
 def _positions(account: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        position
-        for position in account.get("positions", [])
-        if isinstance(position, dict)
-    ]
+    return [position for position in account.get("positions", []) if isinstance(position, dict)]
 
 
 def _position_market_value(position: dict[str, Any]) -> float:
@@ -1022,6 +1014,14 @@ def _position_market_value(position: dict[str, Any]) -> float:
 
 
 def _account_total_value(account: dict[str, Any], positions: list[dict[str, Any]]) -> float | None:
+    cash_balance = _mapping(account.get("cash_balance"))
+    total_value = _first_float(
+        cash_balance,
+        {},
+        ("total_asset_value", "total_value", "total_equity", "net_asset_value"),
+    )
+    if total_value is not None:
+        return total_value
     total_value = _first_float(
         account,
         {},
@@ -1058,9 +1058,16 @@ def _account_unrealized_pnl(
 
 def _snapshot_currency(account: dict[str, Any], payload: dict[str, Any]) -> str:
     currency = account.get("currency") or payload.get("currency")
-    if currency is None:
-        return "UNKNOWN"
-    return str(currency)
+    if currency is not None:
+        return str(currency)
+    cash_balance = _mapping(account.get("cash_balance"))
+    currency = cash_balance.get("currency")
+    if currency is not None:
+        return str(currency)
+    cash_by_currency = _mapping(account.get("cash_by_currency"))
+    if len(cash_by_currency) == 1:
+        return str(next(iter(cash_by_currency)))
+    return "UNKNOWN"
 
 
 def _advance_performance_state(

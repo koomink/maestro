@@ -987,12 +987,20 @@ Suggested SQLite tables:
 - modifications_json
 - decision_json
 
-Planned performance tracking should add queryable read-model tables or views for
-account, strategy, currency-sleeve, and total portfolio performance. Each record
-should include timestamp/as-of, source snapshot/event IDs, currency, beginning
-value, ending value, cash flows, realized PnL, unrealized PnL, fees when
-available, daily return, cumulative return, drawdown, and reconciliation/freshness
-status. These tables are dashboard/read-model state, not a broker order path.
+Current account, currency-sleeve, and total-portfolio performance read models
+are computed in `dashboard/read_models.py` from existing persisted broker
+snapshots and reconciliation events. They are not persisted as dedicated
+performance tables yet. Planned performance tracking should add queryable
+read-model tables or views for account, strategy, currency-sleeve, and total
+portfolio performance. Each record should include timestamp/as-of, source
+snapshot/event IDs, currency, beginning value, ending value, cash flows,
+realized PnL, unrealized PnL, fees when available, daily return, cumulative
+return, drawdown, and reconciliation/freshness status. FX-enabled total
+portfolio records should also include
+`display_currency`, `base_currency`, `fx_source`, `fx_rate`, `fx_timestamp`,
+`fx_status`, `local_return`, `fx_effect`, `converted_total_value`, and
+`converted_return`. These tables are dashboard/read-model state, not a broker
+order path.
 
 ### system_events
 
@@ -1102,25 +1110,38 @@ Streamlit tabs:
 4. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
 5. Raw: raw status payloads
 
-Planned performance tracking should add dashboard graphs and read models for:
+Current dashboard performance read models in `dashboard/read_models.py` cover
+account, currency-sleeve, and total-portfolio views from persisted broker
+snapshots and reconciliation events. The dashboard renders these persisted-state
+read models and CSV exports without calling KIS during page rendering. Planned
+performance tracking should extend that surface with:
 
-- KIS account equity, realized/unrealized PnL, daily return, cumulative return,
-  and drawdown.
+- Persisted performance tables/views for KIS account equity, realized/unrealized
+  PnL, daily return, cumulative return, and drawdown.
 - Strategy-level PnL/return derived from Maestro proposal, order, fill, and
   strategy run lineage.
 - Currency-sleeve PnL/return for KRW and USD sleeves.
 - Total portfolio PnL/return, with base-currency conversion only when an
   explicit FX source and timestamp are available.
+- A dashboard display-currency toggle for KRW and USD total portfolio views.
+  KRW is the default; USD is a reporting view. The toggle affects read models,
+  charts, tables, and exports only.
 - Reconciliation freshness markers so stale or unreconciled broker data is not
   shown as fresh broker truth.
+- FX source, rate, timestamp, and stale/missing status for every converted
+  total-performance view.
 
 Performance read models should be computed from persisted KIS snapshots,
 portfolio snapshots, broker reconciliation events, live order status/lifecycle
-events, fill reconciliation events, and strategy run payloads. The dashboard
-must not call KIS live endpoints directly. Strategy attribution must remain
-strategy-agnostic: use persisted order/fill lineage where unambiguous and a
-documented shared-holding allocation rule until lot-level strategy accounting is
-implemented.
+events, fill reconciliation events, and strategy run payloads. The implemented
+account, currency-sleeve, and total-portfolio views are computed on read from
+those persisted snapshots/events; strategy attribution and dedicated performance
+tables remain pending. The dashboard must not call KIS or FX endpoints directly.
+FX conversion is reporting-only and must not feed order generation,
+buying-power checks, reconciliation cash gates, or risk cash checks. Strategy
+attribution must remain strategy-agnostic: use persisted order/fill lineage
+where unambiguous and a documented shared-holding allocation rule until
+lot-level strategy accounting is implemented.
 
 Account performance v1 is a read model computed from persisted broker account
 snapshots and broker reconciliation events. It exposes account value, cash,
@@ -1134,7 +1155,10 @@ snapshot currency, so KRW and USD returns remain separate. Total portfolio
 performance groups broker snapshots by run/as-of time; when more than one
 currency is present and no explicit FX source/timestamp exists, the row exposes
 component values and `missing_fx=true` instead of computing a base-currency
-return.
+return. With fresh FX, the read model may compute KRW-display or USD-display
+total performance by converting only the non-display currency components. It
+should preserve local sleeve return and expose the FX effect separately so users
+can distinguish investment performance from currency movement.
 
 Security:
 

@@ -264,10 +264,20 @@ And Maestro will:
   strategy-run lineage rather than strategy-specific code branches
 - Currency-sleeve return tracking for KRW and USD portfolios, with explicit FX
   conversion policy before showing a base-currency total return
+- KRW as the default reporting base currency, with a read-only dashboard toggle
+  that can display total portfolio performance in KRW or USD when FX data is
+  fresh
 - Read-only dashboard graphs for account returns, strategy returns,
   currency-sleeve returns, total portfolio returns, drawdown, and reconciliation
   freshness
+- FX-adjusted views must show FX source, rate, timestamp, and missing/stale
+  status; FX conversion must not affect execution, buying power, or risk gates
 - CSV export for performance views without dashboard write controls
+
+Current implementation covers account, currency-sleeve, and total-portfolio
+read models from persisted broker snapshots/events, plus dashboard charts and
+CSV export. Strategy attribution, stale-age labeling, and persisted performance
+tables remain future work.
 
 ### Phase 10: Limited Live Automation
 
@@ -359,16 +369,20 @@ Requirements:
 
 ### 8.8 Dashboard
 
-Future requirement:
+Current and future requirement:
 
 - Dashboard must be read-only by default.
 - Dashboard should display portfolio, account-level PnL/return, strategy-level
   PnL/return, currency-sleeve PnL/return, total portfolio return, drawdown,
   strategy status, orders, proposals, system health, and KIS/Telegram status.
+- Dashboard should default total performance views to KRW and allow a read-only
+  USD display toggle for converted reporting.
 - Performance charts must label stale or unreconciled broker data instead of
   presenting it as fresh broker truth.
+- Performance charts must label missing or stale FX data and must not compute a
+  converted total return from stale FX.
 - Dashboard rendering must use persisted snapshots/read models and must not call
-  KIS live endpoints directly.
+  KIS or FX endpoints directly.
 - Dashboard must not expose secrets.
 - Dashboard should be accessible through localhost or Tailscale/VPN rather than public internet.
 
