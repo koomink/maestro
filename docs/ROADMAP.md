@@ -283,6 +283,7 @@ Completed scope:
   snapshot, latest reconciliation, recent halt/failure events, live order
   status/lifecycle events, fill reconciliation events, and daily live order
   count/notional usage
+- Operator summary and attention items for read-only live-approval monitoring
 - Portfolio analytics panels for broker exposure, Maestro state exposure, and
   snapshot history, with local refresh and CSV download actions
 - Dashboard labels clarified for stock/ETF and KIS domestic/overseas workflows
@@ -504,6 +505,12 @@ general administration surface. Recovery remains CLI/runbook driven.
 
 Planned scope:
 
+- Account performance v1 now reads persisted broker account snapshots into a
+  read-only dashboard table and charts for account value, period return,
+  cumulative return, drawdown, and reconciliation status.
+- Currency-sleeve performance now keeps KRW/USD return series separate, and the
+  total portfolio read model marks mixed-currency rows as missing FX until an
+  explicit conversion source is available.
 - Connect persisted KIS account snapshots, live order/fill events, broker
   reconciliation, and Maestro strategy run records into a performance tracking
   read model.

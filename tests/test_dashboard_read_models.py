@@ -6,10 +6,12 @@ from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
 from maestro.dashboard.read_models import (
     build_approvals_table,
+    build_account_performance_table,
     build_broker_account_summary,
     build_broker_position_exposure_table,
     build_broker_snapshot_history_table,
     build_broker_snapshots_table,
+    build_currency_sleeve_performance_table,
     build_daily_live_order_usage,
     build_fill_reconciliation_table,
     build_health_summary,
@@ -17,6 +19,7 @@ from maestro.dashboard.read_models import (
     build_latest_reconciliation_card,
     build_live_order_events_table,
     build_maestro_state_exposure_table,
+    build_operator_summary,
     build_orders_table,
     build_overview,
     build_portfolio_snapshot_history_table,
@@ -26,6 +29,7 @@ from maestro.dashboard.read_models import (
     build_safety_state_card,
     build_strategy_runs_table,
     build_system_events_table,
+    build_total_portfolio_performance_table,
 )
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state.models import PortfolioState
@@ -42,6 +46,24 @@ def test_build_overview_works_with_empty_db(tmp_path):
     assert overview["orders_count"] == 0
     assert overview["risk_decisions_count"] == 0
     assert overview["latest_run_id"] is None
+
+
+def test_operator_summary_works_with_empty_db(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    config_path = tmp_path / "paper.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    summary = build_operator_summary(config, store)
+
+    assert summary["safety"]["state"] == "active"
+    assert summary["reconciliation"]["passed"] is None
+    assert summary["daily_live_usage"]["order_count"] == 0
+    assert summary["live_order_lifecycle"]["recent_status_counts"] == {}
+    assert isinstance(summary["attention_items"], list)
 
 
 def test_dashboard_read_models_work_after_run(tmp_path):
@@ -298,6 +320,80 @@ def test_dashboard_operational_read_models(tmp_path):
     assert usage["notional"] == 123.45
 
 
+def test_operator_summary_collects_attention_items_and_live_order_lifecycle(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
+    raw["execution"]["max_daily_live_order_count"] = 2
+    raw["execution"]["max_daily_live_notional"] = 200.0
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    store.save_system_event(
+        "run_safety",
+        "safety_state",
+        {
+            "state": "halted",
+            "reason": "operator review",
+            "source": "test",
+            "created_at": utc_now().isoformat(),
+            "updated_at": utc_now().isoformat(),
+        },
+    )
+    store.save_system_event(
+        "run_reconcile",
+        "broker_reconciliation",
+        {"passed": False, "issues": [{"issue_type": "cash_mismatch"}]},
+    )
+    store.save_system_event(
+        "run_order_open",
+        "live_order_lifecycle",
+        {
+            "final_status": "open",
+            "order_id": "ord_open",
+            "broker_order_id": "broker_open",
+            "status_snapshots": [{"status": "open", "symbol": "AAPL"}],
+        },
+    )
+    store.save_system_event(
+        "run_order_failed",
+        "live_order_lifecycle",
+        {
+            "final_status": "failed",
+            "order_id": "ord_failed",
+            "broker_order_id": "broker_failed",
+            "failed_reason": "broker reconciliation failed",
+        },
+    )
+    for index in range(2):
+        store.save_system_event(
+            f"run_live_{index}",
+            "live_order_result",
+            {
+                "submitted_date": utc_now().date().isoformat(),
+                "notional": 125.0,
+            },
+        )
+
+    summary = build_operator_summary(config, store)
+    codes = {item["code"] for item in summary["attention_items"]}
+
+    assert "safety_not_active" in codes
+    assert "health_not_ok" in codes
+    assert "reconciliation_failed" in codes
+    assert "daily_live_order_count_limit" in codes
+    assert "daily_live_notional_limit" in codes
+    assert "recent_live_order_issue" in codes
+    assert summary["live_order_lifecycle"]["latest"]["status"] == "failed"
+    assert summary["live_order_lifecycle"]["recent_status_counts"] == {
+        "failed": 1,
+        "open": 1,
+    }
+
+
 def test_dashboard_broker_portfolio_analytics_from_latest_snapshot(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     store.save_broker_account_snapshot(
@@ -346,6 +442,132 @@ def test_dashboard_broker_portfolio_analytics_from_latest_snapshot(tmp_path):
     assert positions[0]["weight"] == 300.0 / 1550.0
     assert positions[1]["symbol"] == "MSFT"
     assert history[0]["total_value"] == 1550.0
+
+
+def test_account_performance_table_tracks_returns_drawdown_and_reconciliation(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    snapshots = [
+        ("run_1", 1000.0, 0.0),
+        ("run_2", 1100.0, 100.0),
+        ("run_3", 990.0, -10.0),
+    ]
+    for run_id, total_value, unrealized_pnl in snapshots:
+        store.save_broker_account_snapshot(
+            run_id,
+            "acct",
+            {
+                "account": {
+                    "account_id": "acct",
+                    "currency": "USD",
+                    "cash": 100.0,
+                    "total_value": total_value,
+                    "unrealized_pnl": unrealized_pnl,
+                    "positions": [],
+                    "source": "kis_overseas_stock_readonly",
+                }
+            },
+        )
+    latest_snapshot = store.list_broker_account_snapshots(limit=1)[0]
+    store.save_system_event(
+        "run_reconcile",
+        "broker_reconciliation",
+        {
+            "passed": False,
+            "issues": [{"issue_type": "position_mismatch"}],
+            "broker_snapshot_id": latest_snapshot["id"],
+        },
+    )
+
+    rows = build_account_performance_table(store)
+
+    assert [row["run_id"] for row in rows] == ["run_3", "run_2", "run_1"]
+    assert rows[0]["total_value"] == 990.0
+    assert rows[0]["period_return"] == -0.1
+    assert rows[0]["cumulative_return"] == -0.01
+    assert rows[0]["drawdown"] == -0.1
+    assert rows[0]["reconciliation_status"] == "failed"
+    assert rows[1]["period_return"] == 0.1
+    assert rows[1]["cumulative_return"] == 0.1
+    assert rows[1]["drawdown"] == 0.0
+    assert rows[2]["period_return"] is None
+    assert rows[2]["cumulative_return"] == 0.0
+    assert rows[2]["reconciliation_status"] == "unreconciled"
+
+
+def test_currency_sleeve_performance_preserves_currencies_separately(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    snapshots = [
+        ("run_1", "acct_usd", "USD", 1000.0),
+        ("run_1", "acct_krw", "KRW", 1_000_000.0),
+        ("run_2", "acct_usd", "USD", 1100.0),
+        ("run_2", "acct_krw", "KRW", 950_000.0),
+    ]
+    for run_id, account_id, currency, total_value in snapshots:
+        store.save_broker_account_snapshot(
+            run_id,
+            account_id,
+            {
+                "account": {
+                    "account_id": account_id,
+                    "currency": currency,
+                    "cash": total_value,
+                    "total_value": total_value,
+                    "positions": [],
+                }
+            },
+        )
+
+    rows = build_currency_sleeve_performance_table(store)
+    latest_by_currency = {row["currency"]: row for row in rows[:2]}
+
+    assert latest_by_currency["USD"]["total_value"] == 1100.0
+    assert latest_by_currency["USD"]["period_return"] == 0.1
+    assert latest_by_currency["USD"]["cumulative_return"] == 0.1
+    assert latest_by_currency["KRW"]["total_value"] == 950_000.0
+    assert latest_by_currency["KRW"]["period_return"] == -0.05
+    assert latest_by_currency["KRW"]["cumulative_return"] == -0.05
+
+
+def test_total_portfolio_performance_marks_missing_fx_for_mixed_currency(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for run_id, usd_value, krw_value in [
+        ("run_1", 1000.0, 1_000_000.0),
+        ("run_2", 1100.0, 1_100_000.0),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "acct_usd",
+            {
+                "account": {
+                    "account_id": "acct_usd",
+                    "currency": "USD",
+                    "cash": usd_value,
+                    "total_value": usd_value,
+                    "positions": [],
+                }
+            },
+        )
+        store.save_broker_account_snapshot(
+            run_id,
+            "acct_krw",
+            {
+                "account": {
+                    "account_id": "acct_krw",
+                    "currency": "KRW",
+                    "cash": krw_value,
+                    "total_value": krw_value,
+                    "positions": [],
+                }
+            },
+        )
+
+    rows = build_total_portfolio_performance_table(store)
+
+    assert [row["run_id"] for row in rows] == ["run_2", "run_1"]
+    assert rows[0]["missing_fx"] is True
+    assert rows[0]["total_value"] is None
+    assert rows[0]["component_values"] == {"KRW": 1_100_000.0, "USD": 1100.0}
+    assert rows[0]["cumulative_return"] is None
 
 
 def test_dashboard_maestro_state_exposure_uses_latest_broker_prices(tmp_path):

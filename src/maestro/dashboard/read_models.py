@@ -1,3 +1,5 @@
+from collections import OrderedDict
+from datetime import UTC, datetime
 from typing import Any
 
 from maestro.config.models import MaestroConfig
@@ -351,6 +353,187 @@ def build_broker_snapshot_history_table(
     return rows
 
 
+def build_account_performance_table(
+    store: StateStore,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    source_rows = store.list_broker_account_snapshots(limit=limit)
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    rows = []
+    first_value = None
+    previous_value = None
+    peak_value = None
+    cumulative_cash_flow = 0.0
+
+    for row in reversed(source_rows):
+        payload = _mapping(row.get("payload"))
+        account = _mapping(payload.get("account"))
+        positions = _positions(account)
+        total_value = _account_total_value(account, positions)
+        cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
+        period_return = None
+        if previous_value is not None and previous_value > 0 and total_value is not None:
+            period_return = (total_value - previous_value - cash_flow) / previous_value
+        if first_value is None and total_value is not None:
+            first_value = total_value
+        elif total_value is not None:
+            cumulative_cash_flow += cash_flow
+        cumulative_return = None
+        if first_value is not None and first_value > 0 and total_value is not None:
+            cumulative_return = (total_value - first_value - cumulative_cash_flow) / first_value
+        if total_value is not None:
+            peak_value = total_value if peak_value is None else max(peak_value, total_value)
+        drawdown = _safe_weight(total_value, peak_value)
+        if drawdown is not None:
+            drawdown -= 1.0
+
+        reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "account_id": row.get("account_id") or account.get("account_id"),
+                "currency": account.get("currency") or payload.get("currency") or "UNKNOWN",
+                "total_value": total_value,
+                "cash": _float_or_none(account.get("cash")),
+                "positions_market_value": sum(
+                    _position_market_value(position) for position in positions
+                ),
+                "realized_pnl": _first_float(
+                    account,
+                    payload,
+                    ("realized_pnl", "realized_profit_loss", "realized_profit"),
+                ),
+                "unrealized_pnl": _account_unrealized_pnl(account, positions),
+                "fees": _first_float(account, payload, ("fees", "fee", "commission")),
+                "cash_flow": cash_flow,
+                "period_return": _round_ratio(period_return),
+                "daily_return": _round_ratio(period_return),
+                "cumulative_return": _round_ratio(cumulative_return),
+                "drawdown": _round_ratio(drawdown),
+                "reconciliation_status": _reconciliation_status(reconciliation),
+                "reconciliation_created_at": (reconciliation or {}).get("created_at"),
+                "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
+                "source": account.get("source") or payload.get("source"),
+            }
+        )
+        if total_value is not None:
+            previous_value = total_value
+    return list(reversed(rows))
+
+
+def build_currency_sleeve_performance_table(
+    store: StateStore,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    source_rows = store.list_broker_account_snapshots(limit=limit)
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    state_by_currency: dict[str, dict[str, Any]] = {}
+    rows = []
+
+    for row in reversed(source_rows):
+        payload = _mapping(row.get("payload"))
+        account = _mapping(payload.get("account"))
+        positions = _positions(account)
+        currency = _snapshot_currency(account, payload)
+        total_value = _account_total_value(account, positions)
+        cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
+        state = state_by_currency.setdefault(
+            currency,
+            {
+                "first_value": None,
+                "previous_value": None,
+                "peak_value": None,
+                "cumulative_cash_flow": 0.0,
+            },
+        )
+        performance = _advance_performance_state(state, total_value, cash_flow)
+        reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "currency": currency,
+                "account_id": row.get("account_id") or account.get("account_id"),
+                "total_value": total_value,
+                "cash": _float_or_none(account.get("cash")),
+                "cash_flow": cash_flow,
+                "period_return": performance["period_return"],
+                "daily_return": performance["period_return"],
+                "cumulative_return": performance["cumulative_return"],
+                "drawdown": performance["drawdown"],
+                "reconciliation_status": _reconciliation_status(reconciliation),
+                "source": account.get("source") or payload.get("source"),
+            }
+        )
+    return list(reversed(rows))
+
+
+def build_total_portfolio_performance_table(
+    store: StateStore,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    source_rows = store.list_broker_account_snapshots(limit=limit)
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in reversed(source_rows):
+        group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
+        grouped.setdefault(group_key, []).append(row)
+
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    performance_state = {
+        "first_value": None,
+        "previous_value": None,
+        "peak_value": None,
+        "cumulative_cash_flow": 0.0,
+    }
+    rows = []
+    for group_rows in grouped.values():
+        component_values: dict[str, float] = {}
+        component_cash_flows: dict[str, float] = {}
+        created_at = group_rows[-1].get("created_at")
+        run_id = group_rows[-1].get("run_id")
+        reconciliation_statuses = []
+        for row in group_rows:
+            payload = _mapping(row.get("payload"))
+            account = _mapping(payload.get("account"))
+            positions = _positions(account)
+            currency = _snapshot_currency(account, payload)
+            total_value = _account_total_value(account, positions)
+            if total_value is not None:
+                component_values[currency] = component_values.get(currency, 0.0) + total_value
+            cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
+            component_cash_flows[currency] = component_cash_flows.get(currency, 0.0) + cash_flow
+            reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
+            reconciliation_statuses.append(_reconciliation_status(reconciliation))
+
+        currencies = sorted(component_values)
+        missing_fx = len(currencies) > 1
+        total_value = None if missing_fx else next(iter(component_values.values()), None)
+        cash_flow = 0.0 if missing_fx else sum(component_cash_flows.values())
+        performance = _advance_performance_state(performance_state, total_value, cash_flow)
+        rows.append(
+            {
+                "created_at": created_at,
+                "run_id": run_id,
+                "currency": currencies[0] if len(currencies) == 1 else "MIXED",
+                "total_value": total_value,
+                "component_values": {key: component_values[key] for key in currencies},
+                "missing_fx": missing_fx,
+                "fx_source": None,
+                "fx_timestamp": None,
+                "cash_flow": None if missing_fx else cash_flow,
+                "period_return": performance["period_return"],
+                "daily_return": performance["period_return"],
+                "cumulative_return": performance["cumulative_return"],
+                "drawdown": performance["drawdown"],
+                "reconciliation_status": _combined_reconciliation_status(
+                    reconciliation_statuses
+                ),
+            }
+        )
+    return list(reversed(rows))
+
+
 def build_safety_state_card(store: StateStore) -> dict[str, Any]:
     latest = store.load_latest_system_event("safety_state")
     if latest is None:
@@ -388,6 +571,83 @@ def build_health_summary(config: MaestroConfig, store: StateStore) -> dict[str, 
         "generated_at": report.generated_at,
         "counts": counts,
         "checks": rows,
+    }
+
+
+def build_operator_summary(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
+    safety = build_safety_state_card(store)
+    health = build_health_summary(config, store)
+    broker_snapshot = build_latest_broker_snapshot_card(store)
+    broker_summary = build_broker_account_summary(store)
+    reconciliation = build_latest_reconciliation_card(store)
+    daily_live_usage = build_daily_live_order_usage(config, store)
+    live_order_lifecycle = build_live_order_lifecycle_summary(store)
+    halt_failure_events = build_recent_halt_failure_events_table(store, limit=5)
+    overview = build_overview(store)
+    return {
+        "overview": overview,
+        "safety": safety,
+        "health": health,
+        "broker_snapshot": broker_snapshot,
+        "broker_snapshot_age_seconds": _age_seconds(broker_snapshot.get("created_at")),
+        "broker_summary": broker_summary,
+        "reconciliation": reconciliation,
+        "daily_live_usage": daily_live_usage,
+        "daily_live_usage_status": _daily_live_usage_status(daily_live_usage),
+        "live_order_lifecycle": live_order_lifecycle,
+        "recent_halt_failure_events": halt_failure_events,
+        "attention_items": _operator_attention_items(
+            safety=safety,
+            health=health,
+            reconciliation=reconciliation,
+            daily_live_usage=daily_live_usage,
+            live_order_lifecycle=live_order_lifecycle,
+            halt_failure_events=halt_failure_events,
+        ),
+    }
+
+
+def build_live_order_lifecycle_summary(
+    store: StateStore,
+    limit: int = 20,
+) -> dict[str, Any]:
+    rows = []
+    status_counts: dict[str, int] = {}
+    for row in store.list_system_events(limit=200):
+        event_type = str(row.get("event_type") or "")
+        if event_type not in {"live_order_lifecycle", "live_order_workflow"}:
+            continue
+        payload = _mapping(row.get("payload"))
+        status = _live_order_summary_status(payload)
+        if status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id") or payload.get("run_id"),
+                "event_type": event_type,
+                "status": status,
+                "order_id": payload.get("order_id"),
+                "broker_order_id": payload.get("broker_order_id"),
+                "poll_count": payload.get("poll_count"),
+                "applied_fills": len(payload.get("applied_fills", [])),
+                "max_polls_reached": payload.get("max_polls_reached"),
+                "halt_reason": payload.get("halt_reason"),
+                "failed_reason": payload.get("failed_reason"),
+                "symbol": _live_order_summary_symbol(payload),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return {
+        "latest": rows[0] if rows else None,
+        "recent_status_counts": status_counts,
+        "recent_issue_count": sum(
+            count
+            for status, count in status_counts.items()
+            if status in {"failed", "halted", "unknown"}
+        ),
+        "recent": rows,
     }
 
 
@@ -532,6 +792,198 @@ def build_system_events_table(store: StateStore, limit: int = 20) -> list[dict[s
     return rows
 
 
+def _operator_attention_items(
+    *,
+    safety: dict[str, Any],
+    health: dict[str, Any],
+    reconciliation: dict[str, Any],
+    daily_live_usage: dict[str, Any],
+    live_order_lifecycle: dict[str, Any],
+    halt_failure_events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    items = []
+    safety_state = str(safety.get("state") or "unknown")
+    if safety_state != "active":
+        items.append(
+            {
+                "severity": "fail",
+                "code": "safety_not_active",
+                "message": f"Safety state is {safety_state}.",
+                "details": {
+                    "reason": safety.get("reason"),
+                    "updated_at": safety.get("updated_at"),
+                },
+            }
+        )
+
+    health_status = str(health.get("status") or "unknown")
+    if health_status != "ok":
+        items.append(
+            {
+                "severity": "fail" if health_status == "fail" else "warn",
+                "code": "health_not_ok",
+                "message": f"Health status is {health_status}.",
+                "details": health.get("counts", {}),
+            }
+        )
+
+    if reconciliation.get("passed") is False:
+        items.append(
+            {
+                "severity": "fail",
+                "code": "reconciliation_failed",
+                "message": "Latest broker reconciliation failed.",
+                "details": {
+                    "created_at": reconciliation.get("created_at"),
+                    "issues_count": reconciliation.get("issues_count"),
+                    "cash_difference": reconciliation.get("cash_difference"),
+                },
+            }
+        )
+
+    usage_status = _daily_live_usage_status(daily_live_usage)
+    for key, code in (
+        ("order_count", "daily_live_order_count"),
+        ("notional", "daily_live_notional"),
+    ):
+        status = usage_status[key]["status"]
+        if status == "not_configured" or status == "ok":
+            continue
+        items.append(
+            {
+                "severity": "fail" if status == "limit" else "warn",
+                "code": f"{code}_{status}",
+                "message": usage_status[key]["message"],
+                "details": usage_status[key],
+            }
+        )
+
+    latest_lifecycle = live_order_lifecycle.get("latest") or {}
+    latest_status = latest_lifecycle.get("status")
+    recent_issue_count = int(live_order_lifecycle.get("recent_issue_count") or 0)
+    if latest_status in {"failed", "halted", "unknown"} or recent_issue_count:
+        items.append(
+            {
+                "severity": "fail",
+                "code": "recent_live_order_issue",
+                "message": f"Recent live order lifecycle issues: {recent_issue_count}.",
+                "details": {
+                    "latest": latest_lifecycle,
+                    "recent_issue_count": recent_issue_count,
+                },
+            }
+        )
+
+    if halt_failure_events:
+        latest_event = halt_failure_events[0]
+        items.append(
+            {
+                "severity": "warn",
+                "code": "recent_halt_failure_event",
+                "message": f"Recent halt/failure event: {latest_event.get('event_type')}.",
+                "details": {
+                    "created_at": latest_event.get("created_at"),
+                    "run_id": latest_event.get("run_id"),
+                    "reason": latest_event.get("reason"),
+                    "error_type": latest_event.get("error_type"),
+                },
+            }
+        )
+    return items
+
+
+def _daily_live_usage_status(daily_live_usage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "order_count": _limit_status(
+            daily_live_usage.get("order_count"),
+            daily_live_usage.get("max_daily_live_order_count"),
+            "Daily live order count",
+        ),
+        "notional": _limit_status(
+            daily_live_usage.get("notional"),
+            daily_live_usage.get("max_daily_live_notional"),
+            "Daily live notional",
+        ),
+    }
+
+
+def _limit_status(value: object, limit: object, label: str) -> dict[str, Any]:
+    current = _float_or_none(value) or 0.0
+    maximum = _float_or_none(limit) or 0.0
+    if maximum <= 0:
+        return {
+            "status": "not_configured",
+            "value": current,
+            "limit": maximum,
+            "ratio": None,
+            "message": f"{label} limit is not configured.",
+        }
+    ratio = current / maximum
+    if ratio >= 1:
+        status = "limit"
+    elif ratio >= 0.8:
+        status = "near_limit"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "value": current,
+        "limit": maximum,
+        "ratio": ratio,
+        "message": f"{label} is {current:g} / {maximum:g}.",
+    }
+
+
+def _live_order_summary_status(payload: dict[str, Any]) -> str | None:
+    status = (
+        payload.get("final_status")
+        or payload.get("workflow_status")
+        or payload.get("status")
+        or _mapping(payload.get("snapshot")).get("status")
+        or _mapping(payload.get("status_snapshot")).get("status")
+    )
+    if status is None:
+        return None
+    return str(status)
+
+
+def _live_order_summary_symbol(payload: dict[str, Any]) -> str | None:
+    symbol = (
+        payload.get("symbol")
+        or _mapping(payload.get("request")).get("symbol")
+        or _mapping(payload.get("snapshot")).get("symbol")
+        or _mapping(payload.get("status_snapshot")).get("symbol")
+    )
+    if symbol is not None:
+        return str(symbol)
+    snapshots = payload.get("status_snapshots")
+    if isinstance(snapshots, list):
+        for snapshot in snapshots:
+            symbol = _mapping(snapshot).get("symbol")
+            if symbol is not None:
+                return str(symbol)
+    return None
+
+
+def _age_seconds(value: object) -> float | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        created_at = value
+    else:
+        raw = str(value)
+        try:
+            created_at = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                created_at = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return max((utc_now() - created_at).total_seconds(), 0.0)
+
+
 def _event_row(row: dict[str, Any]) -> dict[str, Any]:
     payload = row.get("payload", {})
     return {
@@ -567,6 +1019,140 @@ def _position_market_value(position: dict[str, Any]) -> float:
     quantity = _float_or_none(position.get("quantity")) or 0.0
     current_price = _float_or_none(position.get("current_price")) or 0.0
     return quantity * current_price
+
+
+def _account_total_value(account: dict[str, Any], positions: list[dict[str, Any]]) -> float | None:
+    total_value = _first_float(
+        account,
+        {},
+        ("total_value", "total_equity", "equity", "net_asset_value"),
+    )
+    if total_value is not None:
+        return total_value
+    cash = _float_or_none(account.get("cash"))
+    if cash is None and not positions:
+        return None
+    return (cash or 0.0) + sum(_position_market_value(position) for position in positions)
+
+
+def _account_unrealized_pnl(
+    account: dict[str, Any],
+    positions: list[dict[str, Any]],
+) -> float | None:
+    unrealized_pnl = _first_float(
+        account,
+        {},
+        ("unrealized_pnl", "unrealized_profit_loss", "evaluation_profit_loss"),
+    )
+    if unrealized_pnl is not None:
+        return unrealized_pnl
+    values = [
+        value
+        for value in (_float_or_none(position.get("unrealized_pnl")) for position in positions)
+        if value is not None
+    ]
+    if not values:
+        return None
+    return sum(values)
+
+
+def _snapshot_currency(account: dict[str, Any], payload: dict[str, Any]) -> str:
+    currency = account.get("currency") or payload.get("currency")
+    if currency is None:
+        return "UNKNOWN"
+    return str(currency)
+
+
+def _advance_performance_state(
+    state: dict[str, Any],
+    total_value: float | None,
+    cash_flow: float,
+) -> dict[str, float | None]:
+    period_return = None
+    previous_value = state["previous_value"]
+    if previous_value is not None and previous_value > 0 and total_value is not None:
+        period_return = (total_value - previous_value - cash_flow) / previous_value
+    if state["first_value"] is None and total_value is not None:
+        state["first_value"] = total_value
+    elif total_value is not None:
+        state["cumulative_cash_flow"] += cash_flow
+    cumulative_return = None
+    first_value = state["first_value"]
+    if first_value is not None and first_value > 0 and total_value is not None:
+        cumulative_return = (
+            total_value - first_value - state["cumulative_cash_flow"]
+        ) / first_value
+    if total_value is not None:
+        state["peak_value"] = (
+            total_value if state["peak_value"] is None else max(state["peak_value"], total_value)
+        )
+        state["previous_value"] = total_value
+    drawdown = _safe_weight(total_value, state["peak_value"])
+    if drawdown is not None:
+        drawdown -= 1.0
+    return {
+        "period_return": _round_ratio(period_return),
+        "cumulative_return": _round_ratio(cumulative_return),
+        "drawdown": _round_ratio(drawdown),
+    }
+
+
+def _first_float(
+    primary: dict[str, Any],
+    secondary: dict[str, Any],
+    keys: tuple[str, ...],
+) -> float | None:
+    for key in keys:
+        value = _float_or_none(primary.get(key))
+        if value is not None:
+            return value
+        value = _float_or_none(secondary.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _reconciliation_by_snapshot_id(store: StateStore) -> dict[str, dict[str, Any]]:
+    output = {}
+    for row in store.list_system_events_by_type("broker_reconciliation", limit=1000):
+        payload = _mapping(row.get("payload"))
+        snapshot_id = payload.get("broker_snapshot_id") or payload.get("snapshot_id")
+        if snapshot_id is None:
+            continue
+        output[str(snapshot_id)] = {
+            "created_at": row.get("created_at"),
+            "passed": payload.get("passed"),
+            "issues_count": len(payload.get("issues", [])),
+        }
+    return output
+
+
+def _reconciliation_status(reconciliation: dict[str, Any] | None) -> str:
+    if reconciliation is None:
+        return "unreconciled"
+    if reconciliation.get("passed") is True:
+        return "passed"
+    if reconciliation.get("passed") is False:
+        return "failed"
+    return "unknown"
+
+
+def _combined_reconciliation_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "unreconciled"
+    if "failed" in statuses:
+        return "failed"
+    if "unknown" in statuses:
+        return "unknown"
+    if "unreconciled" in statuses:
+        return "unreconciled"
+    return "passed"
+
+
+def _round_ratio(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(value, 10)
 
 
 def _safe_weight(value: float | None, total: float | None) -> float | None:

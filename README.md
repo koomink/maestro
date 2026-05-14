@@ -889,8 +889,16 @@ The dashboard is read-only. It shows portfolio state, broker account exposure,
 snapshot history, strategy/order/approval tables, safety state, health summary,
 latest reconciliation status, halt/failure events, live order status/lifecycle
 events, fill reconciliation events, and daily live order count/notional usage
-when those events exist. Strategy rows also expose normalized allocation results
-and preserved source-signal fields when strategy plugins return signal results.
+when those events exist. The Operations tab includes an operator summary with
+attention items for halted safety state, degraded health, failed reconciliation,
+daily live-order limit usage, and recent live-order lifecycle issues. Strategy
+rows also expose normalized allocation results and preserved source-signal
+fields when strategy plugins return signal results.
+The Performance tab shows broker-snapshot account value, period return,
+cumulative return, drawdown, and reconciliation labeling from persisted state.
+It also keeps KRW/USD currency-sleeve returns separate and marks mixed-currency
+total portfolio rows as requiring an explicit FX source before base-currency
+returns are shown.
 Refresh and CSV download are local UI actions only; the dashboard does not call
 live KIS endpoints and does not expose state-changing write controls.
 

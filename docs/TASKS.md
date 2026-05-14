@@ -349,6 +349,7 @@
 - [x] Add live order status/lifecycle event read model and panel
 - [x] Add fill reconciliation event read model and panel
 - [x] Add daily live order count/notional usage read model and panel
+- [x] Add operator summary and attention items for live-approval monitoring
 - [x] Add broker exposure, Maestro state exposure, and snapshot history panels
 - [x] Add local refresh and CSV download actions without broker calls or writes
 - [x] Improve labels for stock/ETF and KIS domestic/overseas workflows
@@ -545,14 +546,22 @@
 
 ### Planned Milestone: KIS Performance Tracking & Analytics Dashboard
 
+- [x] Add account performance v1 read model from persisted broker snapshots
+- [x] Add read-only dashboard Performance tab for account value, return,
+      drawdown, reconciliation labels, charts, and CSV export
+- [x] Add dashboard read model tests for account performance calculations
+- [x] Add currency-sleeve performance read model and dashboard table/chart that
+      keeps KRW/USD returns separate
+- [x] Add total portfolio performance read model that marks mixed-currency rows
+      as missing FX instead of force-converting values
 - [ ] Define persisted performance snapshot/read-model schema for account,
       strategy, currency sleeve, and total portfolio returns
 - [ ] Use KIS broker snapshots as the broker-truth source for account equity,
       cash, positions, realized/unrealized PnL, fees, and settlement fields when
       available
-- [ ] Preserve KRW and USD return series separately before adding any
+- [x] Preserve KRW and USD return series separately before adding any
       base-currency converted portfolio return
-- [ ] Add explicit FX conversion source, timestamp, and missing-FX behavior for
+- [x] Add explicit FX conversion source, timestamp, and missing-FX behavior for
       cross-currency portfolio views
 - [ ] Attribute strategy returns from persisted proposal, order, fill, and
       strategy-run lineage without adding strategy-specific code paths
@@ -560,8 +569,8 @@
       lot-level strategy accounting exists
 - [ ] Add account-level daily/cumulative return and drawdown calculations
 - [ ] Add strategy-level daily/cumulative return and drawdown calculations
-- [ ] Add currency-sleeve daily/cumulative return and drawdown calculations
-- [ ] Add total portfolio daily/cumulative return and drawdown calculations
+- [x] Add currency-sleeve daily/cumulative return and drawdown calculations
+- [x] Add total portfolio daily/cumulative return and drawdown calculations
 - [ ] Add reconciliation gates so performance dashboards mark stale or
       unreconciled broker data instead of presenting it as fresh truth
 - [ ] Add read-only dashboard charts for account equity/PnL, strategy returns,

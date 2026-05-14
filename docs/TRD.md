@@ -1083,7 +1083,8 @@ Dashboard should be read-only by default.
 Streamlit tabs:
 
 1. Portfolio: broker exposure, Maestro state exposure, and snapshot history
-2. Operations: safety, health, risk decisions, and halt/failure events
+2. Operations: operator summary, attention items, safety, health, live-order
+   usage, live-order lifecycle, risk decisions, and halt/failure events
 3. Orders: strategy signals, paper orders, and approvals
 4. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
 5. Raw: raw status payloads
@@ -1107,6 +1108,20 @@ must not call KIS live endpoints directly. Strategy attribution must remain
 strategy-agnostic: use persisted order/fill lineage where unambiguous and a
 documented shared-holding allocation rule until lot-level strategy accounting is
 implemented.
+
+Account performance v1 is a read model computed from persisted broker account
+snapshots and broker reconciliation events. It exposes account value, cash,
+positions market value, realized/unrealized PnL when present, period return,
+daily return, cumulative return, drawdown, and reconciliation status. It does
+not persist a new broker-order path and does not call KIS during dashboard
+rendering.
+
+Currency-sleeve performance uses the same persisted broker snapshots grouped by
+snapshot currency, so KRW and USD returns remain separate. Total portfolio
+performance groups broker snapshots by run/as-of time; when more than one
+currency is present and no explicit FX source/timestamp exists, the row exposes
+component values and `missing_fx=true` instead of computing a base-currency
+return.
 
 Security:
 
