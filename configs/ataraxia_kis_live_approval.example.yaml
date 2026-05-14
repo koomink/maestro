@@ -1,0 +1,172 @@
+mode: live_approval
+
+portfolio:
+  base_currency: KRW
+  allocation_mode: currency_sleeves
+  initial_cash: 10000000
+  cash_by_currency:
+    KRW: 10000000
+  allowed_symbols:
+    - CASH_KRW
+    - TIGER_NASDAQ100_LEVERAGE
+    - KODEX_US_DIVIDEND_DOWJONES
+  currency_sleeves:
+    KRW:
+      cash_symbol: CASH_KRW
+      symbols:
+        - TIGER_NASDAQ100_LEVERAGE
+        - KODEX_US_DIVIDEND_DOWJONES
+
+universe:
+  instruments:
+    - symbol: CASH_KRW
+      asset_type: cash
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: KRW
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 0
+    - symbol: TIGER_NASDAQ100_LEVERAGE
+      asset_type: domestic_etf
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: "418660"
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: KODEX_US_DIVIDEND_DOWJONES
+      asset_type: domestic_etf
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: "489250"
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 1
+  policy:
+    allowed_asset_types:
+      - domestic_etf
+    allowed_regions:
+      - KR
+    allowed_currencies:
+      - KRW
+    allowed_broker_products:
+      - kis_domestic_stock
+    allowed_exchange_codes:
+      - KRX
+    denied_symbols: []
+    denied_asset_tags: []
+    max_new_symbols_per_run: 0
+    require_operator_approval_for_tradable: true
+    require_broker_tradability_check: true
+    require_data_freshness_check: true
+
+strategies:
+  - id: ataraxia
+    enabled: true
+    mode: live_approval
+    weight: 1.0
+    entrypoint: "ataraxia.strategy:AtaraxiaStrategy"
+    config:
+      sleeve: KRW
+      allocations:
+        TIGER_NASDAQ100_LEVERAGE: 0.60
+        KODEX_US_DIVIDEND_DOWJONES: 0.40
+
+datahub:
+  provider: yahoo
+  stale_after_seconds: 604800
+  symbol_map:
+    TIGER_NASDAQ100_LEVERAGE: 418660.KS
+    KODEX_US_DIVIDEND_DOWJONES: 489250.KS
+
+execution:
+  engine: paper
+  order_generation_mode: buy_only_contribution
+  live_order_enabled: false
+  live_order_dry_run: true
+  require_reconciliation_pass: true
+  max_live_order_notional: 1000000
+  max_daily_live_notional: 3000000
+  max_daily_live_order_count: 2
+  daily_loss_limit: 100000
+  allowed_order_type: limit
+  order_status_poll_interval_seconds: 30
+  order_status_max_polls: 20
+  order_status_terminal_timeout_seconds: 1800
+  require_market_session: true
+  market_session_timezone: Asia/Seoul
+  market_session_open: "09:00"
+  market_session_close: "15:30"
+  market_session_weekdays: [0, 1, 2, 3, 4]
+  market_session_holidays: []
+  require_broker_quote_validation: true
+  max_broker_quote_deviation_pct: 0.02
+  require_broker_risk_validation: true
+  live_order_fee_buffer_pct: 0.002
+  heartbeat_max_age_seconds: 3600
+  scheduled_run_max_age_seconds: 86400
+  contribution:
+    enabled: true
+    currency: KRW
+    sleeve: KRW
+    monthly_budget: 3000000
+    min_monthly_budget: 2000000
+    max_monthly_budget: 4000000
+    buy_day: 15
+    non_trading_day_policy: next_trading_day
+    target_policy: buy_only_toward_target
+
+risk:
+  max_single_asset_weight: 0.7
+  min_cash_weight: 0.0
+
+state:
+  sqlite_path: var/ataraxia_kis_live_approval_state.db
+
+audit:
+  jsonl_path: var/ataraxia_kis_live_approval_audit.jsonl
+
+approval:
+  enabled: true
+  provider: telegram
+  require_approval: true
+  default_decision: expired
+  timeout_seconds: 300
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_allowed_chat_ids: []
+  whitelisted_user_ids: []
+  telegram_poll_interval_seconds: 1.0
+
+kis:
+  enabled: true
+  provider: kis
+  broker_products:
+    - kis_domestic_stock
+  account_id_env: KIS_ACCOUNT_ID
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  access_token_env: KIS_ACCESS_TOKEN
+  approval_key_env: KIS_APPROVAL_KEY
+  token_cache_path: var/kis_access_token.json
+  paper_trading: false
+  timeout_seconds: 10
+  quote_market_code: J
+
+reconciliation:
+  cash_tolerance: 0.0
+  position_quantity_tolerance: 0.0
+  value_tolerance: 0.0
+  max_age_seconds: 86400

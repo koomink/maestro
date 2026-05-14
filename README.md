@@ -245,6 +245,8 @@ Implemented foundations beyond the core v0.1 scope:
   `personal-check`
 - Safe live approval example config:
   [configs/live_approval.example.yaml](configs/live_approval.example.yaml)
+- Ataraxia domestic KIS live-approval example config:
+  [configs/ataraxia_kis_live_approval.example.yaml](configs/ataraxia_kis_live_approval.example.yaml)
 - v0.6 release checklist:
   [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 
@@ -397,6 +399,17 @@ Use [configs/live_approval.example.yaml](configs/live_approval.example.yaml) as
 the safe-by-default operator template and follow
 [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 before enabling live order submission.
+
+Use
+[configs/ataraxia_kis_live_approval.example.yaml](configs/ataraxia_kis_live_approval.example.yaml)
+as the Ataraxia/KRW domestic ETF rehearsal template. It is dry-run by default,
+keeps live submit disabled, requires Telegram approval, uses the
+`kis_domestic_stock` product only, and routes contribution orders through
+`order_generation_mode: buy_only_contribution` for KRW symbols such as
+`TIGER_NASDAQ100_LEVERAGE` and `KODEX_US_DIVIDEND_DOWJONES`.
+Install Ataraxia into the Maestro virtualenv with
+`uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/Ataraxia`
+for operator rehearsals; do not rely on `PYTHONPATH` or an editable install.
 
 Safe execution config defaults:
 

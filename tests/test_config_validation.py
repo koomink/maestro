@@ -202,6 +202,7 @@ def test_current_sample_configs_load():
         "configs/kis_live_readonly.example.yaml",
         "configs/kis_overseas_readonly.example.yaml",
         "configs/kis_multi_asset_live_approval.example.yaml",
+        "configs/ataraxia_kis_live_approval.example.yaml",
         "configs/live_approval.example.yaml",
         "configs/us_etf_yahoo_paper.yaml",
         "configs/ataraxia_yahoo_paper.yaml",
@@ -227,6 +228,31 @@ def test_ataraxia_contribution_config_declares_budget_range_and_domestic_univers
     assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_product == (
         BrokerProduct.KIS_DOMESTIC_STOCK
     )
+
+
+def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
+    config = load_config("configs/ataraxia_kis_live_approval.example.yaml")
+
+    assert config.mode == "live_approval"
+    assert config.portfolio.base_currency == "KRW"
+    assert config.strategies[0].mode == "live_approval"
+    assert config.execution.order_generation_mode == "buy_only_contribution"
+    assert config.execution.live_order_enabled is False
+    assert config.execution.live_order_dry_run is True
+    assert config.execution.require_market_session is True
+    assert config.execution.require_reconciliation_pass is True
+    assert config.execution.require_broker_quote_validation is True
+    assert config.execution.require_broker_risk_validation is True
+    assert config.execution.daily_loss_limit == 100_000
+    assert config.execution.heartbeat_max_age_seconds == 3600
+    assert config.execution.scheduled_run_max_age_seconds == 86400
+    assert config.approval.provider == "telegram"
+    assert config.approval.require_approval is True
+    assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
+    assert config.kis.account_id is None
+    assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
+    assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_symbol == "418660"
+    assert config.universe.get("KODEX_US_DIVIDEND_DOWJONES").broker_symbol == "489250"
 
 
 def test_contribution_config_rejects_invalid_buy_day(tmp_path):
