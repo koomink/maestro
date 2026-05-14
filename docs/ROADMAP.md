@@ -480,9 +480,12 @@ Completed scope:
   orders, send Telegram messages, or run strategies.
 - `docs/personal_operator_mvp.md` documents the single-user operating loop,
   first minimum-size order procedure, and recovery boundary.
-- `configs/ataraxia_kis_live_approval.example.yaml` documents a dry-run,
-  Telegram-approved Ataraxia rehearsal for KRW domestic ETFs through
-  `kis_domestic_stock` and `buy_only_contribution`.
+- `configs/ataraxia_kis_live_approval.example.yaml` documents a dry-run-first,
+  Telegram-approved Ataraxia broker-submit rehearsal for KRW domestic ETFs
+  through KIS mock-investment mode, `kis_domestic_stock`, and
+  `buy_only_contribution`.
+- `docs/ataraxia_kis_paper_pilot.md` documents the four scheduled-cycle
+  Ataraxia KIS mock-investment broker-submit pilot and its stop conditions.
 
 This milestone packages the existing private beta pieces for one operator. It
 does not add `live_auto`, market orders, direct broker trading CLI commands,

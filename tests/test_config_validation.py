@@ -249,10 +249,37 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
+    assert config.kis.paper_trading is True
     assert config.kis.account_id is None
     assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
     assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_symbol == "418660"
     assert config.universe.get("KODEX_US_DIVIDEND_DOWJONES").broker_symbol == "489250"
+
+
+def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
+    raw = yaml.safe_load(Path("configs/ataraxia_kis_live_approval.example.yaml").read_text())
+    raw["execution"]["live_order_enabled"] = True
+    raw["execution"]["live_order_dry_run"] = False
+    raw["approval"]["telegram_allowed_chat_ids"] = [100]
+    raw["approval"]["whitelisted_user_ids"] = [100]
+    config_path = tmp_path / "ataraxia_kis_paper_submit.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.mode == "live_approval"
+    assert config.execution.live_order_enabled is True
+    assert config.execution.live_order_dry_run is False
+    assert config.execution.allowed_order_type == "limit"
+    assert config.execution.require_reconciliation_pass is True
+    assert config.execution.require_market_session is True
+    assert config.execution.require_broker_quote_validation is True
+    assert config.execution.require_broker_risk_validation is True
+    assert config.approval.provider == "telegram"
+    assert config.approval.require_approval is True
+    assert config.kis.provider == "kis"
+    assert config.kis.paper_trading is True
+    assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
 
 
 def test_contribution_config_rejects_invalid_buy_day(tmp_path):

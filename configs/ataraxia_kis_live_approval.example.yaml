@@ -161,7 +161,7 @@ kis:
   access_token_env: KIS_ACCESS_TOKEN
   approval_key_env: KIS_APPROVAL_KEY
   token_cache_path: var/kis_access_token.json
-  paper_trading: false
+  paper_trading: true
   timeout_seconds: 10
   quote_market_code: J
 

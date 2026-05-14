@@ -245,7 +245,7 @@ Implemented foundations beyond the core v0.1 scope:
   `personal-check`
 - Safe live approval example config:
   [configs/live_approval.example.yaml](configs/live_approval.example.yaml)
-- Ataraxia domestic KIS live-approval example config:
+- Ataraxia domestic KIS mock-investment broker-submit example config:
   [configs/ataraxia_kis_live_approval.example.yaml](configs/ataraxia_kis_live_approval.example.yaml)
 - v0.6 release checklist:
   [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
@@ -402,11 +402,17 @@ before enabling live order submission.
 
 Use
 [configs/ataraxia_kis_live_approval.example.yaml](configs/ataraxia_kis_live_approval.example.yaml)
-as the Ataraxia/KRW domestic ETF rehearsal template. It is dry-run by default,
-keeps live submit disabled, requires Telegram approval, uses the
+as the Ataraxia/KRW domestic ETF rehearsal template. It targets the real KIS
+mock-investment OpenAPI path with `kis.paper_trading: true`, is dry-run by
+default, keeps live submit disabled, requires Telegram approval, uses the
 `kis_domestic_stock` product only, and routes contribution orders through
 `order_generation_mode: buy_only_contribution` for KRW symbols such as
-`TIGER_NASDAQ100_LEVERAGE` and `KODEX_US_DIVIDEND_DOWJONES`.
+`TIGER_NASDAQ100_LEVERAGE` and `KODEX_US_DIVIDEND_DOWJONES`. Copy it to an
+operator-local path outside the repo before use; the source-controlled example
+is not an operating config. For a KIS mock-investment broker-submit pilot, switch
+only the operator-local config to `execution.live_order_enabled=true` and
+`execution.live_order_dry_run=false` after read-only reconciliation, Telegram
+approval rehearsal, live dry-run review, and `beta-preflight` readiness.
 Install Ataraxia into the Maestro virtualenv with
 `uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/Ataraxia`
 for operator rehearsals; do not rely on `PYTHONPATH` or an editable install.

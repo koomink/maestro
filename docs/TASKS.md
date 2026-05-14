@@ -527,6 +527,9 @@
       trading, and risk-change controls deferred
 - [x] Add KIS domestic+overseas multi-product operator config with KRW/USD
       currency sleeves and symbol-level broker-product routing
+- [x] Scope the Ataraxia domestic ETF KIS promotion to mock-investment
+      `paper_trading=true` broker submit and document the four scheduled-cycle
+      pilot
 
 ### Telegram Operator UI
 

@@ -320,6 +320,86 @@ def test_kis_live_order_client_uses_domestic_limit_order_payload(monkeypatch):
     }
 
 
+def test_kis_domestic_paper_trading_live_order_uses_vts_endpoint_and_demo_tr_id(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        paper_trading=True,
+    )
+    transport = FakeKISTransport()
+    client = KISRestDomesticStockLiveOrderClient(config, transport=transport)
+
+    client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_paper_1",
+            symbol="005930",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=70000,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    order_call = [call for call in transport.calls if call["url"].endswith("/trading/order-cash")][
+        0
+    ]
+    assert order_call["url"].startswith("https://openapivts.koreainvestment.com:29443/")
+    assert order_call["headers"]["tr_id"] == "VTTC0012U"
+    assert order_call["headers"]["Content-Type"] == "application/json; charset=utf-8"
+    assert order_call["json_body"] == {
+        "CANO": "12345678",
+        "ACNT_PRDT_CD": "01",
+        "PDNO": "005930",
+        "ORD_DVSN": "00",
+        "ORD_QTY": "2",
+        "ORD_UNPR": "70000",
+    }
+
+
+def test_kis_domestic_paper_trading_sell_order_uses_demo_tr_id(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        paper_trading=True,
+    )
+    transport = FakeKISTransport()
+    client = KISRestDomesticStockLiveOrderClient(config, transport=transport)
+
+    client.submit_limit_order(
+        LiveOrderRequest(
+            order_id="ord_live_paper_2",
+            symbol="005930",
+            side=OrderSide.SELL,
+            quantity=1,
+            limit_price=70000,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    order_call = [call for call in transport.calls if call["url"].endswith("/trading/order-cash")][
+        0
+    ]
+    assert order_call["headers"]["tr_id"] == "VTTC0011U"
+
+
 def test_kis_domestic_adapter_maps_canonical_symbol_to_broker_symbol(monkeypatch):
     monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
     monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")

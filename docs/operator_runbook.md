@@ -1,8 +1,9 @@
 # Operator Runbook
 
-This runbook covers halt recovery and KIS overseas read-only reconciliation.
-It does not authorize live auto-trading, market orders, direct broker CLI
-actions, dashboard write controls, or Telegram admin controls.
+This runbook covers halt recovery, KIS read-only reconciliation, and links to
+the Ataraxia KIS mock-investment broker-submit pilot. It does not authorize live
+auto-trading, market orders, direct broker CLI actions, dashboard write
+controls, or Telegram admin controls.
 
 ## Halt Recovery
 
@@ -61,9 +62,11 @@ hash chain, failed reconciliation, stale broker state, or active safety halt.
 `ops-alerts` sends warn/fail health checks to configured Telegram approval
 chats.
 
-## KIS Overseas Reconciliation
+## KIS Read-only Reconciliation
 
-1. Use a `kis_overseas_stock` read-only config.
+1. Use a KIS read-only or live-approval config for the intended broker product,
+   such as `kis_overseas_stock` for US-listed instruments or
+   `kis_domestic_stock` for KRX instruments.
 2. Confirm KIS env vars are present with:
 
 ```bash
@@ -99,3 +102,11 @@ maestro reconcile --config <config>
 
 KIS current price data is broker reference data for checks and reconciliation.
 Strategy research data must still come through Maestro DataHub.
+
+## Ataraxia KIS Paper Pilot
+
+Use `docs/ataraxia_kis_paper_pilot.md` for the Ataraxia domestic ETF promotion
+from Maestro paper runs to the KIS mock-investment approval-gated broker-submit
+path. The pilot scope is `kis_domestic_stock`, `kis.paper_trading=true`,
+Telegram manual approval, limit orders only, and four scheduled trading-day
+cycles. A real cash account and `live_auto` remain out of scope.
