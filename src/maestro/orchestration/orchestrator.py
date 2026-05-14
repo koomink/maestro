@@ -200,6 +200,7 @@ class MaestroOrchestrator:
             contribution_already_executed = self._contribution_already_executed(
                 order_generation_time
             )
+            prices = self._order_generation_prices(prices)
             orders = self.execution.propose_orders(
                 current_state,
                 risk_decision.target,
@@ -470,6 +471,23 @@ class MaestroOrchestrator:
 
     def _data_quality_issues(self, data_bundle) -> list[dict[str, Any]]:
         return collect_data_quality_issues(data_bundle)
+
+    def _order_generation_prices(self, prices: dict[str, float]) -> dict[str, float]:
+        if (
+            self.config.mode != RunMode.LIVE_APPROVAL
+            or not self.config.execution.require_broker_quote_validation
+        ):
+            return prices
+        latest = self.state_store.load_latest_broker_account_snapshot()
+        if latest is None:
+            return prices
+        current_prices = latest["payload"].get("current_prices", {})
+        if not current_prices:
+            return prices
+        broker_prices = {
+            symbol: float(price) for symbol, price in current_prices.items() if float(price) > 0
+        }
+        return {**prices, **broker_prices}
 
     def _record_event(
         self,

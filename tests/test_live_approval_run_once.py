@@ -129,6 +129,76 @@ def test_run_once_live_approval_uses_lifecycle_with_fake_clients(
     assert orchestrator.state_store.list_system_events_by_type("live_order_lifecycle")
 
 
+def test_live_approval_order_generation_uses_broker_quote_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    approval_id = "appr_live_quote_run_once"
+    monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: approval_id)
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["mode"] = "live_approval"
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["execution"] = {
+        "engine": "paper",
+        "live_order_enabled": False,
+        "live_order_dry_run": True,
+        "require_reconciliation_pass": False,
+        "require_broker_quote_validation": True,
+        "max_live_order_notional": 5_000_000.0,
+        "max_daily_live_notional": 10_000_000.0,
+        "max_daily_live_order_count": 3,
+    }
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "timeout_seconds": 1,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+        "telegram_poll_interval_seconds": 0.0,
+    }
+    raw["kis"] = {"enabled": True, "provider": "mock", "account_id": "MOCK"}
+    config_path = tmp_path / "live_approval_broker_quote.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    orchestrator = MaestroOrchestrator(
+        load_config(config_path),
+        telegram_client=FakeTelegramClient(approval_id),
+    )
+    orchestrator.state_store.save_broker_account_snapshot(
+        "run_broker_snapshot",
+        "MOCK",
+        {
+            "account": {
+                "account_id": "MOCK",
+                "cash": 10_000_000.0,
+                "buying_power": 10_000_000.0,
+                "positions": [],
+            },
+            "current_prices": {
+                "MOCK_ETF_A": 123.0,
+                "MOCK_ETF_B": 47.5,
+            },
+        },
+    )
+
+    summary = orchestrator.run_once()
+
+    assert summary.orders_created == 2
+    proposal_snapshot = orchestrator.state_store.list_system_events_by_type(
+        "live_proposal_data_snapshot"
+    )[0]["payload"]
+    assert proposal_snapshot["order_prices"] == {
+        "MOCK_ETF_A": 123.0,
+        "MOCK_ETF_B": 47.5,
+    }
+    dry_run_requests = [
+        row["payload"]["request"]
+        for row in orchestrator.state_store.list_system_events_by_type("live_order_dry_run")
+    ]
+    assert {request["limit_price"] for request in dry_run_requests} == {123.0, 47.5}
+
+
 @pytest.mark.parametrize(
     ("statuses", "expected_final_status", "expected_applied_fills"),
     [

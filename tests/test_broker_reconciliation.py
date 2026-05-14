@@ -28,6 +28,28 @@ def test_reconciliation_exact_match_passes(tmp_path):
     assert store.list_system_events()[0]["payload"]["passed"] is True
 
 
+def test_reconciliation_refreshes_broker_snapshot_before_compare(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    store.save_portfolio_snapshot(
+        new_run_id(),
+        PortfolioState(cash=1000.0, positions={"005930": 2.0}),
+    )
+    _save_broker_snapshot(store, broker_cash=1000.0, broker_positions={"005930": 1.0})
+
+    def refresh_snapshot() -> None:
+        _save_broker_snapshot(store, broker_cash=1000.0, broker_positions={"005930": 2.0})
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        snapshot_refresher=refresh_snapshot,
+    ).reconcile_latest()
+
+    assert result.passed is True
+    assert result.position_differences == {"005930": 0.0}
+
+
 def test_reconciliation_cash_mismatch_fails(tmp_path):
     config, store, audit = _reconciliation_context(tmp_path)
     _save_portfolio_and_broker(
@@ -152,6 +174,40 @@ def _save_portfolio_and_broker(
     broker_positions: dict[str, float],
 ) -> None:
     store.save_portfolio_snapshot(new_run_id(), portfolio)
+    account_id = "TEST-ACCOUNT"
+    store.save_broker_account_snapshot(
+        new_run_id(),
+        account_id,
+        {
+            "account": {
+                "account_id": account_id,
+                "cash": broker_cash,
+                "buying_power": broker_cash,
+                "positions": [
+                    {
+                        "symbol": symbol,
+                        "quantity": quantity,
+                        "average_price": 1.0,
+                        "current_price": 1.0,
+                    }
+                    for symbol, quantity in broker_positions.items()
+                ],
+                "fetched_at": "2026-05-07T00:00:00+00:00",
+                "source": "test",
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+
+
+def _save_broker_snapshot(
+    store: StateStore,
+    *,
+    broker_cash: float,
+    broker_positions: dict[str, float],
+) -> None:
     account_id = "TEST-ACCOUNT"
     store.save_broker_account_snapshot(
         new_run_id(),

@@ -305,6 +305,11 @@ database caches, or broker behavior.
 - `execution.live_order_dry_run=true` keeps the live approval path through
   strategy, risk, reconciliation, and approval, then persists `live_order_dry_run`
   events without calling the broker submit adapter.
+- When `execution.require_broker_quote_validation=true`, order generation can
+  reuse the latest broker account snapshot's validated `current_prices` as the
+  live approval limit-price basis. This keeps the generated order aligned with
+  the broker quote snapshot used for execution validation without making broker
+  quotes a strategy research feed.
 - `maestro live-preflight --config ...` exposes the live approval safety
   preflight as a scriptable CLI gate and exits nonzero on preflight failure.
 - `maestro adopt-broker-snapshot --config ... --reason ...` is a state-only
@@ -312,9 +317,10 @@ database caches, or broker behavior.
   latest broker snapshot into Maestro portfolio state, records
   `broker_snapshot_adopted`, and refuses positions outside
   `portfolio.allowed_symbols`.
-- KIS overseas live buy orders implement a pre-submit broker validation step:
-  Maestro calls `/uapi/overseas-stock/v1/trading/inquire-psamount` with the
-  request symbol and exact limit price before broker submit. Insufficient KIS
+- KIS domestic and overseas live buy orders implement a pre-submit broker
+  validation step with the request symbol and exact limit price before broker
+  submit. Domestic orders use the domestic buying-power path; overseas orders
+  call `/uapi/overseas-stock/v1/trading/inquire-psamount`. Insufficient KIS
   buying power or max buy quantity fails before any order endpoint call.
 - KIS overseas order status lookup uses the broker submission timestamp to query
   the corresponding US exchange-local date range, reducing false unknown states
@@ -368,8 +374,9 @@ database caches, or broker behavior.
   endpoint from the KIS open-trading-api reference:
   `POST /uapi/domestic-stock/v1/trading/order-cash`, real TR_IDs
   `TTTC0012U`/`TTTC0011U`, demo TR_IDs `VTTC0012U`/`VTTC0011U`, `ORD_DVSN=00`
-  for limit orders, and uppercase KIS body keys. It is an explicit domestic
-  adapter path, not a core product assumption.
+  for limit orders, and uppercase KIS body keys. It also implements
+  pre-submit buying-power/max-quantity validation for buy orders. It is an
+  explicit domestic adapter path, not a core product assumption.
 - `KISRestOverseasStockLiveOrderClient` exists as the strategic adapter boundary
   for US-listed stocks and ETFs. Its read-only, limit-order submit, status, and
   cancellation paths are implemented behind approval, reconciliation, safety, and
@@ -380,10 +387,11 @@ database caches, or broker behavior.
   rejected, canceled, and unknown states into Maestro `OrderStatus` inside each
   product adapter.
 - `MaestroOrchestrator.run_once()` remains unchanged for paper mode. In
-  `live_approval` mode it reuses the proposal and approval path, converts
-  approved proposed orders into limit-order `LiveOrderRequest` objects, and runs
-  the bounded live order lifecycle service. This is product-level wiring for
-  approval-gated live orders, not live automation.
+  `live_approval` mode it reuses the proposal and approval path, optionally
+  overlays broker snapshot prices when broker quote validation is required,
+  converts approved proposed orders into limit-order `LiveOrderRequest` objects,
+  and runs the bounded live order lifecycle service. This is product-level
+  wiring for approval-gated live orders, not live automation.
 - Maestro exposes no direct unguarded buy/sell CLI, no market orders, and no
   dashboard write controls. Real KIS and Telegram network checks are
   operator-triggered smoke/rehearsal procedures, not normal tests.

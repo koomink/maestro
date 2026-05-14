@@ -13,6 +13,7 @@ from maestro.config.models import (
 )
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, RunMode
+from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_orders import (
     BrokerOrderId,
@@ -55,11 +56,73 @@ def test_live_approval_factory_wires_fake_clients_and_lifecycle_success(tmp_path
     request = _request()
     result = dependencies.lifecycle_service.run(request, _approval(request))
 
-    assert result.final_status == OrderStatus.FILLED
+    assert result.final_status == OrderStatus.FILLED, result.failed_reason
     assert submit_client.requests == [request]
     assert status_client.requests == ["KIS-1"]
     assert notification_client.events[-1].status == OrderStatus.FILLED
     assert store.load_latest_portfolio_state().positions == {"005930": 2.0}
+
+
+def test_live_approval_factory_refreshes_kis_snapshot_before_reconciliation(
+    tmp_path,
+    monkeypatch,
+):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    config = _config(tmp_path).model_copy(
+        update={"kis": KISConfig(provider="kis", account_id="12345678-01")}
+    )
+    refresh_calls = []
+    store.save_system_event("run_reconcile_initial", "broker_reconciliation", {"passed": True})
+
+    def fetch_snapshot(self, symbols):
+        refresh_calls.append(list(symbols))
+        self.state_store.save_broker_account_snapshot(
+            "run_refreshed_broker_snapshot",
+            "TEST-ACCOUNT",
+            {
+                "account": {
+                    "account_id": "TEST-ACCOUNT",
+                    "cash": 860_000.0,
+                    "buying_power": 860_000.0,
+                    "positions": [
+                        {
+                            "symbol": "005930",
+                            "quantity": 2.0,
+                            "average_price": 70_000.0,
+                            "current_price": 70_000.0,
+                        }
+                    ],
+                    "source": "test",
+                },
+                "current_prices": {"005930": 70_000.0},
+                "order_fills": [],
+                "unfilled_orders": [],
+            },
+        )
+
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
+
+    dependencies = build_live_approval_dependencies(
+        config,
+        store,
+        audit,
+        live_order_client=FakeLiveOrderClient(),
+        status_client=FakeLiveOrderStatusClient(OrderStatus.FILLED, filled=2.0),
+    )
+    request = _request()
+    result = dependencies.lifecycle_service.run(request, _approval(request))
+
+    reconciliation_events = [
+        event
+        for event in store.list_system_events()
+        if event["event_type"] == "broker_reconciliation"
+    ]
+    assert result.final_status == OrderStatus.FILLED, result.failed_reason
+    assert refresh_calls == [["CASH", "005930"]]
+    assert reconciliation_events[0]["payload"]["passed"] is True
 
 
 def test_live_approval_factory_can_wire_cancel_service_with_fake_client(tmp_path):

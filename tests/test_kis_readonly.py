@@ -370,6 +370,135 @@ def test_kis_domestic_adapter_maps_canonical_symbol_to_broker_symbol(monkeypatch
     assert order_call["json_body"]["PDNO"] == "005930"
 
 
+def test_kis_domestic_adapter_maps_broker_symbol_to_canonical_symbol(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+    )
+    client = KISRestDomesticStockLiveOrderClient(
+        config,
+        transport=FakeKISTransport(),
+        instruments=[
+            TradableInstrument(
+                symbol="KODEX_US_DIVIDEND_DOWJONES",
+                asset_type="domestic_etf",
+                region="KR",
+                currency="KRW",
+                broker="kis",
+                broker_product="kis_domestic_stock",
+                broker_symbol="005930",
+                exchange_code="KRX",
+                quantity_step=1,
+                price_tick=1,
+            )
+        ],
+    )
+
+    snapshot = client.get_account_snapshot()
+    fills = client.get_order_fills()
+    unfilled = client.get_unfilled_orders()
+    status = client.get_order_status(_broker_order("0001"))
+
+    assert snapshot.positions[0].symbol == "KODEX_US_DIVIDEND_DOWJONES"
+    assert fills[0].symbol == "KODEX_US_DIVIDEND_DOWJONES"
+    assert unfilled[0].symbol == "KODEX_US_DIVIDEND_DOWJONES"
+    assert status.symbol == "KODEX_US_DIVIDEND_DOWJONES"
+    assert status.fills[0].symbol == "KODEX_US_DIVIDEND_DOWJONES"
+
+
+def test_kis_domestic_pre_submit_uses_broker_symbol_and_order_price(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+    )
+    transport = FakeKISTransport()
+    client = KISRestDomesticStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=[
+            TradableInstrument(
+                symbol="TIGER_NASDAQ100_LEVERAGE",
+                asset_type="domestic_etf",
+                region="KR",
+                currency="KRW",
+                broker="kis",
+                broker_product="kis_domestic_stock",
+                broker_symbol="418660",
+                exchange_code="KRX",
+                quantity_step=1,
+                price_tick=1,
+            )
+        ],
+    )
+
+    client.validate_pre_submit_order(
+        LiveOrderRequest(
+            order_id="ord_live_kr_1",
+            symbol="TIGER_NASDAQ100_LEVERAGE",
+            side=OrderSide.BUY,
+            quantity=2,
+            limit_price=70000,
+            approval_id="appr_1",
+            run_id="run_1",
+        )
+    )
+
+    buying_power_call = [
+        call for call in transport.calls if call["url"].endswith("/inquire-psbl-order")
+    ][0]
+    assert buying_power_call["params"]["PDNO"] == "418660"
+    assert buying_power_call["params"]["ORD_UNPR"] == "70000"
+
+
+def test_kis_domestic_pre_submit_rejects_insufficient_buying_power(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+    )
+    client = KISRestDomesticStockLiveOrderClient(
+        config,
+        transport=FakeKISTransport(buying_power="100000", max_buy_quantity="1"),
+    )
+
+    try:
+        client.validate_pre_submit_order(
+            LiveOrderRequest(
+                order_id="ord_live_kr_1",
+                symbol="005930",
+                side=OrderSide.BUY,
+                quantity=2,
+                limit_price=70000,
+                approval_id="appr_1",
+                run_id="run_1",
+            )
+        )
+    except ValueError as exc:
+        assert "buying power" in str(exc)
+    else:
+        raise AssertionError("Expected KIS domestic buying power validation to fail closed")
+
+
 def test_kis_provider_defaults_to_overseas_stock_adapter(monkeypatch):
     monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
     monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
@@ -1048,12 +1177,16 @@ class FakeKISTransport:
         rejected_order: bool = False,
         canceled_order: bool = False,
         paginated_daily: bool = False,
+        buying_power: str = "750000",
+        max_buy_quantity: str = "10",
     ) -> None:
         self.calls = []
         self.partial_order = partial_order
         self.rejected_order = rejected_order
         self.canceled_order = canceled_order
         self.paginated_daily = paginated_daily
+        self.buying_power = buying_power
+        self.max_buy_quantity = max_buy_quantity
 
     def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
         self.calls.append(
@@ -1096,8 +1229,8 @@ class FakeKISTransport:
             return {
                 "rt_cd": "0",
                 "output": {
-                    "nrcvb_buy_amt": "750000",
-                    "nrcvb_buy_qty": "10",
+                    "nrcvb_buy_amt": self.buying_power,
+                    "nrcvb_buy_qty": self.max_buy_quantity,
                 },
             }
         if url.endswith("/inquire-price"):

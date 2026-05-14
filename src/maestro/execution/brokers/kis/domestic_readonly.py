@@ -137,7 +137,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
         summary = _first_item(payload.get("output2"))
         positions = [
             KISPosition(
-                symbol=str(row.get("pdno") or row.get("prdt_code") or ""),
+                symbol=self._canonical_symbol(str(row.get("pdno") or row.get("prdt_code") or "")),
                 name=_optional_str(row.get("prdt_name")),
                 quantity=_first_float(row, "hldg_qty", "ord_psbl_qty"),
                 average_price=_first_float(row, "pchs_avg_pric", "avg_unpr"),
@@ -179,7 +179,9 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
             },
         )
         return [
-            _order_summary(row) for payload in payloads for row in _as_list(payload.get("output1"))
+            self._canonical_order_summary(_order_summary(row))
+            for payload in payloads
+            for row in _as_list(payload.get("output1"))
         ]
 
     def _get_pages(
@@ -243,6 +245,15 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
     def _broker_symbol(self, canonical_symbol: str) -> str:
         instrument = self.instruments.get(canonical_symbol)
         return instrument.broker_symbol if instrument else canonical_symbol
+
+    def _canonical_symbol(self, broker_symbol: str) -> str:
+        for instrument in self.instruments.values():
+            if instrument.broker_symbol == broker_symbol:
+                return instrument.symbol
+        return broker_symbol
+
+    def _canonical_order_summary(self, summary: KISOrderSummary) -> KISOrderSummary:
+        return summary.model_copy(update={"symbol": self._canonical_symbol(summary.symbol)})
 
 
 __all__ = ["KISRestDomesticStockReadOnlyClient"]

@@ -3,7 +3,7 @@ from typing import Any
 from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
 from maestro.execution.brokers.kis.domestic_readonly import KISRestDomesticStockReadOnlyClient
-from maestro.execution.brokers.kis.models import KISOrderSummary
+from maestro.execution.brokers.kis.models import KISBuyingPower, KISOrderSummary
 from maestro.execution.brokers.kis.parsers import (
     _as_dict,
     _kis_price,
@@ -18,14 +18,27 @@ from maestro.execution.live_order_models import (
     LiveOrderResult,
     LiveOrderStatusSnapshot,
 )
-from maestro.execution.live_order_ports import LiveOrderClient, LiveOrderStatusClient
+from maestro.execution.live_order_ports import (
+    LiveOrderClient,
+    LiveOrderPreSubmitValidator,
+    LiveOrderStatusClient,
+)
 
 
 class KISRestDomesticStockLiveOrderClient(
     KISRestDomesticStockReadOnlyClient,
     LiveOrderClient,
     LiveOrderStatusClient,
+    LiveOrderPreSubmitValidator,
 ):
+    def validate_pre_submit_order(self, request: LiveOrderRequest) -> None:
+        if request.side != OrderSide.BUY:
+            return
+        buying_power = self.get_buying_power(
+            self._broker_symbol(request.symbol), request.limit_price
+        )
+        _validate_buying_power(request, buying_power)
+
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         payload = self._post(
             "/uapi/domestic-stock/v1/trading/order-cash",
@@ -101,6 +114,23 @@ class KISRestDomesticStockLiveOrderClient(
     def _broker_symbol(self, canonical_symbol: str) -> str:
         instrument = self.instruments.get(canonical_symbol)
         return instrument.broker_symbol if instrument else canonical_symbol
+
+
+def _validate_buying_power(request: LiveOrderRequest, buying_power: KISBuyingPower) -> None:
+    if request.notional > buying_power.cash_buying_power + 1e-9:
+        raise ValueError(
+            "KIS buying power is below requested live order notional: "
+            f"symbol={request.symbol} notional={request.notional:.2f} "
+            f"cash_buying_power={buying_power.cash_buying_power:.2f}"
+        )
+    if buying_power.max_buy_quantity is None:
+        return
+    if request.quantity > buying_power.max_buy_quantity + 1e-9:
+        raise ValueError(
+            "KIS max buy quantity is below requested live order quantity: "
+            f"symbol={request.symbol} quantity={request.quantity} "
+            f"max_buy_quantity={buying_power.max_buy_quantity}"
+        )
 
 
 __all__ = ["KISRestDomesticStockLiveOrderClient"]

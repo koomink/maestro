@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -47,13 +48,17 @@ class BrokerReconciliationService:
         config: ReconciliationConfig,
         state_store: StateStore,
         audit_logger: AuditLogger,
+        snapshot_refresher: Callable[[], None] | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
+        self.snapshot_refresher = snapshot_refresher
 
     def reconcile_latest(self) -> ReconciliationResult:
         run_id = new_run_id()
+        if self.snapshot_refresher is not None:
+            self.snapshot_refresher()
         portfolio_state = self.state_store.load_latest_portfolio_state()
         latest_snapshot = self.state_store.load_latest_broker_account_snapshot()
         if latest_snapshot is None:

@@ -345,10 +345,14 @@ For real-account rehearsals, `execution.require_broker_risk_validation=true`
 adds a broker-snapshot risk gate before approval submission. It checks settled
 buying power with `execution.live_order_fee_buffer_pct`, post-order cash reserve,
 per-symbol exposure, portfolio exposure, pending broker orders, and whether the
-latest broker snapshot is the one that passed reconciliation. For KIS overseas
-buy orders, the live-order adapter also rechecks `/inquire-psamount` with the
-actual limit price immediately before broker submit and rejects the order if KIS
-reports insufficient buying power or max buy quantity.
+latest broker snapshot is the one that passed reconciliation. When
+`execution.require_broker_quote_validation=true`, live approval order generation
+can reuse the latest broker snapshot's validated `current_prices` as the limit
+price basis instead of drifting from the broker quote checked during
+reconciliation. For KIS domestic and overseas buy orders, the live-order adapter
+also rechecks KIS buying power and max buy quantity with the actual limit price
+immediately before broker submit and rejects the order if KIS reports
+insufficient capacity.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,

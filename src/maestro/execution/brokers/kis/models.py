@@ -44,6 +44,8 @@ class KISAccountSnapshot(BaseModel):
 
     @property
     def total_value(self) -> float:
+        if self.cash_balance is not None and self.cash_balance.total_asset_value is not None:
+            return self.cash_balance.total_asset_value
         return self.cash + sum(position.market_value for position in self.positions)
 
 

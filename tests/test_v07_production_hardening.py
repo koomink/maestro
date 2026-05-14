@@ -169,7 +169,7 @@ def test_market_session_blocks_live_approval_on_configured_holiday(tmp_path, mon
     assert event["payload"]["reason"] == "market_holiday_closed"
 
 
-def test_broker_quote_validation_blocks_live_approval_on_large_deviation(tmp_path):
+def test_broker_quote_validation_uses_broker_quote_for_live_order_generation(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
@@ -186,11 +186,12 @@ def test_broker_quote_validation_blocks_live_approval_on_large_deviation(tmp_pat
 
     summary = orchestrator.run_once()
 
-    assert summary.orders_created == 0
-    assert orchestrator.live_order_client.requests == []
-    event = orchestrator.state_store.list_system_events_by_type("broker_quote_validation_halt")[0]
-    assert event["payload"]["reason"] == "broker_quote_deviation_exceeded"
-    assert event["payload"]["symbol"] == "MOCK_ETF_A"
+    assert summary.orders_created == 2
+    assert orchestrator.state_store.list_system_events_by_type("broker_quote_validation_halt") == []
+    proposal_snapshot = orchestrator.state_store.list_system_events_by_type(
+        "live_proposal_data_snapshot"
+    )[0]["payload"]
+    assert proposal_snapshot["order_prices"] == {"MOCK_ETF_A": 80.0, "MOCK_ETF_B": 50.0}
 
 
 def test_broker_quote_validation_allows_live_approval_when_quotes_match(tmp_path):

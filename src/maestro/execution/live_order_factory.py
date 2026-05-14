@@ -4,6 +4,7 @@ from maestro.config.models import MaestroConfig
 from maestro.core.enums import BrokerProduct, Currency
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.live_order_client import build_kis_rest_live_order_client
+from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
     LiveOrderCancelClient,
@@ -59,10 +60,12 @@ def build_live_approval_dependencies(
     notifier = notification_client or _build_notification_client(config, telegram_client)
     broker_reconciliation = broker_reconciliation_service
     if broker_reconciliation is None and config.execution.require_reconciliation_pass:
+        snapshot_refresher = _build_broker_snapshot_refresher(config, state_store, audit_logger)
         broker_reconciliation = BrokerReconciliationService(
             config.reconciliation,
             state_store,
             audit_logger,
+            snapshot_refresher=snapshot_refresher,
         )
 
     safety_service = LiveOrderSafetyService(
@@ -124,6 +127,25 @@ def _build_live_order_client(config: MaestroConfig) -> LiveOrderClient:
     raise ValueError(
         "live_approval requires a real KIS live order client or an injected fake client"
     )
+
+
+def _build_broker_snapshot_refresher(
+    config: MaestroConfig,
+    state_store: StateStore,
+    audit_logger: AuditLogger,
+):
+    if config.kis.provider != "kis":
+        return None
+
+    def refresh() -> None:
+        KISReadOnlyService(
+            config.kis,
+            state_store,
+            audit_logger,
+            instruments=config.universe.instruments,
+        ).fetch_and_store_snapshot(config.portfolio.allowed_symbols)
+
+    return refresh
 
 
 def _build_status_client(

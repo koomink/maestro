@@ -355,6 +355,8 @@ Completed scope:
   a provider needs it.
 - Add broker quote validation for execution checks without letting broker quotes
   become strategy research data.
+- Reuse the latest validated broker snapshot `current_prices` as the live
+  approval order-generation price basis when broker quote validation is required.
 
 ## v0.8.3 — Real Risk Engine
 
@@ -363,8 +365,9 @@ Completed scope:
 - Extend risk controls beyond target weights: cash reserve, buying power,
   position size, symbol exposure, order count, per-symbol notional, and
   portfolio-level exposure.
-- Add KIS overseas pre-submit buying-power validation using the exact live order
-  limit price before calling the broker order endpoint.
+- Add KIS domestic and overseas pre-submit buying-power/max-quantity validation
+  using the exact live order limit price before calling the broker order
+  endpoint.
 - Normalize broker PnL enough to enforce `execution.daily_loss_limit` instead of
   failing closed when it is configured.
 - Account for fees, settlement, pending orders, and manual broker activity where
