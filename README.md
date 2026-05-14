@@ -1011,6 +1011,8 @@ Short direction:
 - v0.8.x: real-account promotion, DataHub, risk, recovery, and ops hardening
 - v0.9: Virtuoso SDK/app integration after live-operations hardening
 - v1.0: private approval-gated production beta
+- post-v1.1: KIS-backed performance tracking for account, strategy, currency
+  sleeve, and portfolio returns with read-only dashboard graphs
 
 ## Dashboard Philosophy
 
@@ -1029,13 +1031,22 @@ Dashboard should show:
 - Total equity
 - Cash
 - Current positions
-- Daily/cumulative PnL
+- Account-level daily/cumulative PnL and return
+- Strategy-level daily/cumulative PnL and return
+- Currency-sleeve KRW/USD PnL and return
+- Total portfolio return and drawdown
 - Recent strategy results
 - Recent orders/proposals
 - Risk status
 - KIS status
 - Telegram status
 - System health
+
+Planned KIS-backed performance tracking should use persisted broker snapshots,
+broker reconciliation, order/fill events, and Maestro strategy lineage. The
+dashboard should render graphs from persisted read models only; it should not
+call KIS live endpoints during page rendering and should not expose trading or
+admin write controls.
 
 Dashboard should not initially allow:
 

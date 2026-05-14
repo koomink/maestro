@@ -500,6 +500,30 @@ Implemented scope:
 This milestone treats Telegram as a constrained mobile operator console, not a
 general administration surface. Recovery remains CLI/runbook driven.
 
+## Post-v1.1 — KIS Performance Tracking & Analytics Dashboard
+
+Planned scope:
+
+- Connect persisted KIS account snapshots, live order/fill events, broker
+  reconciliation, and Maestro strategy run records into a performance tracking
+  read model.
+- Track broker-backed returns by KIS account, strategy, currency sleeve, and
+  total portfolio.
+- Separate realized PnL, unrealized PnL, fees/settlement effects when broker
+  data provides them, daily return, cumulative return, and drawdown.
+- Preserve KRW and USD reporting separately and add a portfolio base-currency
+  view only when an explicit FX conversion source and timestamp are available.
+- Attribute strategy performance from Maestro-owned proposal/order/fill lineage;
+  shared holdings should use a documented allocation rule until lot-level
+  strategy accounting exists.
+- Add read-only dashboard graphs for account equity/PnL, strategy returns,
+  currency-sleeve returns, portfolio return, drawdown, and reconciliation status.
+- Keep the dashboard read-only and backed by persisted snapshots/aggregates; it
+  must not call KIS live endpoints directly and must not expose broker trading
+  controls.
+- Add fixture/fake-client tests for performance calculations and dashboard read
+  models before any real-account rehearsal.
+
 ## Post-v1.0 — Structural Refactor R1-R5
 
 Completed scope:
@@ -538,7 +562,8 @@ unchanged.
   triggers
 - Write-capable dashboard controls
 - Optional KIS WebSocket
-- Performance attribution
+- Advanced lot-level tax/performance attribution beyond the planned broker-backed
+  account, strategy, currency-sleeve, and portfolio return views
 - SDK split into a separate package
 - Multi-user SaaS deployment
 - Complex portfolio optimization engine

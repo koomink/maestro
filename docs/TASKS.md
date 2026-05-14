@@ -543,6 +543,39 @@
 - [x] Keep KIS sync, reconcile, resume, clear-halt, direct trading, live enable,
       dry-run disablement, and risk changes out of Telegram
 
+### Planned Milestone: KIS Performance Tracking & Analytics Dashboard
+
+- [ ] Define persisted performance snapshot/read-model schema for account,
+      strategy, currency sleeve, and total portfolio returns
+- [ ] Use KIS broker snapshots as the broker-truth source for account equity,
+      cash, positions, realized/unrealized PnL, fees, and settlement fields when
+      available
+- [ ] Preserve KRW and USD return series separately before adding any
+      base-currency converted portfolio return
+- [ ] Add explicit FX conversion source, timestamp, and missing-FX behavior for
+      cross-currency portfolio views
+- [ ] Attribute strategy returns from persisted proposal, order, fill, and
+      strategy-run lineage without adding strategy-specific code paths
+- [ ] Define the documented fallback attribution rule for shared holdings until
+      lot-level strategy accounting exists
+- [ ] Add account-level daily/cumulative return and drawdown calculations
+- [ ] Add strategy-level daily/cumulative return and drawdown calculations
+- [ ] Add currency-sleeve daily/cumulative return and drawdown calculations
+- [ ] Add total portfolio daily/cumulative return and drawdown calculations
+- [ ] Add reconciliation gates so performance dashboards mark stale or
+      unreconciled broker data instead of presenting it as fresh truth
+- [ ] Add read-only dashboard charts for account equity/PnL, strategy returns,
+      currency-sleeve returns, total portfolio return, drawdown, and latest
+      reconciliation status
+- [ ] Keep dashboard graphs backed by persisted state/read models only; do not
+      call KIS live endpoints from dashboard rendering
+- [ ] Add CSV export for performance tables without adding dashboard write
+      controls
+- [ ] Add fixture/fake-client tests for KIS snapshot normalization, performance
+      calculations, attribution, multi-currency behavior, stale data labeling,
+      and dashboard read models
+- [ ] Document operator usage and limitations in README/TRD once implemented
+
 ## Completed / Historical Notes
 
 - v0.1.0 delivered the bootable paper-mode skeleton described in [ROADMAP.md](ROADMAP.md).

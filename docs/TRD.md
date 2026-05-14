@@ -974,6 +974,13 @@ Suggested SQLite tables:
 - modifications_json
 - decision_json
 
+Planned performance tracking should add queryable read-model tables or views for
+account, strategy, currency-sleeve, and total portfolio performance. Each record
+should include timestamp/as-of, source snapshot/event IDs, currency, beginning
+value, ending value, cash flows, realized PnL, unrealized PnL, fees when
+available, daily return, cumulative return, drawdown, and reconciliation/freshness
+status. These tables are dashboard/read-model state, not a broker order path.
+
 ### system_events
 
 - id
@@ -1080,6 +1087,26 @@ Streamlit tabs:
 3. Orders: strategy signals, paper orders, and approvals
 4. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
 5. Raw: raw status payloads
+
+Planned performance tracking should add dashboard graphs and read models for:
+
+- KIS account equity, realized/unrealized PnL, daily return, cumulative return,
+  and drawdown.
+- Strategy-level PnL/return derived from Maestro proposal, order, fill, and
+  strategy run lineage.
+- Currency-sleeve PnL/return for KRW and USD sleeves.
+- Total portfolio PnL/return, with base-currency conversion only when an
+  explicit FX source and timestamp are available.
+- Reconciliation freshness markers so stale or unreconciled broker data is not
+  shown as fresh broker truth.
+
+Performance read models should be computed from persisted KIS snapshots,
+portfolio snapshots, broker reconciliation events, live order status/lifecycle
+events, fill reconciliation events, and strategy run payloads. The dashboard
+must not call KIS live endpoints directly. Strategy attribution must remain
+strategy-agnostic: use persisted order/fill lineage where unambiguous and a
+documented shared-holding allocation rule until lot-level strategy accounting is
+implemented.
 
 Security:
 

@@ -224,7 +224,7 @@ And Maestro will:
 - Advanced RiskManager
 - Kill switch
 - Drawdown limits
-- Performance attribution
+- Broker PnL normalization for risk checks
 - Strategy lifecycle management
 - Enhanced dashboard
 - Optional FastAPI read-only API
@@ -256,7 +256,20 @@ And Maestro will:
 - Instrument resolver for canonical metadata and broker mappings
 - Versioned strategy/app compatibility checks
 
-### Phase 9: Limited Live Automation
+### Phase 9: KIS Performance Tracking and Analytics Dashboard
+
+- Broker-backed account equity, PnL, return, and drawdown tracking from KIS
+  account snapshots and Maestro reconciliation state
+- Strategy-level return tracking using Maestro-owned proposal, order, fill, and
+  strategy-run lineage rather than strategy-specific code branches
+- Currency-sleeve return tracking for KRW and USD portfolios, with explicit FX
+  conversion policy before showing a base-currency total return
+- Read-only dashboard graphs for account returns, strategy returns,
+  currency-sleeve returns, total portfolio returns, drawdown, and reconciliation
+  freshness
+- CSV export for performance views without dashboard write controls
+
+### Phase 10: Limited Live Automation
 
 - Very small auto-approval rules
 - Larger orders remain Telegram-approved
@@ -349,7 +362,13 @@ Requirements:
 Future requirement:
 
 - Dashboard must be read-only by default.
-- Dashboard should display portfolio, PnL, drawdown, strategy status, orders, proposals, system health, and KIS/Telegram status.
+- Dashboard should display portfolio, account-level PnL/return, strategy-level
+  PnL/return, currency-sleeve PnL/return, total portfolio return, drawdown,
+  strategy status, orders, proposals, system health, and KIS/Telegram status.
+- Performance charts must label stale or unreconciled broker data instead of
+  presenting it as fresh broker truth.
+- Dashboard rendering must use persisted snapshots/read models and must not call
+  KIS live endpoints directly.
 - Dashboard must not expose secrets.
 - Dashboard should be accessible through localhost or Tailscale/VPN rather than public internet.
 
@@ -453,6 +472,9 @@ Future requirement:
 - Required DataHub prices are fresh, auditable, and valid for the market session.
 - Broker reconciliation, fill reconciliation, and dashboard state match broker
   truth after each live approval order.
+- Account, strategy, currency-sleeve, and total portfolio performance views are
+  computed from reconciled broker snapshots and persisted Maestro events, with
+  stale/unreconciled periods clearly labeled.
 - Buying power, cash reserve, exposure limits, pending orders, and daily loss
   limits are enforced before submission.
 - Ambiguous broker submit, process crash, timeout, and manual broker
