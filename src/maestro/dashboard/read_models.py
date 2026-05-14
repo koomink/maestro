@@ -159,6 +159,198 @@ def build_broker_snapshots_table(store: StateStore, limit: int = 20) -> list[dic
     return rows
 
 
+def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
+    latest = store.load_latest_broker_account_snapshot()
+    if latest is None:
+        return {
+            "created_at": None,
+            "run_id": None,
+            "account_id": None,
+            "cash": None,
+            "buying_power": None,
+            "positions_count": 0,
+            "positions_market_value": None,
+            "total_value": None,
+            "cash_weight": None,
+            "exposure_weight": None,
+            "unrealized_pnl": None,
+            "source": None,
+        }
+    payload = _mapping(latest.get("payload"))
+    account = _mapping(payload.get("account"))
+    positions = _positions(account)
+    positions_market_value = sum(_position_market_value(position) for position in positions)
+    cash = _float_or_none(account.get("cash"))
+    total_value = _float_or_none(account.get("total_value"))
+    if total_value is None:
+        total_value = (cash or 0.0) + positions_market_value
+    unrealized_pnls = [
+        pnl
+        for pnl in (_float_or_none(position.get("unrealized_pnl")) for position in positions)
+        if pnl is not None
+    ]
+    return {
+        "created_at": latest.get("created_at"),
+        "run_id": latest.get("run_id"),
+        "account_id": latest.get("account_id") or account.get("account_id"),
+        "cash": cash,
+        "buying_power": _float_or_none(account.get("buying_power")),
+        "positions_count": len(positions),
+        "positions_market_value": positions_market_value,
+        "total_value": total_value,
+        "cash_weight": _safe_weight(cash, total_value),
+        "exposure_weight": _safe_weight(positions_market_value, total_value),
+        "unrealized_pnl": sum(unrealized_pnls) if unrealized_pnls else None,
+        "source": account.get("source") or payload.get("source"),
+    }
+
+
+def build_broker_position_exposure_table(
+    store: StateStore,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    latest = store.load_latest_broker_account_snapshot()
+    if latest is None:
+        return []
+    payload = _mapping(latest.get("payload"))
+    account = _mapping(payload.get("account"))
+    positions = _positions(account)
+    total_value = _float_or_none(account.get("total_value"))
+    if total_value is None:
+        total_value = (_float_or_none(account.get("cash")) or 0.0) + sum(
+            _position_market_value(position) for position in positions
+        )
+    rows = []
+    for position in sorted(positions, key=lambda item: str(item.get("symbol") or "")):
+        market_value = _position_market_value(position)
+        rows.append(
+            {
+                "symbol": position.get("symbol"),
+                "name": position.get("name"),
+                "quantity": _float_or_none(position.get("quantity")),
+                "average_price": _float_or_none(position.get("average_price")),
+                "current_price": _float_or_none(position.get("current_price")),
+                "market_value": market_value,
+                "weight": _safe_weight(market_value, total_value),
+                "unrealized_pnl": _float_or_none(position.get("unrealized_pnl")),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def build_maestro_state_exposure_table(store: StateStore) -> list[dict[str, Any]]:
+    state = store.load_latest_portfolio_state()
+    prices = _latest_broker_prices(store)
+    rows = []
+    if state.cash_by_currency:
+        for currency, cash in sorted(state.cash_by_currency.items()):
+            rows.append(
+                {
+                    "symbol": currency,
+                    "kind": "cash",
+                    "quantity": cash,
+                    "price": 1.0,
+                    "estimated_value": cash,
+                    "missing_price": False,
+                }
+            )
+    else:
+        rows.append(
+            {
+                "symbol": "CASH",
+                "kind": "cash",
+                "quantity": state.cash,
+                "price": 1.0,
+                "estimated_value": state.cash,
+                "missing_price": False,
+            }
+        )
+    for symbol, quantity in sorted(state.positions.items()):
+        price = prices.get(symbol)
+        rows.append(
+            {
+                "symbol": symbol,
+                "kind": "position",
+                "quantity": quantity,
+                "price": price,
+                "estimated_value": quantity * price if price is not None else None,
+                "missing_price": price is None,
+            }
+        )
+    return rows
+
+
+def build_portfolio_snapshot_history_table(
+    store: StateStore,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    prices = _latest_broker_prices(store)
+    rows = []
+    for row in store.list_portfolio_snapshots(limit=limit):
+        payload = _mapping(row.get("payload"))
+        cash_by_currency = _mapping(payload.get("cash_by_currency"))
+        cash = _float_or_none(payload.get("cash")) or 0.0
+        cash_value = sum(_float_or_none(value) or 0.0 for value in cash_by_currency.values())
+        if not cash_by_currency:
+            cash_value = cash
+        positions = _mapping(payload.get("positions"))
+        estimated_positions_value = 0.0
+        missing_prices = []
+        for symbol, quantity in positions.items():
+            price = prices.get(symbol)
+            if price is None:
+                missing_prices.append(symbol)
+                continue
+            estimated_positions_value += (_float_or_none(quantity) or 0.0) * price
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "cash": cash,
+                "cash_value": cash_value,
+                "positions_count": len(positions),
+                "estimated_positions_value": estimated_positions_value,
+                "estimated_total_value": None
+                if missing_prices
+                else cash_value + estimated_positions_value,
+                "missing_prices": missing_prices,
+            }
+        )
+    return rows
+
+
+def build_broker_snapshot_history_table(
+    store: StateStore,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows = []
+    for row in store.list_broker_account_snapshots(limit=limit):
+        payload = _mapping(row.get("payload"))
+        account = _mapping(payload.get("account"))
+        positions = _positions(account)
+        positions_market_value = sum(_position_market_value(position) for position in positions)
+        cash = _float_or_none(account.get("cash"))
+        total_value = _float_or_none(account.get("total_value"))
+        if total_value is None:
+            total_value = (cash or 0.0) + positions_market_value
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "account_id": row.get("account_id") or account.get("account_id"),
+                "cash": cash,
+                "buying_power": _float_or_none(account.get("buying_power")),
+                "positions_count": len(positions),
+                "positions_market_value": positions_market_value,
+                "total_value": total_value,
+                "source": account.get("source") or payload.get("source"),
+            }
+        )
+    return rows
+
+
 def build_safety_state_card(store: StateStore) -> dict[str, Any]:
     latest = store.load_latest_system_event("safety_state")
     if latest is None:
@@ -358,3 +550,54 @@ def _is_halt_or_failure_event(event_type: str, payload: dict[str, Any]) -> bool:
     if "halt" in event_type or "failure" in event_type or "failed" in event_type:
         return True
     return payload.get("state") in {"halted", "killed"}
+
+
+def _positions(account: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        position
+        for position in account.get("positions", [])
+        if isinstance(position, dict)
+    ]
+
+
+def _position_market_value(position: dict[str, Any]) -> float:
+    market_value = _float_or_none(position.get("market_value"))
+    if market_value is not None:
+        return market_value
+    quantity = _float_or_none(position.get("quantity")) or 0.0
+    current_price = _float_or_none(position.get("current_price")) or 0.0
+    return quantity * current_price
+
+
+def _safe_weight(value: float | None, total: float | None) -> float | None:
+    if value is None or total is None or total <= 0:
+        return None
+    return value / total
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_broker_prices(store: StateStore) -> dict[str, float]:
+    latest = store.load_latest_broker_account_snapshot()
+    if latest is None:
+        return {}
+    payload = _mapping(latest.get("payload"))
+    prices = {
+        str(symbol): price
+        for symbol, value in _mapping(payload.get("current_prices")).items()
+        if (price := _float_or_none(value)) is not None
+    }
+    account = _mapping(payload.get("account"))
+    for position in _positions(account):
+        symbol = position.get("symbol")
+        price = _float_or_none(position.get("current_price"))
+        if symbol and price is not None:
+            prices.setdefault(str(symbol), price)
+    return prices

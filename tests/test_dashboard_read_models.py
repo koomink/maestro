@@ -6,6 +6,9 @@ from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
 from maestro.dashboard.read_models import (
     build_approvals_table,
+    build_broker_account_summary,
+    build_broker_position_exposure_table,
+    build_broker_snapshot_history_table,
     build_broker_snapshots_table,
     build_daily_live_order_usage,
     build_fill_reconciliation_table,
@@ -13,8 +16,10 @@ from maestro.dashboard.read_models import (
     build_latest_broker_snapshot_card,
     build_latest_reconciliation_card,
     build_live_order_events_table,
+    build_maestro_state_exposure_table,
     build_orders_table,
     build_overview,
+    build_portfolio_snapshot_history_table,
     build_portfolio_table,
     build_recent_halt_failure_events_table,
     build_risk_decisions_table,
@@ -23,6 +28,7 @@ from maestro.dashboard.read_models import (
     build_system_events_table,
 )
 from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
@@ -75,6 +81,11 @@ def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
     assert build_risk_decisions_table(store)[0]["approved"] is True
     assert build_system_events_table(store)[0]["event_type"] == "event"
     assert build_broker_snapshots_table(store)[0]["account_id"] == "acct"
+    assert build_broker_account_summary(store)["positions_count"] == 0
+    assert build_broker_position_exposure_table(store) == []
+    assert build_maestro_state_exposure_table(store)[0]["symbol"] == "CASH"
+    assert build_portfolio_snapshot_history_table(store) == []
+    assert build_broker_snapshot_history_table(store)[0]["account_id"] == "acct"
 
 
 def test_strategy_runs_table_includes_top_level_source_signal(tmp_path):
@@ -285,3 +296,126 @@ def test_dashboard_operational_read_models(tmp_path):
     usage = build_daily_live_order_usage(config, store)
     assert usage["order_count"] == 1
     assert usage["notional"] == 123.45
+
+
+def test_dashboard_broker_portfolio_analytics_from_latest_snapshot(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "acct",
+        {
+            "account": {
+                "account_id": "acct",
+                "cash": 1000.0,
+                "buying_power": 800.0,
+                "positions": [
+                    {
+                        "symbol": "AAPL",
+                        "name": "Apple",
+                        "quantity": 2,
+                        "average_price": 100,
+                        "current_price": 150,
+                        "unrealized_pnl": 100,
+                    },
+                    {
+                        "symbol": "MSFT",
+                        "quantity": 1,
+                        "average_price": 200,
+                        "current_price": 250,
+                        "unrealized_pnl": 50,
+                    },
+                ],
+                "source": "kis_overseas_stock_readonly",
+            },
+            "current_prices": {"AAPL": 150.0, "MSFT": 250.0},
+        },
+    )
+
+    summary = build_broker_account_summary(store)
+    positions = build_broker_position_exposure_table(store)
+    history = build_broker_snapshot_history_table(store)
+
+    assert summary["positions_count"] == 2
+    assert summary["positions_market_value"] == 550.0
+    assert summary["total_value"] == 1550.0
+    assert summary["cash_weight"] == 1000.0 / 1550.0
+    assert summary["exposure_weight"] == 550.0 / 1550.0
+    assert summary["unrealized_pnl"] == 150.0
+    assert positions[0]["symbol"] == "AAPL"
+    assert positions[0]["market_value"] == 300.0
+    assert positions[0]["weight"] == 300.0 / 1550.0
+    assert positions[1]["symbol"] == "MSFT"
+    assert history[0]["total_value"] == 1550.0
+
+
+def test_dashboard_maestro_state_exposure_uses_latest_broker_prices(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_portfolio_snapshot(
+        "run_state",
+        PortfolioState(
+            cash=300.0,
+            cash_by_currency={"USD": 300.0},
+            positions={"AAPL": 2.0, "MISSING": 1.0},
+        ),
+    )
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "acct",
+        {
+            "account": {
+                "account_id": "acct",
+                "cash": 300.0,
+                "buying_power": 300.0,
+                "positions": [{"symbol": "AAPL", "quantity": 2, "current_price": 150.0}],
+            },
+            "current_prices": {"AAPL": 150.0},
+        },
+    )
+
+    rows = build_maestro_state_exposure_table(store)
+    history = build_portfolio_snapshot_history_table(store)
+
+    assert rows[0] == {
+        "symbol": "USD",
+        "kind": "cash",
+        "quantity": 300.0,
+        "price": 1.0,
+        "estimated_value": 300.0,
+        "missing_price": False,
+    }
+    assert rows[1]["symbol"] == "AAPL"
+    assert rows[1]["estimated_value"] == 300.0
+    assert rows[1]["missing_price"] is False
+    assert rows[2]["symbol"] == "MISSING"
+    assert rows[2]["estimated_value"] is None
+    assert rows[2]["missing_price"] is True
+    assert history[0]["estimated_positions_value"] == 300.0
+    assert history[0]["estimated_total_value"] is None
+    assert history[0]["missing_prices"] == ["MISSING"]
+
+
+def test_dashboard_snapshot_histories_are_latest_first_and_limited(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for index in range(3):
+        store.save_portfolio_snapshot(
+            f"run_state_{index}",
+            PortfolioState(cash=1000.0 + index, positions={}),
+        )
+        store.save_broker_account_snapshot(
+            f"run_broker_{index}",
+            f"acct_{index}",
+            {
+                "account": {
+                    "account_id": f"acct_{index}",
+                    "cash": 1000.0 + index,
+                    "buying_power": 900.0 + index,
+                    "positions": [],
+                }
+            },
+        )
+
+    portfolio_history = build_portfolio_snapshot_history_table(store, limit=2)
+    broker_history = build_broker_snapshot_history_table(store, limit=2)
+
+    assert [row["run_id"] for row in portfolio_history] == ["run_state_2", "run_state_1"]
+    assert [row["run_id"] for row in broker_history] == ["run_broker_2", "run_broker_1"]

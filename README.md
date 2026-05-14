@@ -885,13 +885,14 @@ uv sync --extra dashboard
 maestro dashboard --config configs/kis_overseas_readonly.example.yaml
 ```
 
-The dashboard is read-only. It shows portfolio state, strategy/order/approval
-tables, safety state, health summary, latest broker snapshot, latest
-reconciliation status, halt/failure events, live order status/lifecycle events,
-fill reconciliation events, and daily live order count/notional usage when those
-events exist. Strategy rows also expose normalized allocation results and
-preserved source-signal fields when strategy plugins return signal results. It
-does not call live KIS endpoints and does not expose write controls.
+The dashboard is read-only. It shows portfolio state, broker account exposure,
+snapshot history, strategy/order/approval tables, safety state, health summary,
+latest reconciliation status, halt/failure events, live order status/lifecycle
+events, fill reconciliation events, and daily live order count/notional usage
+when those events exist. Strategy rows also expose normalized allocation results
+and preserved source-signal fields when strategy plugins return signal results.
+Refresh and CSV download are local UI actions only; the dashboard does not call
+live KIS endpoints and does not expose state-changing write controls.
 
 If no CLI entrypoint exists yet during early development, use:
 

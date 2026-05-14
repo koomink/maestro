@@ -283,13 +283,15 @@ Completed scope:
   snapshot, latest reconciliation, recent halt/failure events, live order
   status/lifecycle events, fill reconciliation events, and daily live order
   count/notional usage
-- Dashboard labels clarified for US stock/ETF and KIS overseas read-only
-  workflows
+- Portfolio analytics panels for broker exposure, Maestro state exposure, and
+  snapshot history, with local refresh and CSV download actions
+- Dashboard labels clarified for stock/ETF and KIS domestic/overseas workflows
 - Dashboard read model tests for observability tables
 
 The dashboard remains read-only, does not call live KIS endpoints, and does not
-add dashboard write controls, Telegram resume/clear-halt/live enable/risk-change
-controls, live auto-trading, market orders, or submit/cancel/amend paths.
+add state-changing dashboard write controls, Telegram resume/clear-halt/live
+enable/risk-change controls, live auto-trading, market orders, or
+submit/cancel/amend paths.
 
 ## v0.8 — KIS Overseas Live Approval Beta
 

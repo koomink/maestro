@@ -1073,21 +1073,21 @@ Live trading safety:
 
 Dashboard should be read-only by default.
 
-Initial Streamlit pages:
+Streamlit tabs:
 
-1. Overview
-2. Portfolio
-3. Performance
-4. Strategies
-5. Orders and Proposals
-6. System Health
+1. Portfolio: broker exposure, Maestro state exposure, and snapshot history
+2. Operations: safety, health, risk decisions, and halt/failure events
+3. Orders: strategy signals, paper orders, and approvals
+4. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
+5. Raw: raw status payloads
 
 Security:
 
 - Prefer localhost/Tailscale access.
 - Do not expose public internet without auth/reverse proxy.
 - No secrets displayed.
-- No write endpoints in early versions.
+- Refresh and CSV download are local UI actions only.
+- No state-changing write endpoints in early versions.
 
 ## 18. Testing Requirements
 

@@ -349,7 +349,9 @@
 - [x] Add live order status/lifecycle event read model and panel
 - [x] Add fill reconciliation event read model and panel
 - [x] Add daily live order count/notional usage read model and panel
-- [x] Improve labels for US stock/ETF and KIS overseas read-only workflows
+- [x] Add broker exposure, Maestro state exposure, and snapshot history panels
+- [x] Add local refresh and CSV download actions without broker calls or writes
+- [x] Improve labels for stock/ETF and KIS domestic/overseas workflows
 - [x] Add dashboard read model tests
 - [x] Keep dashboard write controls deferred
 - [x] Keep live auto-trading, market orders, submit/cancel/amend work, Telegram
