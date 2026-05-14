@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 from maestro.core.enums import BrokerProduct, Currency, OrderSide, OrderStatus, OrderType
 
@@ -14,6 +16,7 @@ class OrderIntent(BaseModel):
     currency: Currency | None = None
     sleeve: str | None = None
     broker_product: BrokerProduct | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ExecutionResult(BaseModel):

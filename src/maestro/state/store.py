@@ -157,6 +157,20 @@ class StateStore:
     def list_orders(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("orders", limit)
 
+    def monthly_contribution_order_exists(self, month_key: str, sleeve: str) -> bool:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT payload FROM orders ORDER BY id DESC").fetchall()
+        for row in rows:
+            payload = json.loads(row[0])
+            metadata = payload.get("metadata", {})
+            if (
+                metadata.get("order_generation_mode") == "buy_only_contribution"
+                and metadata.get("contribution_month") == month_key
+                and metadata.get("contribution_sleeve") == sleeve
+            ):
+                return True
+        return False
+
     def list_system_events(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("system_events", limit)
 

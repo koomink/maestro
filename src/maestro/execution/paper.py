@@ -1,3 +1,6 @@
+from datetime import datetime
+
+from maestro.config.execution import ExecutionConfig
 from maestro.core.enums import OrderSide, OrderStatus
 from maestro.core.symbols import is_cash_symbol
 from maestro.execution.base import ExecutionResult, OrderIntent
@@ -7,8 +10,15 @@ from maestro.state.models import PortfolioState
 
 
 class PaperExecutionEngine:
-    def __init__(self, *, instruments=None, currency_sleeves=None) -> None:
+    def __init__(
+        self,
+        *,
+        config: ExecutionConfig | None = None,
+        instruments=None,
+        currency_sleeves=None,
+    ) -> None:
         self.order_builder = OrderBuilder(
+            config=config,
             instruments=instruments,
             currency_sleeves=currency_sleeves,
         )
@@ -18,8 +28,20 @@ class PaperExecutionEngine:
         current_state: PortfolioState,
         target: PortfolioTarget,
         prices: dict[str, float],
+        *,
+        as_of: datetime | None = None,
+        contribution_already_executed: bool = False,
     ) -> list[OrderIntent]:
-        return self.order_builder.build_orders(current_state, target, prices)
+        return self.order_builder.build_orders(
+            current_state,
+            target,
+            prices,
+            as_of=as_of,
+            contribution_already_executed=contribution_already_executed,
+        )
+
+    def contribution_month_key(self, as_of: datetime | None = None) -> str:
+        return self.order_builder.contribution_month_key(as_of)
 
     def execute_orders(
         self,

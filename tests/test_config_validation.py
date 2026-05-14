@@ -204,8 +204,59 @@ def test_current_sample_configs_load():
         "configs/kis_multi_asset_live_approval.example.yaml",
         "configs/live_approval.example.yaml",
         "configs/us_etf_yahoo_paper.yaml",
+        "configs/ataraxia_yahoo_paper.yaml",
     ]:
         assert load_config(path)
+
+
+def test_ataraxia_contribution_config_declares_budget_range_and_domestic_universe():
+    config = load_config("configs/ataraxia_yahoo_paper.yaml")
+
+    assert config.execution.order_generation_mode == "buy_only_contribution"
+    assert config.execution.contribution.enabled is True
+    assert config.execution.contribution.monthly_budget == 3_000_000
+    assert config.execution.contribution.min_monthly_budget == 2_000_000
+    assert config.execution.contribution.max_monthly_budget == 4_000_000
+    assert config.execution.contribution.buy_day == 15
+    assert config.execution.contribution.non_trading_day_policy == "next_trading_day"
+    assert config.execution.contribution.target_policy == "buy_only_toward_target"
+    assert config.datahub.symbol_map["TIGER_NASDAQ100_LEVERAGE"] == "418660.KS"
+    assert config.datahub.symbol_map["KODEX_US_DIVIDEND_DOWJONES"] == "489250.KS"
+    assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_symbol == "418660"
+    assert config.universe.get("KODEX_US_DIVIDEND_DOWJONES").broker_symbol == "489250"
+    assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_product == (
+        BrokerProduct.KIS_DOMESTIC_STOCK
+    )
+
+
+def test_contribution_config_rejects_invalid_buy_day(tmp_path):
+    raw = yaml.safe_load(Path("configs/ataraxia_yahoo_paper.yaml").read_text())
+    raw["execution"]["contribution"]["buy_day"] = 32
+    config_path = tmp_path / "invalid_buy_day.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="buy_day"):
+        load_config(config_path)
+
+
+def test_contribution_config_rejects_budget_outside_range(tmp_path):
+    raw = yaml.safe_load(Path("configs/ataraxia_yahoo_paper.yaml").read_text())
+    raw["execution"]["contribution"]["monthly_budget"] = 5_000_000
+    config_path = tmp_path / "invalid_monthly_budget.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="monthly_budget"):
+        load_config(config_path)
+
+
+def test_contribution_config_rejects_unsupported_policy(tmp_path):
+    raw = yaml.safe_load(Path("configs/ataraxia_yahoo_paper.yaml").read_text())
+    raw["execution"]["contribution"]["non_trading_day_policy"] = "skip"
+    config_path = tmp_path / "invalid_policy.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="non_trading_day_policy"):
+        load_config(config_path)
 
 
 def test_kis_live_readonly_example_config_uses_real_readonly_provider():

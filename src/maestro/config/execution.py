@@ -1,11 +1,41 @@
-from pydantic import Field, field_validator
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
 
 from maestro.config.base import StrictConfigModel
-from maestro.core.enums import OrderType
+from maestro.core.enums import Currency, OrderType
+
+
+class ContributionConfig(StrictConfigModel):
+    enabled: bool = False
+    currency: Currency = Currency.KRW
+    sleeve: str = "KRW"
+    monthly_budget: float = Field(default=0.0, ge=0.0)
+    min_monthly_budget: float = Field(default=0.0, ge=0.0)
+    max_monthly_budget: float = Field(default=0.0, ge=0.0)
+    buy_day: int = Field(default=1, ge=1, le=31)
+    non_trading_day_policy: Literal["next_trading_day"] = "next_trading_day"
+    target_policy: Literal["buy_only_toward_target"] = "buy_only_toward_target"
+
+    @model_validator(mode="after")
+    def validate_budget_range(self) -> "ContributionConfig":
+        if not self.enabled:
+            return self
+        if self.monthly_budget <= 0:
+            raise ValueError("monthly_budget must be positive when contribution is enabled")
+        if self.min_monthly_budget > self.monthly_budget:
+            raise ValueError("min_monthly_budget must be less than or equal to monthly_budget")
+        if self.max_monthly_budget and self.monthly_budget > self.max_monthly_budget:
+            raise ValueError("monthly_budget must be less than or equal to max_monthly_budget")
+        if self.max_monthly_budget and self.min_monthly_budget > self.max_monthly_budget:
+            raise ValueError("min_monthly_budget must be less than or equal to max_monthly_budget")
+        return self
 
 
 class ExecutionConfig(StrictConfigModel):
     engine: str = "paper"
+    order_generation_mode: Literal["target_rebalance", "buy_only_contribution"] = "target_rebalance"
+    contribution: ContributionConfig = Field(default_factory=ContributionConfig)
     live_order_enabled: bool = False
     live_order_dry_run: bool = False
     require_reconciliation_pass: bool = True
@@ -29,6 +59,14 @@ class ExecutionConfig(StrictConfigModel):
     live_order_fee_buffer_pct: float = Field(default=0.0, ge=0.0)
     heartbeat_max_age_seconds: int = Field(default=0, ge=0)
     scheduled_run_max_age_seconds: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_contribution_mode(self) -> "ExecutionConfig":
+        if self.order_generation_mode == "buy_only_contribution" and not self.contribution.enabled:
+            raise ValueError(
+                "execution.contribution.enabled must be true for buy_only_contribution"
+            )
+        return self
 
     @field_validator("allowed_order_type")
     @classmethod
@@ -59,4 +97,4 @@ class ExecutionConfig(StrictConfigModel):
         return value
 
 
-__all__ = ["ExecutionConfig"]
+__all__ = ["ContributionConfig", "ExecutionConfig"]

@@ -196,7 +196,17 @@ class MaestroOrchestrator:
                     "before_order_generation",
                 )
 
-            orders = self.execution.propose_orders(current_state, risk_decision.target, prices)
+            order_generation_time = utc_now()
+            contribution_already_executed = self._contribution_already_executed(
+                order_generation_time
+            )
+            orders = self.execution.propose_orders(
+                current_state,
+                risk_decision.target,
+                prices,
+                as_of=order_generation_time,
+                contribution_already_executed=contribution_already_executed,
+            )
             if orders and self.config.mode == RunMode.LIVE_APPROVAL:
                 self._record_live_proposal_data_snapshot(
                     run_id,
@@ -377,6 +387,15 @@ class MaestroOrchestrator:
             strategy_id=loaded.config.id,
             portfolio_state=current_state.model_dump(mode="json"),
             config=loaded.config.config,
+        )
+
+    def _contribution_already_executed(self, as_of) -> bool:
+        if self.config.execution.order_generation_mode != "buy_only_contribution":
+            return False
+        month_key = self.execution.contribution_month_key(as_of)
+        return self.state_store.monthly_contribution_order_exists(
+            month_key,
+            self.config.execution.contribution.sleeve,
         )
 
     def _evaluate_dynamic_universe(

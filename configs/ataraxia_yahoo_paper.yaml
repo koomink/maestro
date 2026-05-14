@@ -1,0 +1,124 @@
+mode: paper
+
+portfolio:
+  base_currency: KRW
+  allocation_mode: currency_sleeves
+  initial_cash: 10000000
+  cash_by_currency:
+    KRW: 10000000
+  allowed_symbols:
+    - CASH_KRW
+    - TIGER_NASDAQ100_LEVERAGE
+    - KODEX_US_DIVIDEND_DOWJONES
+  currency_sleeves:
+    KRW:
+      cash_symbol: CASH_KRW
+      symbols:
+        - TIGER_NASDAQ100_LEVERAGE
+        - KODEX_US_DIVIDEND_DOWJONES
+
+universe:
+  instruments:
+    - symbol: CASH_KRW
+      asset_type: cash
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: KRW
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 0
+    - symbol: TIGER_NASDAQ100_LEVERAGE
+      name: TIGER 미국나스닥100레버리지(합성)
+      asset_type: domestic_etf
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: "418660"
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: KODEX_US_DIVIDEND_DOWJONES
+      name: KODEX 미국배당다우존스
+      asset_type: domestic_etf
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: "489250"
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 1
+  policy:
+    allowed_asset_types:
+      - domestic_etf
+    allowed_regions:
+      - KR
+    allowed_currencies:
+      - KRW
+    allowed_broker_products:
+      - kis_domestic_stock
+    allowed_exchange_codes:
+      - KRX
+
+strategies:
+  - id: ataraxia
+    enabled: true
+    mode: paper
+    weight: 1.0
+    entrypoint: "ataraxia.strategy:AtaraxiaStrategy"
+    config:
+      sleeve: KRW
+      allocations:
+        TIGER_NASDAQ100_LEVERAGE: 0.60
+        KODEX_US_DIVIDEND_DOWJONES: 0.40
+
+datahub:
+  provider: yahoo
+  stale_after_seconds: 604800
+  symbol_map:
+    TIGER_NASDAQ100_LEVERAGE: 418660.KS
+    KODEX_US_DIVIDEND_DOWJONES: 489250.KS
+
+execution:
+  engine: paper
+  order_generation_mode: buy_only_contribution
+  market_session_timezone: Asia/Seoul
+  market_session_open: "09:00"
+  market_session_close: "15:30"
+  market_session_weekdays: [0, 1, 2, 3, 4]
+  contribution:
+    enabled: true
+    currency: KRW
+    sleeve: KRW
+    monthly_budget: 3000000
+    min_monthly_budget: 2000000
+    max_monthly_budget: 4000000
+    buy_day: 15
+    non_trading_day_policy: next_trading_day
+    target_policy: buy_only_toward_target
+
+risk:
+  max_single_asset_weight: 0.7
+  min_cash_weight: 0.0
+
+state:
+  sqlite_path: var/ataraxia_yahoo_paper_state.db
+
+audit:
+  jsonl_path: var/ataraxia_yahoo_paper_audit.jsonl
+
+approval:
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
+  timeout_seconds: 300

@@ -10,6 +10,7 @@ def build_execution_engine(
 ) -> PaperExecutionEngine:
     if config.engine == "paper":
         return PaperExecutionEngine(
+            config=config,
             instruments=instruments,
             currency_sleeves=currency_sleeves,
         )

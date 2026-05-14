@@ -4,7 +4,7 @@ from maestro.config.approval import ApprovalConfig
 from maestro.config.base import StrictConfigModel
 from maestro.config.broker import KISConfig
 from maestro.config.datahub import DataHubConfig, DataHubProviderConfig
-from maestro.config.execution import ExecutionConfig
+from maestro.config.execution import ContributionConfig, ExecutionConfig
 from maestro.config.portfolio import CurrencySleeveConfig, PortfolioConfig
 from maestro.config.reconciliation_config import ReconciliationConfig
 from maestro.config.risk import RiskConfig
@@ -67,6 +67,7 @@ class MaestroConfig(StrictConfigModel):
 
 __all__ = [
     "ApprovalConfig",
+    "ContributionConfig",
     "AuditConfig",
     "CurrencySleeveConfig",
     "DataHubConfig",
