@@ -15,10 +15,11 @@ class SampleStaticAllocationStrategy(BaseStrategyPlugin):
             name="Sample Static Allocation",
             version="0.1.0",
             description="Reference Virtuoso app that proposes a fixed target allocation.",
-            supported_modes=["paper"],
+            supported_modes=["paper", "live_approval"],
             supported_asset_types=["cash", "stock", "etf", "domestic_etf", "us_etf"],
             result_type="target_allocation",
             requires_data=["price"],
+            can_run_live=True,
         )
 
     def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:

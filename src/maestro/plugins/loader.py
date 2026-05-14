@@ -31,6 +31,12 @@ def load_strategy(config: StrategyPluginConfig) -> BaseStrategyPlugin:
             "Strategy requires unsupported Maestro SDK contract version "
             f"{manifest.sdk_contract_version}"
         )
+    if config.mode not in manifest.supported_modes:
+        raise PluginLoadError(
+            f"Strategy {config.id} does not support configured mode {config.mode}"
+        )
+    if config.mode == "live_approval" and not manifest.can_run_live:
+        raise PluginLoadError(f"Strategy {config.id} manifest does not allow live execution")
     if manifest.result_type == "strategy_signal" and config.signal_to_allocation is None:
         raise PluginLoadError(
             "strategy_signal result requires strategy config signal_to_allocation policy"

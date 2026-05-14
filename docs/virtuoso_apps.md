@@ -108,11 +108,14 @@ The loader currently enforces:
 - the class can be constructed with no arguments
 - the constructed object is an instance of `BaseStrategyPlugin`
 - `plugin.manifest().strategy_id` exactly matches `strategies[*].id`
+- `strategies[*].mode` is declared in `plugin.manifest().supported_modes`
+- `plugin.manifest().can_run_live=True` when `strategies[*].mode` is
+  `live_approval`
 - `plugin.manifest().result_type` is `target_allocation`, or is
   `strategy_signal` with an explicit `strategies[*].signal_to_allocation`
   policy
 - `plugin.manifest().sdk_contract_version` is at or below Maestro-supported
-  contract version `1.0`
+  contract version `1.1`
 
 If any condition fails, Maestro raises a plugin load error before the strategy
 runs.
@@ -170,6 +173,12 @@ StrategyManifest(
     allow_direct_external_data_calls=False,
 )
 ```
+
+The bundled `sample_static_allocation` reference app is intentionally enabled
+for both `paper` and `live_approval` and declares `can_run_live=True` so tests
+can exercise the approval-gated live path. New third-party wrappers should
+start with `supported_modes=["paper"]` and `can_run_live=False` until their live
+behavior has been reviewed.
 
 Set `requires_llm`, `supported_llm_providers`, `required_env_vars`,
 `estimated_runtime_seconds`, and `allow_direct_external_data_calls` if the app
@@ -390,6 +399,17 @@ The config entrypoint is missing `:` or points to the wrong module/class.
 `Strategy config id ... does not match manifest id ...`
 
 Make `strategies[*].id` and `StrategyManifest.strategy_id` identical.
+
+`Strategy ... does not support configured mode ...`
+
+Add the configured mode to `StrategyManifest.supported_modes` only after the app
+has been tested for that run mode, or change the strategy config back to a
+supported mode.
+
+`Strategy ... manifest does not allow live execution`
+
+Set `can_run_live=True` only for a reviewed app that is intended to run behind
+Maestro's `live_approval` gates.
 
 `Strategy ... must implement BaseStrategyPlugin`
 

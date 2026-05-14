@@ -85,6 +85,58 @@ def test_sdk_contract_version_1_1_loads(monkeypatch):
     assert load_strategy(config).manifest().sdk_contract_version == "1.1"
 
 
+def test_strategy_config_mode_must_be_supported_by_manifest(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def paper_only_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(update={"supported_modes": ["paper"], "can_run_live": True})
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        paper_only_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        mode="live_approval",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+    )
+
+    with pytest.raises(PluginLoadError, match="does not support configured mode"):
+        load_strategy(config)
+
+
+def test_live_approval_mode_requires_manifest_live_permission(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def non_live_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(
+            update={"supported_modes": ["paper", "live_approval"], "can_run_live": False}
+        )
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        non_live_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        mode="live_approval",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+    )
+
+    with pytest.raises(PluginLoadError, match="does not allow live execution"):
+        load_strategy(config)
+
+
 def test_strategy_signal_manifest_requires_signal_to_allocation_policy(monkeypatch):
     import sample_static_allocation.strategy as strategy_module
 

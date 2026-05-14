@@ -515,9 +515,12 @@ class StrategyManifest(BaseModel):
 ```
 
 Maestro rejects plugins that require a newer SDK contract version than the
-current supported contract. `strategy_signal` is public SDK structure for LLM
-research apps and can be loaded when strategy config includes an explicit
-Maestro-owned `signal_to_allocation` policy.
+current supported contract. The loader also rejects a strategy when
+`strategies[*].mode` is not declared in `StrategyManifest.supported_modes`, and
+requires `StrategyManifest.can_run_live=True` before loading a strategy in
+`live_approval` mode. `strategy_signal` is public SDK structure for LLM research
+apps and can be loaded when strategy config includes an explicit Maestro-owned
+`signal_to_allocation` policy.
 
 ### 5.3 StrategyContext
 
@@ -783,7 +786,9 @@ Loader behavior:
 4. Verify instance implements required methods.
 5. Read manifest.
 6. Validate manifest strategy ID against config ID.
-7. Register plugin in registry.
+7. Validate configured mode against `manifest.supported_modes`.
+8. Require `manifest.can_run_live=True` for `live_approval`.
+9. Register plugin in registry.
 
 ## 8. Configuration Model
 
