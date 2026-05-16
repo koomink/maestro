@@ -6,13 +6,6 @@ portfolio:
   cash_by_currency:
     KRW: 1000000
     USD: 10000
-  allowed_symbols:
-    - CASH_KRW
-    - CASH_USD
-    - SAMSUNG
-    - KODEX200
-    - AAPL
-    - VOO
   currency_sleeves:
     KRW:
       cash_symbol: CASH_KRW

@@ -5,10 +5,6 @@ portfolio:
   allocation_mode: currency_sleeves
   cash_by_currency:
     KRW: 10000000
-  allowed_symbols:
-    - CASH_KRW
-    - TIGER_NASDAQ100_LEVERAGE
-    - KODEX_US_DIVIDEND_DOWJONES
   currency_sleeves:
     KRW:
       cash_symbol: CASH_KRW

@@ -306,13 +306,13 @@ FX-adjusted total performance in the dashboard, but order generation, buying
 power, reconciliation cash gates, and risk cash checks stay in each sleeve's
 native currency.
 
-Current example configs use static `portfolio.allowed_symbols` and
-`universe.instruments` lists such as `AAPL`, `MSFT`, `VOO`, `QQQ`, and `SGOV`.
-Those lists are tutorial, test, and conservative paper-mode examples, not a
-product limit. The intended production design is a policy-based dynamic universe:
-Virtuoso apps may propose candidate symbols and data needs, but Maestro validates,
-resolves, and approves tradability before any symbol can receive an allocation or
-reach execution.
+`universe.instruments` is the source of truth for tradable instrument metadata.
+`portfolio.allowed_symbols` is an optional safety override: when it is omitted,
+Maestro derives it from `portfolio.currency_sleeves` or, for single-allocation
+configs, from all configured universe instruments. The intended production
+design is still policy-based: Virtuoso apps may propose candidate symbols and
+data needs, but Maestro validates, resolves, and approves tradability before any
+symbol can receive an allocation or reach execution.
 
 Maestro distinguishes a broad research universe from a stricter tradable
 universe. Research symbols can include analysis inputs such as `SPY`, `VIX`,

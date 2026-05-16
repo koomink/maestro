@@ -40,8 +40,10 @@ For the complete operator-local promotion runbook, see
 
 - Review `configs/live_approval.yaml` and keep
   `execution.live_order_enabled=false` until every item below passes.
-- Confirm the strategy universe, DataHub provider, broker account, and
-  `portfolio.allowed_symbols` refer to the same canonical symbols.
+- Confirm the strategy universe, DataHub provider, broker account, and effective
+  allowed symbols refer to the same canonical symbols. If
+  `portfolio.allowed_symbols` is omitted, Maestro derives it from
+  `portfolio.currency_sleeves` or `universe.instruments`.
 - Confirm `universe.instruments` maps each canonical symbol to the intended
   broker product, broker symbol, exchange code, currency, price tick, and
   quantity step.

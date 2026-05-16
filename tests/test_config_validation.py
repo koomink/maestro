@@ -485,8 +485,18 @@ def test_live_approval_us_etf_example_keeps_concrete_universe_out_of_root_config
 
 
 def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fallback():
+    raw = yaml.safe_load(Path("configs/examples/live_approval_kis_multi_asset.yaml").read_text())
     config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
 
+    assert "allowed_symbols" not in raw["portfolio"]
+    assert config.portfolio.allowed_symbols == [
+        "CASH_KRW",
+        "SAMSUNG",
+        "KODEX200",
+        "CASH_USD",
+        "AAPL",
+        "VOO",
+    ]
     assert config.datahub.provider == "mock"
     assert config.datahub.symbol_map == {}
     assert len(config.datahub.providers) == 1
@@ -505,6 +515,19 @@ def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fa
     }
     assert all(item.provider != "mock" for item in config.datahub.providers)
     assert all(item.provider != "csv" for item in config.datahub.providers)
+
+
+def test_allowed_symbols_can_be_derived_from_universe_when_omitted(tmp_path):
+    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
+    del raw["portfolio"]["allowed_symbols"]
+    config_path = tmp_path / "live_approval_us_etf_without_allowed_symbols.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.portfolio.allowed_symbols == [
+        instrument.symbol for instrument in config.universe.instruments
+    ]
 
 
 def test_research_multi_provider_example_registers_research_data_types():

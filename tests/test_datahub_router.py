@@ -284,6 +284,32 @@ def test_build_data_provider_accepts_yahoo_config_without_network_call():
     assert isinstance(provider, DataHubRouter)
 
 
+def test_single_datahub_config_normalizes_to_provider_config():
+    config = DataHubConfig(
+        provider="newsapi",
+        stale_after_seconds=300,
+        symbol_map={"FED": "Federal Reserve"},
+        newsapi_language="en",
+    )
+
+    provider = config.effective_providers()[0]
+
+    assert provider.name == "newsapi"
+    assert provider.provider == "newsapi"
+    assert provider.data_types == ["news"]
+    assert provider.stale_after_seconds == 300
+    assert provider.symbol_map == {"FED": "Federal Reserve"}
+    assert provider.newsapi_language == "en"
+
+
+def test_single_yahoo_config_preserves_research_and_technical_data_types():
+    provider = build_data_provider(DataHubConfig(provider="yahoo"))
+
+    assert provider.registry.registrations_for(request("MOCK_ETF_A", "fundamental"))
+    assert provider.registry.registrations_for(request("MOCK_ETF_A", "financial_statements"))
+    assert provider.registry.registrations_for(request("MOCK_ETF_A", "technical_indicators"))
+
+
 def test_build_data_provider_accepts_yahoo_llm_research_data_types():
     config = DataHubConfig(
         providers=[

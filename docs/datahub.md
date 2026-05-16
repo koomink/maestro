@@ -161,11 +161,12 @@ DataHub provider symbol maps translate Maestro canonical symbols into
 provider-specific research symbols. Strategies should not carry provider-specific
 ticker translation logic.
 
-Static `allowed_symbols` lists are acceptable for examples, tests, tutorials,
-and conservative paper configs. They are not the intended production ceiling.
-The future production model should support a policy-based dynamic universe where
-Virtuoso apps can propose candidate symbols, and Maestro validates and resolves
-them before they can become tradable.
+Static `allowed_symbols` lists are acceptable as an explicit safety override.
+When omitted, Maestro derives the allowed set from `portfolio.currency_sleeves`
+or from all configured `universe.instruments`. They are not the intended
+production ceiling. The future production model should support a policy-based
+dynamic universe where Virtuoso apps can propose candidate symbols, and Maestro
+validates and resolves them before they can become tradable.
 
 The research universe and tradable universe are separate:
 

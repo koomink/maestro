@@ -854,11 +854,12 @@ audit:
 Maestro v0.1.1 uses strict Pydantic config validation. Unknown YAML fields fail
 loudly instead of being ignored.
 
-Static `allowed_symbols` is valid for examples, tests, tutorials, and
-conservative paper configs. It should not be treated as the final production
-universe model. The production path uses `UniversePolicy` and an
-`InstrumentResolver` so Virtuoso apps can propose candidates and Maestro can
-approve only symbols that satisfy research or tradability requirements.
+Static `allowed_symbols` is valid as an explicit safety override. When omitted,
+Maestro derives it from `portfolio.currency_sleeves` or, for single-allocation
+configs, from all configured `universe.instruments`. It should not be treated as
+the final production universe model. The production path uses `UniversePolicy`
+and an `InstrumentResolver` so Virtuoso apps can propose candidates and Maestro
+can approve only symbols that satisfy research or tradability requirements.
 
 ## 9. Orchestrator Run Cycle
 

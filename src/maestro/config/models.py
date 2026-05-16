@@ -35,8 +35,14 @@ class MaestroConfig(StrictConfigModel):
     @model_validator(mode="after")
     def validate_universe_matches_portfolio(self) -> "MaestroConfig":
         if not self.universe.instruments:
+            if not self.portfolio.allowed_symbols:
+                raise ValueError(
+                    "portfolio.allowed_symbols is required when universe.instruments is empty"
+                )
             return self
-        universe_symbols = {instrument.symbol for instrument in self.universe.instruments}
+        universe_symbol_list = [instrument.symbol for instrument in self.universe.instruments]
+        self.portfolio.allowed_symbols = self.portfolio.derive_allowed_symbols(universe_symbol_list)
+        universe_symbols = set(universe_symbol_list)
         missing = [
             symbol for symbol in self.portfolio.allowed_symbols if symbol not in universe_symbols
         ]
