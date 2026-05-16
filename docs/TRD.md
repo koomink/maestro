@@ -860,6 +860,7 @@ configs, from all configured `universe.instruments`. It should not be treated as
 the final production universe model. The production path uses `UniversePolicy`
 and an `InstrumentResolver` so Virtuoso apps can propose candidates and Maestro
 can approve only symbols that satisfy research or tradability requirements.
+Standard cash instruments are derived from portfolio cash symbols when omitted.
 
 ## 9. Orchestrator Run Cycle
 

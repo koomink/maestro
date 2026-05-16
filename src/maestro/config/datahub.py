@@ -1,7 +1,8 @@
 from pydantic import Field
 
 from maestro.config.base import StrictConfigModel
-from maestro.core.enums import AssetType, RunMode
+from maestro.core.enums import AssetType, BrokerProduct, RunMode
+from maestro.core.instruments import TradableInstrument
 
 
 class DataHubProviderSettings(StrictConfigModel):
@@ -50,6 +51,17 @@ class DataHubConfig(DataHubProviderSettings):
     provider: str = "mock"
     providers: list[DataHubProviderConfig] = Field(default_factory=list)
 
+    def apply_universe_symbol_maps(self, instruments: list[TradableInstrument]) -> None:
+        if self.providers:
+            for provider in self.providers:
+                _apply_yahoo_symbol_map(provider, instruments)
+            return
+        if _is_yahoo_provider(self.provider):
+            self.symbol_map = _merge_symbol_maps(
+                _derive_yahoo_symbol_map(instruments),
+                self.symbol_map,
+            )
+
     def effective_providers(self) -> list[DataHubProviderConfig]:
         if self.providers:
             return self.providers
@@ -87,6 +99,52 @@ def _single_provider_data_types(provider: str) -> list[str] | None:
     if provider == "sentiment":
         return ["sentiment"]
     return None
+
+
+def _apply_yahoo_symbol_map(
+    config: DataHubProviderConfig,
+    instruments: list[TradableInstrument],
+) -> None:
+    if not _is_yahoo_provider(config.provider):
+        return
+    config.symbol_map = _merge_symbol_maps(
+        _derive_yahoo_symbol_map(instruments),
+        config.symbol_map,
+    )
+
+
+def _derive_yahoo_symbol_map(instruments: list[TradableInstrument]) -> dict[str, str]:
+    symbol_map = {}
+    for instrument in instruments:
+        provider_symbol = _yahoo_symbol(instrument)
+        if provider_symbol is not None:
+            symbol_map[instrument.symbol] = provider_symbol
+    return symbol_map
+
+
+def _yahoo_symbol(instrument: TradableInstrument) -> str | None:
+    if instrument.asset_type == AssetType.CASH:
+        return None
+    if instrument.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK:
+        if "." in instrument.broker_symbol:
+            return instrument.broker_symbol
+        return f"{instrument.broker_symbol}.KS"
+    if instrument.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK:
+        return instrument.broker_symbol
+    return None
+
+
+def _merge_symbol_maps(
+    derived: dict[str, str],
+    explicit: dict[str, str],
+) -> dict[str, str]:
+    merged = dict(derived)
+    merged.update(explicit)
+    return merged
+
+
+def _is_yahoo_provider(provider: str) -> bool:
+    return provider in {"yahoo", "yfinance"}
 
 
 __all__ = ["DataHubConfig", "DataHubProviderConfig", "DataHubProviderSettings"]

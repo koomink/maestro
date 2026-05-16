@@ -167,6 +167,8 @@ or from all configured `universe.instruments`. They are not the intended
 production ceiling. The future production model should support a policy-based
 dynamic universe where Virtuoso apps can propose candidate symbols, and Maestro
 validates and resolves them before they can become tradable.
+Cash instruments such as `CASH_KRW` and `CASH_USD` are derived from portfolio
+cash symbols when omitted.
 
 The research universe and tradable universe are separate:
 
@@ -338,8 +340,6 @@ datahub:
       data_types: [price, ohlcv]
       timeout_seconds: 5
       stale_after_seconds: 86400
-      symbol_map:
-        SAMSUNG: 005930.KS
     - name: fred_macro
       provider: fred
       priority: 30
@@ -427,7 +427,10 @@ Supported behavior:
 - `timeout_seconds`: passed to the Yahoo/yfinance client wrapper.
 - `stale_after_seconds`: optional freshness threshold that marks payloads stale.
 - `symbol_map`: canonical Maestro symbol to provider-specific Yahoo symbol
-  mapping.
+  mapping. When omitted in a full Maestro config, Yahoo/yfinance mappings are
+  derived from `universe.instruments`: KIS domestic symbols use `.KS`, and KIS
+  overseas symbols use the broker symbol unchanged. Explicit entries override
+  derived entries.
 
 The provider uses an optional lazy `yfinance` client wrapper at runtime. Normal
 tests use fake clients and fixture rows, so `pytest -q` does not require live
@@ -476,8 +479,6 @@ datahub:
   provider: yahoo
   timeout_seconds: 5
   stale_after_seconds: 86400
-  symbol_map:
-    SAMSUNG: 005930.KS
 ```
 
 Multi-provider example with local fallback:
@@ -491,8 +492,6 @@ datahub:
       data_types: [price, ohlcv]
       timeout_seconds: 5
       stale_after_seconds: 86400
-      symbol_map:
-        SAMSUNG: 005930.KS
     - name: csv_fallback
       provider: csv
       priority: 100
@@ -507,9 +506,11 @@ Config fields:
   lower-priority fallback.
 - `stale_after_seconds`: optional threshold for marking the latest Yahoo bar as
   stale. Omit it when staleness should be evaluated elsewhere.
-- `symbol_map`: maps Maestro canonical symbols to Yahoo/yfinance symbols. Keep
-  strategy plugins on Maestro symbols and put provider-specific ticker aliases
-  here.
+- `symbol_map`: optional override for Maestro canonical symbols to
+  Yahoo/yfinance symbols. In a full Maestro config, omit it when
+  `universe.instruments[].broker_symbol` can derive the Yahoo symbol. Keep
+  strategy plugins on Maestro symbols and put exceptional provider-specific
+  ticker aliases here.
 - `retry_max_attempts`: optional bounded retry count for provider-unavailable
   failures. The default `1` means one attempt and no retry.
 - `retry_backoff_seconds`: optional linear backoff between retry attempts.

@@ -37,6 +37,10 @@ uv pip install -e examples/sample_static_allocation
 6. Keep `var/` owner-readable only when it contains broker state, audit logs, or
    token cache files.
 
+KIS environment variable names, `var/kis_access_token.json`, and strict
+reconciliation tolerances are schema defaults; operator configs only need to
+override them when the deployment uses different names or paths.
+
 For a single-user operator setup, generate an untracked config first:
 
 ```bash

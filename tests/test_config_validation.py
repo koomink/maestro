@@ -290,8 +290,10 @@ def test_current_sample_configs_load():
 
 
 def test_ataraxia_contribution_config_declares_budget_range_and_domestic_universe():
+    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
     config = load_config("configs/examples/paper_ataraxia_yahoo.yaml")
 
+    assert "symbol_map" not in raw["datahub"]
     assert config.execution.order_generation_mode == "buy_only_contribution"
     assert config.execution.contribution.enabled is True
     assert config.execution.contribution.monthly_budget == 3_000_000
@@ -428,8 +430,13 @@ def test_multi_asset_readonly_example_uses_env_var_names_only():
 
 
 def test_live_approval_root_config_is_minimal_operator_skeleton():
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     config = load_config("configs/live_approval.yaml")
 
+    assert "reconciliation" not in raw
+    assert "account_id_env" not in raw["kis"]
+    assert "token_cache_path" not in raw["kis"]
+    assert "instruments" not in raw["universe"]
     assert config.mode == "live_approval"
     assert config.portfolio.base_currency == "KRW"
     assert config.portfolio.initial_cash is None
@@ -453,6 +460,7 @@ def test_live_approval_root_config_is_minimal_operator_skeleton():
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
+    assert config.kis.token_cache_path == "var/kis_access_token.json"
     cash = config.universe.get("CASH_KRW")
     assert cash is not None
     assert cash.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
@@ -460,11 +468,16 @@ def test_live_approval_root_config_is_minimal_operator_skeleton():
 
 
 def test_live_readonly_root_config_uses_broker_cash_baseline():
+    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
     config = load_config("configs/live_readonly.yaml")
 
+    assert "universe" not in raw
+    assert "reconciliation" not in raw
+    assert "account_id_env" not in raw["kis"]
     assert config.mode == "live_readonly"
     assert config.portfolio.initial_cash is None
     assert config.portfolio.allowed_symbols == ["CASH_KRW"]
+    assert config.universe.get("CASH_KRW") is not None
     assert config.strategies == []
     assert config.approval.enabled is False
     assert config.execution.live_order_enabled is False
@@ -489,6 +502,9 @@ def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fa
     config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
 
     assert "allowed_symbols" not in raw["portfolio"]
+    assert all(instrument["asset_type"] != "cash" for instrument in raw["universe"]["instruments"])
+    assert "reconciliation" not in raw
+    assert "token_cache_path" not in raw["kis"]
     assert config.portfolio.allowed_symbols == [
         "CASH_KRW",
         "SAMSUNG",
@@ -507,6 +523,7 @@ def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fa
     assert provider.data_types == ["price", "ohlcv", "technical_indicators"]
     assert provider.timeout_seconds == 5
     assert provider.stale_after_seconds == 604800
+    assert "symbol_map" not in raw["datahub"]["providers"][0]
     assert provider.symbol_map == {
         "SAMSUNG": "005930.KS",
         "KODEX200": "069500.KS",
@@ -528,6 +545,18 @@ def test_allowed_symbols_can_be_derived_from_universe_when_omitted(tmp_path):
     assert config.portfolio.allowed_symbols == [
         instrument.symbol for instrument in config.universe.instruments
     ]
+
+
+def test_yahoo_symbol_map_explicit_values_override_universe_derivation(tmp_path):
+    raw = yaml.safe_load(Path("configs/examples/paper_yahoo_us_etf.yaml").read_text())
+    raw["datahub"]["symbol_map"] = {"AAPL": "AAPL-CUSTOM"}
+    config_path = tmp_path / "paper_yahoo_us_etf_custom_symbol_map.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.datahub.symbol_map["AAPL"] == "AAPL-CUSTOM"
+    assert config.datahub.symbol_map["VOO"] == "VOO"
 
 
 def test_research_multi_provider_example_registers_research_data_types():
@@ -564,7 +593,7 @@ def test_research_multi_provider_example_registers_research_data_types():
 
 
 def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
     raw["portfolio"]["allowed_symbols"].append("TSLA")
     config_path = tmp_path / "missing_universe_symbol.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -574,8 +603,10 @@ def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
 
 
 def test_us_etf_yahoo_paper_config_declares_usd_universe_and_symbol_map():
+    raw = yaml.safe_load(Path("configs/examples/paper_yahoo_us_etf.yaml").read_text())
     config = load_config("configs/examples/paper_yahoo_us_etf.yaml")
 
+    assert "symbol_map" not in raw["datahub"]
     assert config.mode == "paper"
     assert config.portfolio.base_currency == "USD"
     assert config.datahub.provider == "yahoo"

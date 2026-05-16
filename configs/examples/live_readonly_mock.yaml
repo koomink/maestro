@@ -36,8 +36,3 @@ kis:
   enabled: true
   provider: mock
   account_id: MOCK-ACCOUNT
-
-reconciliation:
-  cash_tolerance: 0.0
-  position_quantity_tolerance: 0.0
-  value_tolerance: 0.0

@@ -15,18 +15,6 @@ portfolio:
 
 universe:
   instruments:
-    - symbol: CASH_KRW
-      asset_type: cash
-      region: KR
-      currency: KRW
-      broker: kis
-      broker_product: kis_domestic_stock
-      broker_symbol: KRW
-      exchange_code: KRX
-      quantity_step: 1
-      price_tick: 1
-      min_order_quantity: 1
-      min_order_notional: 0
     - symbol: TIGER_NASDAQ100_LEVERAGE
       name: TIGER 미국나스닥100레버리지(합성)
       asset_type: domestic_etf
@@ -79,9 +67,6 @@ strategies:
 datahub:
   provider: yahoo
   stale_after_seconds: 604800
-  symbol_map:
-    TIGER_NASDAQ100_LEVERAGE: 418660.KS
-    KODEX_US_DIVIDEND_DOWJONES: 489250.KS
 
 execution:
   engine: paper

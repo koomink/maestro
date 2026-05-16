@@ -15,7 +15,16 @@ from maestro.config.strategy import (
     StrategyPluginConfig,
 )
 from maestro.config.universe import UniverseConfig, UniversePolicyConfig
-from maestro.core.enums import RunMode
+from maestro.core.enums import (
+    AssetType,
+    BrokerProduct,
+    Currency,
+    ExchangeCode,
+    MarketRegion,
+    RunMode,
+)
+from maestro.core.instruments import TradableInstrument
+from maestro.core.symbols import is_cash_symbol
 
 
 class MaestroConfig(StrictConfigModel):
@@ -34,6 +43,13 @@ class MaestroConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def validate_universe_matches_portfolio(self) -> "MaestroConfig":
+        configured_symbols = self.portfolio.configured_symbols()
+        if self.universe.instruments or _all_cash_symbols(configured_symbols):
+            self.universe.instruments = _add_default_cash_instruments(
+                self.universe.instruments,
+                configured_symbols,
+                base_currency=self.portfolio.base_currency,
+            )
         if not self.universe.instruments:
             if not self.portfolio.allowed_symbols:
                 raise ValueError(
@@ -42,6 +58,7 @@ class MaestroConfig(StrictConfigModel):
             return self
         universe_symbol_list = [instrument.symbol for instrument in self.universe.instruments]
         self.portfolio.allowed_symbols = self.portfolio.derive_allowed_symbols(universe_symbol_list)
+        self.datahub.apply_universe_symbol_maps(self.universe.instruments)
         universe_symbols = set(universe_symbol_list)
         missing = [
             symbol for symbol in self.portfolio.allowed_symbols if symbol not in universe_symbols
@@ -81,6 +98,8 @@ class MaestroConfig(StrictConfigModel):
                     f"{self.mode.value} mode uses broker snapshot cash; "
                     "remove portfolio.initial_cash"
                 )
+        if self.kis.provider == "kis" and self.kis.token_cache_path is None:
+            self.kis.token_cache_path = "var/kis_access_token.json"
         if self.mode == RunMode.LIVE_READONLY:
             if enabled_strategies:
                 raise ValueError(
@@ -124,3 +143,75 @@ __all__ = [
     "UniverseConfig",
     "UniversePolicyConfig",
 ]
+
+
+def _add_default_cash_instruments(
+    instruments: list[TradableInstrument],
+    configured_symbols: list[str],
+    *,
+    base_currency: str,
+) -> list[TradableInstrument]:
+    known_symbols = {instrument.symbol for instrument in instruments}
+    derived = list(instruments)
+    for symbol in configured_symbols:
+        if symbol in known_symbols or not is_cash_symbol(symbol):
+            continue
+        instrument = _default_cash_instrument(symbol, base_currency=base_currency)
+        if instrument is None:
+            continue
+        derived.append(instrument)
+        known_symbols.add(symbol)
+    return derived
+
+
+def _default_cash_instrument(
+    symbol: str,
+    *,
+    base_currency: str,
+) -> TradableInstrument | None:
+    currency = _cash_currency(symbol, base_currency)
+    if currency == Currency.KRW:
+        return TradableInstrument(
+            symbol=symbol,
+            asset_type=AssetType.CASH,
+            region=MarketRegion.KR,
+            currency=Currency.KRW,
+            broker="kis",
+            broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+            broker_symbol=Currency.KRW.value,
+            exchange_code=ExchangeCode.KRX,
+            quantity_step=1.0,
+            price_tick=1.0,
+            min_order_quantity=1.0,
+            min_order_notional=0.0,
+        )
+    if currency == Currency.USD:
+        return TradableInstrument(
+            symbol=symbol,
+            asset_type=AssetType.CASH,
+            region=MarketRegion.US,
+            currency=Currency.USD,
+            broker="kis",
+            broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+            broker_symbol=Currency.USD.value,
+            quantity_step=0.01,
+            price_tick=0.01,
+            min_order_quantity=0.01,
+            min_order_notional=0.0,
+        )
+    return None
+
+
+def _cash_currency(symbol: str, base_currency: str) -> Currency | None:
+    if symbol == "CASH":
+        currency_code = base_currency
+    else:
+        currency_code = symbol.removeprefix("CASH_")
+    try:
+        return Currency(currency_code)
+    except ValueError:
+        return None
+
+
+def _all_cash_symbols(symbols: list[str]) -> bool:
+    return bool(symbols) and all(is_cash_symbol(symbol) for symbol in symbols)

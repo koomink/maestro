@@ -313,6 +313,9 @@ configs, from all configured universe instruments. The intended production
 design is still policy-based: Virtuoso apps may propose candidate symbols and
 data needs, but Maestro validates, resolves, and approves tradability before any
 symbol can receive an allocation or reach execution.
+Cash instruments such as `CASH_KRW` and `CASH_USD` are derived from portfolio
+cash symbols when omitted, so examples only need to declare non-cash tradable
+instruments.
 
 Maestro distinguishes a broad research universe from a stricter tradable
 universe. Research symbols can include analysis inputs such as `SPY`, `VIX`,
@@ -460,9 +463,12 @@ datahub:
   provider: yahoo
   timeout_seconds: 5
   stale_after_seconds: 86400
-  symbol_map:
-    SAMSUNG: 005930.KS
 ```
+
+For Yahoo/yfinance market data, Maestro derives provider symbols from
+`universe.instruments` when possible: KIS domestic symbols become `.KS` tickers,
+and KIS overseas symbols use the broker symbol unchanged. Add `symbol_map` only
+for explicit provider-specific overrides.
 
 For multiple providers, use `datahub.providers` with lower `priority` values
 preferred first. Strategy plugins still request data through Maestro DataHub and
@@ -869,12 +875,12 @@ The `live_readonly` adapter is read-only. It does not submit, cancel, amend, buy
 sell, enable `live_auto`, or add market orders. Normal tests use fake/fixture KIS
 responses and do not call KIS network endpoints.
 
-If `KIS_ACCESS_TOKEN` is unset, Maestro can issue `/oauth2/tokenP` and can
-persist the access token when `kis.token_cache_path` is configured. The cache
-file is written with owner-only permissions. Access tokens may be stored only in
-`kis.token_cache_path`; they must never be written to state, audit logs,
-dashboard rows, or test fixtures. App secrets follow the same no-persistence
-rule.
+If `KIS_ACCESS_TOKEN` is unset, Maestro can issue `/oauth2/tokenP` and persists
+the access token to `kis.token_cache_path`, which defaults to
+`var/kis_access_token.json`. The cache file is written with owner-only
+permissions. Access tokens may be stored only in `kis.token_cache_path`; they
+must never be written to state, audit logs, dashboard rows, or test fixtures.
+App secrets follow the same no-persistence rule.
 
 For future KIS WebSocket use, Maestro can issue `/oauth2/Approval` when
 `KIS_APPROVAL_KEY` is unset. The request uses `grant_type`, `appkey`, and

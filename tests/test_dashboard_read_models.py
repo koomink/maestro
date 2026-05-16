@@ -410,7 +410,7 @@ def test_freshness_table_labels_fresh_stale_missing_and_disabled_rows(tmp_path):
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
-    raw["reconciliation"]["max_age_seconds"] = 60
+    raw.setdefault("reconciliation", {})["max_age_seconds"] = 60
     raw["execution"]["heartbeat_max_age_seconds"] = 60
     raw["execution"]["scheduled_run_max_age_seconds"] = 0
     config_path = tmp_path / "live_approval.yaml"

@@ -10,17 +10,6 @@ portfolio:
 
 universe:
   instruments:
-    - symbol: CASH_USD
-      asset_type: cash
-      region: US
-      currency: USD
-      broker: kis
-      broker_product: kis_overseas_stock
-      broker_symbol: USD
-      quantity_step: 0.01
-      price_tick: 0.01
-      min_order_quantity: 0.01
-      min_order_notional: 0
     - symbol: AAPL
       asset_type: stock
       region: US

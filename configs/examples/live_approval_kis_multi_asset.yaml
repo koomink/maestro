@@ -28,28 +28,6 @@ universe:
     require_broker_tradability_check: true
     require_data_freshness_check: true
   instruments:
-    - symbol: CASH_KRW
-      asset_type: cash
-      region: KR
-      currency: KRW
-      broker: kis
-      broker_product: kis_domestic_stock
-      broker_symbol: KRW
-      quantity_step: 1
-      price_tick: 1
-      min_order_quantity: 1
-      min_order_notional: 0
-    - symbol: CASH_USD
-      asset_type: cash
-      region: US
-      currency: USD
-      broker: kis
-      broker_product: kis_overseas_stock
-      broker_symbol: USD
-      quantity_step: 0.01
-      price_tick: 0.01
-      min_order_quantity: 0.01
-      min_order_notional: 0
     - symbol: SAMSUNG
       asset_type: stock
       region: KR
@@ -109,11 +87,6 @@ datahub:
       data_types: [price, ohlcv, technical_indicators]
       timeout_seconds: 5
       stale_after_seconds: 604800
-      symbol_map:
-        SAMSUNG: 005930.KS
-        KODEX200: 069500.KS
-        AAPL: AAPL
-        VOO: VOO
 
 execution:
   engine: paper
@@ -166,17 +139,3 @@ kis:
   enabled: true
   provider: kis
   broker_products: [kis_domestic_stock, kis_overseas_stock]
-  account_id_env: KIS_ACCOUNT_ID
-  app_key_env: KIS_APP_KEY
-  app_secret_env: KIS_APP_SECRET
-  access_token_env: KIS_ACCESS_TOKEN
-  approval_key_env: KIS_APPROVAL_KEY
-  token_cache_path: var/kis_access_token.json
-  paper_trading: false
-  timeout_seconds: 10
-
-reconciliation:
-  cash_tolerance: 0.0
-  position_quantity_tolerance: 0.0
-  value_tolerance: 0.0
-  max_age_seconds: 86400

@@ -18,16 +18,26 @@ class PortfolioConfig(StrictConfigModel):
     allowed_symbols: list[str] = Field(default_factory=list)
     currency_sleeves: dict[str, CurrencySleeveConfig] = Field(default_factory=dict)
 
+    def configured_symbols(self) -> list[str]:
+        if self.allowed_symbols:
+            return self.allowed_symbols
+        if self.allocation_mode == "currency_sleeves" and self.currency_sleeves:
+            return self._currency_sleeve_symbols()
+        return []
+
     def derive_allowed_symbols(self, universe_symbols: list[str]) -> list[str]:
         if self.allowed_symbols:
             return self.allowed_symbols
         if self.allocation_mode == "currency_sleeves" and self.currency_sleeves:
-            symbols = []
-            for sleeve in self.currency_sleeves.values():
-                symbols.append(sleeve.cash_symbol)
-                symbols.extend(sleeve.symbols)
-            return list(dict.fromkeys(symbols))
+            return self._currency_sleeve_symbols()
         return universe_symbols
+
+    def _currency_sleeve_symbols(self) -> list[str]:
+        symbols = []
+        for sleeve in self.currency_sleeves.values():
+            symbols.append(sleeve.cash_symbol)
+            symbols.extend(sleeve.symbols)
+        return list(dict.fromkeys(symbols))
 
 
 __all__ = ["CurrencySleeveConfig", "PortfolioConfig"]

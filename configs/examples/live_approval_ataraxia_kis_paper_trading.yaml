@@ -14,18 +14,6 @@ portfolio:
 
 universe:
   instruments:
-    - symbol: CASH_KRW
-      asset_type: cash
-      region: KR
-      currency: KRW
-      broker: kis
-      broker_product: kis_domestic_stock
-      broker_symbol: KRW
-      exchange_code: KRX
-      quantity_step: 1
-      price_tick: 1
-      min_order_quantity: 1
-      min_order_notional: 0
     - symbol: TIGER_NASDAQ100_LEVERAGE
       asset_type: domestic_etf
       region: KR
@@ -82,9 +70,6 @@ strategies:
 datahub:
   provider: yahoo
   stale_after_seconds: 604800
-  symbol_map:
-    TIGER_NASDAQ100_LEVERAGE: 418660.KS
-    KODEX_US_DIVIDEND_DOWJONES: 489250.KS
 
 execution:
   engine: paper
@@ -150,18 +135,4 @@ kis:
   broker_product: kis_domestic_stock
   broker_products:
     - kis_domestic_stock
-  account_id_env: KIS_ACCOUNT_ID
-  app_key_env: KIS_APP_KEY
-  app_secret_env: KIS_APP_SECRET
-  access_token_env: KIS_ACCESS_TOKEN
-  approval_key_env: KIS_APPROVAL_KEY
-  token_cache_path: var/kis_access_token.json
   paper_trading: true
-  timeout_seconds: 10
-  quote_market_code: J
-
-reconciliation:
-  cash_tolerance: 0.0
-  position_quantity_tolerance: 0.0
-  value_tolerance: 0.0
-  max_age_seconds: 86400
