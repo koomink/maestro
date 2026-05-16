@@ -83,6 +83,44 @@ Register the slash command menu once after bot setup or command changes:
 maestro telegram-set-commands --config /opt/maestro/configs/telegram_approval_paper.yaml
 ```
 
+## Example Private Dashboard Service
+
+Run the Streamlit dashboard as a localhost-only service and expose it through
+Tailscale Serve. Do not expose Streamlit directly on the public internet.
+
+```ini
+[Unit]
+Description=Maestro read-only Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/python -m streamlit run src/maestro/dashboard/app.py --server.address 127.0.0.1 --server.port 8503 -- --config /root/maestro-operator/maestro_personal.yaml
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+After installing Tailscale and authenticating the VPS into the operator tailnet,
+publish the local dashboard privately:
+
+```bash
+tailscale serve --bg --https=443 localhost:8503
+tailscale serve status
+```
+
+Normal dashboard access should use the Tailscale Serve HTTPS URL. Keep
+`8503/tcp` closed in `ufw`; use SSH port forwarding only as a fallback.
+
 ## Example Timer
 
 ```ini
