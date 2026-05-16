@@ -7,8 +7,8 @@ from pathlib import Path
 
 import typer
 import yaml
-from dotenv import load_dotenv
 
+from maestro.config.env import load_project_dotenv
 from maestro.config.loader import load_config
 from maestro.config.models import MaestroConfig
 from maestro.config.universe import UniverseConfig
@@ -39,7 +39,7 @@ app = typer.Typer()
 
 
 def _load_dotenv() -> None:
-    load_dotenv(dotenv_path=Path.cwd() / ".env", override=False)
+    load_project_dotenv()
 
 
 @app.callback()

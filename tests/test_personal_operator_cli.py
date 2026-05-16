@@ -6,6 +6,7 @@ import yaml
 from typer.testing import CliRunner
 
 from maestro.cli import _load_dotenv, app
+from maestro.config.env import load_project_dotenv
 from maestro.config.loader import load_config
 from maestro.state.store import StateStore
 
@@ -70,6 +71,24 @@ def test_cli_loads_dotenv_without_overriding_shell_env(monkeypatch, tmp_path):
     assert os.environ["KIS_ACCOUNT_ID"] == "12345678-01"
     assert os.environ["KIS_APP_KEY"] == "shell-app-key"
     assert os.environ["TELEGRAM_BOT_TOKEN"] == "dotenv-telegram-token"
+
+
+def test_project_dotenv_loader_does_not_override_shell_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    monkeypatch.setenv("KIS_APP_KEY", "shell-app-key")
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "KIS_APP_KEY=dotenv-app-key",
+                "FRED_API_KEY=dotenv-fred-key",
+            ]
+        )
+    )
+
+    load_project_dotenv(tmp_path)
+
+    assert os.environ["KIS_APP_KEY"] == "shell-app-key"
+    assert os.environ["FRED_API_KEY"] == "dotenv-fred-key"
 
 
 def test_personal_check_reports_default_blocked_stages(tmp_path):

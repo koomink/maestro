@@ -2,8 +2,11 @@ import os
 
 import pytest
 
+from maestro.config.env import load_project_dotenv
 from maestro.datahub.rss_provider import RSSNewsProvider
 from maestro.sdk import DataRequest
+
+load_project_dotenv()
 
 pytestmark = [
     pytest.mark.integration,
