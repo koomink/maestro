@@ -230,11 +230,11 @@ def test_strategy_runs_table_keeps_target_allocation_payload_compatible(tmp_path
 
 
 def test_dashboard_operational_read_models(tmp_path):
-    raw = yaml.safe_load(Path("configs/kis_overseas_readonly.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/multi_asset_readonly.example.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
-    config_path = tmp_path / "kis_overseas_readonly.yaml"
+    config_path = tmp_path / "multi_asset_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     config = load_config(config_path)
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)

@@ -10,7 +10,7 @@ complete.
 - CSV paper: `configs/csv_paper.yaml`
 - Real-data US stock/ETF paper: `configs/us_etf_yahoo_paper.yaml`
 - Mock KIS read-only: `configs/live_readonly.yaml`
-- KIS overseas read-only: `configs/kis_overseas_readonly.example.yaml`
+- KIS multi-asset read-only: `configs/multi_asset_readonly.example.yaml`
 - Ataraxia KIS mock-investment broker-submit rehearsal:
   `configs/ataraxia_kis_live_approval.example.yaml`
 - Personal operator live approval config generated with `maestro init-personal`
@@ -52,7 +52,7 @@ follow `docs/ataraxia_kis_paper_pilot.md`.
 Run local health checks before and after scheduled jobs:
 
 ```bash
-maestro health --config configs/kis_overseas_readonly.example.yaml
+maestro health --config configs/multi_asset_readonly.example.yaml
 ```
 
 `health` does not call live KIS endpoints. It checks config loading, SQLite

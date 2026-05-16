@@ -148,10 +148,21 @@ Current runnable modes are:
   explicitly configured
 - Yahoo/yfinance-backed fundamentals, financial statements, and OHLCV-derived
   technical indicators for advanced LLM trading agents
+- KR+US live approval example data routed through `datahub.providers`, with
+  Yahoo/yfinance as the active market-data provider and no mock fallback
+- Research provider composition template with
+  `configs/research_multi_provider.example.yaml`
 - Mock `live_readonly` broker scaffolding with `configs/live_readonly.yaml`
+- Real KIS KR+US read-only account/reconciliation template with
+  `configs/multi_asset_readonly.example.yaml`
 - Live approval infrastructure and safety gates, with KIS domestic and overseas
   read-only plus approval-gated stock/ETF limit-order submit/status adapter
   support
+
+Config roles are intentionally separate: mock and CSV configs are fixture/smoke
+paths, Yahoo configs are real-data paper paths, read-only configs are broker
+account/reconciliation paths, and live-approval configs are approval-gated order
+proposal/submission paths.
 
 For a single-user operator workflow, start with
 [docs/personal_operator_mvp.md](docs/personal_operator_mvp.md):
@@ -469,6 +480,17 @@ datahub:
 For multiple providers, use `datahub.providers` with lower `priority` values
 preferred first. Strategy plugins still request data through Maestro DataHub and
 do not call yfinance directly.
+
+`configs/kis_multi_asset_live_approval.example.yaml` uses the multi-provider
+shape for KR+US live approval, but its active strategy market-data provider is
+still Yahoo/yfinance only. KIS remains a broker/account/execution adapter and is
+not a strategy market-data fallback.
+
+`configs/research_multi_provider.example.yaml` is a copy-and-customize research
+template for Yahoo, FRED, GDELT/RSS, rule-based sentiment, and opt-in NewsAPI.
+The current sample allocation and Ataraxia strategies request `price` only, so
+macro, news, sentiment, fundamentals, and financial statements are called only
+by strategies that explicitly request those DataHub data types.
 
 Example LLM-agent requests:
 
@@ -833,12 +855,12 @@ The matching pytest smokes are skipped by default and run only when
 operator-local configs.
 
 `configs/live_readonly.yaml` uses the deterministic no-network mock provider.
-`configs/kis_overseas_readonly.example.yaml` documents the real KIS overseas
-stock/ETF read-only shape with env var names only. The `kis_overseas_stock`
-read-only adapter now covers verified overseas account reads for USD/foreign
-cash, positions, buying power, fills, unfilled orders, broker snapshot
-normalization, and reconciliation against Maestro canonical US stock/ETF
-symbols. It uses these environment variable names:
+`configs/multi_asset_readonly.example.yaml` documents the real KIS KR+US
+multi-asset read-only shape with env var names only. It uses
+`kis.broker_products` to query domestic and overseas account adapters, merge the
+broker snapshot, and reconcile against Maestro canonical symbols. This is an
+account/execution boundary only; strategy market and research data must still
+come through Maestro DataHub. It uses these environment variable names:
 
 - `KIS_ACCOUNT_ID`: KIS account number and product code
 - `KIS_APP_KEY`: KIS app key
@@ -913,7 +935,7 @@ To install dashboard dependencies and open the read-only dashboard:
 
 ```bash
 uv sync --extra dashboard
-maestro dashboard --config configs/kis_overseas_readonly.example.yaml
+maestro dashboard --config configs/multi_asset_readonly.example.yaml
 ```
 
 The dashboard is read-only. It shows an operator home view, portfolio state,

@@ -321,7 +321,8 @@
 - [x] Normalize overseas buying power
 - [x] Normalize overseas fills and unfilled orders
 - [x] Add broker reconciliation for US-listed stock/ETF canonical symbols
-- [x] Add `configs/kis_overseas_readonly.example.yaml` with env var names only
+- [x] Add `configs/multi_asset_readonly.example.yaml` as the KR+US read-only
+  template with env var names only
 - [x] Keep read-only mode free of order submission, cancel, amend, buy, and sell paths
 - [x] Keep normal tests fake-client/fixture based with no KIS network calls
 

@@ -1,4 +1,7 @@
 from datetime import UTC, datetime
+from pathlib import Path
+
+import yaml
 
 from maestro.config.loader import load_config
 from maestro.core.enums import BrokerProduct, Currency, OrderSide
@@ -7,6 +10,7 @@ from maestro.execution.live_order_factory import ProductRoutingKISLiveOrderClien
 from maestro.execution.order_builder import OrderBuilder
 from maestro.execution.paper import PaperExecutionEngine
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.portfolio.manager import PortfolioTarget
 from maestro.sdk import TargetAllocationResult
 from maestro.signals.validator import SignalValidator
@@ -129,8 +133,28 @@ def test_kis_live_order_router_builds_product_clients(monkeypatch):
     }
 
 
+def test_multi_asset_live_approval_run_once_without_strategies_uses_sleeve_cash(tmp_path):
+    raw = yaml.safe_load(Path("configs/kis_multi_asset_live_approval.example.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    config_path = tmp_path / "kis_multi_asset_live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+
+    summary = MaestroOrchestrator(config).run_once()
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    latest_state = store.load_latest_portfolio_state()
+    strategy_run = store.list_system_events_by_type("run_once_completed")[0]["payload"]
+
+    assert summary.orders_created == 0
+    assert summary.loaded_strategies == []
+    assert latest_state.cash_by_currency == {"KRW": 1_000_000.0, "USD": 10_000.0}
+    assert strategy_run["orders_created"] == 0
+    assert store.status()["counts"]["approvals"] == 0
+
+
 def test_kis_multi_product_readonly_service_filters_instruments_by_product(tmp_path):
-    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    config = load_config("configs/multi_asset_readonly.example.yaml")
     store = StateStore(str(tmp_path / "state.db"), config.portfolio.initial_cash)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
     service = KISReadOnlyService(
@@ -144,5 +168,10 @@ def test_kis_multi_product_readonly_service_filters_instruments_by_product(tmp_p
         instrument.symbol
         for instrument in service._instruments_for_product(BrokerProduct.KIS_OVERSEAS_STOCK)
     }
+    domestic_symbols = {
+        instrument.symbol
+        for instrument in service._instruments_for_product(BrokerProduct.KIS_DOMESTIC_STOCK)
+    }
 
     assert overseas_symbols == {"CASH_USD", "AAPL", "VOO"}
+    assert domestic_symbols == {"CASH_KRW", "SAMSUNG", "KODEX200"}

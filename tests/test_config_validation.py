@@ -7,6 +7,9 @@ from pydantic import ValidationError
 from maestro.config.loader import load_config
 from maestro.config.models import StrategyPluginConfig
 from maestro.core.enums import BrokerProduct
+from maestro.datahub.base import build_data_provider
+from maestro.datahub.router import DataHubRouter
+from maestro.sdk import DataRequest
 
 
 def test_invalid_mode_fails(tmp_path):
@@ -199,8 +202,8 @@ def test_current_sample_configs_load():
         "configs/approval_paper.yaml",
         "configs/telegram_approval_paper.yaml",
         "configs/live_readonly.yaml",
-        "configs/kis_live_readonly.example.yaml",
-        "configs/kis_overseas_readonly.example.yaml",
+        "configs/multi_asset_readonly.example.yaml",
+        "configs/research_multi_provider.example.yaml",
         "configs/kis_multi_asset_live_approval.example.yaml",
         "configs/ataraxia_kis_live_approval.example.yaml",
         "configs/live_approval.example.yaml",
@@ -314,38 +317,30 @@ def test_contribution_config_rejects_unsupported_policy(tmp_path):
         load_config(config_path)
 
 
-def test_kis_live_readonly_example_config_uses_real_readonly_provider():
-    config = load_config("configs/kis_live_readonly.example.yaml")
+def test_multi_asset_readonly_example_uses_env_var_names_only():
+    raw_text = Path("configs/multi_asset_readonly.example.yaml").read_text()
+    config = load_config("configs/multi_asset_readonly.example.yaml")
 
     assert config.mode == "live_readonly"
-    assert config.portfolio.base_currency == "USD"
+    assert config.portfolio.base_currency == "KRW"
+    assert config.portfolio.allocation_mode == "currency_sleeves"
+    assert config.portfolio.cash_by_currency == {"KRW": 1_000_000.0, "USD": 10_000.0}
     assert config.kis.enabled is True
     assert config.kis.provider == "kis"
-    assert config.kis.broker_product == "kis_overseas_stock"
-    assert config.kis.account_id == "12345678-01"
-    assert config.kis.app_key_env == "KIS_APP_KEY"
-    assert config.kis.app_secret_env == "KIS_APP_SECRET"
-    assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
-    assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
-    assert config.kis.token_cache_path == "var/kis_access_token.json"
-    assert config.kis.paper_trading is False
-
-
-def test_kis_overseas_readonly_example_uses_env_var_names_only():
-    raw_text = Path("configs/kis_overseas_readonly.example.yaml").read_text()
-    config = load_config("configs/kis_overseas_readonly.example.yaml")
-
-    assert config.mode == "live_readonly"
-    assert config.portfolio.base_currency == "USD"
-    assert config.kis.enabled is True
-    assert config.kis.provider == "kis"
-    assert config.kis.broker_product == "kis_overseas_stock"
+    assert config.kis.effective_broker_products() == [
+        BrokerProduct.KIS_DOMESTIC_STOCK,
+        BrokerProduct.KIS_OVERSEAS_STOCK,
+    ]
     assert config.kis.account_id is None
     assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
     assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
+    assert config.state.sqlite_path == "var/multi_asset_readonly_state.db"
+    assert config.audit.jsonl_path == "var/multi_asset_readonly_audit.jsonl"
+    assert config.universe.get("SAMSUNG").broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
+    assert config.universe.get("KODEX200").broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
     assert config.universe.get("AAPL").exchange_code == "NASD"
     assert config.universe.get("VOO").exchange_code == "AMEX"
     assert "12345678" not in raw_text
@@ -385,6 +380,62 @@ def test_live_approval_example_config_is_safe_by_default():
     assert aapl.quantity_step == 1
     assert voo is not None
     assert voo.asset_type == "etf"
+
+
+def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fallback():
+    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+
+    assert config.datahub.provider == "mock"
+    assert config.datahub.symbol_map == {}
+    assert len(config.datahub.providers) == 1
+    provider = config.datahub.providers[0]
+    assert provider.name == "yahoo_market"
+    assert provider.provider == "yahoo"
+    assert provider.priority == 10
+    assert provider.data_types == ["price", "ohlcv", "technical_indicators"]
+    assert provider.timeout_seconds == 5
+    assert provider.stale_after_seconds == 604800
+    assert provider.symbol_map == {
+        "SAMSUNG": "005930.KS",
+        "KODEX200": "069500.KS",
+        "AAPL": "AAPL",
+        "VOO": "VOO",
+    }
+    assert all(item.provider != "mock" for item in config.datahub.providers)
+    assert all(item.provider != "csv" for item in config.datahub.providers)
+
+
+def test_research_multi_provider_example_registers_research_data_types():
+    config = load_config("configs/research_multi_provider.example.yaml")
+    provider_names = [provider.name for provider in config.datahub.providers]
+
+    assert provider_names == [
+        "yahoo_market",
+        "fred_macro",
+        "gdelt_news",
+        "rss_news",
+        "rule_sentiment",
+        "newsapi_research",
+    ]
+    assert config.datahub.providers[-1].enabled is False
+    assert isinstance(build_data_provider(config.datahub), DataHubRouter)
+
+    router = build_data_provider(config.datahub)
+    assert router.registry.registrations_for(
+        DataRequest(symbol="AAPL", asset_type="stock", data_type="price")
+    )
+    assert router.registry.registrations_for(
+        DataRequest(symbol="AAPL", asset_type="stock", data_type="fundamental")
+    )
+    assert router.registry.registrations_for(
+        DataRequest(symbol="FED_FUNDS", asset_type="cash", data_type="macro")
+    )
+    assert router.registry.registrations_for(
+        DataRequest(symbol="MARKET", asset_type="cash", data_type="news")
+    )
+    assert router.registry.registrations_for(
+        DataRequest(symbol="AAPL", asset_type="stock", data_type="sentiment")
+    )
 
 
 def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):

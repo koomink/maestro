@@ -28,7 +28,7 @@ For SQLite databases in active use, prefer the SQLite online backup command from
 a controlled shell:
 
 ```bash
-sqlite3 var/kis_overseas_readonly_state.db ".backup 'backups/maestro-YYYYMMDD-HHMMSS/state.db'"
+sqlite3 var/multi_asset_readonly_state.db ".backup 'backups/maestro-YYYYMMDD-HHMMSS/state.db'"
 ```
 
 ## Restore

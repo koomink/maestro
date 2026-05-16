@@ -288,11 +288,11 @@ def test_recover_live_order_cli_records_completion_after_reconciliation(tmp_path
 
 
 def _readonly_config(tmp_path: Path) -> Path:
-    raw = yaml.safe_load(Path("configs/kis_overseas_readonly.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/multi_asset_readonly.example.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")
-    config_path = tmp_path / "kis_overseas_readonly.yaml"
+    config_path = tmp_path / "multi_asset_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
 

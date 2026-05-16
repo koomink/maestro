@@ -254,7 +254,8 @@ Completed scope:
 - Overseas buying power normalization
 - Overseas fills and unfilled orders normalization
 - Broker reconciliation for canonical US stock/ETF symbols
-- `configs/kis_overseas_readonly.example.yaml` with env var names only
+- `configs/multi_asset_readonly.example.yaml` as the KR+US read-only template
+  with env var names only
 - Fake-client and fixture tests only for normal test runs
 
 No order submission, cancel, amend, buy, or sell callable path in this

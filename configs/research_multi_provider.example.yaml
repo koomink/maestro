@@ -1,0 +1,145 @@
+mode: paper
+
+portfolio:
+  base_currency: USD
+  initial_cash: 10000
+  allowed_symbols:
+    - CASH_USD
+    - AAPL
+    - VOO
+
+universe:
+  instruments:
+    - symbol: CASH_USD
+      asset_type: cash
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: USD
+      quantity_step: 0.01
+      price_tick: 0.01
+      min_order_quantity: 0.01
+      min_order_notional: 0
+    - symbol: AAPL
+      asset_type: stock
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: AAPL
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: VOO
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: VOO
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+
+strategies: []
+
+datahub:
+  providers:
+    - name: yahoo_market
+      provider: yahoo
+      priority: 10
+      data_types:
+        - price
+        - ohlcv
+        - technical_indicators
+        - fundamental
+        - financial_statements
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      symbol_map:
+        AAPL: AAPL
+        VOO: VOO
+    - name: fred_macro
+      provider: fred
+      priority: 20
+      data_types: [macro]
+      api_key_env: FRED_API_KEY
+      timeout_seconds: 5
+      stale_after_seconds: 7776000
+      symbol_map:
+        FED_FUNDS: FEDFUNDS
+        US_REAL_GDP: GDPC1
+    - name: gdelt_news
+      provider: gdelt
+      priority: 30
+      data_types: [news]
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      gdelt_timespan: 24h
+      gdelt_max_records: 25
+      symbol_map:
+        MARKET: stock market OR Federal Reserve
+        AAPL: Apple stock
+    - name: rss_news
+      provider: rss
+      priority: 40
+      data_types: [news]
+      feed_urls:
+        - https://example.com/rss
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      symbol_map:
+        MARKET: market,Federal Reserve
+        AAPL: Apple,AAPL
+    - name: rule_sentiment
+      provider: sentiment
+      priority: 50
+      data_types: [sentiment]
+      sentiment_texts:
+        - AAPL posts strong gains as market confidence improves.
+        - Federal Reserve commentary raises slowdown risks.
+      symbol_map:
+        AAPL: AAPL,Apple
+        MARKET: market,Federal Reserve
+      source_name: fixture_news
+      stale_after_seconds: 86400
+    - name: newsapi_research
+      provider: newsapi
+      enabled: false
+      priority: 60
+      data_types: [news]
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+      newsapi_api_key_env: NEWSAPI_API_KEY
+      newsapi_page_size: 25
+      newsapi_sort_by: publishedAt
+      newsapi_language: en
+      newsapi_search_in: title,description,content
+      symbol_map:
+        MARKET: stock market OR Federal Reserve
+        AAPL: Apple stock
+
+execution:
+  engine: paper
+
+risk:
+  max_single_asset_weight: 0.5
+  min_cash_weight: 0.05
+
+state:
+  sqlite_path: var/research_multi_provider_state.db
+
+audit:
+  jsonl_path: var/research_multi_provider_audit.jsonl
+
+approval:
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
+  timeout_seconds: 300

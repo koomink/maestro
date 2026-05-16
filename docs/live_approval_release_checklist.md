@@ -20,7 +20,7 @@ gates in order:
 
 1. Run mock or CSV paper mode until the strategy and state path are stable.
 2. Run real-data paper mode with the intended DataHub provider and symbols.
-3. Run KIS overseas read-only sync and broker reconciliation against the real
+3. Run KIS multi-asset read-only sync and broker reconciliation against the real
    account.
 4. Run a real Telegram approval rehearsal without broker submission.
 5. Run `live_order_dry_run=true` through approval and lifecycle preflight.
@@ -117,10 +117,11 @@ Do not adopt the snapshot if it contains positions outside both
 `portfolio.allowed_symbols` and approved `universe.instruments`, violates
 `universe.policy`, or includes holdings the strategy is not meant to manage.
 
-`configs/kis_overseas_readonly.example.yaml` documents the intended
-`kis_overseas_stock` shape. KIS overseas read-only uses verified account
-endpoints, and live approval uses verified US stock/ETF limit-order
-submit/status payloads behind the safety gates.
+`configs/multi_asset_readonly.example.yaml` documents the intended KR+US
+multi-product read-only shape. KIS read-only uses domestic and overseas account
+endpoints for broker snapshots and reconciliation only; strategy market and
+research data must still come through Maestro DataHub. Live approval uses
+verified limit-order submit/status payloads behind the safety gates.
 
 ## Broker Reconciliation Pass
 

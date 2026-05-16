@@ -29,20 +29,20 @@ Description=Maestro health check
 Type=oneshot
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro health --config /opt/maestro/configs/kis_overseas_readonly.example.yaml
+ExecStart=/opt/maestro/.venv/bin/maestro health --config /opt/maestro/configs/multi_asset_readonly.example.yaml
 ```
 
 ## Example Read-only Sync Service
 
 ```ini
 [Unit]
-Description=Maestro KIS overseas read-only sync
+Description=Maestro KIS multi-asset read-only sync
 
 [Service]
 Type=oneshot
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro kis-sync --config /opt/maestro/configs/kis_overseas_readonly.example.yaml
+ExecStart=/opt/maestro/.venv/bin/maestro kis-sync --config /opt/maestro/configs/multi_asset_readonly.example.yaml
 ```
 
 ## Example Telegram Operator Service

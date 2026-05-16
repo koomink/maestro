@@ -1,4 +1,4 @@
-mode: live_approval
+mode: live_readonly
 
 portfolio:
   base_currency: KRW
@@ -110,65 +110,27 @@ universe:
 strategies: []
 
 datahub:
-  providers:
-    - name: yahoo_market
-      provider: yahoo
-      priority: 10
-      data_types: [price, ohlcv, technical_indicators]
-      timeout_seconds: 5
-      stale_after_seconds: 604800
-      symbol_map:
-        SAMSUNG: 005930.KS
-        KODEX200: 069500.KS
-        AAPL: AAPL
-        VOO: VOO
+  provider: mock
 
 execution:
   engine: paper
-  live_order_enabled: false
-  live_order_dry_run: true
-  require_reconciliation_pass: true
-  max_live_order_notional: 100000
-  max_daily_live_notional: 300000
-  max_daily_live_order_count: 2
-  daily_loss_limit: null
-  allowed_order_type: limit
-  order_status_poll_interval_seconds: 30
-  order_status_max_polls: 20
-  order_status_terminal_timeout_seconds: 1800
-  require_market_session: false
-  market_session_timezone: Asia/Seoul
-  market_session_open: "09:00"
-  market_session_close: "15:30"
-  market_session_weekdays: [0, 1, 2, 3, 4]
-  market_session_holidays: []
-  require_broker_quote_validation: false
-  max_broker_quote_deviation_pct: 0.05
-  require_broker_risk_validation: false
-  live_order_fee_buffer_pct: 0.002
-  heartbeat_max_age_seconds: 0
-  scheduled_run_max_age_seconds: 0
 
 risk:
   max_single_asset_weight: 0.5
   min_cash_weight: 0.05
 
 state:
-  sqlite_path: var/kis_multi_asset_live_approval_state.db
+  sqlite_path: var/multi_asset_readonly_state.db
 
 audit:
-  jsonl_path: var/kis_multi_asset_live_approval_audit.jsonl
+  jsonl_path: var/multi_asset_readonly_audit.jsonl
 
 approval:
-  enabled: true
-  provider: telegram
-  require_approval: true
-  default_decision: expired
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
   timeout_seconds: 300
-  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
-  telegram_allowed_chat_ids: []
-  whitelisted_user_ids: []
-  telegram_poll_interval_seconds: 1.0
 
 kis:
   enabled: true

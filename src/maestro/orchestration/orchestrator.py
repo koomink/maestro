@@ -9,6 +9,7 @@ from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderType, RunMode
 from maestro.core.ids import new_run_id
+from maestro.core.symbols import is_cash_symbol
 from maestro.datahub.base import BaseDataProvider, build_data_provider
 from maestro.execution.base import OrderIntent
 from maestro.execution.factory import build_execution_engine
@@ -30,7 +31,7 @@ from maestro.orchestration.data_quality import (
 )
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.plugins.registry import PluginRegistry
-from maestro.portfolio.manager import PortfolioManager
+from maestro.portfolio.manager import PortfolioManager, PortfolioTarget
 from maestro.portfolio.strategy_books import build_strategy_book_snapshots
 from maestro.risk.manager import RiskManager
 from maestro.safety.controls import SafetyControlService
@@ -104,7 +105,7 @@ class MaestroOrchestrator:
         strategy_ids = self.registry.strategy_ids
         data_requests_by_strategy = {}
         data_quality_issues: list[dict[str, Any]] = []
-        prices = {"CASH": 1.0}
+        prices = self._initial_prices()
 
         try:
             self._record_event(
@@ -165,7 +166,10 @@ class MaestroOrchestrator:
                     )
                 valid_results.append(result)
 
-            target = self.portfolio_manager.build_target(valid_results)
+            target = self._target_with_configured_cash(
+                self.portfolio_manager.build_target(valid_results),
+                valid_results,
+            )
             risk_decision = risk_manager.check(target)
             self.state_store.save_risk_decision(
                 run_id,
@@ -256,57 +260,69 @@ class MaestroOrchestrator:
                     SystemEventType.STALE_DATA_WARNING,
                     {"issues": data_quality_issues, "mode": self.config.mode.value},
                 )
-            approval_request, approval_decision, approval_message = (
-                self.approval_manager.request_approval(
-                    run_id,
-                    orders,
-                    risk_decision.modifications,
-                    risk_decision.violations,
-                    target.source_strategy_ids,
-                )
-            )
-            if approval_request and approval_decision:
-                self.state_store.save_approval(
-                    run_id,
-                    approval_request.approval_id,
-                    {
-                        "request": approval_request.model_dump(mode="json"),
-                        "decision": approval_decision.model_dump(mode="json"),
-                        "message": approval_message,
-                    },
-                )
-                self.audit.log(
-                    run_id,
-                    "approval_decision",
-                    {
-                        "request": approval_request.model_dump(mode="json"),
-                        "decision": approval_decision.model_dump(mode="json"),
-                        "message": approval_message,
-                    },
-                )
-                if approval_decision.status != "approved":
-                    next_state = current_state
-                    execution_results = []
-                    self.state_store.save_system_event(
-                        run_id,
-                        SystemEventType.EXECUTION_SKIPPED,
-                        {"approval_status": approval_decision.status},
-                    )
-                elif self.config.mode == RunMode.LIVE_APPROVAL:
-                    execution_results, next_state = self._execute_live_approval_orders(
+            if orders:
+                approval_request, approval_decision, approval_message = (
+                    self.approval_manager.request_approval(
                         run_id,
                         orders,
-                        approval_request.approval_id,
-                        approval_decision,
+                        risk_decision.modifications,
+                        risk_decision.violations,
+                        target.source_strategy_ids,
                     )
+                )
+            else:
+                approval_request = None
+                approval_decision = None
+                approval_message = None
+
+            if orders:
+                if approval_request and approval_decision:
+                    self.state_store.save_approval(
+                        run_id,
+                        approval_request.approval_id,
+                        {
+                            "request": approval_request.model_dump(mode="json"),
+                            "decision": approval_decision.model_dump(mode="json"),
+                            "message": approval_message,
+                        },
+                    )
+                    self.audit.log(
+                        run_id,
+                        "approval_decision",
+                        {
+                            "request": approval_request.model_dump(mode="json"),
+                            "decision": approval_decision.model_dump(mode="json"),
+                            "message": approval_message,
+                        },
+                    )
+                    if approval_decision.status != "approved":
+                        next_state = current_state
+                        execution_results = []
+                        self.state_store.save_system_event(
+                            run_id,
+                            SystemEventType.EXECUTION_SKIPPED,
+                            {"approval_status": approval_decision.status},
+                        )
+                    elif self.config.mode == RunMode.LIVE_APPROVAL:
+                        execution_results, next_state = self._execute_live_approval_orders(
+                            run_id,
+                            orders,
+                            approval_request.approval_id,
+                            approval_decision,
+                        )
+                    else:
+                        execution_results, next_state = self.execution.execute_orders(
+                            current_state, orders
+                        )
                 else:
+                    if self.config.mode == RunMode.LIVE_APPROVAL:
+                        raise ValueError("live_approval mode requires an approval decision")
                     execution_results, next_state = self.execution.execute_orders(
                         current_state, orders
                     )
             else:
-                if self.config.mode == RunMode.LIVE_APPROVAL:
-                    raise ValueError("live_approval mode requires an approval decision")
-                execution_results, next_state = self.execution.execute_orders(current_state, orders)
+                execution_results = []
+                next_state = current_state
 
             for order in orders:
                 order_payload = order.model_dump(mode="json")
@@ -500,6 +516,42 @@ class MaestroOrchestrator:
             symbol: float(price) for symbol, price in current_prices.items() if float(price) > 0
         }
         return {**prices, **broker_prices}
+
+    def _initial_prices(self) -> dict[str, float]:
+        cash_symbols = self._configured_cash_symbols()
+        return {symbol: 1.0 for symbol in cash_symbols} or {"CASH": 1.0}
+
+    def _configured_cash_symbols(self) -> list[str]:
+        if self.config.portfolio.allocation_mode == "currency_sleeves":
+            return [
+                sleeve.cash_symbol
+                for _, sleeve in sorted(self.config.portfolio.currency_sleeves.items())
+            ]
+        return [
+            symbol
+            for symbol in self.config.portfolio.allowed_symbols
+            if is_cash_symbol(symbol)
+        ]
+
+    def _target_with_configured_cash(
+        self,
+        target: PortfolioTarget,
+        valid_results: list[TargetAllocationResult],
+    ) -> PortfolioTarget:
+        if valid_results or self.config.portfolio.allocation_mode != "currency_sleeves":
+            return target
+        sleeves = {
+            sleeve_name: {sleeve.cash_symbol: 1.0}
+            for sleeve_name, sleeve in self.config.portfolio.currency_sleeves.items()
+        }
+        if not sleeves:
+            return target
+        return PortfolioTarget(
+            timestamp=target.timestamp,
+            allocations={},
+            allocation_sleeves=sleeves,
+            source_strategy_ids=target.source_strategy_ids,
+        )
 
     def _record_event(
         self,
