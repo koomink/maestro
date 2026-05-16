@@ -248,6 +248,7 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
     assert config.execution.scheduled_run_max_age_seconds == 86400
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
+    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
     assert config.kis.paper_trading is True
     assert config.kis.account_id is None
@@ -278,6 +279,7 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.kis.provider == "kis"
+    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
     assert config.kis.paper_trading is True
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
 

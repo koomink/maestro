@@ -99,6 +99,17 @@ class StateStore:
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS strategy_book_snapshots "
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "strategy_id TEXT, "
+                "book_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
 
     def load_latest_portfolio_state(self) -> PortfolioState:
         with self._connect() as conn:
@@ -147,6 +158,29 @@ class StateStore:
         payload_with_approved = dict(payload)
         payload_with_approved["approved"] = approved
         self._insert("risk_decisions", run_id, str(int(approved)), payload_with_approved)
+
+    def save_strategy_book_snapshots(
+        self,
+        run_id: str,
+        snapshots: list[dict[str, Any]],
+    ) -> None:
+        payloads = [
+            (
+                run_id,
+                str(snapshot.get("strategy_id") or ""),
+                str(snapshot.get("book_id") or ""),
+                json.dumps(snapshot, default=str),
+            )
+            for snapshot in snapshots
+        ]
+        if not payloads:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO strategy_book_snapshots "
+                "(run_id, strategy_id, book_id, payload) VALUES (?, ?, ?, ?)",
+                payloads,
+            )
 
     def list_portfolio_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("portfolio_snapshots", limit)
@@ -206,6 +240,9 @@ class StateStore:
     def list_risk_decisions(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("risk_decisions", limit)
 
+    def list_strategy_book_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self._list_rows("strategy_book_snapshots", limit)
+
     def load_latest_broker_account_snapshot(self) -> dict[str, Any] | None:
         rows = self.list_broker_account_snapshots(limit=1)
         return rows[0] if rows else None
@@ -220,6 +257,7 @@ class StateStore:
                 "approvals",
                 "broker_account_snapshots",
                 "risk_decisions",
+                "strategy_book_snapshots",
             ]
             counts = {
                 table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -293,6 +331,7 @@ class StateStore:
             "approvals",
             "broker_account_snapshots",
             "risk_decisions",
+            "strategy_book_snapshots",
         }
         if table not in allowed_tables:
             raise ValueError(f"Unsupported table: {table}")

@@ -566,17 +566,17 @@
       base-currency converted portfolio return
 - [x] Add explicit missing-FX behavior and reserved FX source/timestamp fields
       for cross-currency portfolio views
-- [ ] Define the FX source snapshot/config shape for reporting, including
+- [x] Define the FX source snapshot/config shape for reporting, including
       source name, rate, as-of timestamp, stale threshold, and supported pairs
-- [ ] Add KRW as the default dashboard performance display currency
-- [ ] Add a read-only KRW/USD display-currency toggle for total portfolio
+- [x] Add KRW as the default dashboard performance display currency
+- [x] Add a read-only KRW/USD display-currency toggle for total portfolio
       performance charts and tables
-- [ ] Split local sleeve return, FX effect, and converted total return in
+- [x] Split local sleeve return, FX effect, and converted total return in
       performance read models
-- [ ] Ensure FX conversion is used only for dashboard/reporting and never for
+- [x] Ensure FX conversion is used only for dashboard/reporting and never for
       order generation, buying power, reconciliation cash gates, or risk cash
       checks
-- [ ] Add missing/stale FX dashboard labels and disable converted total return
+- [x] Add missing/stale FX dashboard labels and disable converted total return
       calculations when FX is unavailable or stale
 - [ ] Attribute strategy returns from persisted proposal, order, fill, and
       strategy-run lineage without adding strategy-specific code paths
@@ -588,7 +588,7 @@
 - [x] Add total portfolio daily/cumulative return and drawdown calculations
 - [x] Label performance rows with persisted reconciliation pass/fail/missing
       state
-- [ ] Add freshness-age/stale labels so old broker snapshots or old
+- [x] Add freshness-age/stale labels so old broker snapshots or old
       reconciliations are not presented as fresh truth
 - [x] Add read-only dashboard charts for account value/return/drawdown,
       currency-sleeve returns, total portfolio return/drawdown, and latest
@@ -601,7 +601,7 @@
       controls
 - [x] Add fixture/fake-client tests for account, currency-sleeve,
       total-portfolio, multi-currency, and dashboard read model calculations
-- [ ] Add fixture/fake-client tests for strategy attribution and stale data
+- [x] Add fixture/fake-client tests for strategy attribution and stale data
       labeling once implemented
 - [x] Document current operator usage and limitations in README/TRD
 

@@ -13,8 +13,12 @@ from maestro.config.models import (
 )
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, RunMode
+from maestro.execution.brokers.kis.domestic_live_order import KISRestDomesticStockLiveOrderClient
 from maestro.execution.brokers.kis.service import KISReadOnlyService
-from maestro.execution.live_order_factory import build_live_approval_dependencies
+from maestro.execution.live_order_factory import (
+    _build_live_order_client,
+    build_live_approval_dependencies,
+)
 from maestro.execution.live_orders import (
     BrokerOrderId,
     BrokerReconciliationRunner,
@@ -175,6 +179,24 @@ def test_live_approval_factory_requires_injected_clients_for_mock_provider(tmp_p
 
     with pytest.raises(ValueError, match="injected fake client"):
         build_live_approval_dependencies(_config(tmp_path), store, audit)
+
+
+def test_single_broker_products_list_selects_live_order_product_without_default(
+    tmp_path,
+):
+    config = _config(tmp_path).model_copy(
+        update={
+            "kis": KISConfig(
+                provider="kis",
+                account_id="12345678-01",
+                broker_products=["kis_domestic_stock"],
+            )
+        }
+    )
+
+    client = _build_live_order_client(config)
+
+    assert isinstance(client, KISRestDomesticStockLiveOrderClient)
 
 
 def _config(tmp_path) -> MaestroConfig:

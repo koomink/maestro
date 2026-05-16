@@ -123,7 +123,12 @@ def _build_live_order_client(config: MaestroConfig) -> LiveOrderClient:
         products = config.kis.effective_broker_products()
         if len(products) > 1:
             return ProductRoutingKISLiveOrderClient(config)
-        return build_kis_rest_live_order_client(config.kis, config.universe.instruments)
+        kis_config = config.kis
+        if kis_config.broker_products:
+            kis_config = kis_config.model_copy(
+                update={"broker_product": products[0], "broker_products": []}
+            )
+        return build_kis_rest_live_order_client(kis_config, config.universe.instruments)
     raise ValueError(
         "live_approval requires a real KIS live order client or an injected fake client"
     )
@@ -157,8 +162,14 @@ def _build_status_client(
     if config.kis.provider == "kis":
         if len(config.kis.effective_broker_products()) > 1:
             return ProductRoutingKISLiveOrderClient(config)
+        kis_config = config.kis
+        products = kis_config.effective_broker_products()
+        if kis_config.broker_products:
+            kis_config = kis_config.model_copy(
+                update={"broker_product": products[0], "broker_products": []}
+            )
         status_client = build_kis_rest_live_order_client(
-            config.kis,
+            kis_config,
             config.universe.instruments,
         )
         if isinstance(status_client, LiveOrderStatusClient):

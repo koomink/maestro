@@ -88,10 +88,20 @@ class TargetAllocationResult(BaseModel):
     timestamp: datetime
     allocations: dict[str, float] = Field(default_factory=dict)
     allocation_sleeves: dict[str, dict[str, float]] | None = None
+    strategy_books: list["StrategyBookAllocation"] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
     time_horizon: str | None = None
     rationale: str | None = None
     risk_flags: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StrategyBookAllocation(BaseModel):
+    book_id: str
+    label: str | None = None
+    target_weight: float = Field(ge=0.0)
+    allocations: dict[str, float] = Field(default_factory=dict)
+    rationale: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

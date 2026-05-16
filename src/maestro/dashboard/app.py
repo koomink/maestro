@@ -13,8 +13,11 @@ from maestro.dashboard.read_models import (
     build_broker_snapshots_table,
     build_currency_sleeve_performance_table,
     build_fill_reconciliation_table,
+    build_freshness_table,
+    build_fx_rate_snapshot_card,
     build_live_order_events_table,
     build_maestro_state_exposure_table,
+    build_operator_home,
     build_operator_summary,
     build_orders_table,
     build_overview,
@@ -22,6 +25,11 @@ from maestro.dashboard.read_models import (
     build_portfolio_table,
     build_recent_halt_failure_events_table,
     build_risk_decisions_table,
+    build_run_detail,
+    build_run_index_table,
+    build_strategy_attribution_table,
+    build_strategy_book_performance_table,
+    build_strategy_book_snapshots_table,
     build_strategy_runs_table,
     build_system_events_table,
     build_total_portfolio_performance_table,
@@ -49,15 +57,26 @@ def render(config_path: str | Path) -> None:
 
     st.set_page_config(page_title="Maestro Dashboard", layout="wide")
     st.title("Maestro")
-    st.caption(
-        "Read-only portfolio OS dashboard for stock/ETF and KIS domestic/overseas workflows"
-    )
+    st.caption("Read-only portfolio OS dashboard for stock/ETF and KIS domestic/overseas workflows")
 
     action_cols = st.columns([1, 5])
     if action_cols[0].button("Refresh", type="primary"):
         st.rerun()
     action_cols[1].caption("Local refresh and CSV downloads only; no broker calls or writes.")
+    filters = _dashboard_filters(st)
+    display_currency = st.sidebar.selectbox(
+        "Display currency",
+        ["KRW", "USD"],
+        index=0,
+        help="Reporting only; does not affect orders, risk, or reconciliation.",
+    )
 
+    def table(title: str, rows: list[dict[str, object]], key: str) -> None:
+        _table(st, title, rows, key, filters)
+
+    operator_home = build_operator_home(config, store)
+    freshness = build_freshness_table(config, store)
+    fx_snapshot = build_fx_rate_snapshot_card(store)
     safety = operator_summary["safety"]
     health = operator_summary["health"]
     broker_snapshot = operator_summary["broker_snapshot"]
@@ -81,7 +100,14 @@ def render(config_path: str | Path) -> None:
     broker_history = build_broker_snapshot_history_table(store)
     account_performance = build_account_performance_table(store)
     currency_sleeve_performance = build_currency_sleeve_performance_table(store)
-    total_portfolio_performance = build_total_portfolio_performance_table(store)
+    total_portfolio_performance = build_total_portfolio_performance_table(
+        store,
+        display_currency=display_currency,
+    )
+    strategy_book_snapshots = build_strategy_book_snapshots_table(store)
+    strategy_book_performance = build_strategy_book_performance_table(store)
+    strategy_attribution = build_strategy_attribution_table(store)
+    run_index = build_run_index_table(store)
 
     metric_cols = st.columns(7)
     metric_cols[0].metric("Broker Total Value", _money(broker_summary["total_value"]))
@@ -92,9 +118,27 @@ def render(config_path: str | Path) -> None:
     metric_cols[5].metric("Maestro Positions", overview["positions_count"])
     metric_cols[6].metric("Reconciliation", _reconciliation_label(reconciliation["passed"]))
 
-    tabs = st.tabs(["Portfolio", "Performance", "Operations", "Orders", "Events", "Raw"])
+    tabs = st.tabs(
+        ["Home", "Portfolio", "Performance", "Operations", "Orders", "Events", "Run Detail", "Raw"]
+    )
 
     with tabs[0]:
+        st.subheader("Operator Home")
+        home_cols = st.columns(5)
+        home_cols[0].metric("Overall", str(operator_home["status"]).upper())
+        home_cols[1].metric("Mode", operator_home["mode"])
+        home_cols[2].metric("Latest Run", operator_home["latest_run_id"] or "n/a")
+        home_cols[3].metric("Attention", operator_home["attention_count"])
+        home_cols[4].metric("Stale / Missing", operator_home["stale_count"])
+        if operator_home["attention_items"]:
+            st.error(f"{operator_home['attention_count']} attention item(s)")
+            st.dataframe(operator_home["attention_items"], width="stretch")
+        else:
+            st.success("No attention items")
+        table("Freshness", freshness, "freshness")
+        table("Run Index", run_index, "run_index")
+
+    with tabs[1]:
         st.subheader("Account / Portfolio")
         account_cols = st.columns(2)
         with account_cols[0]:
@@ -109,21 +153,20 @@ def render(config_path: str | Path) -> None:
                 }
             )
 
-        _table(st, "Broker Position Exposure", broker_positions, "broker_position_exposure")
-        _table(st, "Maestro State Exposure", maestro_exposure, "maestro_state_exposure")
-        _table(st, "Portfolio", portfolio_table, "portfolio")
+        table("Broker Position Exposure", broker_positions, "broker_position_exposure")
+        table("Maestro State Exposure", maestro_exposure, "maestro_state_exposure")
+        table("Portfolio", portfolio_table, "portfolio")
         history_cols = st.columns(2)
         with history_cols[0]:
-            _table(
-                st,
+            table(
                 "Maestro Snapshot History",
                 portfolio_history,
                 "portfolio_snapshot_history",
             )
         with history_cols[1]:
-            _table(st, "Broker Snapshot History", broker_history, "broker_snapshot_history")
+            table("Broker Snapshot History", broker_history, "broker_snapshot_history")
 
-    with tabs[1]:
+    with tabs[2]:
         st.subheader("Account Performance")
         latest_performance = account_performance[0] if account_performance else {}
         performance_cols = st.columns(5)
@@ -149,7 +192,7 @@ def render(config_path: str | Path) -> None:
                 st.line_chart(chart_rows, x="created_at", y="cumulative_return")
             with return_cols[1]:
                 st.line_chart(chart_rows, x="created_at", y="drawdown")
-        _table(st, "Account Performance", account_performance, "account_performance")
+        table("Account Performance", account_performance, "account_performance")
         st.subheader("Currency Sleeve Performance")
         if currency_sleeve_performance:
             st.line_chart(
@@ -158,8 +201,7 @@ def render(config_path: str | Path) -> None:
                 y="cumulative_return",
                 color="currency",
             )
-        _table(
-            st,
+        table(
             "Currency Sleeve Performance",
             currency_sleeve_performance,
             "currency_sleeve_performance",
@@ -174,14 +216,37 @@ def render(config_path: str | Path) -> None:
             st.line_chart(total_chart_rows, x="created_at", y="total_value")
         if total_portfolio_performance and total_portfolio_performance[0].get("missing_fx"):
             st.warning("Total portfolio return needs an explicit FX source for mixed currencies.")
-        _table(
-            st,
+        st.caption(f"Display currency: {display_currency}; FX status: {fx_snapshot['status']}")
+        table(
             "Total Portfolio Performance",
             total_portfolio_performance,
             "total_portfolio_performance",
         )
+        st.subheader("Strategy Book Performance")
+        if strategy_book_performance:
+            st.line_chart(
+                list(reversed(strategy_book_performance)),
+                x="created_at",
+                y="book_value",
+                color="book_id",
+            )
+        table(
+            "Strategy Book Performance",
+            strategy_book_performance,
+            "strategy_book_performance",
+        )
+        table(
+            "Strategy Attribution",
+            strategy_attribution,
+            "strategy_attribution",
+        )
+        table(
+            "Strategy Book Snapshots",
+            strategy_book_snapshots,
+            "strategy_book_snapshots",
+        )
 
-    with tabs[2]:
+    with tabs[3]:
         st.subheader("Operational Summary")
         summary_cols = st.columns(5)
         summary_cols[0].metric("Safety State", str(safety["state"]).upper())
@@ -228,19 +293,18 @@ def render(config_path: str | Path) -> None:
             "Lifecycle Rows",
             len(live_order_lifecycle["recent"]),
         )
-        _table(
-            st,
+        table(
             "Live Order Lifecycle Summary",
             live_order_lifecycle["recent"],
             "live_order_lifecycle_summary",
         )
-        _table(st, "Health Checks", health["checks"], "health_checks")
-        _table(st, "Recent Risk Decisions", risk_decisions, "risk_decisions")
-        _table(st, "Recent Halt / Failure Events", halt_failure_events, "halt_failure_events")
+        table("Health Checks", health["checks"], "health_checks")
+        table("Recent Risk Decisions", risk_decisions, "risk_decisions")
+        table("Recent Halt / Failure Events", halt_failure_events, "halt_failure_events")
         with st.expander("Operator Summary Payload"):
             st.json(operator_summary)
 
-    with tabs[3]:
+    with tabs[4]:
         st.subheader("Strategy Signals / Results")
         strategy_signal_columns = [
             "created_at",
@@ -256,42 +320,108 @@ def render(config_path: str | Path) -> None:
             "validation_errors",
         ]
         strategy_signal_rows = [
-            {column: row.get(column) for column in strategy_signal_columns}
-            for row in strategy_runs
+            {column: row.get(column) for column in strategy_signal_columns} for row in strategy_runs
         ]
-        _table(st, "Strategy Signals / Results", strategy_signal_rows, "strategy_runs")
+        table("Strategy Signals / Results", strategy_signal_rows, "strategy_runs")
         with st.expander("Strategy Run Payloads"):
             st.json([row.get("payload", {}) for row in strategy_runs])
-        _table(st, "Recent Paper Orders", orders, "orders")
-        _table(st, "Recent Approvals", approvals, "approvals")
+        table("Recent Paper Orders", orders, "orders")
+        table("Recent Approvals", approvals, "approvals")
 
-    with tabs[4]:
-        _table(st, "Recent Broker Account Snapshots", broker_snapshots, "broker_snapshots")
-        _table(st, "Live Order Status / Lifecycle Events", live_order_events, "live_order_events")
-        _table(
-            st,
+    with tabs[5]:
+        table("Recent Broker Account Snapshots", broker_snapshots, "broker_snapshots")
+        table("Live Order Status / Lifecycle Events", live_order_events, "live_order_events")
+        table(
             "Fill Reconciliation Events",
             fill_reconciliation,
             "fill_reconciliation",
         )
-        _table(st, "Recent System Events", system_events, "system_events")
+        table("Recent System Events", system_events, "system_events")
 
-    with tabs[5]:
+    with tabs[6]:
+        st.subheader("Run Detail")
+        run_ids = [row["run_id"] for row in run_index]
+        selected_run_id = st.selectbox("Run", run_ids, index=0) if run_ids else None
+        if selected_run_id:
+            detail = build_run_detail(store, selected_run_id)
+            st.json(detail["summary"])
+            table("Run Timeline", detail["timeline"], "run_timeline")
+            with st.expander("Run Payloads"):
+                st.json(detail)
+        else:
+            st.info("No run data found.")
+
+    with tabs[7]:
         st.subheader("Raw System Status")
         st.json(status)
 
 
-def _table(st: object, title: str, rows: list[dict[str, object]], key: str) -> None:
+def _dashboard_filters(st: object) -> dict[str, object]:
+    st.sidebar.header("Filters")
+    query = st.sidebar.text_input("Search tables")
+    statuses = st.sidebar.multiselect(
+        "Status",
+        ["fresh", "stale", "missing", "failed", "ok", "warn", "fail", "approved", "rejected"],
+    )
+    return {"query": query, "statuses": statuses}
+
+
+def _table(
+    st: object,
+    title: str,
+    rows: list[dict[str, object]],
+    key: str,
+    filters: dict[str, object] | None = None,
+) -> None:
+    display_rows = _filter_rows(rows, filters or {})
     st.subheader(title)
-    st.dataframe(rows, width="stretch")
+    st.dataframe(display_rows, width="stretch")
     st.download_button(
         "Download CSV",
-        data=_rows_to_csv(rows),
+        data=_rows_to_csv(display_rows),
         file_name=f"{key}.csv",
         mime="text/csv",
         key=f"download_{key}",
-        disabled=not rows,
+        disabled=not display_rows,
     )
+
+
+def _filter_rows(
+    rows: list[dict[str, object]],
+    filters: dict[str, object],
+) -> list[dict[str, object]]:
+    query = str(filters.get("query") or "").strip().lower()
+    statuses = {str(status) for status in filters.get("statuses") or []}
+    if not query and not statuses:
+        return rows
+    return [
+        row for row in rows if _row_matches_query(row, query) and _row_matches_status(row, statuses)
+    ]
+
+
+def _row_matches_query(row: dict[str, object], query: str) -> bool:
+    if not query:
+        return True
+    return query in json.dumps(row, default=str, sort_keys=True).lower()
+
+
+def _row_matches_status(row: dict[str, object], statuses: set[str]) -> bool:
+    if not statuses:
+        return True
+    candidates = {
+        str(row.get(key))
+        for key in (
+            "status",
+            "reconciliation_status",
+            "state",
+            "approved",
+            "validation_ok",
+            "passed",
+            "fx_status",
+        )
+        if row.get(key) is not None
+    }
+    return bool(candidates & statuses)
 
 
 def _rows_to_csv(rows: list[dict[str, object]]) -> str:

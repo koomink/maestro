@@ -14,6 +14,8 @@ from maestro.dashboard.read_models import (
     build_currency_sleeve_performance_table,
     build_daily_live_order_usage,
     build_fill_reconciliation_table,
+    build_freshness_table,
+    build_fx_rate_snapshot_card,
     build_health_summary,
     build_latest_broker_snapshot_card,
     build_latest_reconciliation_card,
@@ -26,7 +28,12 @@ from maestro.dashboard.read_models import (
     build_portfolio_table,
     build_recent_halt_failure_events_table,
     build_risk_decisions_table,
+    build_run_detail,
+    build_run_index_table,
     build_safety_state_card,
+    build_strategy_attribution_table,
+    build_strategy_book_performance_table,
+    build_strategy_book_snapshots_table,
     build_strategy_runs_table,
     build_system_events_table,
     build_total_portfolio_performance_table,
@@ -84,6 +91,8 @@ def test_dashboard_read_models_work_after_run(tmp_path):
     assert build_approvals_table(store) == []
     assert len(build_risk_decisions_table(store)) == 1
     assert build_broker_snapshots_table(store) == []
+    assert len(build_strategy_book_snapshots_table(store)) == 1
+    assert len(build_strategy_book_performance_table(store)) == 1
 
 
 def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
@@ -105,6 +114,8 @@ def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
     assert build_broker_snapshots_table(store)[0]["account_id"] == "acct"
     assert build_broker_account_summary(store)["positions_count"] == 0
     assert build_broker_position_exposure_table(store) == []
+    assert build_strategy_book_snapshots_table(store) == []
+    assert build_strategy_book_performance_table(store) == []
     assert build_maestro_state_exposure_table(store)[0]["symbol"] == "CASH"
     assert build_portfolio_snapshot_history_table(store) == []
     assert build_broker_snapshot_history_table(store)[0]["account_id"] == "acct"
@@ -394,6 +405,34 @@ def test_operator_summary_collects_attention_items_and_live_order_lifecycle(tmp_
     }
 
 
+def test_freshness_table_labels_fresh_stale_missing_and_disabled_rows(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
+    raw["reconciliation"]["max_age_seconds"] = 60
+    raw["execution"]["heartbeat_max_age_seconds"] = 60
+    raw["execution"]["scheduled_run_max_age_seconds"] = 0
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "acct",
+        {"account": {"account_id": "acct", "cash": 1000.0, "positions": []}},
+    )
+    store.save_system_event("run_heartbeat", "maestro_heartbeat", {"source": "test"})
+
+    rows = {row["name"]: row for row in build_freshness_table(config, store)}
+
+    assert rows["broker_snapshot"]["status"] == "fresh"
+    assert rows["broker_reconciliation"]["status"] == "missing"
+    assert rows["heartbeat"]["status"] == "fresh"
+    assert rows["scheduled_run"]["status"] == "not_configured"
+
+
 def test_dashboard_broker_portfolio_analytics_from_latest_snapshot(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     store.save_broker_account_snapshot(
@@ -612,6 +651,138 @@ def test_total_portfolio_performance_marks_missing_fx_for_mixed_currency(tmp_pat
     assert rows[0]["total_value"] is None
     assert rows[0]["component_values"] == {"KRW": 1_100_000.0, "USD": 1100.0}
     assert rows[0]["cumulative_return"] is None
+
+
+def test_total_portfolio_performance_uses_persisted_fx_for_display_currency(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for run_id, usd_value, krw_value in [
+        ("run_1", 1000.0, 1_000_000.0),
+        ("run_2", 1100.0, 1_100_000.0),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "acct_usd",
+            {
+                "account": {
+                    "account_id": "acct_usd",
+                    "currency": "USD",
+                    "cash": usd_value,
+                    "total_value": usd_value,
+                    "positions": [],
+                }
+            },
+        )
+        store.save_broker_account_snapshot(
+            run_id,
+            "acct_krw",
+            {
+                "account": {
+                    "account_id": "acct_krw",
+                    "currency": "KRW",
+                    "cash": krw_value,
+                    "total_value": krw_value,
+                    "positions": [],
+                }
+            },
+        )
+    store.save_system_event(
+        "run_fx",
+        "fx_rate_snapshot",
+        {
+            "source": "fixture",
+            "as_of": utc_now().isoformat(),
+            "max_age_seconds": 3600,
+            "rates": {"USD/KRW": 1000.0},
+        },
+    )
+
+    fx = build_fx_rate_snapshot_card(store)
+    rows = build_total_portfolio_performance_table(store, display_currency="KRW")
+
+    assert fx["status"] == "fresh"
+    assert rows[0]["display_currency"] == "KRW"
+    assert rows[0]["fx_status"] == "fresh"
+    assert rows[0]["total_value"] == 2_200_000.0
+    assert rows[0]["period_return"] == 0.1
+    assert rows[0]["local_return"] == 0.1
+    assert rows[0]["fx_effect"] == 0.0
+
+
+def test_total_portfolio_performance_disables_converted_return_for_stale_fx(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_1",
+        "acct_usd",
+        {
+            "account": {
+                "account_id": "acct_usd",
+                "currency": "USD",
+                "cash": 1000.0,
+                "total_value": 1000.0,
+                "positions": [],
+            }
+        },
+    )
+    store.save_system_event(
+        "run_fx",
+        "fx_rate_snapshot",
+        {
+            "source": "fixture",
+            "as_of": "2000-01-01T00:00:00+00:00",
+            "max_age_seconds": 1,
+            "rates": {"USD/KRW": 1000.0},
+        },
+    )
+
+    rows = build_total_portfolio_performance_table(store, display_currency="KRW")
+
+    assert rows[0]["fx_status"] == "stale"
+    assert rows[0]["stale_fx"] is True
+    assert rows[0]["total_value"] is None
+    assert rows[0]["cumulative_return"] is None
+
+
+def test_run_detail_and_strategy_attribution_group_persisted_rows_by_run(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_strategy_run(
+        "run_1",
+        "strategy_1",
+        {
+            "source_signal": {"symbol": "AAPL", "action": "buy"},
+            "result": {"confidence": 0.7, "allocations": {"AAPL": 0.5}},
+            "validation": {"ok": True, "errors": []},
+        },
+    )
+    store.save_order("run_1", "ord_1", {"symbol": "AAPL", "side": "buy"})
+    store.save_risk_decision("run_1", True, {"violations": []})
+    store.save_system_event("run_1", "run_once_completed", {"orders_created": 1})
+    store.save_strategy_book_snapshots(
+        "run_1",
+        [
+            {
+                "strategy_id": "strategy_1",
+                "book_id": "strategy_1:USD",
+                "book_value": 1000.0,
+                "allocations": {"AAPL": 0.5, "CASH_USD": 0.5},
+            }
+        ],
+    )
+
+    index = build_run_index_table(store)
+    detail = build_run_detail(store, "run_1")
+    attribution = build_strategy_attribution_table(store)
+
+    assert index[0]["run_id"] == "run_1"
+    assert detail["summary"]["strategy_runs"] == 1
+    assert detail["summary"]["orders"] == 1
+    assert {row["kind"] for row in detail["timeline"]} >= {
+        "strategy_run",
+        "order",
+        "system_event",
+    }
+    assert attribution[0]["strategy_id"] == "strategy_1"
+    assert attribution[0]["signal_action"] == "buy"
+    assert attribution[0]["allocation_count"] == 2
 
 
 def test_dashboard_maestro_state_exposure_uses_latest_broker_prices(tmp_path):

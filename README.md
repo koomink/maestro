@@ -645,6 +645,11 @@ Virtuoso apps may return `TargetAllocationResult` directly, or return
 `signal_to_allocation` policy. Maestro normalizes signals to target allocations
 before validation, risk, approval, and execution.
 
+Apps that contain multiple internal books or sub-strategies may include
+`strategy_books` on `TargetAllocationResult`. Maestro persists those as virtual
+strategy book snapshots for read-only dashboard attribution; they do not let the
+app bypass Maestro portfolio, risk, or execution ownership.
+
 ## Plugin Loading
 
 Strategies are configured by entrypoint string:
@@ -911,23 +916,25 @@ uv sync --extra dashboard
 maestro dashboard --config configs/kis_overseas_readonly.example.yaml
 ```
 
-The dashboard is read-only. It shows portfolio state, broker account exposure,
-snapshot history, strategy/order/approval tables, safety state, health summary,
-latest reconciliation status, halt/failure events, live order status/lifecycle
-events, fill reconciliation events, and daily live order count/notional usage
-when those events exist. The Operations tab includes an operator summary with
-attention items for halted safety state, degraded health, failed reconciliation,
-daily live-order limit usage, and recent live-order lifecycle issues. Strategy
-rows also expose normalized allocation results and preserved source-signal
-fields when strategy plugins return signal results.
+The dashboard is read-only. It shows an operator home view, portfolio state,
+broker account exposure, snapshot history, strategy/order/approval tables,
+safety state, health summary, latest reconciliation status, halt/failure events,
+live order status/lifecycle events, fill reconciliation events, and daily live
+order count/notional usage when those events exist. The Home and Operations tabs
+include attention items for halted safety state, degraded health, failed or stale
+reconciliation, stale broker snapshots, daily live-order limit usage, and recent
+live-order lifecycle issues. Tables support local search/status filters and CSV
+download. Strategy rows also expose normalized allocation results and preserved
+source-signal fields when strategy plugins return signal results.
 The Performance tab shows broker-snapshot account value, period return,
 cumulative return, drawdown, and reconciliation labeling from persisted state.
-It also keeps KRW/USD currency-sleeve returns separate and marks mixed-currency
-total portfolio rows as requiring an explicit FX source before base-currency
-returns are shown. Planned FX reporting keeps KRW as the default base/display
-currency and adds a dashboard display-currency toggle for KRW or USD total
-performance. The toggle changes charts and tables only; it does not change
-portfolio management, risk checks, or order behavior.
+It also keeps KRW/USD currency-sleeve returns separate, defaults total portfolio
+performance to KRW display, and offers a read-only KRW/USD display-currency
+toggle. Converted total returns are shown only when a fresh persisted
+`fx_rate_snapshot` system event supplies the needed rate; missing or stale FX
+keeps converted return disabled. The Run Detail tab groups persisted strategy,
+risk, approval, order, event, broker snapshot, portfolio snapshot, and strategy
+book rows by `run_id`.
 Refresh and CSV download are local UI actions only; the dashboard does not call
 live KIS endpoints and does not expose state-changing write controls.
 

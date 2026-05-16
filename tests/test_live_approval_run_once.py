@@ -346,6 +346,7 @@ def test_run_once_live_approval_dry_run_records_payload_without_kis_submit(
     assert dry_run["broker_submit_skipped"] is True
     assert dry_run["request"]["symbol"] == "AAPL"
     assert dry_run["approval_decision"]["status"] == "approved"
+    assert orchestrator.state_store.list_orders() == []
     proposal_snapshot = orchestrator.state_store.list_system_events_by_type(
         "live_proposal_data_snapshot"
     )[0]["payload"]

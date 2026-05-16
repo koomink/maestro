@@ -34,6 +34,7 @@ def test_run_once_pipeline(tmp_path):
         "MOCK_ETF_A": 0.3,
         "MOCK_ETF_B": 0.2,
     }
+    assert details["strategy_book_snapshots"][0]["book_id"] == "sample_static_allocation"
     assert len(details["paper_orders"]) == 2
 
 

@@ -31,6 +31,7 @@ from maestro.orchestration.data_quality import (
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.manager import PortfolioManager
+from maestro.portfolio.strategy_books import build_strategy_book_snapshots
 from maestro.risk.manager import RiskManager
 from maestro.safety.controls import SafetyControlService
 from maestro.sdk import (
@@ -312,8 +313,18 @@ class MaestroOrchestrator:
                 order_payload["approval_status"] = (
                     approval_decision.status if approval_decision else "not_required"
                 )
-                self.state_store.save_order(run_id, order.order_id, order_payload)
+                if not (
+                    self.config.mode == RunMode.LIVE_APPROVAL
+                    and self.config.execution.live_order_dry_run
+                ):
+                    self.state_store.save_order(run_id, order.order_id, order_payload)
             self.state_store.save_portfolio_snapshot(run_id, next_state)
+            strategy_book_snapshots = self._save_strategy_book_snapshots(
+                run_id,
+                valid_results,
+                next_state,
+                prices,
+            )
 
             summary = RunOnceSummary(
                 run_id=run_id,
@@ -331,6 +342,7 @@ class MaestroOrchestrator:
                     "strategy_results": [
                         result.model_dump(mode="json") for result in valid_results
                     ],
+                    "strategy_book_snapshots": strategy_book_snapshots,
                     "portfolio_target": target.model_dump(mode="json"),
                     "risk_decision": risk_decision.model_dump(mode="json"),
                     "approval_request": approval_request.model_dump(mode="json")
@@ -541,6 +553,12 @@ class MaestroOrchestrator:
             blocked_at,
         )
         self.state_store.save_portfolio_snapshot(run_id, current_state)
+        strategy_book_snapshots = self._save_strategy_book_snapshots(
+            run_id,
+            valid_results,
+            current_state,
+            prices,
+        )
         summary = RunOnceSummary(
             run_id=run_id,
             loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
@@ -555,6 +573,7 @@ class MaestroOrchestrator:
                 "loaded_strategies": summary.loaded_strategies,
                 "data_requests": data_requests_by_strategy,
                 "strategy_results": [result.model_dump(mode="json") for result in valid_results],
+                "strategy_book_snapshots": strategy_book_snapshots,
                 "portfolio_target": target.model_dump(mode="json"),
                 "risk_decision": risk_decision.model_dump(mode="json"),
                 "approval_request": None,
@@ -578,6 +597,22 @@ class MaestroOrchestrator:
             },
         )
         return summary
+
+    def _save_strategy_book_snapshots(
+        self,
+        run_id: str,
+        valid_results: list[TargetAllocationResult],
+        state: PortfolioState,
+        prices: dict[str, float],
+    ) -> list[dict[str, Any]]:
+        snapshots = build_strategy_book_snapshots(
+            results=valid_results,
+            strategy_weights=self.portfolio_manager.strategy_weights,
+            state=state,
+            prices=prices,
+        )
+        self.state_store.save_strategy_book_snapshots(run_id, snapshots)
+        return snapshots
 
     def _execute_live_approval_orders(
         self,

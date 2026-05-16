@@ -21,10 +21,70 @@ def build_overview(store: StateStore) -> dict[str, Any]:
         "approvals_count": counts.get("approvals", 0),
         "risk_decisions_count": counts.get("risk_decisions", 0),
         "broker_snapshots_count": counts.get("broker_account_snapshots", 0),
+        "strategy_book_snapshots_count": counts.get("strategy_book_snapshots", 0),
         "system_events_count": counts.get("system_events", 0),
         "latest_run_id": latest_snapshot.get("run_id"),
         "latest_run_time": latest_snapshot.get("created_at"),
     }
+
+
+def build_operator_home(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
+    operator_summary = build_operator_summary(config, store)
+    overview = operator_summary["overview"]
+    freshness = build_freshness_table(config, store)
+    health = operator_summary["health"]
+    attention_items = operator_summary["attention_items"]
+    blocking_items = [item for item in attention_items if item.get("severity") in {"fail", "error"}]
+    stale_items = [row for row in freshness if row.get("status") in {"missing", "stale", "failed"}]
+    if blocking_items:
+        status = "danger"
+    elif attention_items or stale_items or health.get("status") == "warn":
+        status = "warning"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "mode": str(config.mode),
+        "latest_run_id": overview.get("latest_run_id"),
+        "latest_run_time": overview.get("latest_run_time"),
+        "attention_count": len(attention_items),
+        "blocking_count": len(blocking_items),
+        "stale_count": len(stale_items),
+        "freshness": freshness,
+        "attention_items": attention_items,
+    }
+
+
+def build_freshness_table(config: MaestroConfig, store: StateStore) -> list[dict[str, Any]]:
+    broker_snapshot = store.load_latest_broker_account_snapshot()
+    reconciliation = store.load_latest_system_event("broker_reconciliation")
+    heartbeat = store.load_latest_system_event("maestro_heartbeat")
+    scheduled_run = store.load_latest_system_event("run_once_completed")
+    max_reconciliation_age = config.reconciliation.max_age_seconds
+    return [
+        _freshness_row(
+            "broker_snapshot",
+            broker_snapshot,
+            max_reconciliation_age,
+        ),
+        _freshness_row(
+            "broker_reconciliation",
+            reconciliation,
+            max_reconciliation_age,
+            failed=reconciliation is not None
+            and reconciliation.get("payload", {}).get("passed") is False,
+        ),
+        _freshness_row(
+            "heartbeat",
+            heartbeat,
+            config.execution.heartbeat_max_age_seconds,
+        ),
+        _freshness_row(
+            "scheduled_run",
+            scheduled_run,
+            config.execution.scheduled_run_max_age_seconds,
+        ),
+    ]
 
 
 def build_portfolio_table(store: StateStore) -> list[dict[str, Any]]:
@@ -470,6 +530,7 @@ def build_currency_sleeve_performance_table(
 def build_total_portfolio_performance_table(
     store: StateStore,
     limit: int = 200,
+    display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
     source_rows = store.list_broker_account_snapshots(limit=limit)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
@@ -478,6 +539,7 @@ def build_total_portfolio_performance_table(
         grouped.setdefault(group_key, []).append(row)
 
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    fx_snapshot = build_fx_rate_snapshot_card(store)
     performance_state = {
         "first_value": None,
         "previous_value": None,
@@ -485,6 +547,7 @@ def build_total_portfolio_performance_table(
         "cumulative_cash_flow": 0.0,
     }
     rows = []
+    previous_component_values: dict[str, float] = {}
     for group_rows in grouped.values():
         component_values: dict[str, float] = {}
         component_cash_flows: dict[str, float] = {}
@@ -505,29 +568,279 @@ def build_total_portfolio_performance_table(
             reconciliation_statuses.append(_reconciliation_status(reconciliation))
 
         currencies = sorted(component_values)
-        missing_fx = len(currencies) > 1
-        total_value = None if missing_fx else next(iter(component_values.values()), None)
-        cash_flow = 0.0 if missing_fx else sum(component_cash_flows.values())
-        performance = _advance_performance_state(performance_state, total_value, cash_flow)
+        converted_value = _convert_components(
+            component_values,
+            display_currency,
+            fx_snapshot,
+        )
+        converted_cash_flow = _convert_components(
+            component_cash_flows,
+            display_currency,
+            fx_snapshot,
+        )
+        fx_needed = any(currency != display_currency for currency in currencies)
+        fx_ready = not fx_needed or fx_snapshot["status"] == "fresh"
+        missing_fx = fx_needed and fx_snapshot["status"] == "missing"
+        stale_fx = fx_needed and fx_snapshot["status"] == "stale"
+        total_value = converted_value if fx_ready else None
+        cash_flow = converted_cash_flow if fx_ready else None
+        local_return = _local_component_return(component_values, previous_component_values)
+        performance = _advance_performance_state(
+            performance_state,
+            total_value,
+            cash_flow if cash_flow is not None else 0.0,
+        )
+        period_return = performance["period_return"]
         rows.append(
             {
                 "created_at": created_at,
                 "run_id": run_id,
-                "currency": currencies[0] if len(currencies) == 1 else "MIXED",
+                "currency": display_currency
+                if total_value is not None
+                else _portfolio_currency_label(currencies),
+                "display_currency": display_currency,
                 "total_value": total_value,
                 "component_values": {key: component_values[key] for key in currencies},
                 "missing_fx": missing_fx,
-                "fx_source": None,
-                "fx_timestamp": None,
-                "cash_flow": None if missing_fx else cash_flow,
-                "period_return": performance["period_return"],
-                "daily_return": performance["period_return"],
+                "fx_status": fx_snapshot["status"] if fx_needed else "not_needed",
+                "fx_source": fx_snapshot["source"] if fx_needed else None,
+                "fx_rate": fx_snapshot["rate"],
+                "fx_timestamp": fx_snapshot["as_of"],
+                "stale_fx": stale_fx,
+                "cash_flow": cash_flow,
+                "local_return": local_return if fx_needed else period_return,
+                "fx_effect": _round_ratio(period_return - local_return)
+                if period_return is not None and local_return is not None and fx_needed
+                else None,
+                "period_return": period_return,
+                "daily_return": period_return,
                 "cumulative_return": performance["cumulative_return"],
                 "drawdown": performance["drawdown"],
                 "reconciliation_status": _combined_reconciliation_status(reconciliation_statuses),
             }
         )
+        previous_component_values = component_values
     return list(reversed(rows))
+
+
+def build_fx_rate_snapshot_card(store: StateStore) -> dict[str, Any]:
+    latest = store.load_latest_system_event("fx_rate_snapshot")
+    if latest is None:
+        return {
+            "status": "missing",
+            "source": None,
+            "as_of": None,
+            "age_seconds": None,
+            "max_age_seconds": None,
+            "rate": None,
+            "rates": {},
+        }
+    payload = _mapping(latest.get("payload"))
+    as_of = payload.get("as_of") or payload.get("created_at") or latest.get("created_at")
+    age_seconds = _age_seconds(as_of)
+    max_age_seconds = int(
+        payload.get("max_age_seconds") or payload.get("stale_after_seconds") or 86400
+    )
+    stale = age_seconds is None or age_seconds > max_age_seconds
+    rates = _mapping(payload.get("rates"))
+    rate = _first_float(payload, rates, ("USD/KRW", "USDKRW", "usd_krw"))
+    return {
+        "status": "stale" if stale else "fresh",
+        "source": payload.get("source"),
+        "as_of": as_of,
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "rate": rate,
+        "rates": rates,
+    }
+
+
+def build_strategy_book_snapshots_table(
+    store: StateStore,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    rows = []
+    for row in store.list_strategy_book_snapshots(limit=limit):
+        payload = _mapping(row.get("payload"))
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "strategy_id": row.get("strategy_id") or payload.get("strategy_id"),
+                "book_id": row.get("book_id") or payload.get("book_id"),
+                "label": payload.get("label"),
+                "target_weight": _float_or_none(payload.get("target_weight")),
+                "book_value": _float_or_none(payload.get("book_value")),
+                "cash": _float_or_none(payload.get("cash")),
+                "allocations": _mapping(payload.get("allocations")),
+                "positions": _mapping(payload.get("positions")),
+                "missing_prices": payload.get("missing_prices", []),
+                "rationale": payload.get("rationale"),
+                "payload": payload,
+            }
+        )
+    return rows
+
+
+def build_strategy_book_performance_table(
+    store: StateStore,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    source_rows = store.list_strategy_book_snapshots(limit=limit)
+    states: dict[str, dict[str, Any]] = {}
+    rows = []
+    for row in reversed(source_rows):
+        payload = _mapping(row.get("payload"))
+        book_id = str(row.get("book_id") or payload.get("book_id") or "")
+        state = states.setdefault(
+            book_id,
+            {
+                "first_value": None,
+                "previous_value": None,
+                "peak_value": None,
+                "cumulative_cash_flow": 0.0,
+            },
+        )
+        book_value = _float_or_none(payload.get("book_value"))
+        performance = _advance_performance_state(state, book_value, 0.0)
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "strategy_id": row.get("strategy_id") or payload.get("strategy_id"),
+                "book_id": book_id,
+                "label": payload.get("label"),
+                "target_weight": _float_or_none(payload.get("target_weight")),
+                "book_value": book_value,
+                "period_return": performance["period_return"],
+                "cumulative_return": performance["cumulative_return"],
+                "drawdown": performance["drawdown"],
+                "cash": _float_or_none(payload.get("cash")),
+                "allocations": _mapping(payload.get("allocations")),
+            }
+        )
+    return list(reversed(rows))
+
+
+def build_strategy_attribution_table(
+    store: StateStore,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    signals_by_run = {
+        str(row.get("run_id")): row for row in build_strategy_runs_table(store, limit=limit)
+    }
+    rows = []
+    for row in build_strategy_book_performance_table(store, limit=limit):
+        signal = signals_by_run.get(str(row.get("run_id"))) or {}
+        allocations = _mapping(row.get("allocations"))
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "strategy_id": row.get("strategy_id"),
+                "book_id": row.get("book_id"),
+                "book_value": row.get("book_value"),
+                "period_return": row.get("period_return"),
+                "cumulative_return": row.get("cumulative_return"),
+                "drawdown": row.get("drawdown"),
+                "allocation_count": len(allocations),
+                "signal_action": signal.get("signal_action"),
+                "signal_symbol": signal.get("signal_symbol"),
+                "confidence": signal.get("confidence"),
+                "attribution_source": "strategy_book_snapshot",
+            }
+        )
+    return rows
+
+
+def build_run_index_table(store: StateStore, limit: int = 50) -> list[dict[str, Any]]:
+    runs: dict[str, dict[str, Any]] = {}
+    sources = (
+        ("strategy_runs", store.list_strategy_runs(limit=limit)),
+        ("orders", store.list_orders(limit=limit)),
+        ("approvals", store.list_approvals(limit=limit)),
+        ("risk_decisions", store.list_risk_decisions(limit=limit)),
+        ("system_events", store.list_system_events(limit=limit)),
+        ("broker_snapshots", store.list_broker_account_snapshots(limit=limit)),
+        ("portfolio_snapshots", store.list_portfolio_snapshots(limit=limit)),
+        ("strategy_book_snapshots", store.list_strategy_book_snapshots(limit=limit)),
+    )
+    for source, rows in sources:
+        for row in rows:
+            run_id = row.get("run_id")
+            if not run_id:
+                continue
+            item = runs.setdefault(
+                str(run_id),
+                {
+                    "run_id": str(run_id),
+                    "latest_at": row.get("created_at"),
+                    "strategy_runs": 0,
+                    "orders": 0,
+                    "approvals": 0,
+                    "risk_decisions": 0,
+                    "system_events": 0,
+                    "broker_snapshots": 0,
+                    "portfolio_snapshots": 0,
+                    "strategy_book_snapshots": 0,
+                },
+            )
+            item[source] += 1
+            if str(row.get("created_at") or "") > str(item.get("latest_at") or ""):
+                item["latest_at"] = row.get("created_at")
+    return sorted(runs.values(), key=lambda item: str(item.get("latest_at") or ""), reverse=True)[
+        :limit
+    ]
+
+
+def build_run_detail(store: StateStore, run_id: str, limit: int = 200) -> dict[str, Any]:
+    def matching(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [row for row in rows if row.get("run_id") == run_id]
+
+    strategy_runs = matching(build_strategy_runs_table(store, limit=limit))
+    orders = matching(build_orders_table(store, limit=limit))
+    approvals = matching(build_approvals_table(store, limit=limit))
+    risk_decisions = matching(build_risk_decisions_table(store, limit=limit))
+    system_events = matching(build_system_events_table(store, limit=limit))
+    broker_snapshots = matching(build_broker_snapshots_table(store, limit=limit))
+    portfolio_snapshots = matching(build_portfolio_snapshot_history_table(store, limit=limit))
+    strategy_books = matching(build_strategy_book_snapshots_table(store, limit=limit))
+    timeline = sorted(
+        [
+            *_timeline_rows("strategy_run", strategy_runs),
+            *_timeline_rows("order", orders),
+            *_timeline_rows("approval", approvals),
+            *_timeline_rows("risk_decision", risk_decisions),
+            *_timeline_rows("system_event", system_events),
+            *_timeline_rows("broker_snapshot", broker_snapshots),
+            *_timeline_rows("portfolio_snapshot", portfolio_snapshots),
+            *_timeline_rows("strategy_book_snapshot", strategy_books),
+        ],
+        key=lambda item: str(item.get("created_at") or ""),
+        reverse=True,
+    )
+    return {
+        "run_id": run_id,
+        "summary": {
+            "strategy_runs": len(strategy_runs),
+            "orders": len(orders),
+            "approvals": len(approvals),
+            "risk_decisions": len(risk_decisions),
+            "system_events": len(system_events),
+            "broker_snapshots": len(broker_snapshots),
+            "portfolio_snapshots": len(portfolio_snapshots),
+            "strategy_book_snapshots": len(strategy_books),
+        },
+        "timeline": timeline,
+        "strategy_runs": strategy_runs,
+        "orders": orders,
+        "approvals": approvals,
+        "risk_decisions": risk_decisions,
+        "system_events": system_events,
+        "broker_snapshots": broker_snapshots,
+        "portfolio_snapshots": portfolio_snapshots,
+        "strategy_book_snapshots": strategy_books,
+    }
 
 
 def build_safety_state_card(store: StateStore) -> dict[str, Any]:
@@ -978,6 +1291,145 @@ def _age_seconds(value: object) -> float | None:
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=UTC)
     return max((utc_now() - created_at).total_seconds(), 0.0)
+
+
+def _freshness_row(
+    name: str,
+    row: dict[str, Any] | None,
+    max_age_seconds: int,
+    *,
+    failed: bool = False,
+) -> dict[str, Any]:
+    if max_age_seconds <= 0:
+        return {
+            "name": name,
+            "status": "not_configured",
+            "created_at": None,
+            "age_seconds": None,
+            "max_age_seconds": max_age_seconds,
+            "run_id": None,
+        }
+    if row is None:
+        return {
+            "name": name,
+            "status": "missing",
+            "created_at": None,
+            "age_seconds": None,
+            "max_age_seconds": max_age_seconds,
+            "run_id": None,
+        }
+    age_seconds = _age_seconds(row.get("created_at"))
+    status = "failed" if failed else "fresh"
+    if age_seconds is None or age_seconds > max_age_seconds:
+        status = "stale"
+    return {
+        "name": name,
+        "status": status,
+        "created_at": row.get("created_at"),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "run_id": row.get("run_id"),
+    }
+
+
+def _convert_components(
+    values: dict[str, float],
+    display_currency: str,
+    fx_snapshot: dict[str, Any],
+) -> float | None:
+    total = 0.0
+    for currency, value in values.items():
+        if currency == display_currency:
+            total += value
+            continue
+        rate = _fx_rate(currency, display_currency, fx_snapshot)
+        if rate is None or fx_snapshot.get("status") != "fresh":
+            return None
+        total += value * rate
+    return total
+
+
+def _fx_rate(
+    source_currency: str,
+    target_currency: str,
+    fx_snapshot: dict[str, Any],
+) -> float | None:
+    if source_currency == target_currency:
+        return 1.0
+    rates = _mapping(fx_snapshot.get("rates"))
+    direct_keys = (
+        f"{source_currency}/{target_currency}",
+        f"{source_currency}{target_currency}",
+        f"{source_currency.lower()}_{target_currency.lower()}",
+    )
+    for key in direct_keys:
+        rate = _float_or_none(rates.get(key))
+        if rate is not None:
+            return rate
+    inverse_keys = (
+        f"{target_currency}/{source_currency}",
+        f"{target_currency}{source_currency}",
+        f"{target_currency.lower()}_{source_currency.lower()}",
+    )
+    for key in inverse_keys:
+        rate = _float_or_none(rates.get(key))
+        if rate is not None and rate != 0:
+            return 1 / rate
+    return None
+
+
+def _local_component_return(
+    component_values: dict[str, float],
+    previous_component_values: dict[str, float],
+) -> float | None:
+    if not previous_component_values:
+        return None
+    previous_total = sum(previous_component_values.values())
+    if previous_total <= 0:
+        return None
+    weighted_return = 0.0
+    has_value = False
+    for currency, previous_value in previous_component_values.items():
+        current_value = component_values.get(currency)
+        if current_value is None or previous_value <= 0:
+            continue
+        weighted_return += (previous_value / previous_total) * (
+            (current_value - previous_value) / previous_value
+        )
+        has_value = True
+    return _round_ratio(weighted_return) if has_value else None
+
+
+def _portfolio_currency_label(currencies: list[str]) -> str:
+    if not currencies:
+        return "UNKNOWN"
+    if len(currencies) == 1:
+        return currencies[0]
+    return "MIXED"
+
+
+def _timeline_rows(kind: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    output = []
+    for row in rows:
+        output.append(
+            {
+                "created_at": row.get("created_at"),
+                "kind": kind,
+                "run_id": row.get("run_id"),
+                "status": row.get("status")
+                or row.get("approved")
+                or row.get("validation_ok")
+                or row.get("reconciliation_status"),
+                "symbol": row.get("symbol") or row.get("signal_symbol"),
+                "summary": row.get("event_type")
+                or row.get("order_id")
+                or row.get("approval_id")
+                or row.get("strategy_id")
+                or row.get("account_id")
+                or row.get("book_id"),
+            }
+        )
+    return output
 
 
 def _event_row(row: dict[str, Any]) -> dict[str, Any]:

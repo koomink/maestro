@@ -158,6 +158,8 @@ class FREDDataProvider(BaseDataProvider):
             if not isinstance(item, Mapping):
                 raise ValueError(f"Malformed FRED payload for {symbol}: observation must be object")
             observation_date = self._parse_date(item.get("date"), symbol)
+            if item.get("value") in {None, "."}:
+                continue
             value = self._parse_value(item.get("value"), symbol)
             observations.append(
                 {

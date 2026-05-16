@@ -12,6 +12,7 @@ from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.rest_client import (
     KISRestDomesticStockLiveOrderClient,
+    KISRestDomesticStockReadOnlyClient,
     KISRestLiveOrderClient,
     KISRestOverseasStockLiveOrderClient,
     KISRestOverseasStockReadOnlyClient,
@@ -140,6 +141,26 @@ def test_live_approval_config_can_run_readonly_sync_and_reconciliation_with_mock
     assert adopt_result.exit_code == 0, adopt_result.output
     assert reconcile_result.exit_code == 0, reconcile_result.output
     assert "status=passed" in reconcile_result.output
+
+
+def test_single_broker_products_list_selects_readonly_product_without_broker_product_default(
+    tmp_path,
+):
+    config = load_config("configs/ataraxia_kis_live_approval.example.yaml")
+    raw_kis = config.kis.model_dump(mode="json")
+    raw_kis.pop("broker_product")
+    kis_config = KISConfig.model_validate(raw_kis)
+    store = StateStore(str(tmp_path / "state.db"), config.portfolio.initial_cash)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+
+    service = KISReadOnlyService(
+        kis_config,
+        store,
+        audit,
+        instruments=config.universe.instruments,
+    )
+
+    assert isinstance(service.client, KISRestDomesticStockReadOnlyClient)
 
 
 def test_adopt_broker_snapshot_seeds_portfolio_for_reconciliation(tmp_path):

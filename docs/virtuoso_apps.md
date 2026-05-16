@@ -301,6 +301,7 @@ TargetAllocationResult(
     strategy_version=self.manifest().version,
     timestamp=context.timestamp,
     allocations={"SPY": 0.6, "CASH": 0.4},
+    strategy_books=[],
     confidence=0.75,
     time_horizon="1-3 months",
     rationale="Short explanation for operators.",
@@ -324,6 +325,13 @@ secrets in metadata.
 Use `allocation_sleeves` only when the app intentionally emits currency or
 portfolio sleeves. If any strategy returns sleeves, Maestro builds a sleeve
 target from sleeve outputs.
+
+Use `strategy_books` when a single Virtuoso app contains multiple internal
+books or sub-strategies that should be tracked separately. Books are advisory
+accounting metadata: Maestro persists virtual book snapshots and dashboard read
+models, while Maestro still owns portfolio construction, risk, order generation,
+execution, and state. Apps that omit `strategy_books` receive one implicit book
+for the top-level strategy.
 
 ## Strategy Signal Results
 

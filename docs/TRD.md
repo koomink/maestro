@@ -610,6 +610,8 @@ class TargetAllocationResult(BaseModel):
     strategy_version: str
     timestamp: datetime
     allocations: dict[str, float]  # symbol -> target weight
+    allocation_sleeves: dict[str, dict[str, float]] | None = None
+    strategy_books: list[StrategyBookAllocation] = []
     confidence: float = Field(ge=0.0, le=1.0)
     time_horizon: str | None = None
     rationale: str | None = None
@@ -623,6 +625,11 @@ into executable target weights. Maestro rejects allocations to research-only,
 unknown, unresolved, or broker-untradable symbols. Virtuoso apps may propose
 candidate symbols, but they cannot directly approve tradability or execute
 orders.
+
+`strategy_books` is optional accounting metadata for apps that contain multiple
+internal books or sub-strategies. Maestro records virtual book snapshots and
+dashboard read models from these books, but execution remains based on the
+validated aggregate portfolio target.
 
 ### 5.6.1 StrategySignalResult
 
@@ -1103,23 +1110,28 @@ Dashboard should be read-only by default.
 
 Streamlit tabs:
 
-1. Portfolio: broker exposure, Maestro state exposure, and snapshot history
-2. Operations: operator summary, attention items, safety, health, live-order
+1. Home: operator status, attention items, freshness labels, and run index
+2. Portfolio: broker exposure, Maestro state exposure, and snapshot history
+3. Performance: account, currency-sleeve, total portfolio, strategy book, and
+   strategy attribution views
+4. Operations: operator summary, attention items, safety, health, live-order
    usage, live-order lifecycle, risk decisions, and halt/failure events
-3. Orders: strategy signals, paper orders, and approvals
-4. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
-5. Raw: raw status payloads
+5. Orders: strategy signals, paper orders, and approvals
+6. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
+7. Run Detail: persisted rows grouped by `run_id`
+8. Raw: raw status payloads
 
 Current dashboard performance read models in `dashboard/read_models.py` cover
 account, currency-sleeve, and total-portfolio views from persisted broker
 snapshots and reconciliation events. The dashboard renders these persisted-state
-read models and CSV exports without calling KIS during page rendering. Planned
-performance tracking should extend that surface with:
+read models, freshness labels, local filters, run drill-downs, and CSV exports
+without calling KIS during page rendering. Performance tracking should continue
+to extend that surface with:
 
 - Persisted performance tables/views for KIS account equity, realized/unrealized
   PnL, daily return, cumulative return, and drawdown.
-- Strategy-level PnL/return derived from Maestro proposal, order, fill, and
-  strategy run lineage.
+- Strategy-level PnL/return derived from Maestro proposal, order, fill,
+  strategy book, and strategy run lineage.
 - Currency-sleeve PnL/return for KRW and USD sleeves.
 - Total portfolio PnL/return, with base-currency conversion only when an
   explicit FX source and timestamp are available.
@@ -1133,15 +1145,17 @@ performance tracking should extend that surface with:
 
 Performance read models should be computed from persisted KIS snapshots,
 portfolio snapshots, broker reconciliation events, live order status/lifecycle
-events, fill reconciliation events, and strategy run payloads. The implemented
-account, currency-sleeve, and total-portfolio views are computed on read from
-those persisted snapshots/events; strategy attribution and dedicated performance
-tables remain pending. The dashboard must not call KIS or FX endpoints directly.
+events, fill reconciliation events, strategy book snapshots, and strategy run
+payloads. The implemented account, currency-sleeve, total-portfolio, and
+strategy book views are computed on read from those persisted snapshots/events;
+dedicated persisted performance tables remain pending. The dashboard must not
+call KIS or FX endpoints directly.
 FX conversion is reporting-only and must not feed order generation,
 buying-power checks, reconciliation cash gates, or risk cash checks. Strategy
-attribution must remain strategy-agnostic: use persisted order/fill lineage
-where unambiguous and a documented shared-holding allocation rule until
-lot-level strategy accounting is implemented.
+attribution must remain strategy-agnostic: the current dashboard attribution
+uses persisted strategy book snapshots, and future fill/order attribution should
+use persisted lineage where unambiguous plus a documented shared-holding
+allocation rule until lot-level strategy accounting is implemented.
 
 Account performance v1 is a read model computed from persisted broker account
 snapshots and broker reconciliation events. It exposes account value, cash,
@@ -1158,7 +1172,10 @@ component values and `missing_fx=true` instead of computing a base-currency
 return. With fresh FX, the read model may compute KRW-display or USD-display
 total performance by converting only the non-display currency components. It
 should preserve local sleeve return and expose the FX effect separately so users
-can distinguish investment performance from currency movement.
+can distinguish investment performance from currency movement. FX rates are read
+from persisted `fx_rate_snapshot` system events with `source`, `as_of`,
+`max_age_seconds` or `stale_after_seconds`, and `rates` entries such as
+`USD/KRW`; stale or missing FX disables converted total returns.
 
 Security:
 

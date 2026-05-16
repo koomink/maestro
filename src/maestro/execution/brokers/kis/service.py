@@ -58,8 +58,13 @@ class KISReadOnlyService:
         config: KISConfig,
         instruments: list[TradableInstrument] | None = None,
     ) -> KISReadOnlyClient:
-        if len(config.effective_broker_products()) > 1:
+        products = config.effective_broker_products()
+        if len(products) > 1:
             return None
+        if config.broker_products:
+            config = config.model_copy(
+                update={"broker_product": products[0], "broker_products": []}
+            )
         if config.provider == "mock":
             return MockKISReadOnlyClient(config.account_id or "MOCK-ACCOUNT")
         if config.provider == "kis":

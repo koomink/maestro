@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 
+from maestro.sdk.runtime import StrategyRuntime
 from maestro.sdk.schemas import (
     CandidateInstrumentRequest,
     DataBundle,
@@ -8,7 +9,6 @@ from maestro.sdk.schemas import (
     StrategyManifest,
     StrategyResult,
 )
-from maestro.sdk.runtime import StrategyRuntime
 
 
 class BaseStrategyPlugin(ABC):

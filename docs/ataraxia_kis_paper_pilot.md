@@ -31,6 +31,7 @@ execution:
   scheduled_run_max_age_seconds: 86400
 kis:
   provider: kis
+  broker_product: kis_domestic_stock
   broker_products:
     - kis_domestic_stock
   paper_trading: true
@@ -94,6 +95,8 @@ maestro live-smoke --config <operator-config> --check live-dry-run
 Review `live_proposal_data_snapshot`, `live_order_dry_run`, and audit JSONL.
 Stop if the symbol, side, limit price, quantity, notional, or KIS broker product
 differs from the expected Ataraxia domestic ETF proposal.
+Dry-run events do not count as monthly contribution execution and must not block
+the later submit pilot in the same state database.
 
 5. Run the beta gate for the KIS mock-investment submit pilot:
 
@@ -114,6 +117,10 @@ maestro beta-preflight --config <operator-config>
 
 Continue only when health is ok and beta preflight prints
 `check=private_beta_preflight status=ok message=ready`.
+On a brand-new state database, `beta-preflight` can fail with
+`health:scheduled_run` until a recent `run_once_completed` event exists. Seed
+that evidence with a no-order warmup run, then rerun `kis-sync`, `reconcile`,
+and `beta-preflight` before enabling the submit pilot.
 
 When `kis.paper_trading=true`, Maestro uses the KIS VTS base URL and domestic
 stock demo order TR_IDs such as `VTTC0012U` for buy and `VTTC0011U` for sell.

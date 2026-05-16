@@ -104,12 +104,33 @@ def test_fred_provider_rejects_missing_series(monkeypatch: pytest.MonkeyPatch):
 def test_fred_provider_rejects_malformed_payload(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("FRED_TEST_API_KEY", "secret-value")
     provider = FREDDataProvider(
-        client=FakeFREDClient({"GDP": {"observations": [{"date": "2025-01-01"}]}}),
+        client=FakeFREDClient({"GDP": {"observations": [{"date": "not-a-date", "value": "1"}]}}),
         api_key_env="FRED_TEST_API_KEY",
     )
 
     with pytest.raises(ValueError, match="Malformed FRED payload"):
         provider.get_data([request()])
+
+
+def test_fred_provider_skips_missing_observation_values(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("FRED_TEST_API_KEY", "secret-value")
+    client = FakeFREDClient(
+        {
+            "GDP": {
+                "observations": [
+                    {"date": "2025-01-01", "value": "."},
+                    {"date": "2025-04-01", "value": "101.2"},
+                ]
+            }
+        }
+    )
+    provider = FREDDataProvider(client=client, api_key_env="FRED_TEST_API_KEY")
+
+    payload = provider.get_data([request(lookback=2)]).data["GDP"]
+
+    assert payload["observations"] == [
+        {"date": "2025-04-01", "value": 101.2, "source": "fred"}
+    ]
 
 
 def test_fred_provider_marks_stale_payloads(monkeypatch: pytest.MonkeyPatch):
