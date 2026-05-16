@@ -288,7 +288,7 @@ def test_recover_live_order_cli_records_completion_after_reconciliation(tmp_path
 
 
 def _readonly_config(tmp_path: Path) -> Path:
-    raw = yaml.safe_load(Path("configs/multi_asset_readonly.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/live_readonly_multi_asset_kis.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")
@@ -310,7 +310,7 @@ def _live_approval_config(
     heartbeat_max_age_seconds: int = 0,
     scheduled_run_max_age_seconds: int = 0,
 ) -> Path:
-    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "live_audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")

@@ -2,11 +2,23 @@ mode: live_readonly
 
 portfolio:
   base_currency: KRW
-  initial_cash: 10000000
   allowed_symbols:
-    - CASH
-    - MOCK_ETF_A
-    - MOCK_ETF_B
+    - CASH_KRW
+
+universe:
+  instruments:
+    - symbol: CASH_KRW
+      asset_type: cash
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: KRW
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 0
 
 strategies: []
 
@@ -17,8 +29,8 @@ execution:
   engine: paper
 
 risk:
-  max_single_asset_weight: 0.4
-  min_cash_weight: 0.05
+  max_single_asset_weight: 1.0
+  min_cash_weight: 0.0
 
 state:
   sqlite_path: var/live_readonly_state.db
@@ -35,10 +47,20 @@ approval:
 
 kis:
   enabled: true
-  provider: mock
-  account_id: MOCK-ACCOUNT
+  provider: kis
+  broker_product: kis_domestic_stock
+  account_id: null
+  account_id_env: KIS_ACCOUNT_ID
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  access_token_env: KIS_ACCESS_TOKEN
+  approval_key_env: KIS_APPROVAL_KEY
+  token_cache_path: var/kis_access_token.json
+  paper_trading: false
+  timeout_seconds: 10
 
 reconciliation:
   cash_tolerance: 0.0
   position_quantity_tolerance: 0.0
   value_tolerance: 0.0
+  max_age_seconds: 86400

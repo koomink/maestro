@@ -11,7 +11,6 @@ portfolio:
 strategies:
   - id: sample_static_allocation
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
     config:
@@ -21,8 +20,7 @@ strategies:
         MOCK_ETF_B: 0.2
 
 datahub:
-  provider: csv
-  csv_path: data/sample_prices.csv
+  provider: mock
 
 execution:
   engine: paper
@@ -32,14 +30,15 @@ risk:
   min_cash_weight: 0.05
 
 state:
-  sqlite_path: var/maestro_state.db
+  sqlite_path: var/approval_state.db
 
 audit:
-  jsonl_path: var/audit.jsonl
+  jsonl_path: var/approval_audit.jsonl
 
 approval:
-  enabled: false
+  enabled: true
   provider: console
-  require_approval: false
+  require_approval: true
   default_decision: approved
   timeout_seconds: 300
+  whitelisted_user_ids: []

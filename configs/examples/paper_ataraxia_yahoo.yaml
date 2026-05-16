@@ -72,7 +72,6 @@ universe:
 strategies:
   - id: ataraxia
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "ataraxia.strategy:AtaraxiaStrategy"
     config:

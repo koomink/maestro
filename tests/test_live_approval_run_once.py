@@ -23,6 +23,7 @@ from maestro.execution.live_orders import (
 )
 from maestro.execution.reconciliation import ReconciliationResult
 from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
@@ -64,6 +65,18 @@ class FakeTelegramClient:
         }
 
 
+def _seed_broker_baseline(
+    store: StateStore,
+    *,
+    cash: float,
+    positions: dict[str, float] | None = None,
+) -> None:
+    store.save_portfolio_snapshot(
+        "run_adopted_broker_baseline",
+        PortfolioState(cash=cash, positions=positions or {}),
+    )
+
+
 def test_run_once_live_approval_uses_lifecycle_with_fake_clients(
     tmp_path,
     monkeypatch,
@@ -74,6 +87,7 @@ def test_run_once_live_approval_uses_lifecycle_with_fake_clients(
     raw["mode"] = "live_approval"
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    del raw["portfolio"]["initial_cash"]
     raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]
     raw["execution"] = {
         "engine": "paper",
@@ -112,6 +126,7 @@ def test_run_once_live_approval_uses_lifecycle_with_fake_clients(
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=10_000_000.0)
 
     summary = orchestrator.run_once()
 
@@ -139,6 +154,7 @@ def test_live_approval_order_generation_uses_broker_quote_snapshot(
     raw["mode"] = "live_approval"
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    del raw["portfolio"]["initial_cash"]
     raw["execution"] = {
         "engine": "paper",
         "live_order_enabled": False,
@@ -181,6 +197,7 @@ def test_live_approval_order_generation_uses_broker_quote_snapshot(
             },
         },
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=10_000_000.0)
 
     summary = orchestrator.run_once()
 
@@ -197,6 +214,20 @@ def test_live_approval_order_generation_uses_broker_quote_snapshot(
         for row in orchestrator.state_store.list_system_events_by_type("live_order_dry_run")
     ]
     assert {request["limit_price"] for request in dry_run_requests} == {123.0, 47.5}
+
+
+def test_live_approval_run_once_requires_adopted_broker_baseline(tmp_path):
+    config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
+    orchestrator = MaestroOrchestrator(
+        load_config(config_path),
+        telegram_client=FakeTelegramClient("appr_missing_baseline"),
+    )
+
+    with pytest.raises(ValueError, match="adopted broker snapshot"):
+        orchestrator.run_once()
+
+    events = orchestrator.state_store.list_system_events_by_type("broker_baseline_required")
+    assert events[0]["payload"]["mode"] == "live_approval"
 
 
 @pytest.mark.parametrize(
@@ -234,6 +265,7 @@ def test_run_once_live_approval_kis_overseas_e2e_status_paths(
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=1000.0)
 
     summary = orchestrator.run_once()
 
@@ -267,6 +299,7 @@ def test_run_once_live_approval_rejected_telegram_decision_skips_kis_submit(
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=1000.0)
 
     summary = orchestrator.run_once()
 
@@ -303,6 +336,7 @@ def test_run_once_live_approval_expired_telegram_decision_skips_kis_submit(
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=1000.0)
 
     summary = orchestrator.run_once()
 
@@ -335,6 +369,7 @@ def test_run_once_live_approval_dry_run_records_payload_without_kis_submit(
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=1000.0)
 
     summary = orchestrator.run_once()
 
@@ -362,11 +397,13 @@ def test_live_smoke_live_dry_run_records_payload_without_broker_submit(tmp_path)
     raw["approval"]["default_decision"] = "approved"
     config_path.write_text(yaml.safe_dump(raw))
     config = load_config(config_path)
-    StateStore(config.state.sqlite_path, config.portfolio.initial_cash).save_system_event(
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
         "run_reconcile_initial",
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(store, cash=1000.0)
 
     result = CliRunner().invoke(
         app,
@@ -493,8 +530,7 @@ def _overseas_live_approval_config(
         )
         + "\n"
     )
-    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
-    raw["portfolio"]["initial_cash"] = 1000
+    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
     raw["portfolio"]["allowed_symbols"] = ["CASH", "AAPL"]
     raw["universe"]["instruments"] = [
         {
@@ -529,7 +565,6 @@ def _overseas_live_approval_config(
         {
             "id": "sample_static_allocation",
             "enabled": True,
-            "mode": "live_approval",
             "weight": 1.0,
             "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
             "config": {"allocations": {"CASH": 0.8, "AAPL": 0.2}},

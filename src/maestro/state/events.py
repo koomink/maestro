@@ -25,6 +25,7 @@ class SystemEventType(StrEnum):
     LIVE_ORDER_RECOVERY_HALT = "live_order_recovery_halt"
     LIVE_ORDER_LIMIT_HALT = "live_order_limit_halt"
     MARKET_SESSION_HALT = "market_session_halt"
+    BROKER_BASELINE_REQUIRED = "broker_baseline_required"
     BROKER_SNAPSHOT_ADOPTED = "broker_snapshot_adopted"
     BROKER_RECONCILIATION = "broker_reconciliation"
     BROKER_RECONCILIATION_HALT = "broker_reconciliation_halt"

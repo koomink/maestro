@@ -11,7 +11,7 @@ CLI commands, dashboard write controls, or Telegram live enablement.
 ## Operator Config
 
 Create an operator-local config outside source control from
-`configs/ataraxia_kis_live_approval.example.yaml`. Do not run scheduled jobs
+`configs/examples/live_approval_ataraxia_kis_paper_trading.yaml`. Do not run scheduled jobs
 directly from the source-controlled example.
 
 Keep these values for the initial dry-run stages:
@@ -51,8 +51,8 @@ Secrets belong only in environment variables or an operator-local env file:
 1. Verify the baseline Maestro paper run:
 
 ```bash
-maestro run-once --config configs/ataraxia_yahoo_paper.yaml
-maestro status --config configs/ataraxia_yahoo_paper.yaml
+maestro run-once --config configs/examples/paper_ataraxia_yahoo.yaml
+maestro status --config configs/examples/paper_ataraxia_yahoo.yaml
 ```
 
 Confirm the paper state and audit log are expected. Keep Ataraxia installed in

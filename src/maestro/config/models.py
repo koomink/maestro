@@ -64,6 +64,38 @@ class MaestroConfig(StrictConfigModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def validate_mode_contract(self) -> "MaestroConfig":
+        enabled_strategies = [strategy.id for strategy in self.strategies if strategy.enabled]
+        if self.mode == RunMode.PAPER and self.portfolio.initial_cash is None:
+            raise ValueError("paper mode requires portfolio.initial_cash")
+        if self.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+            if self.portfolio.initial_cash is not None:
+                raise ValueError(
+                    f"{self.mode.value} mode uses broker snapshot cash; "
+                    "remove portfolio.initial_cash"
+                )
+        if self.mode == RunMode.LIVE_READONLY:
+            if enabled_strategies:
+                raise ValueError(
+                    "live_readonly mode does not run strategies; disable: "
+                    + ", ".join(enabled_strategies)
+                )
+            if self.approval.enabled or self.approval.require_approval:
+                raise ValueError("live_readonly mode must not require approval")
+            if self.execution.live_order_enabled or self.execution.live_order_dry_run:
+                raise ValueError("live_readonly mode must not enable live order execution")
+            if not self.kis.enabled:
+                raise ValueError("live_readonly mode requires kis.enabled=true")
+        if self.mode == RunMode.LIVE_APPROVAL:
+            if not self.approval.enabled or not self.approval.require_approval:
+                raise ValueError("live_approval mode requires approval.enabled=true")
+            if not self.kis.enabled:
+                raise ValueError("live_approval mode requires kis.enabled=true")
+        if self.mode == RunMode.PAPER and self.execution.live_order_enabled:
+            raise ValueError("paper mode must not enable live order execution")
+        return self
+
 
 __all__ = [
     "ApprovalConfig",

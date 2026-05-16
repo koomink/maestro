@@ -123,7 +123,6 @@ def _readme(package_name: str, class_name: str, strategy_id: str) -> str:
         strategies:
           - id: {strategy_id}
             enabled: true
-            mode: paper
             weight: 1.0
             entrypoint: "{package_name}.strategy:{class_name}"
             config:

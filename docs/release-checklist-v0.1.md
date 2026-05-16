@@ -55,9 +55,9 @@ Verified locally before tagging:
 These are implemented foundations beyond the strict v0.1 paper skeleton:
 
 ```bash
-maestro run-once --config configs/csv_paper.yaml
-maestro run-once --config configs/approval_paper.yaml
-maestro approvals --config configs/approval_paper.yaml
+maestro run-once --config configs/examples/paper_csv.yaml
+maestro run-once --config configs/examples/paper_approval_console.yaml
+maestro approvals --config configs/examples/paper_approval_console.yaml
 maestro kis-sync --config configs/live_readonly.yaml
 maestro kis-account --config configs/live_readonly.yaml
 ```

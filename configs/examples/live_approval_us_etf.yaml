@@ -2,7 +2,6 @@ mode: live_approval
 
 portfolio:
   base_currency: USD
-  initial_cash: 10000
   allowed_symbols:
     - CASH_USD
     - AAPL
@@ -120,10 +119,10 @@ risk:
   min_cash_weight: 0.05
 
 state:
-  sqlite_path: var/live_approval_state.db
+  sqlite_path: var/live_approval_us_etf_state.db
 
 audit:
-  jsonl_path: var/live_approval_audit.jsonl
+  jsonl_path: var/live_approval_us_etf_audit.jsonl
 
 approval:
   enabled: true

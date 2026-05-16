@@ -13,7 +13,7 @@ class CurrencySleeveConfig(StrictConfigModel):
 class PortfolioConfig(StrictConfigModel):
     base_currency: str = "KRW"
     allocation_mode: Literal["single", "currency_sleeves"] = "single"
-    initial_cash: float = Field(gt=0)
+    initial_cash: float | None = Field(default=None, gt=0)
     cash_by_currency: dict[str, float] = Field(default_factory=dict)
     allowed_symbols: list[str]
     currency_sleeves: dict[str, CurrencySleeveConfig] = Field(default_factory=dict)

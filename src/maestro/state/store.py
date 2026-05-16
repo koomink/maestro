@@ -10,12 +10,12 @@ class StateStore:
     def __init__(
         self,
         path: str,
-        initial_cash: float,
+        initial_cash: float | None = None,
         initial_cash_by_currency: dict[str, float] | None = None,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.initial_cash = initial_cash
+        self.initial_cash = float(initial_cash or 0.0)
         self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
         self._init_db()
 
@@ -123,6 +123,11 @@ class StateStore:
                 positions={},
             )
         return PortfolioState.model_validate_json(row[0])
+
+    def has_portfolio_snapshot(self) -> bool:
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM portfolio_snapshots LIMIT 1").fetchone()
+        return row is not None
 
     def save_portfolio_snapshot(self, run_id: str, state: PortfolioState) -> None:
         self._insert("portfolio_snapshots", run_id, None, state.model_dump(mode="json"))

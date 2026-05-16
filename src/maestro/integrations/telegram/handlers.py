@@ -246,8 +246,11 @@ class TelegramOperatorCommandRouter:
     def _apps(self, chat_id: int) -> None:
         lines = ["Maestro apps"]
         for strategy in self.config.strategies[:10]:
-            status = "enabled" if strategy.enabled else "disabled"
-            lines.append(f"{strategy.id}: {status} mode={strategy.mode.value}")
+            status = "on" if strategy.enabled else "off"
+            if strategy.enabled:
+                lines.append(f"{strategy.id}: {status} effective_mode={self.config.mode.value}")
+            else:
+                lines.append(f"{strategy.id}: {status}")
         latest_runs = build_strategy_runs_table(self.store, limit=5)
         if latest_runs:
             lines.append("")

@@ -70,7 +70,7 @@ class MaestroOrchestrator:
         telegram_client=None,
     ) -> None:
         self.config = config
-        self.registry = PluginRegistry.from_configs(config.strategies)
+        self.registry = PluginRegistry.from_configs(config.strategies, run_mode=config.mode)
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
         self.portfolio_manager = PortfolioManager(config.strategies)
         self.risk_manager = RiskManager(config.portfolio.allowed_symbols, config.risk)
@@ -100,6 +100,22 @@ class MaestroOrchestrator:
 
     def run_once(self) -> RunOnceSummary:
         run_id = new_run_id()
+        if (
+            self.config.mode == RunMode.LIVE_APPROVAL
+            and not self.state_store.has_portfolio_snapshot()
+        ):
+            self._record_event(
+                run_id,
+                SystemEventType.BROKER_BASELINE_REQUIRED,
+                {
+                    "mode": self.config.mode.value,
+                    "reason": "live_approval requires an adopted broker snapshot before run_once",
+                },
+            )
+            raise ValueError(
+                "live_approval requires an adopted broker snapshot before run_once; "
+                "run kis-sync and adopt-broker-snapshot first"
+            )
         current_state = self.state_store.load_latest_portfolio_state()
         valid_results: list[TargetAllocationResult] = []
         strategy_ids = self.registry.strategy_ids
@@ -528,9 +544,7 @@ class MaestroOrchestrator:
                 for _, sleeve in sorted(self.config.portfolio.currency_sleeves.items())
             ]
         return [
-            symbol
-            for symbol in self.config.portfolio.allowed_symbols
-            if is_cash_symbol(symbol)
+            symbol for symbol in self.config.portfolio.allowed_symbols if is_cash_symbol(symbol)
         ]
 
     def _target_with_configured_cash(

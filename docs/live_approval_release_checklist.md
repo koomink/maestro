@@ -38,7 +38,7 @@ For the complete operator-local promotion runbook, see
 
 ## Preflight Checklist
 
-- Review `configs/live_approval.example.yaml` and keep
+- Review `configs/live_approval.yaml` and keep
   `execution.live_order_enabled=false` until every item below passes.
 - Confirm the strategy universe, DataHub provider, broker account, and
   `portfolio.allowed_symbols` refer to the same canonical symbols.
@@ -100,6 +100,7 @@ no-audit/no-state rule.
 ## KIS Read-Only Sync
 
 1. Start from a read-only config such as `configs/live_readonly.yaml` for the
+   operator KIS skeleton, or `configs/examples/live_readonly_mock.yaml` for the
    deterministic mock KIS path.
 2. Run `maestro kis-sync --config <readonly-config>`.
 3. Run `maestro kis-account --config <readonly-config>`.
@@ -117,7 +118,7 @@ Do not adopt the snapshot if it contains positions outside both
 `portfolio.allowed_symbols` and approved `universe.instruments`, violates
 `universe.policy`, or includes holdings the strategy is not meant to manage.
 
-`configs/multi_asset_readonly.example.yaml` documents the intended KR+US
+`configs/examples/live_readonly_multi_asset_kis.yaml` documents the intended KR+US
 multi-product read-only shape. KIS read-only uses domestic and overseas account
 endpoints for broker snapshots and reconciliation only; strategy market and
 research data must still come through Maestro DataHub. Live approval uses
@@ -260,19 +261,24 @@ For normal tests this gate can run with console/mock approval by passing
 
 ## Live Approval Submit Path
 
-1. Copy `configs/live_approval.example.yaml` to an operator-local config.
+1. Copy `configs/live_approval.yaml` to an operator-local config.
 2. Replace placeholder account ID, chat IDs, symbols, strategy configuration, and
    state/audit paths.
 3. Keep `execution.live_order_enabled=false` and run config validation/tests.
-4. Run KIS read-only sync and broker reconciliation.
-5. Confirm Telegram approval works with the intended operator account.
-6. Set small live notional caps.
-7. Set `execution.live_order_dry_run=true` and run one approved dry-run.
-8. Only after all checks pass, set `execution.live_order_enabled=true` and
+4. Run KIS read-only sync, inspect the account, and adopt the verified broker
+   snapshot as the live baseline.
+5. Run broker reconciliation against the adopted baseline.
+6. Confirm Telegram approval works with the intended operator account.
+7. Set small live notional caps.
+8. Set `execution.live_order_dry_run=true` and run one approved dry-run.
+9. Only after all checks pass, set `execution.live_order_enabled=true` and
    `execution.live_order_dry_run=false` in the
    operator-local config.
-9. Run `maestro run-once --config <live-approval-config>`.
-10. Approve only if the proposal, limit price, notional, and symbol are expected.
+10. Run `maestro run-once --config <live-approval-config>`.
+11. Approve only if the proposal, limit price, notional, and symbol are expected.
+
+`portfolio.initial_cash` is intentionally absent from live configs. `run-once`
+must use the adopted KIS broker snapshot as its cash/position baseline.
 
 There is no direct or unguarded buy/sell command. The only live submit path is
 approval-gated `run_once` through `LiveOrderSafetyService` and the bounded

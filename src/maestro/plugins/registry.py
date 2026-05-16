@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 from maestro.config.models import StrategyPluginConfig
+from maestro.core.enums import RunMode
 from maestro.plugins.loader import load_strategy
 from maestro.sdk import BaseStrategyPlugin, StrategyManifest
 
@@ -10,6 +11,7 @@ class LoadedStrategy:
     config: StrategyPluginConfig
     plugin: BaseStrategyPlugin
     manifest: StrategyManifest
+    run_mode: RunMode
 
 
 class PluginRegistry:
@@ -17,13 +19,25 @@ class PluginRegistry:
         self.strategies = strategies
 
     @classmethod
-    def from_configs(cls, configs: list[StrategyPluginConfig]) -> "PluginRegistry":
+    def from_configs(
+        cls,
+        configs: list[StrategyPluginConfig],
+        *,
+        run_mode: RunMode = RunMode.PAPER,
+    ) -> "PluginRegistry":
         loaded = []
         for config in configs:
             if not config.enabled:
                 continue
-            plugin = load_strategy(config)
-            loaded.append(LoadedStrategy(config=config, plugin=plugin, manifest=plugin.manifest()))
+            plugin = load_strategy(config, run_mode=run_mode)
+            loaded.append(
+                LoadedStrategy(
+                    config=config,
+                    plugin=plugin,
+                    manifest=plugin.manifest(),
+                    run_mode=run_mode,
+                )
+            )
         return cls(loaded)
 
     @property

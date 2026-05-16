@@ -3,7 +3,6 @@ mode: live_approval
 portfolio:
   base_currency: KRW
   allocation_mode: currency_sleeves
-  initial_cash: 1000000
   cash_by_currency:
     KRW: 1000000
     USD: 10000

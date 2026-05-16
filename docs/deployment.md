@@ -6,14 +6,17 @@ complete.
 
 ## Current Runnable Modes
 
-- Mock paper: `configs/paper.yaml`
-- CSV paper: `configs/csv_paper.yaml`
-- Real-data US stock/ETF paper: `configs/us_etf_yahoo_paper.yaml`
-- Mock KIS read-only: `configs/live_readonly.yaml`
-- KIS multi-asset read-only: `configs/multi_asset_readonly.example.yaml`
-- Ataraxia KIS mock-investment broker-submit rehearsal:
-  `configs/ataraxia_kis_live_approval.example.yaml`
-- Personal operator live approval config generated with `maestro init-personal`
+- Paper: `configs/paper.yaml`
+- Broker read-only: `configs/live_readonly.yaml`
+- Approval-gated live: `configs/live_approval.yaml`
+
+The root `configs/` directory is reserved for these operator-facing mode
+skeletons. Concrete recipes such as CSV paper, Yahoo paper, deterministic mock
+KIS read-only, US ETF live approval, KIS multi-asset read-only, and Ataraxia KIS
+mock-investment rehearsal live under `configs/examples/`.
+
+Personal operator live approval configs are generated with `maestro
+init-personal`.
 
 Do not enable `live_auto`, market orders, direct buy/sell/cancel CLI paths,
 dashboard write controls, or Telegram admin controls.
@@ -44,7 +47,7 @@ maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 
 Then follow `docs/personal_operator_mvp.md` before enabling any live submission.
 For the Ataraxia domestic ETF KIS mock-investment broker-submit pilot, copy
-`configs/ataraxia_kis_live_approval.example.yaml` to an operator-local path and
+`configs/examples/live_approval_ataraxia_kis_paper_trading.yaml` to an operator-local path and
 follow `docs/ataraxia_kis_paper_pilot.md`.
 
 ## Health Check
@@ -52,7 +55,7 @@ follow `docs/ataraxia_kis_paper_pilot.md`.
 Run local health checks before and after scheduled jobs:
 
 ```bash
-maestro health --config configs/multi_asset_readonly.example.yaml
+maestro health --config configs/examples/live_readonly_multi_asset_kis.yaml
 ```
 
 `health` does not call live KIS endpoints. It checks config loading, SQLite

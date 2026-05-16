@@ -536,7 +536,7 @@ def test_telegram_approval_manager_rejects_live_readonly_mode():
 
 
 def test_live_smoke_telegram_approval_validates_config_without_network(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["execution"]["live_order_enabled"] = False

@@ -36,7 +36,7 @@ def test_approval_required_rejected_skips_execution(tmp_path):
 
 
 def _config_with_approval(tmp_path, decision):
-    raw = yaml.safe_load(Path("configs/approval_paper.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/paper_approval_console.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["approval"]["default_decision"] = decision

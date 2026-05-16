@@ -187,7 +187,7 @@ Completed scope:
 - Live approval dependency factory with KIS clients when `kis.provider="kis"` and injectable fake clients for tests
 - Product-level `run_once` wiring to live order lifecycle when `mode=live_approval`
 - Safe-by-default live approval example config at
-  `configs/live_approval.example.yaml`
+  `configs/live_approval.yaml`
 - v0.6 live approval release checklist at
   `docs/live_approval_release_checklist.md`
 - Reconciliation before and after orders
@@ -254,7 +254,7 @@ Completed scope:
 - Overseas buying power normalization
 - Overseas fills and unfilled orders normalization
 - Broker reconciliation for canonical US stock/ETF symbols
-- `configs/multi_asset_readonly.example.yaml` as the KR+US read-only template
+- `configs/examples/live_readonly_multi_asset_kis.yaml` as the KR+US read-only template
   with env var names only
 - Fake-client and fixture tests only for normal test runs
 
@@ -481,7 +481,7 @@ Completed scope:
   orders, send Telegram messages, or run strategies.
 - `docs/personal_operator_mvp.md` documents the single-user operating loop,
   first minimum-size order procedure, and recovery boundary.
-- `configs/ataraxia_kis_live_approval.example.yaml` documents a dry-run-first,
+- `configs/examples/live_approval_ataraxia_kis_paper_trading.yaml` documents a dry-run-first,
   Telegram-approved Ataraxia broker-submit rehearsal for KRW domestic ETFs
   through KIS mock-investment mode, `kis_domestic_stock`, and
   `buy_only_contribution`.

@@ -142,27 +142,14 @@ It is not an autonomous production trading system.
 
 Current runnable modes are:
 
-- Mock paper mode with `configs/paper.yaml`
-- CSV-backed paper mode with `configs/csv_paper.yaml`
-- Optional external DataHub providers such as Yahoo/yfinance, FRED, and RSS when
-  explicitly configured
-- Yahoo/yfinance-backed fundamentals, financial statements, and OHLCV-derived
-  technical indicators for advanced LLM trading agents
-- KR+US live approval example data routed through `datahub.providers`, with
-  Yahoo/yfinance as the active market-data provider and no mock fallback
-- Research provider composition template with
-  `configs/research_multi_provider.example.yaml`
-- Mock `live_readonly` broker scaffolding with `configs/live_readonly.yaml`
-- Real KIS KR+US read-only account/reconciliation template with
-  `configs/multi_asset_readonly.example.yaml`
-- Live approval infrastructure and safety gates, with KIS domestic and overseas
-  read-only plus approval-gated stock/ETF limit-order submit/status adapter
-  support
+- Paper mode with `configs/paper.yaml`
+- Broker read-only mode with `configs/live_readonly.yaml`
+- Approval-gated live mode with `configs/live_approval.yaml`
 
-Config roles are intentionally separate: mock and CSV configs are fixture/smoke
-paths, Yahoo configs are real-data paper paths, read-only configs are broker
-account/reconciliation paths, and live-approval configs are approval-gated order
-proposal/submission paths.
+The root `configs/` directory intentionally contains only these operator-facing
+mode skeletons. Concrete recipes such as CSV paper, Yahoo paper, deterministic
+mock KIS read-only, US ETF live approval, multi-provider research, multi-asset
+KIS read-only, and Ataraxia KIS rehearsal configs live under `configs/examples/`.
 
 For a single-user operator workflow, start with
 [docs/personal_operator_mvp.md](docs/personal_operator_mvp.md):
@@ -255,9 +242,9 @@ Implemented foundations beyond the core v0.1 scope:
 - Personal operator config and readiness commands: `init-personal` and
   `personal-check`
 - Safe live approval example config:
-  [configs/live_approval.example.yaml](configs/live_approval.example.yaml)
+  [configs/live_approval.yaml](configs/live_approval.yaml)
 - Ataraxia domestic KIS mock-investment broker-submit example config:
-  [configs/ataraxia_kis_live_approval.example.yaml](configs/ataraxia_kis_live_approval.example.yaml)
+  [configs/examples/live_approval_ataraxia_kis_paper_trading.yaml](configs/examples/live_approval_ataraxia_kis_paper_trading.yaml)
 - v0.6 release checklist:
   [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 
@@ -281,10 +268,10 @@ inspect and change state with CLI commands:
 
 ```bash
 maestro safety-status --config configs/paper.yaml
-maestro pause --config configs/live_approval.example.yaml --reason "operator maintenance"
-maestro resume --config configs/live_approval.example.yaml --reason "checks passed"
-maestro clear-halt --config configs/live_approval.example.yaml --reason "root cause fixed"
-maestro kill-switch --config configs/live_approval.example.yaml --reason "emergency stop"
+maestro pause --config configs/live_approval.yaml --reason "operator maintenance"
+maestro resume --config configs/live_approval.yaml --reason "checks passed"
+maestro clear-halt --config configs/live_approval.yaml --reason "root cause fixed"
+maestro kill-switch --config configs/live_approval.yaml --reason "emergency stop"
 ```
 
 `paused`, `killed`, and `halted` block `live_approval` order submission before
@@ -406,13 +393,13 @@ and the constrained Telegram operator UI remain available. Telegram resume,
 clear-halt, live enablement, direct trading, and risk changes remain deferred;
 `/pause` and `/kill_switch` are the only Telegram safety controls.
 
-Use [configs/live_approval.example.yaml](configs/live_approval.example.yaml) as
+Use [configs/live_approval.yaml](configs/live_approval.yaml) as
 the safe-by-default operator template and follow
 [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 before enabling live order submission.
 
 Use
-[configs/ataraxia_kis_live_approval.example.yaml](configs/ataraxia_kis_live_approval.example.yaml)
+[configs/examples/live_approval_ataraxia_kis_paper_trading.yaml](configs/examples/live_approval_ataraxia_kis_paper_trading.yaml)
 as the Ataraxia/KRW domestic ETF rehearsal template. It targets the real KIS
 mock-investment OpenAPI path with `kis.paper_trading: true`, is dry-run by
 default, keeps live submit disabled, requires Telegram approval, uses the
@@ -481,12 +468,12 @@ For multiple providers, use `datahub.providers` with lower `priority` values
 preferred first. Strategy plugins still request data through Maestro DataHub and
 do not call yfinance directly.
 
-`configs/kis_multi_asset_live_approval.example.yaml` uses the multi-provider
+`configs/examples/live_approval_kis_multi_asset.yaml` uses the multi-provider
 shape for KR+US live approval, but its active strategy market-data provider is
 still Yahoo/yfinance only. KIS remains a broker/account/execution adapter and is
 not a strategy market-data fallback.
 
-`configs/research_multi_provider.example.yaml` is a copy-and-customize research
+`configs/examples/paper_research_multi_provider.yaml` is a copy-and-customize research
 template for Yahoo, FRED, GDELT/RSS, rule-based sentiment, and opt-in NewsAPI.
 The current sample allocation and Ataraxia strategies request `price` only, so
 macro, news, sentiment, fundamentals, and financial statements are called only
@@ -680,7 +667,6 @@ Strategies are configured by entrypoint string:
 strategies:
   - id: sample_static_allocation
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
 ```
@@ -691,7 +677,6 @@ Later, a real Virtuoso package can be installed and configured similarly:
 strategies:
   - id: ataraxia
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "virtuoso_ataraxia.strategy:AtaraxiaStrategy"
 ```
@@ -736,7 +721,7 @@ maestro run-once --config configs/paper.yaml
 To run the same pipeline using CSV-backed sample prices:
 
 ```bash
-maestro run-once --config configs/csv_paper.yaml
+maestro run-once --config configs/examples/paper_csv.yaml
 ```
 
 To inspect current state from SQLite:
@@ -749,11 +734,11 @@ To run real-data US stock/ETF paper mode:
 
 ```bash
 uv sync --extra yahoo
-maestro run-once --config configs/us_etf_yahoo_paper.yaml
-maestro status --config configs/us_etf_yahoo_paper.yaml
+maestro run-once --config configs/examples/paper_yahoo_us_etf.yaml
+maestro status --config configs/examples/paper_yahoo_us_etf.yaml
 ```
 
-`configs/us_etf_yahoo_paper.yaml` uses canonical USD symbols
+`configs/examples/paper_yahoo_us_etf.yaml` uses canonical USD symbols
 `CASH_USD`, `VOO`, `QQQ`, and `SGOV` in the sample allocation, with AAPL and
 MSFT included in the static example US universe. Yahoo/yfinance supplies external
 market data through Maestro DataHub. The fixed symbol list is intentionally small
@@ -766,13 +751,13 @@ orders, and does not enable live trading.
 To run the paper pipeline with the approval gate enabled:
 
 ```bash
-maestro run-once --config configs/approval_paper.yaml
-maestro approvals --config configs/approval_paper.yaml
+maestro run-once --config configs/examples/paper_approval_console.yaml
+maestro approvals --config configs/examples/paper_approval_console.yaml
 ```
 
-By default, `configs/approval_paper.yaml` uses the no-network `console`
+By default, `configs/examples/paper_approval_console.yaml` uses the no-network `console`
 approval stub and records the configured decision. For the v0.4 Telegram MVP,
-start from `configs/telegram_approval_paper.yaml`, set
+start from `configs/examples/paper_approval_telegram.yaml`, set
 `TELEGRAM_BOT_TOKEN` in the environment, configure
 `telegram_allowed_chat_ids` and `whitelisted_user_ids`, and keep `mode: paper`.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
@@ -794,8 +779,8 @@ maestro reconcile --config configs/live_readonly.yaml
 maestro reconcile-fills --config configs/live_readonly.yaml
 maestro recover-live-order --config configs/live_readonly.yaml --reason "broker truth reconciled"
 maestro heartbeat --config configs/live_readonly.yaml
-maestro ops-alerts --config configs/live_approval.example.yaml --allow-mock
-maestro beta-preflight --config configs/live_approval.example.yaml
+maestro ops-alerts --config configs/live_approval.yaml --allow-mock
+maestro beta-preflight --config configs/live_approval.yaml
 maestro health --config configs/live_readonly.yaml
 ```
 
@@ -810,6 +795,9 @@ latest read-only broker snapshot into Maestro's portfolio state after the
 operator has accepted that snapshot as the rehearsal baseline, records
 `broker_snapshot_adopted`, and refuses broker positions outside
 `portfolio.allowed_symbols`.
+Live configs do not set `portfolio.initial_cash`; KIS cash and positions become
+Maestro's live baseline only after this adoption step. `live_approval run-once`
+fails closed until a broker snapshot has been adopted.
 
 `heartbeat` records `maestro_heartbeat` for operator schedulers. When
 `execution.heartbeat_max_age_seconds` or
@@ -854,9 +842,11 @@ The matching pytest smokes are skipped by default and run only when
 `MAESTRO_RUN_LIVE_DRY_RUN_SMOKE=1` / `MAESTRO_LIVE_DRY_RUN_CONFIG` point to
 operator-local configs.
 
-`configs/live_readonly.yaml` uses the deterministic no-network mock provider.
-`configs/multi_asset_readonly.example.yaml` documents the real KIS KR+US
-multi-asset read-only shape with env var names only. It uses
+`configs/live_readonly.yaml` is a cash-only KIS read-only skeleton that expects
+operator environment variables. Use `configs/examples/live_readonly_mock.yaml`
+for deterministic no-network read-only rehearsals.
+`configs/examples/live_readonly_multi_asset_kis.yaml` documents the real KIS
+KR+US multi-asset read-only shape with env var names only. It uses
 `kis.broker_products` to query domestic and overseas account adapters, merge the
 broker snapshot, and reconcile against Maestro canonical symbols. This is an
 account/execution boundary only; strategy market and research data must still
@@ -935,7 +925,7 @@ To install dashboard dependencies and open the read-only dashboard:
 
 ```bash
 uv sync --extra dashboard
-maestro dashboard --config configs/multi_asset_readonly.example.yaml
+maestro dashboard --config configs/examples/live_readonly_multi_asset_kis.yaml
 ```
 
 The dashboard is read-only. It shows an operator home view, portfolio state,
@@ -975,7 +965,6 @@ mode: live_approval
 
 portfolio:
   base_currency: USD
-  initial_cash: 10000
   allowed_symbols:
     - CASH_USD
     - AAPL
@@ -1020,6 +1009,9 @@ paper configs. It should not be read as the final universe model. The future
 production path is dynamic and policy-gated: strategy apps propose candidates,
 Maestro resolves and validates them, and only approved tradable instruments may
 appear in target allocations.
+`portfolio.initial_cash` is required for `paper` mode only. In `live_readonly`
+and `live_approval`, account cash is sourced from KIS broker snapshots and must
+be adopted into Maestro state before live approval `run-once`.
 
 ## Data Storage
 

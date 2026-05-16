@@ -120,7 +120,7 @@
 - [x] `ruff format --check .`
 - [x] `pytest -q`
 - [x] `maestro run-once --config configs/paper.yaml`
-- [x] `maestro run-once --config configs/csv_paper.yaml`
+- [x] `maestro run-once --config configs/examples/paper_csv.yaml`
 - [x] `maestro status --config configs/paper.yaml`
 
 ## Completed Milestone: v0.3 External Research Data Providers
@@ -266,7 +266,7 @@
 - [x] Do not auto-cancel when max polls are reached
 - [x] Add live approval dependency factory with injectable fake clients
 - [x] Wire `MaestroOrchestrator.run_once()` to the bounded live order lifecycle in `live_approval` mode
-- [x] Add safe-by-default `configs/live_approval.example.yaml`
+- [x] Add safe-by-default `configs/live_approval.yaml`
 - [x] Add `docs/live_approval_release_checklist.md`
 - [x] Document why package metadata remains `0.1.1`
 - [x] Implement KIS overseas cancel adapter after endpoint path, TR_IDs, and request fields are verified
@@ -321,7 +321,7 @@
 - [x] Normalize overseas buying power
 - [x] Normalize overseas fills and unfilled orders
 - [x] Add broker reconciliation for US-listed stock/ETF canonical symbols
-- [x] Add `configs/multi_asset_readonly.example.yaml` as the KR+US read-only
+- [x] Add `configs/examples/live_readonly_multi_asset_kis.yaml` as the KR+US read-only
   template with env var names only
 - [x] Keep read-only mode free of order submission, cancel, amend, buy, and sell paths
 - [x] Keep normal tests fake-client/fixture based with no KIS network calls

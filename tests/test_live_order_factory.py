@@ -2,6 +2,7 @@ import pytest
 
 from maestro.approval.models import ApprovalDecision
 from maestro.config.models import (
+    ApprovalConfig,
     AuditConfig,
     ExecutionConfig,
     KISConfig,
@@ -76,7 +77,7 @@ def test_live_approval_factory_refreshes_kis_snapshot_before_reconciliation(
     monkeypatch.setenv("KIS_APP_KEY", "app-key")
     monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
     config = _config(tmp_path).model_copy(
-        update={"kis": KISConfig(provider="kis", account_id="12345678-01")}
+        update={"kis": KISConfig(enabled=True, provider="kis", account_id="12345678-01")}
     )
     refresh_calls = []
     store.save_system_event("run_reconcile_initial", "broker_reconciliation", {"passed": True})
@@ -183,10 +184,14 @@ def test_live_approval_factory_requires_injected_clients_for_mock_provider(tmp_p
 
 def test_single_broker_products_list_selects_live_order_product_without_default(
     tmp_path,
+    monkeypatch,
 ):
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
     config = _config(tmp_path).model_copy(
         update={
             "kis": KISConfig(
+                enabled=True,
                 provider="kis",
                 account_id="12345678-01",
                 broker_products=["kis_domestic_stock"],
@@ -203,7 +208,6 @@ def _config(tmp_path) -> MaestroConfig:
     return MaestroConfig(
         mode=RunMode.LIVE_APPROVAL,
         portfolio=PortfolioConfig(
-            initial_cash=1_000_000,
             allowed_symbols=["CASH", "005930"],
         ),
         strategies=[],
@@ -217,7 +221,8 @@ def _config(tmp_path) -> MaestroConfig:
         risk=RiskConfig(max_single_asset_weight=0.8, min_cash_weight=0.0),
         state=StateConfig(sqlite_path=str(tmp_path / "state.db")),
         audit=AuditConfig(jsonl_path=str(tmp_path / "audit.jsonl")),
-        kis=KISConfig(provider="mock"),
+        approval=ApprovalConfig(enabled=True, require_approval=True),
+        kis=KISConfig(enabled=True, provider="mock"),
         reconciliation=ReconciliationConfig(),
     )
 

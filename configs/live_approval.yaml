@@ -1,0 +1,105 @@
+mode: live_approval
+
+portfolio:
+  base_currency: KRW
+  allowed_symbols:
+    - CASH_KRW
+
+universe:
+  instruments:
+    - symbol: CASH_KRW
+      asset_type: cash
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: KRW
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 0
+  policy:
+    allowed_asset_types: [stock, etf, domestic_etf, us_etf]
+    allowed_regions: [KR, US]
+    allowed_currencies: [KRW, USD]
+    allowed_broker_products: [kis_domestic_stock, kis_overseas_stock]
+    allowed_exchange_codes: [KRX, NASD, NYSE, AMEX]
+    denied_symbols: []
+    denied_asset_tags: []
+    max_new_symbols_per_run: 1
+    require_operator_approval_for_tradable: true
+    require_broker_tradability_check: true
+    require_data_freshness_check: true
+
+strategies: []
+
+datahub:
+  provider: mock
+
+execution:
+  engine: paper
+  live_order_enabled: false
+  live_order_dry_run: true
+  require_reconciliation_pass: true
+  max_live_order_notional: 100
+  max_daily_live_notional: 300
+  max_daily_live_order_count: 3
+  daily_loss_limit: null
+  allowed_order_type: limit
+  order_status_poll_interval_seconds: 30
+  order_status_max_polls: 20
+  order_status_terminal_timeout_seconds: 1800
+  require_market_session: false
+  market_session_timezone: Asia/Seoul
+  market_session_open: "09:00"
+  market_session_close: "15:30"
+  market_session_weekdays: [0, 1, 2, 3, 4]
+  market_session_holidays: []
+  require_broker_quote_validation: false
+  max_broker_quote_deviation_pct: 0.05
+  require_broker_risk_validation: false
+  live_order_fee_buffer_pct: 0.0
+  heartbeat_max_age_seconds: 0
+  scheduled_run_max_age_seconds: 0
+
+risk:
+  max_single_asset_weight: 1.0
+  min_cash_weight: 0.0
+
+state:
+  sqlite_path: var/live_approval_state.db
+
+audit:
+  jsonl_path: var/live_approval_audit.jsonl
+
+approval:
+  enabled: true
+  provider: telegram
+  require_approval: true
+  default_decision: expired
+  timeout_seconds: 300
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_allowed_chat_ids: []
+  whitelisted_user_ids: []
+  telegram_poll_interval_seconds: 1.0
+
+kis:
+  enabled: true
+  provider: kis
+  broker_product: kis_domestic_stock
+  account_id: null
+  account_id_env: KIS_ACCOUNT_ID
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  access_token_env: KIS_ACCESS_TOKEN
+  approval_key_env: KIS_APPROVAL_KEY
+  token_cache_path: var/kis_access_token.json
+  paper_trading: false
+  timeout_seconds: 10
+
+reconciliation:
+  cash_tolerance: 0.0
+  position_quantity_tolerance: 0.0
+  value_tolerance: 0.0
+  max_age_seconds: 86400

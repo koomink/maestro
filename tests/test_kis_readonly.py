@@ -120,6 +120,8 @@ def test_live_approval_config_can_run_readonly_sync_and_reconciliation_with_mock
     config = _live_readonly_config(tmp_path)
     raw = config.model_dump(mode="json")
     raw["mode"] = "live_approval"
+    raw["approval"]["enabled"] = True
+    raw["approval"]["require_approval"] = True
     config_path = tmp_path / "live_approval_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     runner = CliRunner()
@@ -146,7 +148,7 @@ def test_live_approval_config_can_run_readonly_sync_and_reconciliation_with_mock
 def test_single_broker_products_list_selects_readonly_product_without_broker_product_default(
     tmp_path,
 ):
-    config = load_config("configs/ataraxia_kis_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml")
     raw_kis = config.kis.model_dump(mode="json")
     raw_kis.pop("broker_product")
     kis_config = KISConfig.model_validate(raw_kis)
@@ -1223,7 +1225,7 @@ def test_kis_live_order_client_returns_unknown_for_missing_order(monkeypatch):
 
 
 def _live_readonly_config(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/live_readonly_mock.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_readonly.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "live_readonly.jsonl")
     config_path = tmp_path / "source_live_readonly.yaml"

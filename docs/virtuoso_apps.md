@@ -54,7 +54,6 @@ Configure the app by entrypoint string:
 strategies:
   - id: my_virtuoso_app
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "my_virtuoso_app.strategy:MyVirtuosoStrategy"
     config:
@@ -108,9 +107,9 @@ The loader currently enforces:
 - the class can be constructed with no arguments
 - the constructed object is an instance of `BaseStrategyPlugin`
 - `plugin.manifest().strategy_id` exactly matches `strategies[*].id`
-- `strategies[*].mode` is declared in `plugin.manifest().supported_modes`
-- `plugin.manifest().can_run_live=True` when `strategies[*].mode` is
-  `live_approval`
+- the Maestro run mode is declared in `plugin.manifest().supported_modes`
+- `plugin.manifest().can_run_live=True` when the Maestro run mode is
+  `live_approval` and the strategy is enabled
 - `plugin.manifest().result_type` is `target_allocation`, or is
   `strategy_signal` with an explicit `strategies[*].signal_to_allocation`
   policy
@@ -343,7 +342,6 @@ config must include an explicit conversion policy:
 strategies:
   - id: tradingagents
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "tradingagents_app.strategy:TradingAgentsStrategy"
     signal_to_allocation:
@@ -408,11 +406,10 @@ The config entrypoint is missing `:` or points to the wrong module/class.
 
 Make `strategies[*].id` and `StrategyManifest.strategy_id` identical.
 
-`Strategy ... does not support configured mode ...`
+`Strategy ... does not support Maestro run mode ...`
 
-Add the configured mode to `StrategyManifest.supported_modes` only after the app
-has been tested for that run mode, or change the strategy config back to a
-supported mode.
+Add the Maestro run mode to `StrategyManifest.supported_modes` only after the
+app has been tested for that run mode, or disable the strategy in that config.
 
 `Strategy ... manifest does not allow live execution`
 

@@ -131,6 +131,80 @@ def test_unknown_top_level_field_fails(tmp_path):
         load_config(config_path)
 
 
+def test_live_readonly_rejects_enabled_strategies(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
+    raw["strategies"] = [
+        {
+            "id": "sample_static_allocation",
+            "enabled": True,
+            "weight": 1.0,
+            "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+        }
+    ]
+    config_path = tmp_path / "live_readonly_with_strategy.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="live_readonly mode does not run strategies"):
+        load_config(config_path)
+
+
+def test_live_readonly_rejects_approval_and_live_order_settings(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
+    raw["approval"]["enabled"] = True
+    raw["approval"]["require_approval"] = True
+    config_path = tmp_path / "live_readonly_with_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="live_readonly mode must not require approval"):
+        load_config(config_path)
+
+    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
+    raw["execution"]["live_order_enabled"] = True
+    config_path = tmp_path / "live_readonly_with_live_orders.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="live_readonly mode must not enable live order"):
+        load_config(config_path)
+
+
+def test_paper_rejects_live_order_execution(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["live_order_enabled"] = True
+    config_path = tmp_path / "paper_with_live_orders.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="paper mode must not enable live order"):
+        load_config(config_path)
+
+
+def test_paper_requires_initial_cash(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    del raw["portfolio"]["initial_cash"]
+    config_path = tmp_path / "paper_without_initial_cash.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="paper mode requires portfolio.initial_cash"):
+        load_config(config_path)
+
+
+def test_live_modes_reject_initial_cash(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["portfolio"]["initial_cash"] = 1_000_000
+    config_path = tmp_path / "live_approval_with_initial_cash.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="uses broker snapshot cash"):
+        load_config(config_path)
+
+    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
+    raw["portfolio"]["initial_cash"] = 1_000_000
+    config_path = tmp_path / "live_readonly_with_initial_cash.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="uses broker snapshot cash"):
+        load_config(config_path)
+
+
 def test_signal_to_allocation_type_is_restricted():
     with pytest.raises(ValidationError, match="single_symbol_action_map"):
         StrategyPluginConfig(
@@ -198,23 +272,25 @@ def test_signal_to_allocation_unknown_field_fails():
 def test_current_sample_configs_load():
     for path in [
         "configs/paper.yaml",
-        "configs/csv_paper.yaml",
-        "configs/approval_paper.yaml",
-        "configs/telegram_approval_paper.yaml",
+        "configs/examples/paper_csv.yaml",
+        "configs/examples/paper_approval_console.yaml",
+        "configs/examples/paper_approval_telegram.yaml",
         "configs/live_readonly.yaml",
-        "configs/multi_asset_readonly.example.yaml",
-        "configs/research_multi_provider.example.yaml",
-        "configs/kis_multi_asset_live_approval.example.yaml",
-        "configs/ataraxia_kis_live_approval.example.yaml",
-        "configs/live_approval.example.yaml",
-        "configs/us_etf_yahoo_paper.yaml",
-        "configs/ataraxia_yahoo_paper.yaml",
+        "configs/examples/live_readonly_mock.yaml",
+        "configs/examples/live_readonly_multi_asset_kis.yaml",
+        "configs/examples/paper_research_multi_provider.yaml",
+        "configs/examples/live_approval_us_etf.yaml",
+        "configs/examples/live_approval_kis_multi_asset.yaml",
+        "configs/examples/live_approval_ataraxia_kis_paper_trading.yaml",
+        "configs/live_approval.yaml",
+        "configs/examples/paper_yahoo_us_etf.yaml",
+        "configs/examples/paper_ataraxia_yahoo.yaml",
     ]:
         assert load_config(path)
 
 
 def test_ataraxia_contribution_config_declares_budget_range_and_domestic_universe():
-    config = load_config("configs/ataraxia_yahoo_paper.yaml")
+    config = load_config("configs/examples/paper_ataraxia_yahoo.yaml")
 
     assert config.execution.order_generation_mode == "buy_only_contribution"
     assert config.execution.contribution.enabled is True
@@ -234,11 +310,11 @@ def test_ataraxia_contribution_config_declares_budget_range_and_domestic_univers
 
 
 def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
-    config = load_config("configs/ataraxia_kis_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml")
 
     assert config.mode == "live_approval"
     assert config.portfolio.base_currency == "KRW"
-    assert config.strategies[0].mode == "live_approval"
+    assert config.strategies[0].enabled is True
     assert config.execution.order_generation_mode == "buy_only_contribution"
     assert config.execution.live_order_enabled is False
     assert config.execution.live_order_dry_run is True
@@ -261,7 +337,9 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
 
 
 def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
-    raw = yaml.safe_load(Path("configs/ataraxia_kis_live_approval.example.yaml").read_text())
+    raw = yaml.safe_load(
+        Path("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+    )
     raw["execution"]["live_order_enabled"] = True
     raw["execution"]["live_order_dry_run"] = False
     raw["approval"]["telegram_allowed_chat_ids"] = [100]
@@ -288,7 +366,7 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
 
 
 def test_contribution_config_rejects_invalid_buy_day(tmp_path):
-    raw = yaml.safe_load(Path("configs/ataraxia_yahoo_paper.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["buy_day"] = 32
     config_path = tmp_path / "invalid_buy_day.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -298,7 +376,7 @@ def test_contribution_config_rejects_invalid_buy_day(tmp_path):
 
 
 def test_contribution_config_rejects_budget_outside_range(tmp_path):
-    raw = yaml.safe_load(Path("configs/ataraxia_yahoo_paper.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["monthly_budget"] = 5_000_000
     config_path = tmp_path / "invalid_monthly_budget.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -308,7 +386,7 @@ def test_contribution_config_rejects_budget_outside_range(tmp_path):
 
 
 def test_contribution_config_rejects_unsupported_policy(tmp_path):
-    raw = yaml.safe_load(Path("configs/ataraxia_yahoo_paper.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["non_trading_day_policy"] = "skip"
     config_path = tmp_path / "invalid_policy.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -318,8 +396,8 @@ def test_contribution_config_rejects_unsupported_policy(tmp_path):
 
 
 def test_multi_asset_readonly_example_uses_env_var_names_only():
-    raw_text = Path("configs/multi_asset_readonly.example.yaml").read_text()
-    config = load_config("configs/multi_asset_readonly.example.yaml")
+    raw_text = Path("configs/examples/live_readonly_multi_asset_kis.yaml").read_text()
+    config = load_config("configs/examples/live_readonly_multi_asset_kis.yaml")
 
     assert config.mode == "live_readonly"
     assert config.portfolio.base_currency == "KRW"
@@ -349,13 +427,15 @@ def test_multi_asset_readonly_example_uses_env_var_names_only():
     assert "access-token" not in raw_text
 
 
-def test_live_approval_example_config_is_safe_by_default():
-    config = load_config("configs/live_approval.example.yaml")
+def test_live_approval_root_config_is_minimal_operator_skeleton():
+    config = load_config("configs/live_approval.yaml")
 
     assert config.mode == "live_approval"
-    assert config.portfolio.base_currency == "USD"
-    assert config.portfolio.allowed_symbols == ["CASH_USD", "AAPL", "MSFT", "VOO", "QQQ"]
+    assert config.portfolio.base_currency == "KRW"
+    assert config.portfolio.initial_cash is None
+    assert config.portfolio.allowed_symbols == ["CASH_KRW"]
     assert config.execution.live_order_enabled is False
+    assert config.execution.live_order_dry_run is True
     assert config.execution.require_reconciliation_pass is True
     assert config.execution.allowed_order_type == "limit"
     assert config.execution.max_live_order_notional == 100.0
@@ -366,24 +446,46 @@ def test_live_approval_example_config_is_safe_by_default():
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.approval.default_decision == "expired"
+    assert config.approval.telegram_allowed_chat_ids == []
+    assert config.approval.whitelisted_user_ids == []
     assert config.kis.provider == "kis"
-    assert config.kis.broker_product == "kis_overseas_stock"
+    assert config.kis.broker_product == "kis_domestic_stock"
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
-    aapl = config.universe.get("AAPL")
-    voo = config.universe.get("VOO")
-    assert aapl is not None
-    assert aapl.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
-    assert aapl.exchange_code == "NASD"
-    assert aapl.price_tick == 0.01
-    assert aapl.quantity_step == 1
-    assert voo is not None
-    assert voo.asset_type == "etf"
+    cash = config.universe.get("CASH_KRW")
+    assert cash is not None
+    assert cash.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
+    assert cash.exchange_code == "KRX"
+
+
+def test_live_readonly_root_config_uses_broker_cash_baseline():
+    config = load_config("configs/live_readonly.yaml")
+
+    assert config.mode == "live_readonly"
+    assert config.portfolio.initial_cash is None
+    assert config.portfolio.allowed_symbols == ["CASH_KRW"]
+    assert config.strategies == []
+    assert config.approval.enabled is False
+    assert config.execution.live_order_enabled is False
+    assert config.kis.enabled is True
+
+
+def test_live_approval_us_etf_example_keeps_concrete_universe_out_of_root_config():
+    config = load_config("configs/examples/live_approval_us_etf.yaml")
+
+    assert config.mode == "live_approval"
+    assert config.portfolio.base_currency == "USD"
+    assert config.portfolio.initial_cash is None
+    assert config.portfolio.allowed_symbols == ["CASH_USD", "AAPL", "MSFT", "VOO", "QQQ"]
+    assert config.kis.broker_product == "kis_overseas_stock"
+    assert config.universe.get("AAPL").broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
+    assert config.universe.get("AAPL").exchange_code == "NASD"
+    assert config.universe.get("VOO").asset_type == "etf"
 
 
 def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fallback():
-    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
 
     assert config.datahub.provider == "mock"
     assert config.datahub.symbol_map == {}
@@ -406,7 +508,7 @@ def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fa
 
 
 def test_research_multi_provider_example_registers_research_data_types():
-    config = load_config("configs/research_multi_provider.example.yaml")
+    config = load_config("configs/examples/paper_research_multi_provider.yaml")
     provider_names = [provider.name for provider in config.datahub.providers]
 
     assert provider_names == [
@@ -439,7 +541,7 @@ def test_research_multi_provider_example_registers_research_data_types():
 
 
 def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     raw["portfolio"]["allowed_symbols"].append("TSLA")
     config_path = tmp_path / "missing_universe_symbol.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -449,7 +551,7 @@ def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
 
 
 def test_us_etf_yahoo_paper_config_declares_usd_universe_and_symbol_map():
-    config = load_config("configs/us_etf_yahoo_paper.yaml")
+    config = load_config("configs/examples/paper_yahoo_us_etf.yaml")
 
     assert config.mode == "paper"
     assert config.portfolio.base_currency == "USD"
@@ -488,8 +590,8 @@ def test_live_approval_example_config_has_no_hardcoded_secrets(
     monkeypatch.delenv("KIS_APPROVAL_KEY", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
 
-    raw_text = Path("configs/live_approval.example.yaml").read_text()
-    config = load_config("configs/live_approval.example.yaml")
+    raw_text = Path("configs/live_approval.yaml").read_text()
+    config = load_config("configs/live_approval.yaml")
 
     assert config.kis.app_key_env == "KIS_APP_KEY"
     assert config.kis.app_secret_env == "KIS_APP_SECRET"

@@ -11,7 +11,6 @@ portfolio:
 strategies:
   - id: sample_static_allocation
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
     config:

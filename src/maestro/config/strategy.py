@@ -3,7 +3,6 @@ from typing import Any, Literal
 from pydantic import Field, field_validator
 
 from maestro.config.base import StrictConfigModel
-from maestro.core.enums import StrategyMode
 
 
 class SignalActionTargetWeights(StrictConfigModel):
@@ -21,7 +20,6 @@ class SignalToAllocationConfig(StrictConfigModel):
 class StrategyPluginConfig(StrictConfigModel):
     id: str
     enabled: bool = True
-    mode: StrategyMode = StrategyMode.PAPER
     weight: float = Field(ge=0.0)
     entrypoint: str
     config: dict[str, Any] = Field(default_factory=dict)

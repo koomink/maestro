@@ -149,7 +149,7 @@ def test_reconcile_cli_outputs_passed_result(tmp_path):
 
 
 def _reconciliation_context(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/live_readonly_mock.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["portfolio"]["allowed_symbols"] = ["CASH", "005930", "000660"]

@@ -8,7 +8,7 @@ from maestro.state.store import StateStore
 
 
 def test_run_once_pipeline_with_csv_datahub(tmp_path):
-    raw = yaml.safe_load(Path("configs/csv_paper.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/paper_csv.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     config_path = tmp_path / "csv_paper.yaml"

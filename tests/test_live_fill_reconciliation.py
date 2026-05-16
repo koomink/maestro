@@ -157,7 +157,6 @@ def test_reconcile_fills_cli_outputs_result(tmp_path):
                 "mode": "live_readonly",
                 "portfolio": {
                     "base_currency": "KRW",
-                    "initial_cash": 1_000_000,
                     "allowed_symbols": ["CASH", "005930"],
                 },
                 "strategies": [],

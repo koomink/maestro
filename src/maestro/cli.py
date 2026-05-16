@@ -861,8 +861,7 @@ def _portfolio_state_from_broker_account(
     if unknown_symbols:
         raise typer.BadParameter(
             "broker snapshot contains positions outside portfolio.allowed_symbols and "
-            "universe.instruments: "
-            + ",".join(sorted(set(unknown_symbols)))
+            "universe.instruments: " + ",".join(sorted(set(unknown_symbols)))
         )
     if policy_rejected_symbols:
         details = [
@@ -870,8 +869,7 @@ def _portfolio_state_from_broker_account(
             for symbol, reasons in sorted(policy_rejected_symbols.items())
         ]
         raise typer.BadParameter(
-            "broker snapshot contains positions rejected by universe.policy: "
-            + ";".join(details)
+            "broker snapshot contains positions rejected by universe.policy: " + ";".join(details)
         )
     return PortfolioState(
         cash=float(account.get("cash", 0.0)),
@@ -945,7 +943,6 @@ def _personal_operator_config(output: Path) -> dict:
         "mode": "live_approval",
         "portfolio": {
             "base_currency": "USD",
-            "initial_cash": 10000,
             "allowed_symbols": ["CASH_USD", "AAPL", "MSFT", "VOO", "QQQ", "SGOV"],
         },
         "universe": {
@@ -975,7 +972,6 @@ def _personal_operator_config(output: Path) -> dict:
             {
                 "id": "sample_static_allocation",
                 "enabled": True,
-                "mode": "live_approval",
                 "weight": 1.0,
                 "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
                 "config": {

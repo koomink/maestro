@@ -2,6 +2,7 @@ import pytest
 
 from maestro.config.loader import load_config
 from maestro.config.models import StrategyPluginConfig
+from maestro.core.enums import RunMode
 from maestro.core.exceptions import PluginLoadError
 from maestro.plugins.loader import load_strategy
 from maestro.plugins.registry import PluginRegistry
@@ -85,7 +86,7 @@ def test_sdk_contract_version_1_1_loads(monkeypatch):
     assert load_strategy(config).manifest().sdk_contract_version == "1.1"
 
 
-def test_strategy_config_mode_must_be_supported_by_manifest(monkeypatch):
+def test_enabled_strategy_must_support_maestro_run_mode(monkeypatch):
     import sample_static_allocation.strategy as strategy_module
 
     original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
@@ -101,13 +102,12 @@ def test_strategy_config_mode_must_be_supported_by_manifest(monkeypatch):
     )
     config = StrategyPluginConfig(
         id="sample_static_allocation",
-        mode="live_approval",
         weight=1.0,
         entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
     )
 
-    with pytest.raises(PluginLoadError, match="does not support configured mode"):
-        load_strategy(config)
+    with pytest.raises(PluginLoadError, match="does not support Maestro run mode"):
+        load_strategy(config, run_mode=RunMode.LIVE_APPROVAL)
 
 
 def test_live_approval_mode_requires_manifest_live_permission(monkeypatch):
@@ -128,13 +128,12 @@ def test_live_approval_mode_requires_manifest_live_permission(monkeypatch):
     )
     config = StrategyPluginConfig(
         id="sample_static_allocation",
-        mode="live_approval",
         weight=1.0,
         entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
     )
 
     with pytest.raises(PluginLoadError, match="does not allow live execution"):
-        load_strategy(config)
+        load_strategy(config, run_mode=RunMode.LIVE_APPROVAL)
 
 
 def test_strategy_signal_manifest_requires_signal_to_allocation_policy(monkeypatch):

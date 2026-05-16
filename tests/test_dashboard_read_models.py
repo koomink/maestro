@@ -230,7 +230,7 @@ def test_strategy_runs_table_keeps_target_allocation_payload_compatible(tmp_path
 
 
 def test_dashboard_operational_read_models(tmp_path):
-    raw = yaml.safe_load(Path("configs/multi_asset_readonly.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/examples/live_readonly_multi_asset_kis.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
@@ -332,7 +332,7 @@ def test_dashboard_operational_read_models(tmp_path):
 
 
 def test_operator_summary_collects_attention_items_and_live_order_lifecycle(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
@@ -406,7 +406,7 @@ def test_operator_summary_collects_attention_items_and_live_order_lifecycle(tmp_
 
 
 def test_freshness_table_labels_fresh_stale_missing_and_disabled_rows(tmp_path):
-    raw = yaml.safe_load(Path("configs/live_approval.example.yaml").read_text())
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")

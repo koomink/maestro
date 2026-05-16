@@ -3,7 +3,6 @@ mode: live_approval
 portfolio:
   base_currency: KRW
   allocation_mode: currency_sleeves
-  initial_cash: 10000000
   cash_by_currency:
     KRW: 10000000
   allowed_symbols:
@@ -76,7 +75,6 @@ universe:
 strategies:
   - id: ataraxia
     enabled: true
-    mode: live_approval
     weight: 1.0
     entrypoint: "ataraxia.strategy:AtaraxiaStrategy"
     config:

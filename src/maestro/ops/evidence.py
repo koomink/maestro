@@ -90,8 +90,8 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
         "strategies": [
             {
                 "id": strategy.id,
-                "mode": strategy.mode.value,
                 "enabled": strategy.enabled,
+                "effective_mode": config.mode.value if strategy.enabled else None,
             }
             for strategy in config.strategies
         ],
@@ -182,6 +182,9 @@ def _latest_evidence(store: StateStore) -> dict[str, Any]:
         ),
         "fill_reconciliation": _fill_reconciliation(
             store.load_latest_system_event(SystemEventType.FILL_RECONCILIATION)
+        ),
+        "broker_baseline_required": _generic_event(
+            store.load_latest_system_event(SystemEventType.BROKER_BASELINE_REQUIRED)
         ),
         "live_order_recovery_required": _generic_event(
             store.load_latest_system_event(SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED)

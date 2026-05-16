@@ -26,6 +26,7 @@ from maestro.execution.reconciliation import ReconciliationResult
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
@@ -258,6 +259,7 @@ def _live_approval_config_path(tmp_path) -> Path:
     raw["mode"] = "live_approval"
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    del raw["portfolio"]["initial_cash"]
     raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]
     raw["execution"] = {
         "engine": "paper",
@@ -284,7 +286,7 @@ def _live_approval_config_path(tmp_path) -> Path:
 
 
 def _live_orchestrator(config, approval_id: str = "appr_safety") -> MaestroOrchestrator:
-    return MaestroOrchestrator(
+    orchestrator = MaestroOrchestrator(
         config,
         live_order_client=FakeLiveOrderClient(),
         live_order_status_client=FakeStatusClient(),
@@ -292,3 +294,8 @@ def _live_orchestrator(config, approval_id: str = "appr_safety") -> MaestroOrche
         broker_reconciliation_service=FakeBrokerReconciliation(),
         telegram_client=FakeTelegramClient(approval_id),
     )
+    orchestrator.state_store.save_portfolio_snapshot(
+        "run_adopted_broker_baseline",
+        PortfolioState(cash=10_000_000.0, positions={}),
+    )
+    return orchestrator

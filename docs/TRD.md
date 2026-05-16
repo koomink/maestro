@@ -318,6 +318,9 @@ database caches, or broker behavior.
   `broker_snapshot_adopted`, and refuses positions that are neither in
   `portfolio.allowed_symbols` nor known `universe.instruments` allowed by
   `universe.policy`.
+- Live configs do not carry `portfolio.initial_cash`; live cash and positions
+  are sourced from the adopted broker snapshot. `live_approval run-once` fails
+  before strategy execution when no broker baseline has been adopted.
 - KIS domestic and overseas live buy orders implement a pre-submit broker
   validation step with the request symbol and exact limit price before broker
   submit. Domestic orders use the domestic buying-power path; overseas orders
@@ -525,11 +528,11 @@ class StrategyManifest(BaseModel):
 
 Maestro rejects plugins that require a newer SDK contract version than the
 current supported contract. The loader also rejects a strategy when
-`strategies[*].mode` is not declared in `StrategyManifest.supported_modes`, and
-requires `StrategyManifest.can_run_live=True` before loading a strategy in
-`live_approval` mode. `strategy_signal` is public SDK structure for LLM research
-apps and can be loaded when strategy config includes an explicit Maestro-owned
-`signal_to_allocation` policy.
+the Maestro run mode is not declared in `StrategyManifest.supported_modes`, and
+requires `StrategyManifest.can_run_live=True` before loading an enabled strategy
+in `live_approval` mode. `strategy_signal` is public SDK structure for LLM
+research apps and can be loaded when strategy config includes an explicit
+Maestro-owned `signal_to_allocation` policy.
 
 ### 5.3 StrategyContext
 
@@ -784,7 +787,6 @@ Config example:
 strategies:
   - id: sample_static_allocation
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
     config:
@@ -802,7 +804,7 @@ Loader behavior:
 4. Verify instance implements required methods.
 5. Read manifest.
 6. Validate manifest strategy ID against config ID.
-7. Validate configured mode against `manifest.supported_modes`.
+7. Validate Maestro run mode against `manifest.supported_modes`.
 8. Require `manifest.can_run_live=True` for `live_approval`.
 9. Register plugin in registry.
 
@@ -824,7 +826,6 @@ portfolio:
 strategies:
   - id: sample_static_allocation
     enabled: true
-    mode: paper
     weight: 1.0
     entrypoint: "sample_static_allocation.strategy:SampleStaticAllocationStrategy"
     config:

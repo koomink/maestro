@@ -19,7 +19,7 @@ from maestro.state.store import StateStore
 
 
 def test_multi_asset_example_config_loads_domestic_and_overseas_products():
-    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
 
     assert config.portfolio.allocation_mode == "currency_sleeves"
     assert config.portfolio.cash_by_currency == {"KRW": 1_000_000.0, "USD": 10_000.0}
@@ -54,7 +54,7 @@ def test_signal_validator_accepts_sleeve_allocations():
 
 
 def test_order_builder_creates_independent_currency_sleeve_orders():
-    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
     state = PortfolioState(
         cash=0,
         cash_by_currency={"KRW": 1_000_000.0, "USD": 10_000.0},
@@ -88,7 +88,7 @@ def test_order_builder_creates_independent_currency_sleeve_orders():
 
 
 def test_paper_execution_updates_cash_by_order_currency():
-    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
     state = PortfolioState(
         cash=0,
         cash_by_currency={"KRW": 1_000_000.0, "USD": 10_000.0},
@@ -123,7 +123,7 @@ def test_kis_live_order_router_builds_product_clients(monkeypatch):
     monkeypatch.setenv("KIS_ACCOUNT_ID", "12345678-01")
     monkeypatch.setenv("KIS_APP_KEY", "app-key")
     monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
-    config = load_config("configs/kis_multi_asset_live_approval.example.yaml")
+    config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
 
     router = ProductRoutingKISLiveOrderClient(config)
 
@@ -133,15 +133,27 @@ def test_kis_live_order_router_builds_product_clients(monkeypatch):
     }
 
 
-def test_multi_asset_live_approval_run_once_without_strategies_uses_sleeve_cash(tmp_path):
-    raw = yaml.safe_load(Path("configs/kis_multi_asset_live_approval.example.yaml").read_text())
+def test_multi_asset_live_approval_run_once_without_strategies_uses_adopted_sleeve_cash(
+    tmp_path,
+):
+    raw = yaml.safe_load(Path("configs/examples/live_approval_kis_multi_asset.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     config_path = tmp_path / "kis_multi_asset_live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     config = load_config(config_path)
 
-    summary = MaestroOrchestrator(config).run_once()
+    orchestrator = MaestroOrchestrator(config)
+    orchestrator.state_store.save_portfolio_snapshot(
+        "run_adopted_broker_baseline",
+        PortfolioState(
+            cash=1_000_000.0,
+            cash_by_currency={"KRW": 1_000_000.0, "USD": 10_000.0},
+            positions={},
+        ),
+    )
+
+    summary = orchestrator.run_once()
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
     latest_state = store.load_latest_portfolio_state()
     strategy_run = store.list_system_events_by_type("run_once_completed")[0]["payload"]
@@ -154,7 +166,7 @@ def test_multi_asset_live_approval_run_once_without_strategies_uses_sleeve_cash(
 
 
 def test_kis_multi_product_readonly_service_filters_instruments_by_product(tmp_path):
-    config = load_config("configs/multi_asset_readonly.example.yaml")
+    config = load_config("configs/examples/live_readonly_multi_asset_kis.yaml")
     store = StateStore(str(tmp_path / "state.db"), config.portfolio.initial_cash)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
     service = KISReadOnlyService(
