@@ -220,7 +220,43 @@ def test_adopt_broker_snapshot_rejects_positions_outside_allowed_symbols(tmp_pat
     assert sync_result.exit_code == 0
     assert adopt_result.exit_code == 2
     assert "positions outside" in adopt_result.output
+    assert "universe.instruments" in adopt_result.output
     assert "MOCK_ETF_B" in adopt_result.output
+
+
+def test_adopt_broker_snapshot_accepts_universe_position_outside_allowed_symbols(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    raw = config.model_dump(mode="json")
+    raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A"]
+    raw["universe"] = {
+        "instruments": [
+            _instrument("CASH", "cash"),
+            _instrument("MOCK_ETF_A", "etf"),
+            _instrument("MOCK_ETF_B", "etf"),
+        ]
+    }
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    runner = CliRunner()
+
+    sync_result = runner.invoke(app, ["kis-sync", "--config", str(config_path)])
+    adopt_result = runner.invoke(
+        app,
+        [
+            "adopt-broker-snapshot",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator baseline rehearsal",
+        ],
+    )
+
+    assert sync_result.exit_code == 0, sync_result.output
+    assert adopt_result.exit_code == 0, adopt_result.output
+    assert "positions=2" in adopt_result.output
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    adopted = store.load_latest_portfolio_state()
+    assert adopted.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
 
 
 def test_kis_rest_client_normalizes_readonly_responses(monkeypatch):
@@ -1193,6 +1229,21 @@ def _live_readonly_config(tmp_path):
     config_path = tmp_path / "source_live_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return load_config(config_path)
+
+
+def _instrument(symbol: str, asset_type: str) -> dict:
+    return {
+        "symbol": symbol,
+        "asset_type": asset_type,
+        "region": "US",
+        "currency": "USD",
+        "broker": "kis",
+        "broker_product": "kis_overseas_stock",
+        "broker_symbol": symbol,
+        "exchange_code": "NASD" if asset_type != "cash" else None,
+        "quantity_step": 1,
+        "price_tick": 0.01,
+    }
 
 
 def _kis_live_order_client(monkeypatch, transport: "FakeKISTransport") -> KISRestLiveOrderClient:

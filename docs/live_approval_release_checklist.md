@@ -113,8 +113,9 @@ maestro adopt-broker-snapshot --config <readonly-config> --reason "operator base
 
 Do not proceed if the read-only account snapshot is missing, stale, points to
 the wrong account, or does not use the intended broker product adapter.
-Do not adopt the snapshot if it contains positions outside
-`portfolio.allowed_symbols` or holdings the strategy is not meant to manage.
+Do not adopt the snapshot if it contains positions outside both
+`portfolio.allowed_symbols` and approved `universe.instruments`, violates
+`universe.policy`, or includes holdings the strategy is not meant to manage.
 
 `configs/kis_overseas_readonly.example.yaml` documents the intended
 `kis_overseas_stock` shape. KIS overseas read-only uses verified account

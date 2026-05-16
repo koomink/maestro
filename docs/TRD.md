@@ -315,8 +315,9 @@ database caches, or broker behavior.
 - `maestro adopt-broker-snapshot --config ... --reason ...` is a state-only
   operator command for the first real-account rehearsal baseline. It copies the
   latest broker snapshot into Maestro portfolio state, records
-  `broker_snapshot_adopted`, and refuses positions outside
-  `portfolio.allowed_symbols`.
+  `broker_snapshot_adopted`, and refuses positions that are neither in
+  `portfolio.allowed_symbols` nor known `universe.instruments` allowed by
+  `universe.policy`.
 - KIS domestic and overseas live buy orders implement a pre-submit broker
   validation step with the request symbol and exact limit price before broker
   submit. Domestic orders use the domestic buying-power path; overseas orders

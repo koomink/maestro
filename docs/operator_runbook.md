@@ -88,7 +88,8 @@ maestro adopt-broker-snapshot --config <config> --reason "operator baseline acce
 ```
 
 This is a state-only action. It does not call a broker order endpoint and
-refuses broker positions outside `portfolio.allowed_symbols`.
+refuses broker positions that are neither in `portfolio.allowed_symbols` nor
+known `universe.instruments` allowed by `universe.policy`.
 
 5. Reconcile Maestro state against the latest broker snapshot:
 
