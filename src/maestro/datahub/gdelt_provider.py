@@ -49,6 +49,11 @@ class StdlibGDELTClient:
         try:
             with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                 payload = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            raise ProviderUnavailableError(
+                f"GDELT provider is unavailable for query: {query}: "
+                f"HTTP {exc.code} {exc.reason}"
+            ) from exc
         except TimeoutError as exc:
             raise ProviderUnavailableError(f"GDELT provider timed out for query: {query}") from exc
         except urllib.error.URLError as exc:

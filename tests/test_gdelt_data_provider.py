@@ -229,6 +229,30 @@ def test_stdlib_gdelt_client_rejects_malformed_json(monkeypatch: pytest.MonkeyPa
         )
 
 
+def test_stdlib_gdelt_client_preserves_http_status_in_unavailable_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fake_urlopen(request: object, *, timeout: float) -> FakeHTTPResponse:
+        raise urllib.error.HTTPError(
+            url="https://example.test/gdelt",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={},
+            fp=None,
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(ProviderUnavailableError, match="HTTP 429 Too Many Requests"):
+        StdlibGDELTClient().articles(
+            "Federal Reserve",
+            base_url="https://example.test/gdelt",
+            timespan="24h",
+            max_records=25,
+            timeout_seconds=1.0,
+        )
+
+
 @pytest.mark.parametrize(
     "error",
     [TimeoutError("slow"), urllib.error.URLError("down"), RuntimeError("down")],
