@@ -1,5 +1,6 @@
 import argparse
 import csv
+import html
 import io
 import json
 from pathlib import Path
@@ -56,8 +57,8 @@ def render(config_path: str | Path) -> None:
     status = store.status()
 
     st.set_page_config(page_title="Maestro Dashboard", layout="wide")
-    st.title("Maestro")
-    st.caption("Read-only portfolio OS dashboard for stock/ETF and KIS domestic/overseas workflows")
+    _apply_design_theme(st)
+    _page_header(st, config.mode.value)
 
     action_cols = st.columns([1, 5])
     if action_cols[0].button("Refresh", type="primary"):
@@ -109,43 +110,76 @@ def render(config_path: str | Path) -> None:
     strategy_attribution = build_strategy_attribution_table(store)
     run_index = build_run_index_table(store)
 
-    metric_cols = st.columns(7)
-    metric_cols[0].metric("Broker Total Value", _money(broker_summary["total_value"]))
-    metric_cols[1].metric("Broker Cash", _money(broker_summary["cash"]))
-    metric_cols[2].metric("Broker Exposure", _percent(broker_summary["exposure_weight"]))
-    metric_cols[3].metric("Broker PnL", _money(broker_summary["unrealized_pnl"]))
-    metric_cols[4].metric("Maestro Cash", f"{overview['cash']:,.2f}")
-    metric_cols[5].metric("Maestro Positions", overview["positions_count"])
-    metric_cols[6].metric("Reconciliation", _reconciliation_label(reconciliation["passed"]))
+    _metric_strip(
+        st,
+        [
+            ("Broker Total Value", _money(broker_summary["total_value"]), "neutral"),
+            ("Broker Cash", _money(broker_summary["cash"]), "neutral"),
+            ("Broker Exposure", _percent(broker_summary["exposure_weight"]), "neutral"),
+            ("Broker PnL", _money(broker_summary["unrealized_pnl"]), "neutral"),
+            ("Maestro Cash", f"{overview['cash']:,.2f}", "neutral"),
+            ("Maestro Positions", overview["positions_count"], "neutral"),
+            (
+                "Reconciliation",
+                _reconciliation_label(reconciliation["passed"]),
+                _boolean_tone(reconciliation["passed"]),
+            ),
+        ],
+    )
 
     tabs = st.tabs(
         ["Home", "Portfolio", "Performance", "Operations", "Orders", "Events", "Run Detail", "Raw"]
     )
 
     with tabs[0]:
-        st.subheader("Operator Home")
-        home_cols = st.columns(5)
-        home_cols[0].metric("Overall", str(operator_home["status"]).upper())
-        home_cols[1].metric("Mode", operator_home["mode"])
-        home_cols[2].metric("Latest Run", operator_home["latest_run_id"] or "n/a")
-        home_cols[3].metric("Attention", operator_home["attention_count"])
-        home_cols[4].metric("Stale / Missing", operator_home["stale_count"])
+        _section_header(
+            st,
+            "Operator Home",
+            "Control state, data freshness, and recent runs from persisted Maestro state.",
+        )
+        _metric_strip(
+            st,
+            [
+                ("Overall", str(operator_home["status"]).upper(), operator_home["status"]),
+                ("Mode", operator_home["mode"], "neutral"),
+                ("Latest Run", operator_home["latest_run_id"] or "n/a", "neutral"),
+                (
+                    "Attention",
+                    operator_home["attention_count"],
+                    _count_tone(operator_home["attention_count"]),
+                ),
+                (
+                    "Stale / Missing",
+                    operator_home["stale_count"],
+                    _count_tone(operator_home["stale_count"]),
+                ),
+            ],
+        )
         if operator_home["attention_items"]:
-            st.error(f"{operator_home['attention_count']} attention item(s)")
+            _status_banner(
+                st,
+                "Attention required",
+                f"{operator_home['attention_count']} item(s) need review.",
+                "danger",
+            )
             st.dataframe(operator_home["attention_items"], width="stretch")
         else:
-            st.success("No attention items")
+            _status_banner(st, "No attention items", "Operator summary is clear.", "success")
         table("Freshness", freshness, "freshness")
         table("Run Index", run_index, "run_index")
 
     with tabs[1]:
-        st.subheader("Account / Portfolio")
+        _section_header(
+            st,
+            "Account / Portfolio",
+            "Broker truth beside Maestro state, with snapshot histories for review.",
+        )
         account_cols = st.columns(2)
         with account_cols[0]:
-            st.subheader("Latest Broker Account")
+            _section_header(st, "Latest Broker Account")
             st.json(broker_summary)
         with account_cols[1]:
-            st.subheader("Latest Broker / Reconciliation")
+            _section_header(st, "Latest Broker / Reconciliation")
             st.json(
                 {
                     "broker_snapshot": broker_snapshot,
@@ -167,22 +201,29 @@ def render(config_path: str | Path) -> None:
             table("Broker Snapshot History", broker_history, "broker_snapshot_history")
 
     with tabs[2]:
-        st.subheader("Account Performance")
+        _section_header(
+            st,
+            "Account Performance",
+            "Persisted broker snapshots rendered as read-only return and drawdown views.",
+        )
         latest_performance = account_performance[0] if account_performance else {}
-        performance_cols = st.columns(5)
-        performance_cols[0].metric("Account Value", _money(latest_performance.get("total_value")))
-        performance_cols[1].metric(
-            "Period Return",
-            _percent(latest_performance.get("period_return")),
-        )
-        performance_cols[2].metric(
-            "Cumulative Return",
-            _percent(latest_performance.get("cumulative_return")),
-        )
-        performance_cols[3].metric("Drawdown", _percent(latest_performance.get("drawdown")))
-        performance_cols[4].metric(
-            "Reconciliation",
-            latest_performance.get("reconciliation_status") or "n/a",
+        _metric_strip(
+            st,
+            [
+                ("Account Value", _money(latest_performance.get("total_value")), "neutral"),
+                ("Period Return", _percent(latest_performance.get("period_return")), "neutral"),
+                (
+                    "Cumulative Return",
+                    _percent(latest_performance.get("cumulative_return")),
+                    "neutral",
+                ),
+                ("Drawdown", _percent(latest_performance.get("drawdown")), "neutral"),
+                (
+                    "Reconciliation",
+                    latest_performance.get("reconciliation_status") or "n/a",
+                    _status_tone(latest_performance.get("reconciliation_status")),
+                ),
+            ],
         )
         if account_performance:
             chart_rows = list(reversed(account_performance))
@@ -193,7 +234,7 @@ def render(config_path: str | Path) -> None:
             with return_cols[1]:
                 st.line_chart(chart_rows, x="created_at", y="drawdown")
         table("Account Performance", account_performance, "account_performance")
-        st.subheader("Currency Sleeve Performance")
+        _section_header(st, "Currency Sleeve Performance")
         if currency_sleeve_performance:
             st.line_chart(
                 list(reversed(currency_sleeve_performance)),
@@ -206,7 +247,7 @@ def render(config_path: str | Path) -> None:
             currency_sleeve_performance,
             "currency_sleeve_performance",
         )
-        st.subheader("Total Portfolio Performance")
+        _section_header(st, "Total Portfolio Performance")
         total_chart_rows = [
             row
             for row in reversed(total_portfolio_performance)
@@ -215,14 +256,27 @@ def render(config_path: str | Path) -> None:
         if total_chart_rows:
             st.line_chart(total_chart_rows, x="created_at", y="total_value")
         if total_portfolio_performance and total_portfolio_performance[0].get("missing_fx"):
-            st.warning("Total portfolio return needs an explicit FX source for mixed currencies.")
-        st.caption(f"Display currency: {display_currency}; FX status: {fx_snapshot['status']}")
+            _status_banner(
+                st,
+                "FX source required",
+                "Total portfolio return needs an explicit FX source for mixed currencies.",
+                "warning",
+            )
+        st.markdown(
+            _badge_row(
+                [
+                    ("Display", display_currency, "neutral"),
+                    ("FX", fx_snapshot["status"], _status_tone(fx_snapshot["status"])),
+                ]
+            ),
+            unsafe_allow_html=True,
+        )
         table(
             "Total Portfolio Performance",
             total_portfolio_performance,
             "total_portfolio_performance",
         )
-        st.subheader("Strategy Book Performance")
+        _section_header(st, "Strategy Book Performance")
         if strategy_book_performance:
             st.line_chart(
                 list(reversed(strategy_book_performance)),
@@ -247,28 +301,48 @@ def render(config_path: str | Path) -> None:
         )
 
     with tabs[3]:
-        st.subheader("Operational Summary")
-        summary_cols = st.columns(5)
-        summary_cols[0].metric("Safety State", str(safety["state"]).upper())
-        summary_cols[1].metric("Health", str(health["status"]).upper())
-        summary_cols[2].metric("Reconciliation", _reconciliation_label(reconciliation["passed"]))
-        summary_cols[3].metric(
-            "Broker Snapshot Age",
-            _duration(operator_summary["broker_snapshot_age_seconds"]),
+        _section_header(
+            st,
+            "Operational Summary",
+            "Safety, health, live-order usage, lifecycle state, and recent risk events.",
         )
-        summary_cols[4].metric("Risk Decisions", overview["risk_decisions_count"])
-        usage_cols = st.columns(2)
-        usage_cols[0].metric(
-            "Daily Live Orders",
-            f"{daily_usage['order_count']} / {daily_usage['max_daily_live_order_count']}",
+        daily_notional_value = (
+            f"{_money(daily_usage['notional'])} / {_money(daily_usage['max_daily_live_notional'])}"
         )
-        usage_cols[1].metric(
-            "Daily Live Notional",
-            f"{_money(daily_usage['notional'])} / {_money(daily_usage['max_daily_live_notional'])}",
+        _metric_strip(
+            st,
+            [
+                ("Safety State", str(safety["state"]).upper(), _status_tone(safety["state"])),
+                ("Health", str(health["status"]).upper(), _status_tone(health["status"])),
+                (
+                    "Reconciliation",
+                    _reconciliation_label(reconciliation["passed"]),
+                    _boolean_tone(reconciliation["passed"]),
+                ),
+                (
+                    "Broker Snapshot Age",
+                    _duration(operator_summary["broker_snapshot_age_seconds"]),
+                    "neutral",
+                ),
+                ("Risk Decisions", overview["risk_decisions_count"], "neutral"),
+                (
+                    "Daily Live Orders",
+                    f"{daily_usage['order_count']} / {daily_usage['max_daily_live_order_count']}",
+                    _limit_tone(
+                        daily_usage["order_count"],
+                        daily_usage["max_daily_live_order_count"],
+                    ),
+                ),
+                (
+                    "Daily Live Notional",
+                    daily_notional_value,
+                    _limit_tone(daily_usage["notional"], daily_usage["max_daily_live_notional"]),
+                ),
+            ],
         )
         attention_items = operator_summary["attention_items"]
         if attention_items:
-            st.error(f"{len(attention_items)} attention item(s)")
+            _status_banner(st, "Attention required", f"{len(attention_items)} item(s)", "danger")
             st.dataframe(
                 [
                     {
@@ -281,17 +355,23 @@ def render(config_path: str | Path) -> None:
                 width="stretch",
             )
         else:
-            st.success("No attention items")
-        lifecycle_cols = st.columns(3)
+            _status_banner(st, "No attention items", "Operational summary is clear.", "success")
         latest_lifecycle = live_order_lifecycle["latest"] or {}
-        lifecycle_cols[0].metric("Latest Live Order", latest_lifecycle.get("status") or "n/a")
-        lifecycle_cols[1].metric(
-            "Recent Live Order Issues",
-            live_order_lifecycle["recent_issue_count"],
-        )
-        lifecycle_cols[2].metric(
-            "Lifecycle Rows",
-            len(live_order_lifecycle["recent"]),
+        _metric_strip(
+            st,
+            [
+                (
+                    "Latest Live Order",
+                    latest_lifecycle.get("status") or "n/a",
+                    _status_tone(latest_lifecycle.get("status")),
+                ),
+                (
+                    "Recent Live Order Issues",
+                    live_order_lifecycle["recent_issue_count"],
+                    _count_tone(live_order_lifecycle["recent_issue_count"]),
+                ),
+                ("Lifecycle Rows", len(live_order_lifecycle["recent"]), "neutral"),
+            ],
         )
         table(
             "Live Order Lifecycle Summary",
@@ -305,7 +385,11 @@ def render(config_path: str | Path) -> None:
             st.json(operator_summary)
 
     with tabs[4]:
-        st.subheader("Strategy Signals / Results")
+        _section_header(
+            st,
+            "Strategy Signals / Results",
+            "Normalized proposals, validation state, generated orders, and approvals.",
+        )
         strategy_signal_columns = [
             "created_at",
             "run_id",
@@ -339,7 +423,11 @@ def render(config_path: str | Path) -> None:
         table("Recent System Events", system_events, "system_events")
 
     with tabs[6]:
-        st.subheader("Run Detail")
+        _section_header(
+            st,
+            "Run Detail",
+            "Trace strategy, risk, approval, order, and event rows by run identifier.",
+        )
         run_ids = [row["run_id"] for row in run_index]
         selected_run_id = st.selectbox("Run", run_ids, index=0) if run_ids else None
         if selected_run_id:
@@ -366,6 +454,282 @@ def _dashboard_filters(st: object) -> dict[str, object]:
     return {"query": query, "statuses": statuses}
 
 
+def _apply_design_theme(st: object) -> None:
+    st.markdown(
+        """
+        <style>
+        :root {
+          --maestro-primary: #5e6ad2;
+          --maestro-primary-hover: #828fff;
+          --maestro-primary-focus: #5e69d1;
+          --maestro-ink: #f7f8f8;
+          --maestro-ink-muted: #d0d6e0;
+          --maestro-ink-subtle: #8a8f98;
+          --maestro-canvas: #010102;
+          --maestro-surface-1: #0f1011;
+          --maestro-surface-2: #141516;
+          --maestro-surface-3: #18191a;
+          --maestro-hairline: #23252a;
+          --maestro-hairline-strong: #34343a;
+          --maestro-success: #27a644;
+          --maestro-danger: #d06262;
+          --maestro-warning: #d0a85c;
+        }
+        .stApp {
+          background: var(--maestro-canvas);
+          color: var(--maestro-ink);
+          font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont,
+            "Segoe UI", sans-serif;
+        }
+        .block-container {
+          max-width: 1280px;
+          padding-top: 32px;
+          padding-bottom: 64px;
+        }
+        h1, h2, h3, h4, h5, h6, p, label, span {
+          letter-spacing: 0;
+        }
+        h1, h2, h3 {
+          color: var(--maestro-ink);
+          font-weight: 600;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+          gap: 4px;
+          background: var(--maestro-surface-1);
+          border: 1px solid var(--maestro-hairline);
+          border-radius: 8px;
+          padding: 4px;
+        }
+        .stTabs [data-baseweb="tab"] {
+          border-radius: 6px;
+          color: var(--maestro-ink-subtle);
+          padding: 8px 12px;
+        }
+        .stTabs [aria-selected="true"] {
+          background: var(--maestro-surface-3);
+          color: var(--maestro-ink);
+        }
+        .stDataFrame, [data-testid="stDataFrame"] {
+          border: 1px solid var(--maestro-hairline);
+          border-radius: 8px;
+          overflow: hidden;
+          background: var(--maestro-surface-1);
+        }
+        [data-testid="stSidebar"] {
+          background: #09090a;
+          border-right: 1px solid var(--maestro-hairline);
+        }
+        .stButton > button, .stDownloadButton > button {
+          background: var(--maestro-surface-1);
+          color: var(--maestro-ink);
+          border: 1px solid var(--maestro-hairline);
+          border-radius: 8px;
+          min-height: 40px;
+        }
+        .stButton > button[kind="primary"] {
+          background: var(--maestro-primary);
+          color: #ffffff;
+          border-color: var(--maestro-primary);
+        }
+        .stButton > button:hover, .stDownloadButton > button:hover {
+          border-color: var(--maestro-hairline-strong);
+          color: var(--maestro-ink);
+        }
+        .stButton > button:focus, .stDownloadButton > button:focus {
+          box-shadow: 0 0 0 2px rgba(94, 105, 209, 0.45);
+          outline: none;
+        }
+        .maestro-header {
+          border: 1px solid var(--maestro-hairline);
+          background: var(--maestro-surface-1);
+          border-radius: 8px;
+          padding: 24px;
+          margin-bottom: 16px;
+        }
+        .maestro-eyebrow {
+          color: var(--maestro-primary-hover);
+          font-size: 13px;
+          font-weight: 500;
+          margin-bottom: 8px;
+        }
+        .maestro-title {
+          color: var(--maestro-ink);
+          font-size: 40px;
+          font-weight: 600;
+          line-height: 1.15;
+          margin: 0 0 8px 0;
+        }
+        .maestro-subtitle {
+          color: var(--maestro-ink-muted);
+          font-size: 15px;
+          line-height: 1.5;
+          margin: 0;
+        }
+        .maestro-section {
+          margin: 24px 0 12px 0;
+        }
+        .maestro-section-title {
+          color: var(--maestro-ink);
+          font-size: 22px;
+          font-weight: 600;
+          margin: 0;
+        }
+        .maestro-section-copy {
+          color: var(--maestro-ink-subtle);
+          font-size: 13px;
+          margin-top: 4px;
+        }
+        .maestro-metric-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+          gap: 8px;
+          margin: 12px 0 18px 0;
+        }
+        .maestro-metric {
+          border: 1px solid var(--maestro-hairline);
+          background: var(--maestro-surface-1);
+          border-radius: 8px;
+          padding: 14px;
+          min-height: 86px;
+        }
+        .maestro-metric-label {
+          color: var(--maestro-ink-subtle);
+          font-size: 12px;
+          line-height: 1.35;
+          margin-bottom: 10px;
+        }
+        .maestro-metric-value {
+          color: var(--maestro-ink);
+          font-size: 20px;
+          font-weight: 600;
+          line-height: 1.2;
+          word-break: break-word;
+        }
+        .maestro-tone-success { border-color: rgba(39, 166, 68, 0.45); }
+        .maestro-tone-warning { border-color: rgba(208, 168, 92, 0.55); }
+        .maestro-tone-danger { border-color: rgba(208, 98, 98, 0.65); }
+        .maestro-tone-primary { border-color: rgba(94, 106, 210, 0.65); }
+        .maestro-badge-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 10px 0 14px 0;
+        }
+        .maestro-badge {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          background: var(--maestro-surface-2);
+          color: var(--maestro-ink-muted);
+          border: 1px solid var(--maestro-hairline);
+          border-radius: 9999px;
+          padding: 3px 9px;
+          font-size: 12px;
+          line-height: 1.4;
+        }
+        .maestro-badge strong {
+          color: var(--maestro-ink);
+          font-weight: 500;
+        }
+        .maestro-banner {
+          border: 1px solid var(--maestro-hairline);
+          background: var(--maestro-surface-1);
+          border-radius: 8px;
+          padding: 14px 16px;
+          margin: 12px 0;
+        }
+        .maestro-banner-title {
+          color: var(--maestro-ink);
+          font-size: 14px;
+          font-weight: 600;
+          margin-bottom: 4px;
+        }
+        .maestro-banner-copy {
+          color: var(--maestro-ink-subtle);
+          font-size: 13px;
+        }
+        .maestro-table-title {
+          display: flex;
+          align-items: baseline;
+          justify-content: space-between;
+          gap: 12px;
+          margin: 20px 0 8px 0;
+        }
+        .maestro-table-title strong {
+          color: var(--maestro-ink);
+          font-size: 16px;
+          font-weight: 600;
+        }
+        .maestro-table-title span {
+          color: var(--maestro-ink-tertiary, #62666d);
+          font-size: 12px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _page_header(st: object, mode: str) -> None:
+    st.markdown(
+        f"""
+        <div class="maestro-header">
+          <div class="maestro-eyebrow">SYMPHONY / MAESTRO</div>
+          <h1 class="maestro-title">Maestro Dashboard</h1>
+          <p class="maestro-subtitle">
+            Read-only portfolio OS visibility for stock/ETF and KIS
+            domestic/overseas workflows.
+          </p>
+          {_badge_row([("Mode", mode, "primary"), ("Access", "read-only", "success")])}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _section_header(st: object, title: str, copy: str | None = None) -> None:
+    copy_html = f'<div class="maestro-section-copy">{_escape(copy)}</div>' if copy else ""
+    st.markdown(
+        f"""
+        <div class="maestro-section">
+          <h2 class="maestro-section-title">{_escape(title)}</h2>
+          {copy_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _metric_strip(st: object, metrics: list[tuple[str, object, str]]) -> None:
+    cards = []
+    for label, value, tone in metrics:
+        tone_class = _tone_class(tone)
+        cards.append(
+            f"""
+            <div class="maestro-metric {tone_class}">
+              <div class="maestro-metric-label">{_escape(label)}</div>
+              <div class="maestro-metric-value">{_escape(value)}</div>
+            </div>
+            """
+        )
+    st.markdown(
+        f'<div class="maestro-metric-grid">{"".join(cards)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _status_banner(st: object, title: str, copy: str, tone: str) -> None:
+    st.markdown(
+        f"""
+        <div class="maestro-banner {_tone_class(tone)}">
+          <div class="maestro-banner-title">{_escape(title)}</div>
+          <div class="maestro-banner-copy">{_escape(copy)}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _table(
     st: object,
     title: str,
@@ -374,7 +738,15 @@ def _table(
     filters: dict[str, object] | None = None,
 ) -> None:
     display_rows = _filter_rows(rows, filters or {})
-    st.subheader(title)
+    st.markdown(
+        f"""
+        <div class="maestro-table-title">
+          <strong>{_escape(title)}</strong>
+          <span>{len(display_rows)} / {len(rows)} rows</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.dataframe(display_rows, width="stretch")
     st.download_button(
         "Download CSV",
@@ -422,6 +794,69 @@ def _row_matches_status(row: dict[str, object], statuses: set[str]) -> bool:
         if row.get(key) is not None
     }
     return bool(candidates & statuses)
+
+
+def _badge_row(badges: list[tuple[str, object, str]]) -> str:
+    return (
+        '<div class="maestro-badge-row">'
+        + "".join(
+            f'<span class="maestro-badge {_tone_class(tone)}">'
+            f"{_escape(label)} <strong>{_escape(value)}</strong></span>"
+            for label, value, tone in badges
+        )
+        + "</div>"
+    )
+
+
+def _tone_class(tone: str | None) -> str:
+    return {
+        "success": "maestro-tone-success",
+        "warning": "maestro-tone-warning",
+        "danger": "maestro-tone-danger",
+        "fail": "maestro-tone-danger",
+        "error": "maestro-tone-danger",
+        "primary": "maestro-tone-primary",
+    }.get(str(tone or "neutral"), "")
+
+
+def _status_tone(value: object) -> str:
+    normalized = str(value or "").lower()
+    if normalized in {"ok", "active", "fresh", "passed", "approved", "completed", "filled"}:
+        return "success"
+    if normalized in {"warn", "warning", "stale", "missing", "open", "partially_filled"}:
+        return "warning"
+    if normalized in {"fail", "failed", "halted", "killed", "rejected", "unknown"}:
+        return "danger"
+    return "neutral"
+
+
+def _boolean_tone(value: object) -> str:
+    if value is True:
+        return "success"
+    if value is False:
+        return "danger"
+    return "warning"
+
+
+def _count_tone(value: object) -> str:
+    return "warning" if float(value or 0) > 0 else "success"
+
+
+def _limit_tone(value: object, limit: object) -> str:
+    current = float(value or 0)
+    maximum = float(limit or 0)
+    if maximum <= 0:
+        return "neutral"
+    ratio = current / maximum
+    if ratio >= 1:
+        return "danger"
+    if ratio >= 0.8:
+        return "warning"
+    return "success"
+
+
+def _escape(value: object) -> str:
+    return html.escape(str(value))
 
 
 def _rows_to_csv(rows: list[dict[str, object]]) -> str:
