@@ -13,6 +13,8 @@ or Telegram admin controls.
    canonical symbols.
 3. KIS read-only: run real account sync and broker reconciliation with an
    operator-local read-only config.
+   Paper SQLite state is not promoted into live truth; the live baseline is the
+   broker snapshot accepted through `adopt-broker-snapshot`.
 4. Telegram approval smoke: verify the real bot can reach only the configured
    chats and requires whitelisted users for approvals.
 5. Live dry-run: set `execution.live_order_dry_run=true`, run approval-gated
@@ -28,14 +30,18 @@ or Telegram admin controls.
 
 - Copy an example config outside source control and use operator-owned state,
   audit, and token-cache paths.
+- Use one operator config for `run-once`, read-only sync, reconciliation,
+  health, Telegram operator, dashboard, and systemd timers. Do not use a
+  Telegram-only config to represent the live operator state.
 - Keep secrets in environment variables only: KIS app key, KIS app secret,
   optional KIS access token, and Telegram bot token.
 - Confirm `portfolio.allowed_symbols`, `universe.instruments`, DataHub symbol
   maps, and KIS broker symbols describe the same intended instruments.
 - Keep `execution.live_order_enabled=false` until read-only sync,
   reconciliation, Telegram smoke, and live dry-run all pass.
-- Use small `max_live_order_notional`, `max_daily_live_notional`, and
-  `max_daily_live_order_count` values for the first order.
+- Use small `execution.live_order_limits.max_order_notional`,
+  `execution.live_order_limits.max_daily_notional`, and
+  `execution.live_order_limits.max_daily_order_count` values for the first order.
 - Enable market-session and broker-quote validation in the operator config once
   the required market calendar and broker snapshot flow are verified.
 - Enable broker-risk validation only after the latest broker snapshot is

@@ -93,8 +93,10 @@ def test_run_once_live_approval_uses_lifecycle_with_fake_clients(
         "engine": "paper",
         "live_order_enabled": True,
         "require_reconciliation_pass": True,
-        "max_live_order_notional": 5_000_000.0,
-        "max_daily_live_notional": 10_000_000.0,
+        "live_order_limits": {
+            "max_order_notional": 5_000_000.0,
+            "max_daily_notional": 10_000_000.0,
+        },
         "order_status_max_polls": 1,
         "order_status_poll_interval_seconds": 0.0,
     }
@@ -160,10 +162,12 @@ def test_live_approval_order_generation_uses_broker_quote_snapshot(
         "live_order_enabled": False,
         "live_order_dry_run": True,
         "require_reconciliation_pass": False,
-        "require_broker_quote_validation": True,
-        "max_live_order_notional": 5_000_000.0,
-        "max_daily_live_notional": 10_000_000.0,
-        "max_daily_live_order_count": 3,
+        "broker_validation": {"require_quote_validation": True},
+        "live_order_limits": {
+            "max_order_notional": 5_000_000.0,
+            "max_daily_notional": 10_000_000.0,
+            "max_daily_order_count": 3,
+        },
     }
     raw["approval"] = {
         "enabled": True,
@@ -573,9 +577,9 @@ def _overseas_live_approval_config(
     raw["datahub"] = {"provider": "csv", "csv_path": str(csv_path)}
     raw["execution"]["live_order_enabled"] = True
     raw["execution"]["live_order_dry_run"] = dry_run
-    raw["execution"]["max_live_order_notional"] = 500
-    raw["execution"]["max_daily_live_notional"] = 1000
-    raw["execution"]["max_daily_live_order_count"] = 3
+    raw["execution"]["live_order_limits"]["max_order_notional"] = 500
+    raw["execution"]["live_order_limits"]["max_daily_notional"] = 1000
+    raw["execution"]["live_order_limits"]["max_daily_order_count"] = 3
     raw["execution"]["order_status_max_polls"] = max_polls
     raw["execution"]["order_status_poll_interval_seconds"] = 0.0
     raw["risk"] = {"max_single_asset_weight": 1.0, "min_cash_weight": 0.0}

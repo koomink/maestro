@@ -414,7 +414,8 @@
 - [x] Add KIS overseas pre-submit buying-power check using the exact live order
       limit price
 - [x] Add position, per-symbol notional, and portfolio exposure limits
-- [x] Normalize broker PnL enough to enforce `execution.daily_loss_limit`
+- [x] Normalize broker PnL enough to enforce
+      `execution.live_order_limits.daily_loss_limit`
 - [x] Account for fees, settlement, pending orders, and manual broker activity in
       live approval safety checks
 - [x] Add fake-client tests for risk fail-closed behavior
@@ -531,6 +532,25 @@
 - [x] Scope the Ataraxia domestic ETF KIS promotion to mock-investment
       `paper_trading=true` broker submit and document the four scheduled-cycle
       pilot
+
+### Hybrid Operator Hardening
+
+- [x] Define `mode`, `profile`, and `operator config` terminology in docs
+- [x] Document that Telegram and dashboard are long-running operator services
+      inside the current hybrid operator architecture
+- [x] Add StateStore writer lock for shared SQLite state before overlapping
+      scheduled writer jobs are allowed
+- [x] Add config fingerprint and canonical config path recording to
+      heartbeat, audit, and state metadata
+- [x] Add drift check for opening the same state DB with a different
+      config identity
+- [x] Add `MAESTRO_CONFIG` fallback so operator services can share one config
+      path without repeating `--config` in every command
+- [x] Surface config path, fingerprint, state path, and audit path in
+      Telegram/dashboard operator status
+- [x] Update systemd docs to use one operator config across services and timers
+- [x] Document broker snapshot adoption as the live baseline transition instead
+      of promoting paper SQLite state
 
 ### Telegram Operator UI
 

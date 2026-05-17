@@ -25,6 +25,7 @@ def build_overview(store: StateStore) -> dict[str, Any]:
         "system_events_count": counts.get("system_events", 0),
         "latest_run_id": latest_snapshot.get("run_id"),
         "latest_run_time": latest_snapshot.get("created_at"),
+        "operator_config": status.get("operator_config"),
     }
 
 
@@ -45,6 +46,7 @@ def build_operator_home(config: MaestroConfig, store: StateStore) -> dict[str, A
     return {
         "status": status,
         "mode": str(config.mode),
+        "operator_config": overview.get("operator_config"),
         "latest_run_id": overview.get("latest_run_id"),
         "latest_run_time": overview.get("latest_run_time"),
         "attention_count": len(attention_items),
@@ -77,12 +79,12 @@ def build_freshness_table(config: MaestroConfig, store: StateStore) -> list[dict
         _freshness_row(
             "heartbeat",
             heartbeat,
-            config.execution.heartbeat_max_age_seconds,
+            config.monitoring.heartbeat_max_age_seconds,
         ),
         _freshness_row(
             "scheduled_run",
             scheduled_run,
-            config.execution.scheduled_run_max_age_seconds,
+            config.monitoring.scheduled_run_max_age_seconds,
         ),
     ]
 
@@ -1078,9 +1080,9 @@ def build_daily_live_order_usage(config: MaestroConfig, store: StateStore) -> di
     return {
         "date": today,
         "order_count": count,
-        "max_daily_live_order_count": config.execution.max_daily_live_order_count,
+        "max_daily_live_order_count": config.execution.live_order_limits.max_daily_order_count,
         "notional": notional,
-        "max_daily_live_notional": config.execution.max_daily_live_notional,
+        "max_daily_live_notional": config.execution.live_order_limits.max_daily_notional,
     }
 
 

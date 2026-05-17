@@ -146,6 +146,36 @@ Current runnable modes are:
 - Broker read-only mode with `configs/live_readonly.yaml`
 - Approval-gated live mode with `configs/live_approval.yaml`
 
+Current operator architecture is a hybrid operator architecture: one-shot CLI
+jobs such as `run-once`, `kis-sync`, `reconcile`, and `health` coexist with
+long-running operator services such as `telegram-operator` and the Streamlit
+dashboard, all reading the configured SQLite state and JSONL audit paths. It is
+not yet a single always-on Maestro daemon with one in-memory runtime.
+
+Use these terms consistently:
+
+- `mode`: the safety contract enforced by config validation:
+  `paper`, `live_readonly`, or `live_approval`.
+- `profile`: an operator recipe made from mode plus strategy, DataHub, KIS,
+  approval, execution, reconciliation, monitoring, state, and audit settings.
+- `operator config`: the one operator-local YAML file used by all Maestro
+  commands and services for a running deployment.
+
+For real operator deployments, `run-once`, `kis-sync`, `reconcile`, `health`,
+`telegram-operator`, dashboard, and systemd timers must use the same operator
+config, state DB path, and audit path. Separate Telegram-only configs are only
+for isolated tests or examples; they must not be treated as the live operator
+state. Commands still accept `--config`, but operator services should normally
+set `MAESTRO_CONFIG` once and let every CLI process use that same path by
+default. SQLite currently uses connection timeout, `busy_timeout`, and WAL mode
+for CLI/dashboard coexistence. Maestro also records the operator config path and
+config fingerprint in state metadata, rejects the same state DB being opened
+with a different config identity, records that identity in heartbeat/audit
+payloads, surfaces config/state/audit paths in operator status views, and
+serializes state writes through a StateStore writer lock. A future daemon
+architecture remains deferred until scheduling, approval polling, status
+polling, and recovery need one coordinated runtime.
+
 The root `configs/` directory intentionally contains only these operator-facing
 mode skeletons. Concrete recipes such as CSV paper, Yahoo paper, deterministic
 mock KIS read-only, US ETF live approval, multi-provider research, multi-asset
@@ -347,14 +377,15 @@ Daily loss limits are enforced from normalized broker PnL fields in the latest
 broker snapshot. Maestro first uses account-level `daily_pnl`/`today_pnl` style
 fields when present, then falls back to summed position `unrealized_pnl`.
 
-For real-account rehearsals, `execution.require_broker_risk_validation=true`
+For real-account rehearsals,
+`execution.broker_validation.require_risk_validation=true`
 adds a broker-snapshot risk gate before approval submission. It checks settled
-buying power with `execution.live_order_fee_buffer_pct`, post-order cash reserve,
-per-symbol exposure, portfolio exposure, pending broker orders, and whether the
-latest broker snapshot is the one that passed reconciliation. When
-`execution.require_broker_quote_validation=true`, live approval order generation
-can reuse the latest broker snapshot's validated `current_prices` as the limit
-price basis instead of drifting from the broker quote checked during
+buying power with `execution.live_order_limits.fee_buffer_pct`, post-order cash
+reserve, per-symbol exposure, portfolio exposure, pending broker orders, and
+whether the latest broker snapshot is the one that passed reconciliation. When
+`execution.broker_validation.require_quote_validation=true`, live approval order
+generation can reuse the latest broker snapshot's validated `current_prices` as
+the limit price basis instead of drifting from the broker quote checked during
 reconciliation. For KIS domestic and overseas buy orders, the live-order adapter
 also rechecks KIS buying power and max buy quantity with the actual limit price
 immediately before broker submit and rejects the order if KIS reports
@@ -425,10 +456,12 @@ execution:
   engine: paper
   live_order_enabled: false
   require_reconciliation_pass: true
-  max_live_order_notional: 0
-  max_daily_live_notional: 0
-  max_daily_live_order_count: 0
-  daily_loss_limit: null
+  live_order_limits:
+    max_order_notional: 0
+    max_daily_notional: 0
+    max_daily_order_count: 0
+    daily_loss_limit: null
+    fee_buffer_pct: 0
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20
@@ -804,10 +837,13 @@ operator has accepted that snapshot as the rehearsal baseline, records
 Live configs do not set `portfolio.initial_cash`; KIS cash and positions become
 Maestro's live baseline only after this adoption step. `live_approval run-once`
 fails closed until a broker snapshot has been adopted.
+The paper-to-live promotion path does not promote the paper SQLite DB into live
+truth. Paper runs validate strategy behavior; live readiness starts from broker
+truth through `kis-sync`, reconciliation, and `adopt-broker-snapshot`.
 
 `heartbeat` records `maestro_heartbeat` for operator schedulers. When
-`execution.heartbeat_max_age_seconds` or
-`execution.scheduled_run_max_age_seconds` are set in an operator config,
+`monitoring.heartbeat_max_age_seconds` or
+`monitoring.scheduled_run_max_age_seconds` are set in an operator config,
 `maestro health` fails on missed heartbeat or missed scheduled `run-once`.
 `ops-alerts` sends current health warnings/failures to configured Telegram
 approval chats; `--allow-mock` validates the escalation path without network.

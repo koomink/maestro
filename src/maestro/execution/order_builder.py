@@ -237,7 +237,7 @@ class OrderBuilder:
             if current_state.cash_by_currency
             else current_state.cash
         )
-        available = cash * max(0.0, 1.0 - self.config.live_order_fee_buffer_pct)
+        available = cash * max(0.0, 1.0 - self.config.live_order_limits.fee_buffer_pct)
         return min(contribution.monthly_budget, available)
 
     def _contribution_budget_by_symbol(
@@ -295,10 +295,11 @@ class OrderBuilder:
         return f"{local_date.year:04d}-{local_date.month:02d}"
 
     def _local_date(self, as_of: datetime | None) -> date:
-        timestamp = as_of or datetime.now(ZoneInfo(self.config.market_session_timezone))
+        market_session = self.config.market_session
+        timestamp = as_of or datetime.now(ZoneInfo(market_session.timezone))
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=ZoneInfo(self.config.market_session_timezone))
-        return timestamp.astimezone(ZoneInfo(self.config.market_session_timezone)).date()
+            timestamp = timestamp.replace(tzinfo=ZoneInfo(market_session.timezone))
+        return timestamp.astimezone(ZoneInfo(market_session.timezone)).date()
 
     def _effective_contribution_date(self, year: int, month: int) -> date:
         _, last_day = calendar.monthrange(year, month)
@@ -309,6 +310,6 @@ class OrderBuilder:
 
     def _is_trading_day(self, candidate: date) -> bool:
         return (
-            candidate.weekday() in self.config.market_session_weekdays
-            and candidate.isoformat() not in self.config.market_session_holidays
+            candidate.weekday() in self.config.market_session.weekdays
+            and candidate.isoformat() not in self.config.market_session.holidays
         )

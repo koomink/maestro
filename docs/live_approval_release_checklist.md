@@ -53,24 +53,24 @@ For the complete operator-local promotion runbook, see
 - Confirm `execution.require_reconciliation_pass=true`.
 - Confirm per-order and daily live notional caps are small enough for the first
   operator-approved order.
-- Confirm `execution.max_daily_live_order_count` is small enough for the first
-  operator-approved run.
-- Enable `execution.require_market_session=true` only after the operator config
+- Confirm `execution.live_order_limits.max_daily_order_count` is small enough
+  for the first operator-approved run.
+- Enable `execution.market_session.required=true` only after the operator config
   has the intended venue timezone, open/close times, weekdays, and holiday list.
-- Enable `execution.require_broker_quote_validation=true` only after KIS
-  read-only sync writes current prices for the intended order symbols.
-- Enable `execution.require_broker_risk_validation=true` only after the latest
-  KIS read-only snapshot is reconciled and includes cash, buying power, current
-  prices, positions, and unfilled orders.
+- Enable `execution.broker_validation.require_quote_validation=true` only after
+  KIS read-only sync writes current prices for the intended order symbols.
+- Enable `execution.broker_validation.require_risk_validation=true` only after
+  the latest KIS read-only snapshot is reconciled and includes cash, buying
+  power, current prices, positions, and unfilled orders.
 - Confirm KIS overseas buy orders perform a pre-submit `/inquire-psamount`
   check with the exact limit price, and fail closed on insufficient buying power
   or max buy quantity.
-- Set `execution.live_order_fee_buffer_pct` to the operator's conservative
+- Set `execution.live_order_limits.fee_buffer_pct` to the operator's conservative
   commission/fee cushion before the first real order.
-- Set `execution.daily_loss_limit` only after the operator has verified which
-  normalized broker PnL field the account snapshot provides.
-- Set `execution.heartbeat_max_age_seconds` and
-  `execution.scheduled_run_max_age_seconds` in operator deployments that run on a
+- Set `execution.live_order_limits.daily_loss_limit` only after the operator has
+  verified which normalized broker PnL field the account snapshot provides.
+- Set `monitoring.heartbeat_max_age_seconds` and
+  `monitoring.scheduled_run_max_age_seconds` in operator deployments that run on a
   schedule.
 - Confirm required DataHub price data is fresh before live approval.
 - Confirm the dashboard remains read-only.
@@ -323,8 +323,8 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 - Halt when broker risk validation detects insufficient buying power, cash
   reserve breach, symbol or portfolio exposure breach, pending broker orders, or
   unreconciled broker snapshot/manual broker activity.
-- Halt when `execution.daily_loss_limit` is exceeded or broker PnL is unavailable
-  while the limit is configured.
+- Halt when `execution.live_order_limits.daily_loss_limit` is exceeded or broker
+  PnL is unavailable while the limit is configured.
 - Halt or fail when broker reconciliation fails after a fill update.
 - Do not retry blindly after any halt/failure.
 - Preserve state and audit files for review.

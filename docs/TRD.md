@@ -231,6 +231,36 @@ database caches, or broker behavior.
 - JSONL for append-only audit logs
 - pytest for tests
 
+### 3.1.1 Current Operator Architecture
+
+Maestro currently uses a hybrid operator architecture, not a single always-on
+daemon. One-shot CLI jobs (`run-once`, `kis-sync`, `reconcile`, `health`, and
+related recovery commands) coexist with long-running operator services
+(`telegram-operator` and the Streamlit dashboard). These processes coordinate
+through the configured SQLite state DB and JSONL audit log.
+
+Every process in one deployment should use the same operator-local config,
+state DB, and audit log. `mode` is the validated safety contract
+(`paper`, `live_readonly`, or `live_approval`); a `profile` is the broader
+operator recipe made from mode plus strategy, data, KIS, approval, execution,
+reconciliation, monitoring, state, and audit settings. The operator config is
+the single YAML file that carries that profile for a deployment. CLI commands
+accept `--config`, but scheduled/operator services should normally resolve this
+shared path from `MAESTRO_CONFIG`.
+
+SQLite currently uses connection timeout, `busy_timeout`, and WAL mode for
+basic multi-process coexistence. StateStore also serializes writes with a
+writer lock, stores the operator config path and config fingerprint in state
+metadata, rejects the same state DB being opened with a different config
+identity, and includes config identity in heartbeat/audit payloads. This is the
+current daemon-before safety boundary for CLI jobs plus Telegram/dashboard
+services. Operator status surfaces config identity plus state/audit paths so a
+running process can be checked against the intended deployment config.
+
+Daemonization is deferred until Maestro needs a central scheduler/job queue,
+coordinated approval/status polling, or live-order recovery that cannot be
+reliably handled by one-shot jobs plus explicit locks.
+
 ### 3.2 Future Integrations
 
 - Streamlit for early read-only dashboard
@@ -289,8 +319,8 @@ database caches, or broker behavior.
   no `live_auto` mode.
 - Live orders are disabled by default with:
   `live_order_enabled=false`, `require_reconciliation_pass=true`,
-  `max_live_order_notional=0`, `max_daily_live_notional=0`, and
-  `allowed_order_type=limit`.
+  `live_order_limits.max_order_notional=0`,
+  `live_order_limits.max_daily_notional=0`, and `allowed_order_type=limit`.
 - `LiveOrderSafetyService` is the only internal live order submission boundary.
   It requires an approved approval decision, the latest `broker_reconciliation`
   event to pass, limit orders only, per-order and daily notional caps,
@@ -305,11 +335,11 @@ database caches, or broker behavior.
 - `execution.live_order_dry_run=true` keeps the live approval path through
   strategy, risk, reconciliation, and approval, then persists `live_order_dry_run`
   events without calling the broker submit adapter.
-- When `execution.require_broker_quote_validation=true`, order generation can
-  reuse the latest broker account snapshot's validated `current_prices` as the
-  live approval limit-price basis. This keeps the generated order aligned with
-  the broker quote snapshot used for execution validation without making broker
-  quotes a strategy research feed.
+- When `execution.broker_validation.require_quote_validation=true`, order
+  generation can reuse the latest broker account snapshot's validated
+  `current_prices` as the live approval limit-price basis. This keeps the
+  generated order aligned with the broker quote snapshot used for execution
+  validation without making broker quotes a strategy research feed.
 - `maestro live-preflight --config ...` exposes the live approval safety
   preflight as a scriptable CLI gate and exits nonzero on preflight failure.
 - `maestro adopt-broker-snapshot --config ... --reason ...` is a state-only
@@ -853,6 +883,16 @@ audit:
 
 Maestro v0.1.1 uses strict Pydantic config validation. Unknown YAML fields fail
 loudly instead of being ignored.
+
+Execution config uses nested `execution.market_session` and
+`execution.broker_validation` blocks and the `execution.live_order_limits` block
+as the canonical schema. The older flat market-session, broker-validation, and
+live-order-limit keys remain accepted for one migration release, but configs
+must not mix legacy keys with the corresponding nested block.
+Operator freshness thresholds live in the top-level `monitoring` block. The
+older `execution.heartbeat_max_age_seconds` and
+`execution.scheduled_run_max_age_seconds` keys remain accepted for one migration
+release, but configs must not mix them with `monitoring`.
 
 Static `allowed_symbols` is valid as an explicit safety override. When omitted,
 Maestro derives it from `portfolio.currency_sleeves` or, for single-allocation

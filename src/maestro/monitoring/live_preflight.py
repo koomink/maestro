@@ -11,11 +11,12 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
         failures.append("reconciliation_not_required")
     if config.execution.allowed_order_type != OrderType.LIMIT:
         failures.append("non_limit_order_type")
-    if config.execution.max_live_order_notional <= 0:
+    limits = config.execution.live_order_limits
+    if limits.max_order_notional <= 0:
         failures.append("missing_per_order_notional_cap")
-    if config.execution.max_daily_live_notional <= 0:
+    if limits.max_daily_notional <= 0:
         failures.append("missing_daily_notional_cap")
-    if config.execution.max_daily_live_order_count <= 0:
+    if limits.max_daily_order_count <= 0:
         warnings.append("unbounded_daily_order_count")
     if not config.approval.enabled or not config.approval.require_approval:
         failures.append("approval_not_required")

@@ -11,17 +11,17 @@ def private_beta_failures(config: MaestroConfig, report: HealthReport) -> list[s
         failures.append("live_order_disabled")
     if config.execution.live_order_dry_run:
         failures.append("live_order_dry_run_enabled")
-    if not config.execution.require_market_session:
+    if not config.execution.market_session.required:
         failures.append("market_session_not_required")
-    if not config.execution.require_broker_quote_validation:
+    if not config.execution.broker_validation.require_quote_validation:
         failures.append("broker_quote_validation_not_required")
-    if not config.execution.require_broker_risk_validation:
+    if not config.execution.broker_validation.require_risk_validation:
         failures.append("broker_risk_validation_not_required")
-    if config.execution.daily_loss_limit is None:
+    if config.execution.live_order_limits.daily_loss_limit is None:
         failures.append("daily_loss_limit_missing")
-    if config.execution.heartbeat_max_age_seconds <= 0:
+    if config.monitoring.heartbeat_max_age_seconds <= 0:
         failures.append("heartbeat_monitoring_missing")
-    if config.execution.scheduled_run_max_age_seconds <= 0:
+    if config.monitoring.scheduled_run_max_age_seconds <= 0:
         failures.append("scheduled_run_monitoring_missing")
     if checks.get("live_approval_preflight") is None:
         failures.append("live_approval_preflight_missing")

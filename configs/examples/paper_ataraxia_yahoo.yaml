@@ -71,10 +71,11 @@ datahub:
 execution:
   engine: paper
   order_generation_mode: buy_only_contribution
-  market_session_timezone: Asia/Seoul
-  market_session_open: "09:00"
-  market_session_close: "15:30"
-  market_session_weekdays: [0, 1, 2, 3, 4]
+  market_session:
+    timezone: Asia/Seoul
+    open: "09:00"
+    close: "15:30"
+    weekdays: [0, 1, 2, 3, 4]
   contribution:
     enabled: true
     currency: KRW

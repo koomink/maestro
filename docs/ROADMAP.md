@@ -369,15 +369,16 @@ Completed scope:
 - Add KIS domestic and overseas pre-submit buying-power/max-quantity validation
   using the exact live order limit price before calling the broker order
   endpoint.
-- Normalize broker PnL enough to enforce `execution.daily_loss_limit` instead of
-  failing closed when it is configured.
+- Normalize broker PnL enough to enforce
+  `execution.live_order_limits.daily_loss_limit` instead of failing closed when
+  it is configured.
 - Account for fees, settlement, pending orders, and manual broker activity where
   they affect live approval safety.
 - Keep all live orders approval-gated and limit-order-only.
 
 The broker risk gate is explicit and operator-enabled through
-`execution.require_broker_risk_validation=true`; normal tests remain fake-client
-based and do not call KIS or Telegram network endpoints.
+`execution.broker_validation.require_risk_validation=true`; normal tests remain
+fake-client based and do not call KIS or Telegram network endpoints.
 
 ## v0.8.4 — Live Order Recovery
 
@@ -406,8 +407,8 @@ Completed scope:
 
 - Add heartbeat and scheduled-run monitoring for operator deployments through
   `maestro heartbeat`, `maestro_heartbeat` events, `run_once_completed` events,
-  and health checks governed by `execution.heartbeat_max_age_seconds` and
-  `execution.scheduled_run_max_age_seconds`.
+  and health checks governed by `monitoring.heartbeat_max_age_seconds` and
+  `monitoring.scheduled_run_max_age_seconds`.
 - Add Telegram error escalation for halt, failure, stale data, reconciliation
   failure, and missed heartbeat events through `maestro ops-alerts`.
 - Add audit hash-chain integrity checks for JSONL audit events.
@@ -492,6 +493,34 @@ This milestone packages the existing private beta pieces for one operator. It
 does not add `live_auto`, market orders, direct broker trading CLI commands,
 dashboard write controls, or high-risk Telegram controls such as resume,
 clear-halt, live enablement, direct trading, or risk changes.
+
+## Post-v1.1 — Hybrid Operator Hardening
+
+Completed scope:
+
+- Treat the current deployment model as a hybrid operator architecture:
+  one-shot CLI jobs plus long-running Telegram/dashboard services sharing
+  SQLite state and JSONL audit logs.
+- Require one operator config for all services and timers in a deployment:
+  `run-once`, `kis-sync`, `reconcile`, `health`, `telegram-operator`, and the
+  dashboard must point at the same operator-local YAML, state DB, and audit log.
+- Let all CLI services resolve that shared operator config from
+  `MAESTRO_CONFIG`, with `--config` kept as an explicit override.
+- Add a StateStore writer lock for shared SQLite writes, with `run-once` holding
+  the lock across the full run.
+- Record config path and config fingerprint in heartbeat/audit/state metadata.
+- Reject the same state DB being opened with a different config identity.
+- Surface mode, config path, config fingerprint, state path, and audit path in
+  operator status views.
+- Update systemd units and timers so examples use the same operator config
+  instead of Telegram-specific or example-only configs.
+- Keep paper-to-live promotion based on broker snapshot adoption, not paper DB
+  promotion.
+
+Daemon conversion remains a later milestone. Move to a single `maestro server`
+or operator daemon when scheduler/job-queue behavior, approval/status polling,
+and live-order recovery need one coordinated runtime, or when file-lock based
+coordination becomes too complex for the live workflow.
 
 ## Post-v1.1 — Telegram Operator UI
 

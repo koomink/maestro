@@ -336,8 +336,8 @@ def test_operator_summary_collects_attention_items_and_live_order_lifecycle(tmp_
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
-    raw["execution"]["max_daily_live_order_count"] = 2
-    raw["execution"]["max_daily_live_notional"] = 200.0
+    raw["execution"]["live_order_limits"]["max_daily_order_count"] = 2
+    raw["execution"]["live_order_limits"]["max_daily_notional"] = 200.0
     config_path = tmp_path / "live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     config = load_config(config_path)
@@ -411,8 +411,10 @@ def test_freshness_table_labels_fresh_stale_missing_and_disabled_rows(tmp_path):
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
     raw.setdefault("reconciliation", {})["max_age_seconds"] = 60
-    raw["execution"]["heartbeat_max_age_seconds"] = 60
-    raw["execution"]["scheduled_run_max_age_seconds"] = 0
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": 60,
+        "scheduled_run_max_age_seconds": 0,
+    }
     config_path = tmp_path / "live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     config = load_config(config_path)

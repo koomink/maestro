@@ -11,6 +11,25 @@ from maestro.datahub.base import build_data_provider
 from maestro.datahub.router import DataHubRouter
 from maestro.sdk import DataRequest
 
+LEGACY_EXECUTION_CONFIG_KEYS = {
+    "require_market_session",
+    "market_session_timezone",
+    "market_session_open",
+    "market_session_close",
+    "market_session_weekdays",
+    "market_session_holidays",
+    "require_broker_quote_validation",
+    "max_broker_quote_deviation_pct",
+    "require_broker_risk_validation",
+    "max_live_order_notional",
+    "max_daily_live_notional",
+    "max_daily_live_order_count",
+    "daily_loss_limit",
+    "live_order_fee_buffer_pct",
+    "heartbeat_max_age_seconds",
+    "scheduled_run_max_age_seconds",
+}
+
 
 def test_invalid_mode_fails(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
@@ -48,26 +67,26 @@ def test_live_order_config_defaults_are_safe():
     assert config.execution.live_order_enabled is False
     assert config.execution.live_order_dry_run is False
     assert config.execution.require_reconciliation_pass is True
-    assert config.execution.max_live_order_notional == 0.0
-    assert config.execution.max_daily_live_notional == 0.0
-    assert config.execution.max_daily_live_order_count == 0
-    assert config.execution.daily_loss_limit is None
+    assert config.execution.live_order_limits.max_order_notional == 0.0
+    assert config.execution.live_order_limits.max_daily_notional == 0.0
+    assert config.execution.live_order_limits.max_daily_order_count == 0
+    assert config.execution.live_order_limits.daily_loss_limit is None
     assert config.execution.allowed_order_type == "limit"
     assert config.execution.order_status_poll_interval_seconds == 30.0
     assert config.execution.order_status_max_polls == 20
     assert config.execution.order_status_terminal_timeout_seconds == 1800.0
-    assert config.execution.require_market_session is False
-    assert config.execution.market_session_timezone == "America/New_York"
-    assert config.execution.market_session_open == "09:30"
-    assert config.execution.market_session_close == "16:00"
-    assert config.execution.market_session_weekdays == [0, 1, 2, 3, 4]
-    assert config.execution.market_session_holidays == []
-    assert config.execution.require_broker_quote_validation is False
-    assert config.execution.max_broker_quote_deviation_pct == 0.05
-    assert config.execution.require_broker_risk_validation is False
-    assert config.execution.live_order_fee_buffer_pct == 0.0
-    assert config.execution.heartbeat_max_age_seconds == 0
-    assert config.execution.scheduled_run_max_age_seconds == 0
+    assert config.execution.market_session.required is False
+    assert config.execution.market_session.timezone == "America/New_York"
+    assert config.execution.market_session.open == "09:30"
+    assert config.execution.market_session.close == "16:00"
+    assert config.execution.market_session.weekdays == [0, 1, 2, 3, 4]
+    assert config.execution.market_session.holidays == []
+    assert config.execution.broker_validation.require_quote_validation is False
+    assert config.execution.broker_validation.max_quote_deviation_pct == 0.05
+    assert config.execution.broker_validation.require_risk_validation is False
+    assert config.execution.live_order_limits.fee_buffer_pct == 0.0
+    assert config.monitoring.heartbeat_max_age_seconds == 0
+    assert config.monitoring.scheduled_run_max_age_seconds == 0
     assert config.universe.policy.max_new_symbols_per_run == 1
     assert [item.value for item in config.universe.policy.allowed_regions] == ["US"]
     assert [item.value for item in config.universe.policy.allowed_currencies] == ["USD"]
@@ -93,11 +112,156 @@ def test_live_order_lifecycle_config_validates_positive_max_polls(tmp_path):
 
 def test_live_order_config_rejects_invalid_market_session_time(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
-    raw["execution"]["market_session_open"] = "25:00"
+    raw["execution"]["market_session"] = {"open": "25:00"}
     config_path = tmp_path / "invalid_market_time.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
-    with pytest.raises(ValidationError, match="market_session_open"):
+    with pytest.raises(ValidationError, match="market_session"):
+        load_config(config_path)
+
+
+def test_execution_nested_blocks_load_canonical_schema(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["market_session"] = {
+        "required": True,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": ["2026-05-05"],
+    }
+    raw["execution"]["broker_validation"] = {
+        "require_quote_validation": True,
+        "max_quote_deviation_pct": 0.02,
+        "require_risk_validation": True,
+    }
+    raw["execution"]["live_order_limits"] = {
+        "max_order_notional": 100,
+        "max_daily_notional": 300,
+        "max_daily_order_count": 3,
+        "daily_loss_limit": 50,
+        "fee_buffer_pct": 0.01,
+    }
+    config_path = tmp_path / "nested_execution.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.execution.market_session.required is True
+    assert config.execution.market_session.timezone == "Asia/Seoul"
+    assert config.execution.market_session.open == "09:00"
+    assert config.execution.market_session.close == "15:30"
+    assert config.execution.market_session.weekdays == [0, 1, 2, 3, 4]
+    assert config.execution.market_session.holidays == ["2026-05-05"]
+    assert config.execution.broker_validation.require_quote_validation is True
+    assert config.execution.broker_validation.max_quote_deviation_pct == 0.02
+    assert config.execution.broker_validation.require_risk_validation is True
+    assert config.execution.live_order_limits.max_order_notional == 100
+    assert config.execution.live_order_limits.max_daily_notional == 300
+    assert config.execution.live_order_limits.max_daily_order_count == 3
+    assert config.execution.live_order_limits.daily_loss_limit == 50
+    assert config.execution.live_order_limits.fee_buffer_pct == 0.01
+
+
+def test_execution_legacy_flat_blocks_migrate_for_one_release(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["require_market_session"] = True
+    raw["execution"]["market_session_timezone"] = "Asia/Seoul"
+    raw["execution"]["market_session_open"] = "09:00"
+    raw["execution"]["market_session_close"] = "15:30"
+    raw["execution"]["market_session_weekdays"] = [0, 1, 2, 3, 4]
+    raw["execution"]["market_session_holidays"] = ["2026-05-05"]
+    raw["execution"]["require_broker_quote_validation"] = True
+    raw["execution"]["max_broker_quote_deviation_pct"] = 0.02
+    raw["execution"]["require_broker_risk_validation"] = True
+    raw["execution"]["max_live_order_notional"] = 100
+    raw["execution"]["max_daily_live_notional"] = 300
+    raw["execution"]["max_daily_live_order_count"] = 3
+    raw["execution"]["daily_loss_limit"] = 50
+    raw["execution"]["live_order_fee_buffer_pct"] = 0.01
+    config_path = tmp_path / "legacy_execution.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.execution.market_session.required is True
+    assert config.execution.market_session.timezone == "Asia/Seoul"
+    assert config.execution.market_session.holidays == ["2026-05-05"]
+    assert config.execution.broker_validation.require_quote_validation is True
+    assert config.execution.broker_validation.max_quote_deviation_pct == 0.02
+    assert config.execution.broker_validation.require_risk_validation is True
+    assert config.execution.live_order_limits.max_order_notional == 100
+    assert config.execution.live_order_limits.max_daily_notional == 300
+    assert config.execution.live_order_limits.max_daily_order_count == 3
+    assert config.execution.live_order_limits.daily_loss_limit == 50
+    assert config.execution.live_order_limits.fee_buffer_pct == 0.01
+
+
+def test_execution_rejects_mixed_legacy_and_nested_blocks(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["market_session"] = {"required": True}
+    raw["execution"]["require_market_session"] = True
+    config_path = tmp_path / "mixed_market_session.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="execution.market_session cannot be mixed"):
+        load_config(config_path)
+
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["broker_validation"] = {"require_quote_validation": True}
+    raw["execution"]["require_broker_quote_validation"] = True
+    config_path = tmp_path / "mixed_broker_validation.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="execution.broker_validation cannot be mixed"):
+        load_config(config_path)
+
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["live_order_limits"] = {"max_order_notional": 100}
+    raw["execution"]["max_live_order_notional"] = 100
+    config_path = tmp_path / "mixed_live_order_limits.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="execution.live_order_limits cannot be mixed"):
+        load_config(config_path)
+
+
+def test_monitoring_loads_top_level_schema(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": 60,
+        "scheduled_run_max_age_seconds": 120,
+    }
+    config_path = tmp_path / "monitoring.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.monitoring.heartbeat_max_age_seconds == 60
+    assert config.monitoring.scheduled_run_max_age_seconds == 120
+
+
+def test_execution_legacy_monitoring_fields_migrate_for_one_release(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["heartbeat_max_age_seconds"] = 60
+    raw["execution"]["scheduled_run_max_age_seconds"] = 120
+    config_path = tmp_path / "legacy_monitoring.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.monitoring.heartbeat_max_age_seconds == 60
+    assert config.monitoring.scheduled_run_max_age_seconds == 120
+
+
+def test_monitoring_rejects_mixed_legacy_execution_fields(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["monitoring"] = {"heartbeat_max_age_seconds": 60}
+    raw["execution"]["heartbeat_max_age_seconds"] = 60
+    config_path = tmp_path / "mixed_monitoring.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="monitoring cannot be mixed"):
         load_config(config_path)
 
 
@@ -270,23 +434,26 @@ def test_signal_to_allocation_unknown_field_fails():
 
 
 def test_current_sample_configs_load():
-    for path in [
+    paths = [
         "configs/paper.yaml",
-        "configs/examples/paper_csv.yaml",
-        "configs/examples/paper_approval_console.yaml",
-        "configs/examples/paper_approval_telegram.yaml",
         "configs/live_readonly.yaml",
-        "configs/examples/live_readonly_mock.yaml",
-        "configs/examples/live_readonly_multi_asset_kis.yaml",
-        "configs/examples/paper_research_multi_provider.yaml",
-        "configs/examples/live_approval_us_etf.yaml",
-        "configs/examples/live_approval_kis_multi_asset.yaml",
-        "configs/examples/live_approval_ataraxia_kis_paper_trading.yaml",
         "configs/live_approval.yaml",
-        "configs/examples/paper_yahoo_us_etf.yaml",
-        "configs/examples/paper_ataraxia_yahoo.yaml",
-    ]:
+        *(str(path) for path in sorted(Path("configs/examples").glob("*.yaml"))),
+    ]
+    assert len(paths) == 14
+    for path in paths:
         assert load_config(path)
+
+
+def test_example_configs_use_canonical_execution_schema():
+    paths = sorted(Path("configs/examples").glob("*.yaml"))
+    assert len(paths) == 11
+    for path in paths:
+        raw = yaml.safe_load(path.read_text())
+        assert load_config(path)
+        execution = raw.get("execution", {})
+        legacy_keys = sorted(LEGACY_EXECUTION_CONFIG_KEYS & set(execution))
+        assert legacy_keys == [], f"{path} still uses legacy execution keys: {legacy_keys}"
 
 
 def test_ataraxia_contribution_config_declares_budget_range_and_domestic_universe():
@@ -320,13 +487,13 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
     assert config.execution.order_generation_mode == "buy_only_contribution"
     assert config.execution.live_order_enabled is False
     assert config.execution.live_order_dry_run is True
-    assert config.execution.require_market_session is True
+    assert config.execution.market_session.required is True
     assert config.execution.require_reconciliation_pass is True
-    assert config.execution.require_broker_quote_validation is True
-    assert config.execution.require_broker_risk_validation is True
-    assert config.execution.daily_loss_limit == 100_000
-    assert config.execution.heartbeat_max_age_seconds == 3600
-    assert config.execution.scheduled_run_max_age_seconds == 86400
+    assert config.execution.broker_validation.require_quote_validation is True
+    assert config.execution.broker_validation.require_risk_validation is True
+    assert config.execution.live_order_limits.daily_loss_limit == 100_000
+    assert config.monitoring.heartbeat_max_age_seconds == 3600
+    assert config.monitoring.scheduled_run_max_age_seconds == 86400
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
@@ -356,9 +523,9 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     assert config.execution.live_order_dry_run is False
     assert config.execution.allowed_order_type == "limit"
     assert config.execution.require_reconciliation_pass is True
-    assert config.execution.require_market_session is True
-    assert config.execution.require_broker_quote_validation is True
-    assert config.execution.require_broker_risk_validation is True
+    assert config.execution.market_session.required is True
+    assert config.execution.broker_validation.require_quote_validation is True
+    assert config.execution.broker_validation.require_risk_validation is True
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.kis.provider == "kis"
@@ -445,10 +612,10 @@ def test_live_approval_root_config_is_minimal_operator_skeleton():
     assert config.execution.live_order_dry_run is True
     assert config.execution.require_reconciliation_pass is True
     assert config.execution.allowed_order_type == "limit"
-    assert config.execution.max_live_order_notional == 100.0
-    assert config.execution.max_daily_live_notional == 300.0
-    assert config.execution.max_daily_live_order_count == 3
-    assert config.execution.daily_loss_limit is None
+    assert config.execution.live_order_limits.max_order_notional == 100.0
+    assert config.execution.live_order_limits.max_daily_notional == 300.0
+    assert config.execution.live_order_limits.max_daily_order_count == 3
+    assert config.execution.live_order_limits.daily_loss_limit is None
     assert config.approval.enabled is True
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True

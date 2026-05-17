@@ -114,31 +114,31 @@ class LiveExecutionGateService:
         return blocks
 
     def _market_session_block(self) -> dict[str, Any] | None:
-        execution = self.config.execution
-        if not execution.require_market_session:
+        market_session = self.config.execution.market_session
+        if not market_session.required:
             return None
         try:
-            timezone = ZoneInfo(execution.market_session_timezone)
+            timezone = ZoneInfo(market_session.timezone)
         except Exception:
             return {
                 "reason": "invalid_market_session_timezone",
-                "timezone": execution.market_session_timezone,
+                "timezone": market_session.timezone,
             }
         local_now = self._now().astimezone(timezone)
         local_date = local_now.date().isoformat()
         local_time = local_now.time()
-        open_time = _parse_hhmm(execution.market_session_open)
-        close_time = _parse_hhmm(execution.market_session_close)
+        open_time = _parse_hhmm(market_session.open)
+        close_time = _parse_hhmm(market_session.close)
         payload = {
             "checked_at": self._now().isoformat(),
             "local_time": local_now.isoformat(),
-            "timezone": execution.market_session_timezone,
-            "open": execution.market_session_open,
-            "close": execution.market_session_close,
+            "timezone": market_session.timezone,
+            "open": market_session.open,
+            "close": market_session.close,
         }
-        if local_now.weekday() not in execution.market_session_weekdays:
+        if local_now.weekday() not in market_session.weekdays:
             return {"reason": "market_weekday_closed", **payload}
-        if local_date in execution.market_session_holidays:
+        if local_date in market_session.holidays:
             return {"reason": "market_holiday_closed", "date": local_date, **payload}
         if not (open_time <= local_time < close_time):
             return {"reason": "outside_market_session", **payload}
@@ -222,14 +222,15 @@ class LiveExecutionGateService:
                 existing_notional += float(payload.get("notional", 0.0))
         proposed_notional = sum(order.notional for order in orders)
         proposed_count = len(orders)
-        if existing_notional + proposed_notional > self.config.execution.max_daily_live_notional:
+        limits = self.config.execution.live_order_limits
+        if existing_notional + proposed_notional > limits.max_daily_notional:
             return {
                 "reason": "daily_notional_exceeded",
                 "existing_notional": existing_notional,
                 "proposed_notional": proposed_notional,
-                "max_daily_live_notional": self.config.execution.max_daily_live_notional,
+                "max_daily_live_notional": limits.max_daily_notional,
             }
-        max_count = self.config.execution.max_daily_live_order_count
+        max_count = limits.max_daily_order_count
         if max_count > 0 and existing_count + proposed_count > max_count:
             return {
                 "reason": "daily_order_count_exceeded",
@@ -267,8 +268,8 @@ class LiveExecutionGateService:
         return None
 
     def _broker_quote_validation_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
-        execution = self.config.execution
-        if not execution.require_broker_quote_validation:
+        broker_validation = self.config.execution.broker_validation
+        if not broker_validation.require_quote_validation:
             return None
         latest = self.state_store.load_latest_broker_account_snapshot()
         if latest is None:
@@ -286,20 +287,22 @@ class LiveExecutionGateService:
                     "broker_quote": quote_value,
                 }
             deviation = abs(order.price - quote_value) / quote_value
-            if deviation > execution.max_broker_quote_deviation_pct:
+            if deviation > broker_validation.max_quote_deviation_pct:
                 return {
                     "reason": "broker_quote_deviation_exceeded",
                     "symbol": order.symbol,
                     "order_price": order.price,
                     "broker_quote": quote_value,
                     "deviation_pct": deviation,
-                    "max_deviation_pct": execution.max_broker_quote_deviation_pct,
+                    "max_deviation_pct": broker_validation.max_quote_deviation_pct,
                 }
         return None
 
     def _broker_risk_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
         execution = self.config.execution
-        if not execution.require_broker_risk_validation and execution.daily_loss_limit is None:
+        broker_validation = execution.broker_validation
+        limits = execution.live_order_limits
+        if not broker_validation.require_risk_validation and limits.daily_loss_limit is None:
             return None
         latest = self.state_store.load_latest_broker_account_snapshot()
         if latest is None:
@@ -308,7 +311,7 @@ class LiveExecutionGateService:
         snapshot = latest["payload"]
         account = snapshot.get("account", {})
         issues = []
-        if execution.require_broker_risk_validation:
+        if broker_validation.require_risk_validation:
             issues.extend(self._broker_reconciliation_risk_issues(latest))
             issues.extend(self._pending_broker_order_issues(snapshot))
             issues.extend(self._cash_and_exposure_risk_issues(orders, snapshot))
@@ -380,7 +383,7 @@ class LiveExecutionGateService:
         sell_notional = sum(order.notional for order in orders if order.side == OrderSide.SELL)
         fee_buffer = (
             buy_notional + sell_notional
-        ) * self.config.execution.live_order_fee_buffer_pct
+        ) * self.config.execution.live_order_limits.fee_buffer_pct
         required_buying_power = buy_notional + fee_buffer
         cash_after_orders = cash - buy_notional + sell_notional - fee_buffer
         positions = _broker_position_quantities(account)
@@ -459,7 +462,7 @@ class LiveExecutionGateService:
         return issues
 
     def _daily_loss_risk_issue(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
-        daily_loss_limit = self.config.execution.daily_loss_limit
+        daily_loss_limit = self.config.execution.live_order_limits.daily_loss_limit
         if daily_loss_limit is None:
             return None
         normalized_pnl = _normalized_broker_pnl(snapshot)

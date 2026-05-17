@@ -14,10 +14,25 @@ KIS_APP_KEY=...
 KIS_APP_SECRET=...
 KIS_ACCESS_TOKEN=
 KIS_APPROVAL_KEY=
+MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml
 ```
 
 Do not commit this file. Do not paste secret values into tickets, docs, audit
 logs, or dashboard rows.
+
+## Operator Config
+
+Create one operator-local config outside the git checkout, for example
+`/root/maestro-operator/maestro_personal.yaml`, and use that same file for
+health checks, sync timers, Telegram operator, dashboard, and manual rehearsals.
+This keeps mode, state DB, audit log, approval settings, and KIS settings
+aligned across the hybrid operator architecture.
+The examples below rely on `MAESTRO_CONFIG` from the environment file so every
+unit resolves the same operator config by default.
+
+Do not run Telegram from a separate Telegram-only config when it is expected to
+represent the live operator state. Repo example configs are copy-and-customize
+templates only.
 
 ## Example Health Service
 
@@ -29,7 +44,7 @@ Description=Maestro health check
 Type=oneshot
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro health --config /opt/maestro/configs/multi_asset_readonly.example.yaml
+ExecStart=/opt/maestro/.venv/bin/maestro health
 ```
 
 ## Example Read-only Sync Service
@@ -42,7 +57,7 @@ Description=Maestro KIS multi-asset read-only sync
 Type=oneshot
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro kis-sync --config /opt/maestro/configs/multi_asset_readonly.example.yaml
+ExecStart=/opt/maestro/.venv/bin/maestro kis-sync
 ```
 
 ## Example Telegram Operator Service
@@ -57,7 +72,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config /etc/maestro/telegram_operator.yaml --timeout-seconds 10
+ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --timeout-seconds 10
 Restart=always
 RestartSec=5
 
@@ -65,14 +80,11 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-Use an operator-local config outside the git checkout, such as
-`/etc/maestro/telegram_operator.yaml` or `/root/maestro-operator/telegram_approval_operator.yaml`.
-Do not point systemd at `configs/telegram_approval_paper.yaml`; that file is a
-repo example and may contain placeholder chat/user IDs. The operator-local
-config must set `telegram_allowed_chat_ids` and `whitelisted_user_ids` to the
-real operator account. This service handles read-only Telegram commands and the
-limited `/pause` and `/kill_switch` confirmations. Approval request polling
-still happens inside `maestro run-once` when an approval-gated run is active.
+The shared operator config must set `telegram_allowed_chat_ids` and
+`whitelisted_user_ids` to the real operator account. This service handles
+read-only Telegram commands and the limited `/pause` and `/kill_switch`
+confirmations. Approval request polling still happens inside `maestro run-once`
+when an approval-gated run is active.
 Telegram Bot API polling allows only one active `getUpdates` consumer per bot
 token, so stop this service during approval-gated `run-once` or
 `live-smoke --check live-dry-run` rehearsals when they use the same bot.
@@ -80,7 +92,7 @@ token, so stop this service during approval-gated `run-once` or
 Register the slash command menu once after bot setup or command changes:
 
 ```bash
-maestro telegram-set-commands --config /opt/maestro/configs/telegram_approval_paper.yaml
+MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml maestro telegram-set-commands
 ```
 
 ## Example Private Dashboard Service
@@ -98,7 +110,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/python -m streamlit run src/maestro/dashboard/app.py --server.address 127.0.0.1 --server.port 8503 -- --config /root/maestro-operator/maestro_personal.yaml
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/python -m streamlit run src/maestro/dashboard/app.py --server.address 127.0.0.1 --server.port 8503
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

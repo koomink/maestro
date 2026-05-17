@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from maestro.approval.manager import ApprovalManager
 from maestro.approval.models import ApprovalDecision
+from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderType, RunMode
@@ -68,6 +69,7 @@ class MaestroOrchestrator:
         live_order_notification_client: LiveOrderNotificationClient | None = None,
         broker_reconciliation_service: BrokerReconciliationRunner | None = None,
         telegram_client=None,
+        config_identity: ConfigIdentity | None = None,
     ) -> None:
         self.config = config
         self.registry = PluginRegistry.from_configs(config.strategies, run_mode=config.mode)
@@ -89,6 +91,7 @@ class MaestroOrchestrator:
             config.state.sqlite_path,
             config.portfolio.initial_cash,
             config.portfolio.cash_by_currency,
+            config_identity=config_identity,
         )
         self.audit = AuditLogger(config.audit.jsonl_path)
         self.safety = SafetyControlService(self.state_store, self.audit)
@@ -99,6 +102,10 @@ class MaestroOrchestrator:
         self.telegram_client = telegram_client
 
     def run_once(self) -> RunOnceSummary:
+        with self.state_store.writer_lock("run_once"):
+            return self._run_once_locked()
+
+    def _run_once_locked(self) -> RunOnceSummary:
         run_id = new_run_id()
         if (
             self.config.mode == RunMode.LIVE_APPROVAL
@@ -519,7 +526,7 @@ class MaestroOrchestrator:
     def _order_generation_prices(self, prices: dict[str, float]) -> dict[str, float]:
         if (
             self.config.mode != RunMode.LIVE_APPROVAL
-            or not self.config.execution.require_broker_quote_validation
+            or not self.config.execution.broker_validation.require_quote_validation
         ):
             return prices
         latest = self.state_store.load_latest_broker_account_snapshot()

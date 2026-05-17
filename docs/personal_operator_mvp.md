@@ -112,8 +112,9 @@ changing `execution.live_order_enabled` or `execution.live_order_dry_run`.
 Only after `personal-check` reports `minimum_live_ready status=ok`:
 
 1. Keep `execution.allowed_order_type=limit`.
-2. Set the smallest practical `max_live_order_notional`,
-   `max_daily_live_notional`, and `max_daily_live_order_count`.
+2. Set the smallest practical `execution.live_order_limits.max_order_notional`,
+   `execution.live_order_limits.max_daily_notional`, and
+   `execution.live_order_limits.max_daily_order_count`.
 3. Set `execution.live_order_dry_run=false`.
 4. Set `execution.live_order_enabled=true`.
 5. Run `maestro beta-preflight --config <operator-config>`.

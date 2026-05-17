@@ -306,8 +306,12 @@ def _personal_config(
     raw["approval"]["whitelisted_user_ids"] = [123456789]
     raw["execution"]["live_order_enabled"] = live_order_enabled
     raw["execution"]["live_order_dry_run"] = live_order_dry_run
-    raw["execution"]["require_broker_quote_validation"] = require_broker_quote_validation
-    raw["execution"]["require_broker_risk_validation"] = require_broker_risk_validation
-    raw["execution"]["daily_loss_limit"] = daily_loss_limit
+    raw["execution"]["broker_validation"]["require_quote_validation"] = (
+        require_broker_quote_validation
+    )
+    raw["execution"]["broker_validation"]["require_risk_validation"] = (
+        require_broker_risk_validation
+    )
+    raw["execution"]["live_order_limits"]["daily_loss_limit"] = daily_loss_limit
     output.write_text(yaml.safe_dump(raw))
     return output

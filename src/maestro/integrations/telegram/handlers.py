@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from maestro.config.models import MaestroConfig
@@ -183,12 +184,20 @@ class TelegramOperatorCommandRouter:
     def _status(self, chat_id: int) -> None:
         overview = build_overview(self.store)
         safety = build_safety_state_card(self.store)
+        operator_config = overview.get("operator_config") or {}
+        fingerprint = operator_config.get("fingerprint", "none")
+        state_path = Path(self.config.state.sqlite_path).expanduser().resolve()
+        audit_path = Path(self.config.audit.jsonl_path).expanduser().resolve()
         self._send(
             chat_id,
             "\n".join(
                 [
                     "Maestro status",
                     f"mode: {self.config.mode.value}",
+                    f"config: {operator_config.get('path', 'unknown')}",
+                    f"config_fingerprint: {fingerprint[:12] if fingerprint != 'none' else 'none'}",
+                    f"state: {state_path}",
+                    f"audit: {audit_path}",
                     f"safety: {safety['state']}",
                     f"cash: {_money(overview['cash'])}",
                     f"positions: {overview['positions_count']}",

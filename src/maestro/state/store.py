@@ -1,8 +1,12 @@
+import fcntl
 import json
 import sqlite3
+import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from maestro.config.identity import ConfigIdentity
 from maestro.state.models import PortfolioState
 
 
@@ -12,12 +16,17 @@ class StateStore:
         path: str,
         initial_cash: float | None = None,
         initial_cash_by_currency: dict[str, float] | None = None,
+        config_identity: ConfigIdentity | None = None,
     ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self._writer_lock_depth = 0
         self.initial_cash = float(initial_cash or 0.0)
         self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
         self._init_db()
+        if config_identity is not None:
+            self.validate_config_identity(config_identity)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, timeout=10)
@@ -110,6 +119,66 @@ class StateStore:
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS operator_metadata "
+                "("
+                "key TEXT PRIMARY KEY, "
+                "value TEXT NOT NULL, "
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+
+    @contextmanager
+    def writer_lock(
+        self,
+        owner: str,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> Any:
+        del owner
+        if self._writer_lock_depth > 0:
+            yield
+            return
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout_seconds
+        with self.lock_path.open("a+", encoding="utf-8") as lock_file:
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"State writer lock is busy: {self.lock_path}") from exc
+                    time.sleep(0.1)
+            self._writer_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._writer_lock_depth -= 1
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def validate_config_identity(self, identity: ConfigIdentity) -> None:
+        payload = identity.model_dump()
+        existing = self.load_operator_config_identity()
+        if existing is not None and existing != payload:
+            raise ValueError(
+                "State DB config identity mismatch: "
+                f"state_db={self.path} existing_path={existing.get('path')} "
+                f"existing_fingerprint={existing.get('fingerprint')} "
+                f"current_path={payload['path']} current_fingerprint={payload['fingerprint']}"
+            )
+        if existing is None:
+            self._set_metadata("operator_config_identity", payload)
+
+    def load_operator_config_identity(self) -> dict[str, str] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM operator_metadata WHERE key = ?",
+                ("operator_config_identity",),
+            ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row[0])
 
     def load_latest_portfolio_state(self) -> PortfolioState:
         with self._connect() as conn:
@@ -180,12 +249,13 @@ class StateStore:
         ]
         if not payloads:
             return
-        with self._connect() as conn:
-            conn.executemany(
-                "INSERT INTO strategy_book_snapshots "
-                "(run_id, strategy_id, book_id, payload) VALUES (?, ?, ?, ?)",
-                payloads,
-            )
+        with self.writer_lock("save_strategy_book_snapshots"):
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO strategy_book_snapshots "
+                    "(run_id, strategy_id, book_id, payload) VALUES (?, ?, ?, ?)",
+                    payloads,
+                )
 
     def list_portfolio_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("portfolio_snapshots", limit)
@@ -279,6 +349,7 @@ class StateStore:
             }
             if latest_snapshot
             else None,
+            "operator_config": self.load_operator_config_identity(),
         }
 
     def _insert(
@@ -289,42 +360,55 @@ class StateStore:
         payload: dict[str, Any],
     ) -> None:
         payload_json = json.dumps(payload, default=str)
-        with self._connect() as conn:
-            if table == "strategy_runs":
+        with self.writer_lock(f"insert:{table}"):
+            with self._connect() as conn:
+                if table == "strategy_runs":
+                    conn.execute(
+                        "INSERT INTO strategy_runs (run_id, strategy_id, payload) VALUES (?, ?, ?)",
+                        (run_id, secondary, payload_json),
+                    )
+                elif table == "orders":
+                    conn.execute(
+                        "INSERT INTO orders (run_id, order_id, payload) VALUES (?, ?, ?)",
+                        (run_id, secondary, payload_json),
+                    )
+                elif table == "system_events":
+                    conn.execute(
+                        "INSERT INTO system_events (run_id, event_type, payload) VALUES (?, ?, ?)",
+                        (run_id, secondary, payload_json),
+                    )
+                elif table == "approvals":
+                    conn.execute(
+                        "INSERT INTO approvals (run_id, approval_id, payload) VALUES (?, ?, ?)",
+                        (run_id, secondary, payload_json),
+                    )
+                elif table == "broker_account_snapshots":
+                    conn.execute(
+                        "INSERT INTO broker_account_snapshots "
+                        "(run_id, account_id, payload) VALUES (?, ?, ?)",
+                        (run_id, secondary, payload_json),
+                    )
+                elif table == "risk_decisions":
+                    conn.execute(
+                        "INSERT INTO risk_decisions (run_id, approved, payload) VALUES (?, ?, ?)",
+                        (run_id, int(secondary or "0"), payload_json),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT INTO portfolio_snapshots (run_id, payload) VALUES (?, ?)",
+                        (run_id, payload_json),
+                    )
+
+    def _set_metadata(self, key: str, value: dict[str, Any]) -> None:
+        payload_json = json.dumps(value, sort_keys=True)
+        with self.writer_lock(f"metadata:{key}"):
+            with self._connect() as conn:
                 conn.execute(
-                    "INSERT INTO strategy_runs (run_id, strategy_id, payload) VALUES (?, ?, ?)",
-                    (run_id, secondary, payload_json),
-                )
-            elif table == "orders":
-                conn.execute(
-                    "INSERT INTO orders (run_id, order_id, payload) VALUES (?, ?, ?)",
-                    (run_id, secondary, payload_json),
-                )
-            elif table == "system_events":
-                conn.execute(
-                    "INSERT INTO system_events (run_id, event_type, payload) VALUES (?, ?, ?)",
-                    (run_id, secondary, payload_json),
-                )
-            elif table == "approvals":
-                conn.execute(
-                    "INSERT INTO approvals (run_id, approval_id, payload) VALUES (?, ?, ?)",
-                    (run_id, secondary, payload_json),
-                )
-            elif table == "broker_account_snapshots":
-                conn.execute(
-                    "INSERT INTO broker_account_snapshots "
-                    "(run_id, account_id, payload) VALUES (?, ?, ?)",
-                    (run_id, secondary, payload_json),
-                )
-            elif table == "risk_decisions":
-                conn.execute(
-                    "INSERT INTO risk_decisions (run_id, approved, payload) VALUES (?, ?, ?)",
-                    (run_id, int(secondary or "0"), payload_json),
-                )
-            else:
-                conn.execute(
-                    "INSERT INTO portfolio_snapshots (run_id, payload) VALUES (?, ?)",
-                    (run_id, payload_json),
+                    "INSERT INTO operator_metadata (key, value, updated_at) "
+                    "VALUES (?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(key) DO UPDATE SET "
+                    "value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                    (key, payload_json),
                 )
 
     def _list_rows(self, table: str, limit: int) -> list[dict[str, Any]]:

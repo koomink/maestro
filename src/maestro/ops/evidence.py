@@ -108,16 +108,22 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
             "live_order_enabled": config.execution.live_order_enabled,
             "live_order_dry_run": config.execution.live_order_dry_run,
             "allowed_order_type": config.execution.allowed_order_type.value,
-            "max_live_order_notional": config.execution.max_live_order_notional,
-            "max_daily_live_notional": config.execution.max_daily_live_notional,
-            "max_daily_live_order_count": config.execution.max_daily_live_order_count,
+            "max_live_order_notional": config.execution.live_order_limits.max_order_notional,
+            "max_daily_live_notional": config.execution.live_order_limits.max_daily_notional,
+            "max_daily_live_order_count": (
+                config.execution.live_order_limits.max_daily_order_count
+            ),
             "require_reconciliation_pass": config.execution.require_reconciliation_pass,
-            "require_market_session": config.execution.require_market_session,
-            "require_broker_quote_validation": config.execution.require_broker_quote_validation,
-            "require_broker_risk_validation": config.execution.require_broker_risk_validation,
-            "daily_loss_limit": config.execution.daily_loss_limit,
-            "heartbeat_max_age_seconds": config.execution.heartbeat_max_age_seconds,
-            "scheduled_run_max_age_seconds": config.execution.scheduled_run_max_age_seconds,
+            "require_market_session": config.execution.market_session.required,
+            "require_broker_quote_validation": (
+                config.execution.broker_validation.require_quote_validation
+            ),
+            "require_broker_risk_validation": (
+                config.execution.broker_validation.require_risk_validation
+            ),
+            "daily_loss_limit": config.execution.live_order_limits.daily_loss_limit,
+            "heartbeat_max_age_seconds": config.monitoring.heartbeat_max_age_seconds,
+            "scheduled_run_max_age_seconds": config.monitoring.scheduled_run_max_age_seconds,
         },
         "kis": {
             "enabled": config.kis.enabled,

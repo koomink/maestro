@@ -5,6 +5,25 @@ the Ataraxia KIS mock-investment broker-submit pilot. It does not authorize live
 auto-trading, market orders, direct broker CLI actions, dashboard write
 controls, or Telegram admin controls.
 
+## Operator Config Discipline
+
+Use one operator-local config for every process in a deployment. `run-once`,
+`kis-sync`, `reconcile`, `health`, `ops-alerts`, `telegram-operator`, dashboard,
+and systemd timers should all point at the same YAML file, state DB path, and
+audit log path. Do not run the Telegram operator from a separate Telegram-only
+config when it is expected to represent the live operator state.
+Set `MAESTRO_CONFIG` in the operator environment or systemd environment file so
+routine commands can omit `--config`; use an explicit `--config` only for
+isolated tests or manual overrides.
+
+This is necessary because Maestro is currently a hybrid operator architecture:
+one-shot CLI jobs and long-running Telegram/dashboard services coordinate
+through SQLite and JSONL, not through a single in-memory daemon. SQLite has
+timeout, `busy_timeout`, WAL settings, a StateStore writer lock, and a config
+identity drift check. If a command reports a state DB config identity mismatch,
+stop scheduled services and verify every unit points at the intended operator
+config before continuing.
+
 ## Halt Recovery
 
 1. Stop scheduled jobs that could submit or approve work.
@@ -48,8 +67,8 @@ switch requires a separately defined safe recovery procedure.
 
 ## Monitoring
 
-For scheduled deployments, configure `execution.heartbeat_max_age_seconds` and
-`execution.scheduled_run_max_age_seconds`, then run:
+For scheduled deployments, configure `monitoring.heartbeat_max_age_seconds` and
+`monitoring.scheduled_run_max_age_seconds`, then run:
 
 ```bash
 maestro heartbeat --config <config>

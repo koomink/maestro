@@ -29,30 +29,35 @@ execution:
   live_order_enabled: false
   live_order_dry_run: true
   require_reconciliation_pass: true
-  max_live_order_notional: 100
-  max_daily_live_notional: 300
-  max_daily_live_order_count: 3
-  daily_loss_limit: null
+  live_order_limits:
+    max_order_notional: 100
+    max_daily_notional: 300
+    max_daily_order_count: 3
+    daily_loss_limit: null
+    fee_buffer_pct: 0.0
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
-  require_market_session: false
-  market_session_timezone: Asia/Seoul
-  market_session_open: "09:00"
-  market_session_close: "15:30"
-  market_session_weekdays: [0, 1, 2, 3, 4]
-  market_session_holidays: []
-  require_broker_quote_validation: false
-  max_broker_quote_deviation_pct: 0.05
-  require_broker_risk_validation: false
-  live_order_fee_buffer_pct: 0.0
-  heartbeat_max_age_seconds: 0
-  scheduled_run_max_age_seconds: 0
+  market_session:
+    required: false
+    timezone: Asia/Seoul
+    open: "09:00"
+    close: "15:30"
+    weekdays: [0, 1, 2, 3, 4]
+    holidays: []
+  broker_validation:
+    require_quote_validation: false
+    max_quote_deviation_pct: 0.05
+    require_risk_validation: false
 
 risk:
   max_single_asset_weight: 1.0
   min_cash_weight: 0.0
+
+monitoring:
+  heartbeat_max_age_seconds: 0
+  scheduled_run_max_age_seconds: 0
 
 state:
   sqlite_path: var/live_approval_state.db

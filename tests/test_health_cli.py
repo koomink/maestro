@@ -6,7 +6,7 @@ import yaml
 from typer.testing import CliRunner
 
 from maestro.cli import app
-from maestro.config.loader import load_config
+from maestro.config.loader import load_config, load_config_with_identity
 from maestro.core.ids import new_run_id
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
@@ -34,6 +34,28 @@ def test_health_cli_reports_local_checks_without_kis_network(monkeypatch, tmp_pa
     assert "app-key" not in result.output
     assert "app-secret" not in result.output
     assert "access-token" not in result.output
+
+
+def test_cli_uses_maestro_config_env_when_config_option_is_omitted(monkeypatch, tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    monkeypatch.setenv("MAESTRO_CONFIG", str(config_path))
+
+    result = CliRunner().invoke(app, ["heartbeat"])
+
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    assert result.exit_code == 0
+    assert "heartbeat run_id=" in result.output
+    assert store.list_system_events_by_type("maestro_heartbeat")
+
+
+def test_cli_requires_config_option_or_maestro_config_env(monkeypatch):
+    monkeypatch.delenv("MAESTRO_CONFIG", raising=False)
+
+    result = CliRunner().invoke(app, ["health"], env={"MAESTRO_CONFIG": ""})
+
+    assert result.exit_code != 0
+    assert "MAESTRO_CONFIG" in result.output
 
 
 def test_health_reports_recent_broker_snapshot_and_reconciliation(tmp_path):
@@ -97,8 +119,44 @@ def test_heartbeat_cli_records_event_and_hash_chained_audit(tmp_path):
     audit_event = json.loads(audit_line)
     assert result.exit_code == 0
     assert store.list_system_events_by_type("maestro_heartbeat")
+    heartbeat = store.list_system_events_by_type("maestro_heartbeat")[0]["payload"]
+    operator_config = store.status()["operator_config"]
+    assert operator_config is not None
+    assert heartbeat["config"] == operator_config
+    assert heartbeat["state_path"] == str(Path(config.state.sqlite_path).resolve())
+    assert heartbeat["audit_path"] == str(Path(config.audit.jsonl_path).resolve())
     assert audit_event["event_type"] == "maestro_heartbeat"
+    assert audit_event["details"]["config"] == operator_config
     assert audit_event["event_hash"]
+
+
+def test_state_store_rejects_same_db_with_different_config_identity(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    config, identity = load_config_with_identity(config_path)
+    StateStore(
+        config.state.sqlite_path,
+        config.portfolio.initial_cash,
+        config.portfolio.cash_by_currency,
+        config_identity=identity,
+    )
+
+    raw = yaml.safe_load(config_path.read_text())
+    raw["approval"]["timeout_seconds"] = 123
+    second_config_path = tmp_path / "live_approval_changed.yaml"
+    second_config_path.write_text(yaml.safe_dump(raw))
+    changed_config, changed_identity = load_config_with_identity(second_config_path)
+
+    try:
+        StateStore(
+            changed_config.state.sqlite_path,
+            changed_config.portfolio.initial_cash,
+            changed_config.portfolio.cash_by_currency,
+            config_identity=changed_identity,
+        )
+    except ValueError as exc:
+        assert "config identity mismatch" in str(exc)
+    else:
+        raise AssertionError("expected config identity mismatch")
 
 
 def test_audit_integrity_check_detects_hash_tampering(tmp_path):
@@ -316,13 +374,19 @@ def _live_approval_config(
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")
     raw["execution"]["live_order_enabled"] = live_order_enabled
     raw["execution"]["require_reconciliation_pass"] = require_reconciliation_pass
-    raw["execution"]["max_daily_live_order_count"] = max_daily_live_order_count
-    raw["execution"]["require_market_session"] = require_market_session
-    raw["execution"]["require_broker_quote_validation"] = require_broker_quote_validation
-    raw["execution"]["require_broker_risk_validation"] = require_broker_risk_validation
-    raw["execution"]["daily_loss_limit"] = daily_loss_limit
-    raw["execution"]["heartbeat_max_age_seconds"] = heartbeat_max_age_seconds
-    raw["execution"]["scheduled_run_max_age_seconds"] = scheduled_run_max_age_seconds
+    raw["execution"]["live_order_limits"]["max_daily_order_count"] = max_daily_live_order_count
+    raw["execution"]["market_session"]["required"] = require_market_session
+    raw["execution"]["broker_validation"]["require_quote_validation"] = (
+        require_broker_quote_validation
+    )
+    raw["execution"]["broker_validation"]["require_risk_validation"] = (
+        require_broker_risk_validation
+    )
+    raw["execution"]["live_order_limits"]["daily_loss_limit"] = daily_loss_limit
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": heartbeat_max_age_seconds,
+        "scheduled_run_max_age_seconds": scheduled_run_max_age_seconds,
+    }
     config_path = tmp_path / "live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path

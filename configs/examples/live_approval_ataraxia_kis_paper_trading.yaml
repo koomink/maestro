@@ -77,26 +77,27 @@ execution:
   live_order_enabled: false
   live_order_dry_run: true
   require_reconciliation_pass: true
-  max_live_order_notional: 1000000
-  max_daily_live_notional: 3000000
-  max_daily_live_order_count: 2
-  daily_loss_limit: 100000
+  live_order_limits:
+    max_order_notional: 1000000
+    max_daily_notional: 3000000
+    max_daily_order_count: 2
+    daily_loss_limit: 100000
+    fee_buffer_pct: 0.002
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
-  require_market_session: true
-  market_session_timezone: Asia/Seoul
-  market_session_open: "09:00"
-  market_session_close: "15:30"
-  market_session_weekdays: [0, 1, 2, 3, 4]
-  market_session_holidays: []
-  require_broker_quote_validation: true
-  max_broker_quote_deviation_pct: 0.02
-  require_broker_risk_validation: true
-  live_order_fee_buffer_pct: 0.002
-  heartbeat_max_age_seconds: 3600
-  scheduled_run_max_age_seconds: 86400
+  market_session:
+    required: true
+    timezone: Asia/Seoul
+    open: "09:00"
+    close: "15:30"
+    weekdays: [0, 1, 2, 3, 4]
+    holidays: []
+  broker_validation:
+    require_quote_validation: true
+    max_quote_deviation_pct: 0.02
+    require_risk_validation: true
   contribution:
     enabled: true
     currency: KRW
@@ -111,6 +112,10 @@ execution:
 risk:
   max_single_asset_weight: 0.7
   min_cash_weight: 0.0
+
+monitoring:
+  heartbeat_max_age_seconds: 3600
+  scheduled_run_max_age_seconds: 86400
 
 state:
   sqlite_path: var/ataraxia_kis_live_approval_state.db

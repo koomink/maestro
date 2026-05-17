@@ -265,8 +265,10 @@ def _live_approval_config_path(tmp_path) -> Path:
         "engine": "paper",
         "live_order_enabled": True,
         "require_reconciliation_pass": True,
-        "max_live_order_notional": 5_000_000.0,
-        "max_daily_live_notional": 10_000_000.0,
+        "live_order_limits": {
+            "max_order_notional": 5_000_000.0,
+            "max_daily_notional": 10_000_000.0,
+        },
         "order_status_max_polls": 1,
         "order_status_poll_interval_seconds": 0.0,
     }

@@ -188,7 +188,7 @@ class HealthService:
         )
 
     def _heartbeat_check(self) -> HealthCheck:
-        max_age = self.config.execution.heartbeat_max_age_seconds
+        max_age = self.config.monitoring.heartbeat_max_age_seconds
         if max_age <= 0:
             return HealthCheck(name="heartbeat", status="ok", message="not_configured")
         latest = self.store.load_latest_system_event("maestro_heartbeat")
@@ -213,7 +213,7 @@ class HealthService:
         )
 
     def _scheduled_run_check(self) -> HealthCheck:
-        max_age = self.config.execution.scheduled_run_max_age_seconds
+        max_age = self.config.monitoring.scheduled_run_max_age_seconds
         if max_age <= 0:
             return HealthCheck(name="scheduled_run", status="ok", message="not_configured")
         latest = self.store.load_latest_system_event("run_once_completed")

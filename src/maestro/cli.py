@@ -9,7 +9,8 @@ import typer
 import yaml
 
 from maestro.config.env import load_project_dotenv
-from maestro.config.loader import load_config
+from maestro.config.identity import ConfigIdentity
+from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.config.universe import UniverseConfig
 from maestro.core.enums import RunMode
@@ -37,6 +38,14 @@ from maestro.state.store import StateStore
 
 app = typer.Typer()
 
+CONFIG_ENV_VAR = "MAESTRO_CONFIG"
+CONFIG_OPTION = typer.Option(
+    None,
+    "--config",
+    envvar=CONFIG_ENV_VAR,
+    help=f"Path to operator config. Defaults to ${CONFIG_ENV_VAR}.",
+)
+
 
 def _load_dotenv() -> None:
     load_project_dotenv()
@@ -49,10 +58,35 @@ def main() -> None:
     configure_structured_logging()
 
 
+def _resolve_config(config: Path | None) -> Path:
+    if config is not None:
+        return config
+    env_config = os.getenv(CONFIG_ENV_VAR)
+    if env_config:
+        return Path(env_config)
+    raise typer.BadParameter(f"--config is required or set {CONFIG_ENV_VAR}")
+
+
+def _load_operator_config(config: Path | None) -> tuple[MaestroConfig, ConfigIdentity]:
+    return load_config_with_identity(_resolve_config(config))
+
+
+def _state_store(
+    maestro_config: MaestroConfig,
+    identity: ConfigIdentity,
+) -> StateStore:
+    return StateStore(
+        maestro_config.state.sqlite_path,
+        maestro_config.portfolio.initial_cash,
+        maestro_config.portfolio.cash_by_currency,
+        config_identity=identity,
+    )
+
+
 @app.command("run-once")
-def run_once(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    summary = MaestroOrchestrator(maestro_config).run_once()
+def run_once(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    summary = MaestroOrchestrator(maestro_config, config_identity=identity).run_once()
     typer.echo(
         f"run_id={summary.run_id} strategies={summary.loaded_strategies} "
         f"orders={summary.orders_created} total_value={summary.total_value:.2f} "
@@ -61,36 +95,47 @@ def run_once(config: Path = typer.Option(..., "--config")) -> None:
 
 
 @app.command("status")
-def status(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def status(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     current = store.load_latest_portfolio_state()
     store_status = store.status()
+    operator_config = store_status.get("operator_config") or {}
     typer.echo(
         f"cash={current.cash:.2f} positions={len(current.positions)} "
         f"strategy_runs={store_status['counts']['strategy_runs']} "
         f"orders={store_status['counts']['orders']} "
         f"approvals={store_status['counts']['approvals']} "
-        f"broker_snapshots={store_status['counts']['broker_account_snapshots']}"
+        f"broker_snapshots={store_status['counts']['broker_account_snapshots']} "
+        f"config_path={operator_config.get('path', identity.path)} "
+        f"config_fingerprint={operator_config.get('fingerprint', 'none')}"
+        f" state_path={Path(maestro_config.state.sqlite_path).expanduser().resolve()}"
+        f" audit_path={Path(maestro_config.audit.jsonl_path).expanduser().resolve()}"
     )
 
 
 @app.command("health")
-def health(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def health(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     report = HealthService(maestro_config, store).run()
     for line in report.text_lines():
         typer.echo(line)
 
 
 @app.command("heartbeat")
-def heartbeat(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def heartbeat(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     run_id = new_run_id()
-    payload = {"mode": maestro_config.mode.value, "source": "cli"}
+    payload = {
+        "mode": maestro_config.mode.value,
+        "source": "cli",
+        "config": identity.model_dump(),
+        "state_path": str(Path(maestro_config.state.sqlite_path).expanduser().resolve()),
+        "audit_path": str(Path(maestro_config.audit.jsonl_path).expanduser().resolve()),
+    }
     store.save_system_event(run_id, "maestro_heartbeat", payload)
     audit.log(run_id, "maestro_heartbeat", payload)
     typer.echo(f"heartbeat run_id={run_id} mode={maestro_config.mode.value}")
@@ -98,11 +143,11 @@ def heartbeat(config: Path = typer.Option(..., "--config")) -> None:
 
 @app.command("ops-alerts")
 def ops_alerts(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     allow_mock: bool = typer.Option(False, "--allow-mock"),
 ) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     report = HealthService(maestro_config, store).run()
     alert_checks = [check for check in report.checks if check.status in {"warn", "fail"}]
     if not alert_checks:
@@ -137,11 +182,11 @@ def ops_alerts(
 
 
 @app.command("live-preflight")
-def live_preflight(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
+def live_preflight(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode != RunMode.LIVE_APPROVAL:
         raise typer.BadParameter("live-preflight requires mode=live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     report = HealthService(maestro_config, store).run()
     preflight = next(check for check in report.checks if check.name == "live_approval_preflight")
     detail_text = " ".join(f"{key}={value}" for key, value in preflight.details.items())
@@ -155,11 +200,11 @@ def live_preflight(config: Path = typer.Option(..., "--config")) -> None:
 
 @app.command("telegram-operator")
 def telegram_operator(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     once: bool = typer.Option(False, "--once"),
     timeout_seconds: int = typer.Option(10, "--timeout-seconds"),
 ) -> None:
-    maestro_config = load_config(config)
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.approval.provider != "telegram":
         raise typer.BadParameter("telegram-operator requires approval.provider=telegram")
     if not maestro_config.approval.telegram_allowed_chat_ids:
@@ -175,11 +220,7 @@ def telegram_operator(
         typer.echo("telegram_operator status=fail message=missing_bot_token")
         raise typer.Exit(1)
 
-    store = StateStore(
-        maestro_config.state.sqlite_path,
-        maestro_config.portfolio.initial_cash,
-        maestro_config.portfolio.cash_by_currency,
-    )
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     router = TelegramOperatorCommandRouter(
         config=maestro_config,
@@ -207,8 +248,8 @@ def telegram_operator(
 
 
 @app.command("telegram-set-commands")
-def telegram_set_commands(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
+def telegram_set_commands(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, _identity = _load_operator_config(config)
     if maestro_config.approval.provider != "telegram":
         raise typer.BadParameter("telegram-set-commands requires approval.provider=telegram")
     if not os.getenv(maestro_config.approval.telegram_bot_token_env):
@@ -223,11 +264,11 @@ def telegram_set_commands(config: Path = typer.Option(..., "--config")) -> None:
 
 
 @app.command("beta-preflight")
-def beta_preflight(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
+def beta_preflight(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode != RunMode.LIVE_APPROVAL:
         raise typer.BadParameter("beta-preflight requires mode=live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     report = HealthService(maestro_config, store).run()
     failures = private_beta_failures(maestro_config, report)
     if failures:
@@ -281,9 +322,9 @@ def init_virtuoso_app(
 
 
 @app.command("personal-check")
-def personal_check(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def personal_check(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     report = HealthService(maestro_config, store).run()
     checks = {check.name: check for check in report.checks}
 
@@ -295,34 +336,34 @@ def personal_check(config: Path = typer.Option(..., "--config")) -> None:
                 ["config", "state_db", "audit_path", "audit_integrity", "datahub"],
             ),
             "local config, state, audit, and DataHub checks are usable",
-            f"maestro health --config {config}",
+            f"maestro health --config {identity.path}",
         ),
         _personal_stage(
             "readonly_ready",
             _all_ok(checks, ["kis_env", "broker_snapshot", "reconciliation"]),
             "KIS env, broker snapshot, and reconciliation are ready",
-            f"maestro live-smoke --config {config} --check kis-readonly",
+            f"maestro live-smoke --config {identity.path} --check kis-readonly",
         ),
         _personal_stage(
             "telegram_ready",
             _telegram_personal_status(maestro_config),
             "Telegram approval config and token are ready",
-            f"maestro live-smoke --config {config} --check telegram-approval",
+            f"maestro live-smoke --config {identity.path} --check telegram-approval",
         ),
         _personal_stage(
             "dry_run_ready",
             _dry_run_personal_status(maestro_config, checks),
             "approval-gated dry-run config is ready",
-            f"maestro live-smoke --config {config} --check live-dry-run",
+            f"maestro live-smoke --config {identity.path} --check live-dry-run",
         ),
         _personal_stage(
             "minimum_live_ready",
             _minimum_live_personal_status(maestro_config, report),
             "minimum-size approval-gated live order gate is ready",
-            f"maestro beta-preflight --config {config}",
+            f"maestro beta-preflight --config {identity.path}",
         ),
     ]
-    typer.echo(f"personal_check status={_overall_personal_status(stages)} config={config}")
+    typer.echo(f"personal_check status={_overall_personal_status(stages)} config={identity.path}")
     for stage in stages:
         typer.echo(
             f"stage={stage['stage']} status={stage['status']} "
@@ -332,12 +373,12 @@ def personal_check(config: Path = typer.Option(..., "--config")) -> None:
 
 @app.command("operator-evidence")
 def operator_evidence(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     output: Path | None = typer.Option(None, "--output"),
 ) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
-    evidence = build_operator_evidence(maestro_config, store, config_path=config)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    evidence = build_operator_evidence(maestro_config, store, config_path=Path(identity.path))
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -345,7 +386,7 @@ def operator_evidence(
     output_text = str(output) if output is not None else "none"
     typer.echo(
         f"operator_evidence status={evidence['overall_status']} "
-        f"config={config} output={output_text}"
+        f"config={identity.path} output={output_text}"
     )
     for stage in evidence["stages"]:
         typer.echo(
@@ -359,24 +400,28 @@ def operator_evidence(
 
 @app.command("live-smoke")
 def live_smoke(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     check: str = typer.Option("kis-readonly", "--check"),
     allow_mock: bool = typer.Option(False, "--allow-mock"),
 ) -> None:
-    maestro_config = load_config(config)
+    maestro_config, identity = _load_operator_config(config)
     if check == "kis-readonly":
-        _run_kis_readonly_live_smoke(maestro_config, allow_mock)
+        _run_kis_readonly_live_smoke(maestro_config, identity, allow_mock)
         return
     if check == "telegram-approval":
         _run_telegram_approval_live_smoke(maestro_config, allow_mock)
         return
     if check == "live-dry-run":
-        _run_live_dry_run_smoke(maestro_config, allow_mock)
+        _run_live_dry_run_smoke(maestro_config, identity, allow_mock)
         return
     raise typer.BadParameter("supported checks: kis-readonly, telegram-approval, live-dry-run")
 
 
-def _run_kis_readonly_live_smoke(maestro_config, allow_mock: bool) -> None:
+def _run_kis_readonly_live_smoke(
+    maestro_config,
+    identity: ConfigIdentity,
+    allow_mock: bool,
+) -> None:
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter(
             "live-smoke --check kis-readonly requires mode=live_readonly or live_approval"
@@ -388,7 +433,7 @@ def _run_kis_readonly_live_smoke(maestro_config, allow_mock: bool) -> None:
             "live-smoke --check kis-readonly requires kis.provider=kis unless --allow-mock is set"
         )
 
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     kis_env = next(
         check
@@ -488,7 +533,11 @@ def _run_telegram_approval_live_smoke(maestro_config, allow_mock: bool) -> None:
     )
 
 
-def _run_live_dry_run_smoke(maestro_config, allow_mock: bool) -> None:
+def _run_live_dry_run_smoke(
+    maestro_config,
+    identity: ConfigIdentity,
+    allow_mock: bool,
+) -> None:
     if maestro_config.mode != RunMode.LIVE_APPROVAL:
         raise typer.BadParameter("live-smoke --check live-dry-run requires mode=live_approval")
     if not maestro_config.execution.live_order_dry_run:
@@ -498,10 +547,7 @@ def _run_live_dry_run_smoke(maestro_config, allow_mock: bool) -> None:
             raise typer.BadParameter("live-smoke --check live-dry-run requires Telegram approval")
         if maestro_config.kis.provider != "kis":
             raise typer.BadParameter("live-smoke --check live-dry-run requires kis.provider=kis")
-        store = StateStore(
-            maestro_config.state.sqlite_path,
-            maestro_config.portfolio.initial_cash,
-        )
+        store = _state_store(maestro_config, identity)
         preflight = next(
             check
             for check in HealthService(maestro_config, store).run().checks
@@ -515,7 +561,7 @@ def _run_live_dry_run_smoke(maestro_config, allow_mock: bool) -> None:
             )
             raise typer.Exit(1)
 
-    orchestrator = MaestroOrchestrator(maestro_config)
+    orchestrator = MaestroOrchestrator(maestro_config, config_identity=identity)
     summary = orchestrator.run_once()
     dry_run_events = [
         row
@@ -550,11 +596,11 @@ def _run_live_dry_run_smoke(maestro_config, allow_mock: bool) -> None:
 
 @app.command("approvals")
 def approvals(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     limit: int = typer.Option(10, "--limit"),
 ) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     for row in store.list_approvals(limit=limit):
         decision = row["payload"]["decision"]
         typer.echo(
@@ -564,9 +610,9 @@ def approvals(
 
 
 @app.command("safety-status")
-def safety_status(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def safety_status(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     current = SafetyControlService(store, audit).current_state()
     typer.echo(
@@ -578,7 +624,7 @@ def safety_status(config: Path = typer.Option(..., "--config")) -> None:
 
 @app.command("pause")
 def pause(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
     current = _safety_service(config).pause(new_run_id(), reason)
@@ -587,7 +633,7 @@ def pause(
 
 @app.command("resume")
 def resume(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
     current = _safety_service(config).resume(new_run_id(), reason)
@@ -596,7 +642,7 @@ def resume(
 
 @app.command("kill-switch")
 def kill_switch(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
     current = _safety_service(config).kill_switch(new_run_id(), reason)
@@ -605,7 +651,7 @@ def kill_switch(
 
 @app.command("clear-halt")
 def clear_halt(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
     current = _safety_service(config).clear_halt(new_run_id(), reason)
@@ -613,11 +659,11 @@ def clear_halt(
 
 
 @app.command("kis-sync")
-def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
+def kis_sync(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("kis-sync requires mode=live_readonly or live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     try:
         service = KISReadOnlyService(
@@ -638,9 +684,9 @@ def kis_sync(config: Path = typer.Option(..., "--config")) -> None:
 
 
 @app.command("kis-account")
-def kis_account(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def kis_account(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     latest = store.load_latest_broker_account_snapshot()
     if latest is None:
         typer.echo("No broker account snapshot found.")
@@ -654,11 +700,11 @@ def kis_account(config: Path = typer.Option(..., "--config")) -> None:
 
 
 @app.command("reconcile")
-def reconcile(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
+def reconcile(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("reconcile requires mode=live_readonly or live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     result = BrokerReconciliationService(
         maestro_config.reconciliation,
@@ -680,13 +726,13 @@ def reconcile(config: Path = typer.Option(..., "--config")) -> None:
 
 @app.command("adopt-broker-snapshot")
 def adopt_broker_snapshot(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
-    maestro_config = load_config(config)
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("adopt-broker-snapshot requires live_readonly or live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     latest = store.load_latest_broker_account_snapshot()
     if latest is None:
@@ -723,11 +769,11 @@ def adopt_broker_snapshot(
 
 
 @app.command("reconcile-fills")
-def reconcile_fills(config: Path = typer.Option(..., "--config")) -> None:
-    maestro_config = load_config(config)
+def reconcile_fills(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("reconcile-fills requires mode=live_readonly or live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     result = PartialFillReconciliationService(store, audit).reconcile_latest(new_run_id())
     typer.echo(
@@ -740,13 +786,13 @@ def reconcile_fills(config: Path = typer.Option(..., "--config")) -> None:
 
 @app.command("recover-live-order")
 def recover_live_order(
-    config: Path = typer.Option(..., "--config"),
+    config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
-    maestro_config = load_config(config)
+    maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("recover-live-order requires live_readonly or live_approval")
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     latest_snapshot = store.load_latest_broker_account_snapshot()
     if latest_snapshot is None:
@@ -773,7 +819,8 @@ def recover_live_order(
 
 
 @app.command("dashboard")
-def dashboard(config: Path = typer.Option(Path("configs/paper.yaml"), "--config")) -> None:
+def dashboard(config: Path | None = CONFIG_OPTION) -> None:
+    resolved_config = _resolve_config(config)
     command = [
         sys.executable,
         "-m",
@@ -782,14 +829,14 @@ def dashboard(config: Path = typer.Option(Path("configs/paper.yaml"), "--config"
         "src/maestro/dashboard/app.py",
         "--",
         "--config",
-        str(config),
+        str(resolved_config),
     ]
     raise typer.Exit(subprocess.call(command))
 
 
-def _safety_service(config: Path) -> SafetyControlService:
-    maestro_config = load_config(config)
-    store = StateStore(maestro_config.state.sqlite_path, maestro_config.portfolio.initial_cash)
+def _safety_service(config: Path | None) -> SafetyControlService:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
     return SafetyControlService(store, audit)
 
@@ -1000,24 +1047,32 @@ def _personal_operator_config(output: Path) -> dict:
             "live_order_enabled": False,
             "live_order_dry_run": True,
             "require_reconciliation_pass": True,
-            "max_live_order_notional": 100,
-            "max_daily_live_notional": 300,
-            "max_daily_live_order_count": 1,
-            "daily_loss_limit": None,
+            "live_order_limits": {
+                "max_order_notional": 100,
+                "max_daily_notional": 300,
+                "max_daily_order_count": 1,
+                "daily_loss_limit": None,
+                "fee_buffer_pct": 0.002,
+            },
             "allowed_order_type": "limit",
             "order_status_poll_interval_seconds": 30,
             "order_status_max_polls": 20,
             "order_status_terminal_timeout_seconds": 1800,
-            "require_market_session": True,
-            "market_session_timezone": "America/New_York",
-            "market_session_open": "09:30",
-            "market_session_close": "16:00",
-            "market_session_weekdays": [0, 1, 2, 3, 4],
-            "market_session_holidays": [],
-            "require_broker_quote_validation": False,
-            "max_broker_quote_deviation_pct": 0.05,
-            "require_broker_risk_validation": False,
-            "live_order_fee_buffer_pct": 0.002,
+            "market_session": {
+                "required": True,
+                "timezone": "America/New_York",
+                "open": "09:30",
+                "close": "16:00",
+                "weekdays": [0, 1, 2, 3, 4],
+                "holidays": [],
+            },
+            "broker_validation": {
+                "require_quote_validation": False,
+                "max_quote_deviation_pct": 0.05,
+                "require_risk_validation": False,
+            },
+        },
+        "monitoring": {
             "heartbeat_max_age_seconds": 3600,
             "scheduled_run_max_age_seconds": 86400,
         },

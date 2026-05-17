@@ -23,10 +23,15 @@ execution:
   live_order_enabled: false
   live_order_dry_run: true
   require_reconciliation_pass: true
-  require_market_session: true
-  require_broker_quote_validation: true
-  require_broker_risk_validation: true
-  daily_loss_limit: 100000
+  market_session:
+    required: true
+  broker_validation:
+    require_quote_validation: true
+    require_risk_validation: true
+  live_order_limits:
+    daily_loss_limit: 100000
+
+monitoring:
   heartbeat_max_age_seconds: 3600
   scheduled_run_max_age_seconds: 86400
 kis:
@@ -39,8 +44,10 @@ kis:
 
 For the first KIS mock-investment broker-submit pilot only, set
 `execution.live_order_enabled=true` and `execution.live_order_dry_run=false`.
-Keep `max_live_order_notional`, `max_daily_live_notional`, and
-`max_daily_live_order_count` at minimum-order rehearsal levels.
+Keep `execution.live_order_limits.max_order_notional`,
+`execution.live_order_limits.max_daily_notional`, and
+`execution.live_order_limits.max_daily_order_count` at minimum-order rehearsal
+levels.
 
 Secrets belong only in environment variables or an operator-local env file:
 `KIS_ACCOUNT_ID`, `KIS_APP_KEY`, `KIS_APP_SECRET`, optional

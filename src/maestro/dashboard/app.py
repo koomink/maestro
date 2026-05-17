@@ -3,9 +3,10 @@ import csv
 import html
 import io
 import json
+import os
 from pathlib import Path
 
-from maestro.config.loader import load_config
+from maestro.config.loader import load_config_with_identity
 from maestro.dashboard.read_models import (
     build_account_performance_table,
     build_approvals_table,
@@ -37,8 +38,10 @@ from maestro.dashboard.read_models import (
 )
 from maestro.state.store import StateStore
 
+CONFIG_ENV_VAR = "MAESTRO_CONFIG"
 
-def render(config_path: str | Path) -> None:
+
+def render(config_path: str | Path | None) -> None:
     try:
         import streamlit as st
     except ModuleNotFoundError as exc:
@@ -46,11 +49,13 @@ def render(config_path: str | Path) -> None:
             "Streamlit is required for the dashboard. Install with `uv sync --extra dashboard`."
         ) from exc
 
-    config = load_config(config_path)
+    resolved_config = _resolve_config(config_path)
+    config, identity = load_config_with_identity(resolved_config)
     store = StateStore(
         config.state.sqlite_path,
         config.portfolio.initial_cash,
         config.portfolio.cash_by_currency,
+        config_identity=identity,
     )
     overview = build_overview(store)
     operator_summary = build_operator_summary(config, store)
@@ -58,7 +63,10 @@ def render(config_path: str | Path) -> None:
 
     st.set_page_config(page_title="Maestro Dashboard", layout="wide")
     _apply_design_theme(st)
-    _page_header(st, config.mode.value)
+    _page_header(st, config.mode.value, status.get("operator_config"))
+    st.sidebar.caption(f"Config: {identity.path}")
+    st.sidebar.caption(f"State: {Path(config.state.sqlite_path).expanduser().resolve()}")
+    st.sidebar.caption(f"Audit: {Path(config.audit.jsonl_path).expanduser().resolve()}")
 
     action_cols = st.columns([1, 5])
     if action_cols[0].button("Refresh", type="primary"):
@@ -670,7 +678,9 @@ def _apply_design_theme(st: object) -> None:
     )
 
 
-def _page_header(st: object, mode: str) -> None:
+def _page_header(st: object, mode: str, operator_config: dict[str, str] | None) -> None:
+    fingerprint = (operator_config or {}).get("fingerprint", "none")
+    short_fingerprint = fingerprint[:12] if fingerprint != "none" else "none"
     st.markdown(
         f"""
         <div class="maestro-header">
@@ -680,7 +690,15 @@ def _page_header(st: object, mode: str) -> None:
             Read-only portfolio OS visibility for stock/ETF and KIS
             domestic/overseas workflows.
           </p>
-          {_badge_row([("Mode", mode, "primary"), ("Access", "read-only", "success")])}
+          {
+            _badge_row(
+                [
+                    ("Mode", mode, "primary"),
+                    ("Access", "read-only", "success"),
+                    ("Config", short_fingerprint, "neutral"),
+                ]
+            )
+        }
         </div>
         """,
         unsafe_allow_html=True,
@@ -879,9 +897,18 @@ def _csv_value(value: object) -> object:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/paper.yaml")
+    parser.add_argument("--config", default=None)
     args = parser.parse_args()
     render(args.config)
+
+
+def _resolve_config(config_path: str | Path | None) -> Path:
+    if config_path:
+        return Path(config_path)
+    env_config = os.getenv(CONFIG_ENV_VAR)
+    if env_config:
+        return Path(env_config)
+    raise ValueError(f"--config is required or set {CONFIG_ENV_VAR}")
 
 
 def _money(value: object) -> str:

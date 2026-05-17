@@ -161,8 +161,7 @@ def _config(**contribution_overrides) -> ExecutionConfig:
     return ExecutionConfig(
         engine="paper",
         order_generation_mode="buy_only_contribution",
-        market_session_timezone="Asia/Seoul",
-        market_session_weekdays=[0, 1, 2, 3, 4],
+        market_session={"timezone": "Asia/Seoul", "weekdays": [0, 1, 2, 3, 4]},
         contribution=contribution,
     )
 

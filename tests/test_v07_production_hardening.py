@@ -130,10 +130,12 @@ def test_market_session_blocks_live_approval_outside_session(tmp_path, monkeypat
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_market_session": True,
-            "market_session_timezone": "UTC",
-            "market_session_open": "09:30",
-            "market_session_close": "16:00",
+            "market_session": {
+                "required": True,
+                "timezone": "UTC",
+                "open": "09:30",
+                "close": "16:00",
+            },
         },
     )
     _save_passed_reconciliation(orchestrator.state_store)
@@ -154,11 +156,13 @@ def test_market_session_blocks_live_approval_on_configured_holiday(tmp_path, mon
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_market_session": True,
-            "market_session_timezone": "UTC",
-            "market_session_open": "09:30",
-            "market_session_close": "16:00",
-            "market_session_holidays": ["2026-05-11"],
+            "market_session": {
+                "required": True,
+                "timezone": "UTC",
+                "open": "09:30",
+                "close": "16:00",
+                "holidays": ["2026-05-11"],
+            },
         },
     )
     _save_passed_reconciliation(orchestrator.state_store)
@@ -174,8 +178,10 @@ def test_broker_quote_validation_uses_broker_quote_for_live_order_generation(tmp
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_broker_quote_validation": True,
-            "max_broker_quote_deviation_pct": 0.05,
+            "broker_validation": {
+                "require_quote_validation": True,
+                "max_quote_deviation_pct": 0.05,
+            },
             "live_order_dry_run": True,
         },
     )
@@ -199,8 +205,10 @@ def test_broker_quote_validation_allows_live_approval_when_quotes_match(tmp_path
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_broker_quote_validation": True,
-            "max_broker_quote_deviation_pct": 0.05,
+            "broker_validation": {
+                "require_quote_validation": True,
+                "max_quote_deviation_pct": 0.05,
+            },
             "live_order_dry_run": True,
         },
     )
@@ -221,8 +229,8 @@ def test_broker_risk_validation_blocks_when_fee_buffer_exceeds_buying_power(tmp_
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_broker_risk_validation": True,
-            "live_order_fee_buffer_pct": 0.01,
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_limits": {"fee_buffer_pct": 0.01},
             "live_order_dry_run": True,
         },
     )
@@ -246,7 +254,7 @@ def test_broker_risk_validation_blocks_pending_broker_orders(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_broker_risk_validation": True,
+            "broker_validation": {"require_risk_validation": True},
             "live_order_dry_run": True,
         },
     )
@@ -269,7 +277,7 @@ def test_broker_risk_validation_blocks_unreconciled_broker_snapshot(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_broker_risk_validation": True,
+            "broker_validation": {"require_risk_validation": True},
             "live_order_dry_run": True,
         },
     )
@@ -291,7 +299,7 @@ def test_broker_risk_validation_blocks_symbol_exposure_from_broker_truth(tmp_pat
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "require_broker_risk_validation": True,
+            "broker_validation": {"require_risk_validation": True},
             "live_order_dry_run": True,
         },
     )
@@ -316,7 +324,7 @@ def test_daily_loss_limit_blocks_from_normalized_broker_pnl(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "daily_loss_limit": 100.0,
+            "live_order_limits": {"daily_loss_limit": 100.0},
             "live_order_dry_run": True,
         },
     )
@@ -339,7 +347,7 @@ def test_daily_loss_limit_allows_when_normalized_broker_pnl_is_above_limit(tmp_p
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
-            "daily_loss_limit": 100.0,
+            "live_order_limits": {"daily_loss_limit": 100.0},
             "live_order_dry_run": True,
         },
     )
@@ -648,13 +656,19 @@ def _live_orchestrator(
         "engine": "paper",
         "live_order_enabled": True,
         "require_reconciliation_pass": True,
-        "max_live_order_notional": 10_000_000.0,
-        "max_daily_live_notional": max_daily_live_notional,
-        "max_daily_live_order_count": max_daily_live_order_count,
+        "live_order_limits": {
+            "max_order_notional": 10_000_000.0,
+            "max_daily_notional": max_daily_live_notional,
+            "max_daily_order_count": max_daily_live_order_count,
+        },
         "order_status_max_polls": 1,
         "order_status_poll_interval_seconds": 0.0,
     }
-    raw["execution"].update(execution_overrides or {})
+    execution_overrides = dict(execution_overrides or {})
+    live_order_limits = execution_overrides.pop("live_order_limits", None)
+    if live_order_limits:
+        raw["execution"]["live_order_limits"].update(live_order_limits)
+    raw["execution"].update(execution_overrides)
     raw["approval"] = {
         "enabled": True,
         "provider": "telegram",

@@ -1,10 +1,19 @@
+from typing import Any
+
 from pydantic import Field, model_validator
 
 from maestro.config.approval import ApprovalConfig
 from maestro.config.base import StrictConfigModel
 from maestro.config.broker import KISConfig
 from maestro.config.datahub import DataHubConfig, DataHubProviderConfig
-from maestro.config.execution import ContributionConfig, ExecutionConfig
+from maestro.config.execution import (
+    BrokerValidationConfig,
+    ContributionConfig,
+    ExecutionConfig,
+    LiveOrderLimitsConfig,
+    MarketSessionConfig,
+)
+from maestro.config.monitoring_config import MonitoringConfig
 from maestro.config.portfolio import CurrencySleeveConfig, PortfolioConfig
 from maestro.config.reconciliation_config import ReconciliationConfig
 from maestro.config.risk import RiskConfig
@@ -34,12 +43,39 @@ class MaestroConfig(StrictConfigModel):
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     datahub: DataHubConfig = Field(default_factory=DataHubConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     risk: RiskConfig
     state: StateConfig
     audit: AuditConfig
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     kis: KISConfig = Field(default_factory=KISConfig)
     reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_monitoring_config(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        execution = values.get("execution")
+        if not isinstance(execution, dict):
+            return values
+        legacy_keys = [
+            key
+            for key in ("heartbeat_max_age_seconds", "scheduled_run_max_age_seconds")
+            if key in execution
+        ]
+        if not legacy_keys:
+            return values
+        if "monitoring" in values:
+            raise ValueError(
+                "monitoring cannot be mixed with legacy execution monitoring fields: "
+                + ", ".join(legacy_keys)
+            )
+        execution_values = dict(execution)
+        values["execution"] = execution_values
+        values["monitoring"] = {key: execution_values.pop(key) for key in legacy_keys}
+        return values
 
     @model_validator(mode="after")
     def validate_universe_matches_portfolio(self) -> "MaestroConfig":
@@ -124,6 +160,7 @@ class MaestroConfig(StrictConfigModel):
 
 __all__ = [
     "ApprovalConfig",
+    "BrokerValidationConfig",
     "ContributionConfig",
     "AuditConfig",
     "CurrencySleeveConfig",
@@ -131,7 +168,10 @@ __all__ = [
     "DataHubProviderConfig",
     "ExecutionConfig",
     "KISConfig",
+    "LiveOrderLimitsConfig",
     "MaestroConfig",
+    "MarketSessionConfig",
+    "MonitoringConfig",
     "PortfolioConfig",
     "ReconciliationConfig",
     "RiskConfig",

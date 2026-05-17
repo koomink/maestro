@@ -60,6 +60,8 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
     sent_text = "\n\n".join(message["text"] for message in client.sent_messages)
     assert "Maestro Telegram commands" in sent_text
     assert "Maestro status" in sent_text
+    assert f"state: {Path(config.state.sqlite_path).resolve()}" in sent_text
+    assert f"audit: {Path(config.audit.jsonl_path).resolve()}" in sent_text
     assert "Maestro health" in sent_text
     assert "Maestro portfolio" in sent_text
     assert "Maestro apps" in sent_text

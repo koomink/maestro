@@ -108,12 +108,13 @@ class LiveOrderSafetyService:
             raise ValueError("Live order submission is limit-order only")
         if self.config.allowed_order_type != OrderType.LIMIT:
             raise ValueError("Configured live order type must be limit")
-        if request.notional > self.config.max_live_order_notional:
+        limits = self.config.live_order_limits
+        if request.notional > limits.max_order_notional:
             raise ValueError("Live order notional exceeds per-order cap")
-        if self._daily_live_notional() + request.notional > self.config.max_daily_live_notional:
+        if self._daily_live_notional() + request.notional > limits.max_daily_notional:
             raise ValueError("Live order notional exceeds daily cap")
-        if self.config.max_daily_live_order_count > 0:
-            if self._daily_live_order_count() + 1 > self.config.max_daily_live_order_count:
+        if limits.max_daily_order_count > 0:
+            if self._daily_live_order_count() + 1 > limits.max_daily_order_count:
                 raise ValueError("Live order count exceeds daily cap")
         self._validate_instrument_contract(request)
         if self._is_duplicate(request):
