@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Maestro scheduled run-once daily
+
+[Timer]
+OnCalendar=*-*-* 09:10:00
+Persistent=true
+Unit=maestro-run-once.service
+
+[Install]
+WantedBy=timers.target

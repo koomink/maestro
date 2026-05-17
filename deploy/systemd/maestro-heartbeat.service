@@ -1,0 +1,14 @@
+[Unit]
+Description=Maestro heartbeat
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro heartbeat
+StandardOutput=journal
+StandardError=journal

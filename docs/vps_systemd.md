@@ -133,15 +133,63 @@ tailscale serve status
 Normal dashboard access should use the Tailscale Serve HTTPS URL. Keep
 `8503/tcp` closed in `ufw`; use SSH port forwarding only as a fallback.
 
-## Example Timer
+## Example Heartbeat Timer
 
 ```ini
 [Unit]
-Description=Run Maestro KIS read-only sync periodically
+Description=Maestro heartbeat
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro heartbeat
+```
+
+```ini
+[Unit]
+Description=Run Maestro heartbeat periodically
 
 [Timer]
 OnCalendar=*:0/15
 Persistent=true
+Unit=maestro-heartbeat.service
+
+[Install]
+WantedBy=timers.target
+```
+
+## Example Scheduled Run-once Timer
+
+For the current polling-based Telegram approval flow, stop
+`maestro-telegram-operator.service` while `run-once` is active so only one
+process consumes Telegram `getUpdates` for the shared bot token. The service
+below restarts the Telegram operator when `run-once` exits.
+
+```ini
+[Unit]
+Description=Maestro scheduled run-once
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStartPre=-/bin/systemctl stop maestro-telegram-operator.service
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro run-once
+ExecStopPost=-/bin/systemctl start maestro-telegram-operator.service
+TimeoutStartSec=900
+```
+
+```ini
+[Unit]
+Description=Run Maestro scheduled run-once daily
+
+[Timer]
+OnCalendar=*-*-* 09:10:00
+Persistent=true
+Unit=maestro-run-once.service
 
 [Install]
 WantedBy=timers.target
@@ -151,7 +199,8 @@ Reload systemd after installing unit files:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now maestro-kis-sync.timer
+sudo systemctl enable --now maestro-heartbeat.timer
+sudo systemctl enable --now maestro-run-once.timer
 ```
 
 Keep service output in journald or a controlled log sink. Confirm structured

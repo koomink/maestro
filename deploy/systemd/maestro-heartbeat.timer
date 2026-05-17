@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Maestro heartbeat periodically
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=maestro-heartbeat.service
+
+[Install]
+WantedBy=timers.target
