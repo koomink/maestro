@@ -39,6 +39,7 @@ from maestro.dashboard.read_models import (
 from maestro.state.store import StateStore
 
 CONFIG_ENV_VAR = "MAESTRO_CONFIG"
+THEME_OPTIONS = ("System Default", "Dark", "Light")
 
 
 def render(config_path: str | Path | None) -> None:
@@ -62,7 +63,13 @@ def render(config_path: str | Path | None) -> None:
     status = store.status()
 
     st.set_page_config(page_title="Maestro Dashboard", layout="wide")
-    _apply_design_theme(st)
+    theme = st.sidebar.selectbox(
+        "Theme",
+        THEME_OPTIONS,
+        index=0,
+        help="Display preference only; no broker calls or writes.",
+    )
+    _apply_design_theme(st, theme)
     _page_header(st, config.mode.value, status.get("operator_config"))
     st.sidebar.caption(f"Config: {identity.path}")
     st.sidebar.caption(f"State: {Path(config.state.sqlite_path).expanduser().resolve()}")
@@ -462,43 +469,35 @@ def _dashboard_filters(st: object) -> dict[str, object]:
     return {"query": query, "statuses": statuses}
 
 
-def _apply_design_theme(st: object) -> None:
+def _apply_design_theme(st: object, theme: str) -> None:
     st.markdown(
         """
         <style>
-        :root {
-          --maestro-primary: #5e6ad2;
-          --maestro-primary-hover: #828fff;
-          --maestro-primary-focus: #5e69d1;
-          --maestro-ink: #f7f8f8;
-          --maestro-ink-muted: #d0d6e0;
-          --maestro-ink-subtle: #8a8f98;
-          --maestro-canvas: #010102;
-          --maestro-surface-1: #0f1011;
-          --maestro-surface-2: #141516;
-          --maestro-surface-3: #18191a;
-          --maestro-hairline: #23252a;
-          --maestro-hairline-strong: #34343a;
-          --maestro-success: #27a644;
-          --maestro-danger: #d06262;
-          --maestro-warning: #d0a85c;
-        }
+        """
+        + _theme_variables(theme)
+        + """
         .stApp {
           background: var(--maestro-canvas);
           color: var(--maestro-ink);
           font-family: "Inter", "SF Pro Display", -apple-system, BlinkMacSystemFont,
             "Segoe UI", sans-serif;
         }
+        [data-testid="stAppViewContainer"], [data-testid="stHeader"] {
+          background: var(--maestro-canvas);
+        }
         .block-container {
           max-width: 1280px;
           padding-top: 32px;
           padding-bottom: 64px;
         }
-        h1, h2, h3, h4, h5, h6, p, label, span {
+        h1, h2, h3, h4, h5, h6, p, label, span, div {
           letter-spacing: 0;
         }
-        h1, h2, h3 {
+        h1, h2, h3, h4, h5, h6, p, label,
+        [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"] {
           color: var(--maestro-ink);
+        }
+        h1, h2, h3 {
           font-weight: 600;
         }
         .stTabs [data-baseweb="tab-list"] {
@@ -524,8 +523,11 @@ def _apply_design_theme(st: object) -> None:
           background: var(--maestro-surface-1);
         }
         [data-testid="stSidebar"] {
-          background: #09090a;
+          background: var(--maestro-sidebar);
           border-right: 1px solid var(--maestro-hairline);
+        }
+        [data-testid="stSidebar"] * {
+          color: var(--maestro-ink);
         }
         .stButton > button, .stDownloadButton > button {
           background: var(--maestro-surface-1);
@@ -538,6 +540,13 @@ def _apply_design_theme(st: object) -> None:
           background: var(--maestro-primary);
           color: #ffffff;
           border-color: var(--maestro-primary);
+        }
+        .stSelectbox [data-baseweb="select"],
+        .stMultiSelect [data-baseweb="select"],
+        .stTextInput input {
+          background: var(--maestro-surface-1);
+          color: var(--maestro-ink);
+          border-color: var(--maestro-hairline);
         }
         .stButton > button:hover, .stDownloadButton > button:hover {
           border-color: var(--maestro-hairline-strong);
@@ -675,6 +684,65 @@ def _apply_design_theme(st: object) -> None:
         </style>
         """,
         unsafe_allow_html=True,
+    )
+
+
+def _theme_variables(theme: str) -> str:
+    dark = """
+        :root {
+          --maestro-primary: #5e6ad2;
+          --maestro-primary-hover: #828fff;
+          --maestro-primary-focus: #5e69d1;
+          --maestro-ink: #f7f8f8;
+          --maestro-ink-muted: #d0d6e0;
+          --maestro-ink-subtle: #8a8f98;
+          --maestro-ink-tertiary: #62666d;
+          --maestro-canvas: #010102;
+          --maestro-sidebar: #09090a;
+          --maestro-surface-1: #0f1011;
+          --maestro-surface-2: #141516;
+          --maestro-surface-3: #18191a;
+          --maestro-hairline: #23252a;
+          --maestro-hairline-strong: #34343a;
+          --maestro-success: #27a644;
+          --maestro-danger: #d06262;
+          --maestro-warning: #d0a85c;
+        }
+    """
+    light = """
+        :root {
+          --maestro-primary: #4f5bd5;
+          --maestro-primary-hover: #3f49ba;
+          --maestro-primary-focus: #4f5bd5;
+          --maestro-ink: #111827;
+          --maestro-ink-muted: #334155;
+          --maestro-ink-subtle: #64748b;
+          --maestro-ink-tertiary: #94a3b8;
+          --maestro-canvas: #f7f8fb;
+          --maestro-sidebar: #eef1f6;
+          --maestro-surface-1: #ffffff;
+          --maestro-surface-2: #f1f4f8;
+          --maestro-surface-3: #e8edf5;
+          --maestro-hairline: #d8dee9;
+          --maestro-hairline-strong: #b8c2d3;
+          --maestro-success: #1f8f3a;
+          --maestro-danger: #b42318;
+          --maestro-warning: #a16207;
+        }
+    """
+    if theme == "Light":
+        return light
+    if theme == "Dark":
+        return dark
+    return (
+        dark
+        + """
+        @media (prefers-color-scheme: light) {
+        """
+        + light.strip()
+        + """
+        }
+        """
     )
 
 
