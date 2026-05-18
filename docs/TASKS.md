@@ -616,6 +616,14 @@
       reconciliation status
 - [ ] Add read-only dashboard charts for strategy-level returns after strategy
       attribution exists
+- [ ] Redesign dashboard information architecture around Symphony Map, Operator
+      Cockpit, Investment Console, Virtuoso Apps, and Audit Trail
+- [ ] Make Symphony Map the dashboard landing view with persisted status nodes
+      for proposal, validation/risk, execution/state, reconciliation, and
+      operator attention
+- [ ] Keep the Streamlit dashboard read-only during the IA redesign; defer
+      React/Vite, REST/WebSocket, approval controls, kill switch, and config
+      writes until a daemon/API event model exists
 - [x] Keep dashboard graphs backed by persisted state/read models only; do not
       call KIS live endpoints from dashboard rendering
 - [x] Add CSV export for performance tables without adding dashboard write

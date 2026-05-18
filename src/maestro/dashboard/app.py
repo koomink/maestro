@@ -144,56 +144,75 @@ def render(config_path: str | Path | None) -> None:
 
     tabs = st.tabs(
         [
-            "Home",
-            "Virtuoso",
-            "Portfolio",
-            "Performance",
-            "Operations",
-            "Orders",
-            "Events",
-            "Run Detail",
+            "Symphony Map",
+            "Operator Cockpit",
+            "Investment Console",
+            "Virtuoso Apps",
+            "Audit Trail",
             "Raw",
         ]
     )
 
     with tabs[0]:
-        _section_header(
+        _render_symphony_map(
             st,
-            "Operator Home",
-            "Control state, data freshness, and recent runs from persisted Maestro state.",
+            config,
+            operator_home,
+            health,
+            reconciliation,
+            freshness,
+            safety,
+            broker_summary,
+            broker_snapshot,
+            strategy_runs,
+            risk_decisions,
+            orders,
+            approvals,
+            live_order_lifecycle,
+            run_index,
+            table,
         )
-        _metric_strip(
-            st,
-            [
-                ("Overall", str(operator_home["status"]).upper(), operator_home["status"]),
-                ("Mode", operator_home["mode"], "neutral"),
-                ("Latest Run", operator_home["latest_run_id"] or "n/a", "neutral"),
-                (
-                    "Attention",
-                    operator_home["attention_count"],
-                    _count_tone(operator_home["attention_count"]),
-                ),
-                (
-                    "Stale / Missing",
-                    operator_home["stale_count"],
-                    _count_tone(operator_home["stale_count"]),
-                ),
-            ],
-        )
-        if operator_home["attention_items"]:
-            _status_banner(
-                st,
-                "Attention required",
-                f"{operator_home['attention_count']} item(s) need review.",
-                "danger",
-            )
-            st.dataframe(operator_home["attention_items"], width="stretch")
-        else:
-            _status_banner(st, "No attention items", "Operator summary is clear.", "success")
-        table("Freshness", freshness, "freshness")
-        table("Run Index", run_index, "run_index")
 
     with tabs[1]:
+        _render_operator_cockpit(
+            st,
+            operator_home,
+            freshness,
+            safety,
+            health,
+            reconciliation,
+            operator_summary,
+            daily_usage,
+            live_order_lifecycle,
+            risk_decisions,
+            halt_failure_events,
+            run_index,
+            table,
+        )
+
+    with tabs[2]:
+        _render_investment_console(
+            st,
+            broker_summary,
+            broker_snapshot,
+            reconciliation,
+            account_performance,
+            currency_sleeve_performance,
+            total_portfolio_performance,
+            display_currency,
+            fx_snapshot,
+            strategy_book_performance,
+            strategy_attribution,
+            strategy_book_snapshots,
+            broker_positions,
+            maestro_exposure,
+            portfolio_table,
+            portfolio_history,
+            broker_history,
+            table,
+        )
+
+    with tabs[3]:
         _render_virtuoso_tab(
             st,
             config,
@@ -204,280 +223,469 @@ def render(config_path: str | Path | None) -> None:
             table,
         )
 
-    with tabs[2]:
-        _section_header(
-            st,
-            "Account / Portfolio",
-            "Broker truth beside Maestro state, with snapshot histories for review.",
-        )
-        account_cols = st.columns(2)
-        with account_cols[0]:
-            _section_header(st, "Latest Broker Account")
-            st.json(broker_summary)
-        with account_cols[1]:
-            _section_header(st, "Latest Broker / Reconciliation")
-            st.json(
-                {
-                    "broker_snapshot": broker_snapshot,
-                    "reconciliation": reconciliation,
-                }
-            )
-
-        table("Broker Position Exposure", broker_positions, "broker_position_exposure")
-        table("Maestro State Exposure", maestro_exposure, "maestro_state_exposure")
-        table("Portfolio", portfolio_table, "portfolio")
-        history_cols = st.columns(2)
-        with history_cols[0]:
-            table(
-                "Maestro Snapshot History",
-                portfolio_history,
-                "portfolio_snapshot_history",
-            )
-        with history_cols[1]:
-            table("Broker Snapshot History", broker_history, "broker_snapshot_history")
-
-    with tabs[3]:
-        _section_header(
-            st,
-            "Account Performance",
-            "Persisted broker snapshots rendered as read-only return and drawdown views.",
-        )
-        latest_performance = account_performance[0] if account_performance else {}
-        _metric_strip(
-            st,
-            [
-                ("Account Value", _money(latest_performance.get("total_value")), "neutral"),
-                ("Period Return", _percent(latest_performance.get("period_return")), "neutral"),
-                (
-                    "Cumulative Return",
-                    _percent(latest_performance.get("cumulative_return")),
-                    "neutral",
-                ),
-                ("Drawdown", _percent(latest_performance.get("drawdown")), "neutral"),
-                (
-                    "Reconciliation",
-                    latest_performance.get("reconciliation_status") or "n/a",
-                    _status_tone(latest_performance.get("reconciliation_status")),
-                ),
-            ],
-        )
-        if account_performance:
-            chart_rows = list(reversed(account_performance))
-            st.line_chart(chart_rows, x="created_at", y="total_value")
-            return_cols = st.columns(2)
-            with return_cols[0]:
-                st.line_chart(chart_rows, x="created_at", y="cumulative_return")
-            with return_cols[1]:
-                st.line_chart(chart_rows, x="created_at", y="drawdown")
-        table("Account Performance", account_performance, "account_performance")
-        _section_header(st, "Currency Sleeve Performance")
-        if currency_sleeve_performance:
-            st.line_chart(
-                list(reversed(currency_sleeve_performance)),
-                x="created_at",
-                y="cumulative_return",
-                color="currency",
-            )
-        table(
-            "Currency Sleeve Performance",
-            currency_sleeve_performance,
-            "currency_sleeve_performance",
-        )
-        _section_header(st, "Total Portfolio Performance")
-        total_chart_rows = [
-            row
-            for row in reversed(total_portfolio_performance)
-            if row.get("total_value") is not None
-        ]
-        if total_chart_rows:
-            st.line_chart(total_chart_rows, x="created_at", y="total_value")
-        if total_portfolio_performance and total_portfolio_performance[0].get("missing_fx"):
-            _status_banner(
-                st,
-                "FX source required",
-                "Total portfolio return needs an explicit FX source for mixed currencies.",
-                "warning",
-            )
-        st.markdown(
-            _badge_row(
-                [
-                    ("Display", display_currency, "neutral"),
-                    ("FX", fx_snapshot["status"], _status_tone(fx_snapshot["status"])),
-                ]
-            ),
-            unsafe_allow_html=True,
-        )
-        table(
-            "Total Portfolio Performance",
-            total_portfolio_performance,
-            "total_portfolio_performance",
-        )
-        _section_header(st, "Strategy Book Performance")
-        if strategy_book_performance:
-            st.line_chart(
-                list(reversed(strategy_book_performance)),
-                x="created_at",
-                y="book_value",
-                color="book_id",
-            )
-        table(
-            "Strategy Book Performance",
-            strategy_book_performance,
-            "strategy_book_performance",
-        )
-        table(
-            "Strategy Attribution",
-            strategy_attribution,
-            "strategy_attribution",
-        )
-        table(
-            "Strategy Book Snapshots",
-            strategy_book_snapshots,
-            "strategy_book_snapshots",
-        )
-
     with tabs[4]:
-        _section_header(
+        _render_audit_trail(
             st,
-            "Operational Summary",
-            "Safety, health, live-order usage, lifecycle state, and recent risk events.",
+            strategy_runs,
+            orders,
+            approvals,
+            broker_snapshots,
+            live_order_events,
+            fill_reconciliation,
+            system_events,
+            run_index,
+            store,
+            table,
         )
-        daily_notional_value = (
-            f"{_money(daily_usage['notional'])} / {_money(daily_usage['max_daily_live_notional'])}"
-        )
-        _metric_strip(
-            st,
-            [
-                ("Safety State", str(safety["state"]).upper(), _status_tone(safety["state"])),
-                ("Health", str(health["status"]).upper(), _status_tone(health["status"])),
-                (
-                    "Reconciliation",
-                    _reconciliation_label(reconciliation["passed"]),
-                    _boolean_tone(reconciliation["passed"]),
-                ),
-                (
-                    "Broker Snapshot Age",
-                    _duration(operator_summary["broker_snapshot_age_seconds"]),
-                    "neutral",
-                ),
-                ("Risk Decisions", overview["risk_decisions_count"], "neutral"),
-                (
-                    "Daily Live Orders",
-                    f"{daily_usage['order_count']} / {daily_usage['max_daily_live_order_count']}",
-                    _limit_tone(
-                        daily_usage["order_count"],
-                        daily_usage["max_daily_live_order_count"],
-                    ),
-                ),
-                (
-                    "Daily Live Notional",
-                    daily_notional_value,
-                    _limit_tone(daily_usage["notional"], daily_usage["max_daily_live_notional"]),
-                ),
-            ],
-        )
-        attention_items = operator_summary["attention_items"]
-        if attention_items:
-            _status_banner(st, "Attention required", f"{len(attention_items)} item(s)", "danger")
-            st.dataframe(
-                [
-                    {
-                        "severity": item.get("severity"),
-                        "code": item.get("code"),
-                        "message": item.get("message"),
-                    }
-                    for item in attention_items
-                ],
-                width="stretch",
-            )
-        else:
-            _status_banner(st, "No attention items", "Operational summary is clear.", "success")
-        latest_lifecycle = live_order_lifecycle["latest"] or {}
-        _metric_strip(
-            st,
-            [
-                (
-                    "Latest Live Order",
-                    latest_lifecycle.get("status") or "n/a",
-                    _status_tone(latest_lifecycle.get("status")),
-                ),
-                (
-                    "Recent Live Order Issues",
-                    live_order_lifecycle["recent_issue_count"],
-                    _count_tone(live_order_lifecycle["recent_issue_count"]),
-                ),
-                ("Lifecycle Rows", len(live_order_lifecycle["recent"]), "neutral"),
-            ],
-        )
-        table(
-            "Live Order Lifecycle Summary",
-            live_order_lifecycle["recent"],
-            "live_order_lifecycle_summary",
-        )
-        table("Health Checks", health["checks"], "health_checks")
-        table("Recent Risk Decisions", risk_decisions, "risk_decisions")
-        table("Recent Halt / Failure Events", halt_failure_events, "halt_failure_events")
-        with st.expander("Operator Summary Payload"):
-            st.json(operator_summary)
 
     with tabs[5]:
-        _section_header(
-            st,
-            "Strategy Signals / Results",
-            "Normalized proposals, validation state, generated orders, and approvals.",
-        )
-        strategy_signal_columns = [
-            "created_at",
-            "run_id",
-            "strategy_id",
-            "signal_action",
-            "signal_symbol",
-            "rating",
-            "confidence",
-            "allocations",
-            "risk_flags",
-            "validation_ok",
-            "validation_errors",
-        ]
-        strategy_signal_rows = [
-            {column: row.get(column) for column in strategy_signal_columns} for row in strategy_runs
-        ]
-        table("Strategy Signals / Results", strategy_signal_rows, "strategy_runs")
-        with st.expander("Strategy Run Payloads"):
-            st.json([row.get("payload", {}) for row in strategy_runs])
-        table("Recent Paper Orders", orders, "orders")
-        table("Recent Approvals", approvals, "approvals")
-
-    with tabs[6]:
-        table("Recent Broker Account Snapshots", broker_snapshots, "broker_snapshots")
-        table("Live Order Status / Lifecycle Events", live_order_events, "live_order_events")
-        table(
-            "Fill Reconciliation Events",
-            fill_reconciliation,
-            "fill_reconciliation",
-        )
-        table("Recent System Events", system_events, "system_events")
-
-    with tabs[7]:
-        _section_header(
-            st,
-            "Run Detail",
-            "Trace strategy, risk, approval, order, and event rows by run identifier.",
-        )
-        run_ids = [row["run_id"] for row in run_index]
-        selected_run_id = st.selectbox("Run", run_ids, index=0) if run_ids else None
-        if selected_run_id:
-            detail = build_run_detail(store, selected_run_id)
-            st.json(detail["summary"])
-            table("Run Timeline", detail["timeline"], "run_timeline")
-            with st.expander("Run Payloads"):
-                st.json(detail)
-        else:
-            st.info("No run data found.")
-
-    with tabs[8]:
         st.subheader("Raw System Status")
         st.json(status)
+
+
+def _render_symphony_map(
+    st: object,
+    config: object,
+    operator_home: dict[str, object],
+    health: dict[str, object],
+    reconciliation: dict[str, object],
+    freshness: list[dict[str, object]],
+    safety: dict[str, object],
+    broker_summary: dict[str, object],
+    broker_snapshot: dict[str, object],
+    strategy_runs: list[dict[str, object]],
+    risk_decisions: list[dict[str, object]],
+    orders: list[dict[str, object]],
+    approvals: list[dict[str, object]],
+    live_order_lifecycle: dict[str, object],
+    run_index: list[dict[str, object]],
+    table: object,
+) -> None:
+    latest_strategy = strategy_runs[0] if strategy_runs else {}
+    latest_risk = risk_decisions[0] if risk_decisions else {}
+    latest_order = orders[0] if orders else {}
+    latest_approval = approvals[0] if approvals else {}
+    latest_lifecycle = live_order_lifecycle.get("latest") or {}
+    freshest_status = _freshness_rollup(freshness)
+    reconciliation_passed = reconciliation.get("passed")
+    enabled_strategies = [
+        strategy
+        for strategy in getattr(config, "strategies", [])
+        if getattr(strategy, "enabled", False)
+    ]
+
+    _section_header(
+        st,
+        "Symphony Map",
+        "A live read-only map of proposal, decision, protection, execution, and recorded truth.",
+    )
+    _metric_strip(
+        st,
+        [
+            ("Overall", str(operator_home["status"]).upper(), operator_home["status"]),
+            ("Enabled Virtuoso Apps", len(enabled_strategies), "neutral"),
+            ("Health", str(health["status"]).upper(), _status_tone(health["status"])),
+            (
+                "Reconciliation",
+                _reconciliation_label(reconciliation_passed),
+                _boolean_tone(reconciliation_passed),
+            ),
+            ("Broker Total Value", _money(broker_summary["total_value"]), "neutral"),
+            (
+                "Attention",
+                operator_home["attention_count"],
+                _count_tone(operator_home["attention_count"]),
+            ),
+        ],
+    )
+    _system_map(
+        st,
+        [
+            _system_node(
+                "Virtuoso",
+                "Propose",
+                f"{len(enabled_strategies)} enabled app(s)",
+                latest_strategy.get("created_at") or "No recent proposal",
+                _boolean_tone(bool(enabled_strategies)),
+            ),
+            _system_node(
+                "Maestro",
+                "Decide",
+                _validation_label(latest_strategy.get("validation_ok")),
+                latest_strategy.get("run_id") or "No run yet",
+                _boolean_tone(latest_strategy.get("validation_ok")),
+            ),
+            _system_node(
+                "Risk",
+                "Protect",
+                _approval_label(latest_risk.get("approved")),
+                latest_risk.get("created_at") or "No recent risk decision",
+                _boolean_tone(latest_risk.get("approved")),
+            ),
+            _system_node(
+                "Execution",
+                "Execute",
+                latest_order.get("approval_status") or latest_approval.get("status") or "read-only",
+                latest_lifecycle.get("status")
+                or latest_order.get("created_at")
+                or "No live lifecycle",
+                _status_tone(
+                    latest_lifecycle.get("status")
+                    or latest_order.get("approval_status")
+                    or latest_approval.get("status")
+                    or "ok"
+                ),
+            ),
+            _system_node(
+                "State",
+                "Record",
+                f"{len(run_index)} indexed run(s)",
+                broker_snapshot.get("created_at") or "No broker snapshot",
+                freshest_status,
+            ),
+            _system_node(
+                "Operator",
+                "Observe",
+                f"{operator_home['attention_count']} attention item(s)",
+                "Approve through Telegram; administer through CLI/config",
+                _count_tone(operator_home["attention_count"]),
+            ),
+        ],
+    )
+    if operator_home["attention_items"]:
+        _status_banner(
+            st,
+            "Attention required",
+            f"{operator_home['attention_count']} item(s) need operator review.",
+            "danger",
+        )
+        st.dataframe(operator_home["attention_items"], width="stretch")
+    else:
+        _status_banner(st, "No attention items", "The observed system map is clear.", "success")
+    table("Freshness", freshness, "symphony_freshness")
+    table("Run Index", run_index, "symphony_run_index")
+
+
+def _render_operator_cockpit(
+    st: object,
+    operator_home: dict[str, object],
+    freshness: list[dict[str, object]],
+    safety: dict[str, object],
+    health: dict[str, object],
+    reconciliation: dict[str, object],
+    operator_summary: dict[str, object],
+    daily_usage: dict[str, object],
+    live_order_lifecycle: dict[str, object],
+    risk_decisions: list[dict[str, object]],
+    halt_failure_events: list[dict[str, object]],
+    run_index: list[dict[str, object]],
+    table: object,
+) -> None:
+    _section_header(
+        st,
+        "Operator Cockpit",
+        "Operational trust, safety, freshness, and attention queue before the next cycle.",
+    )
+    daily_notional_value = (
+        f"{_money(daily_usage['notional'])} / {_money(daily_usage['max_daily_live_notional'])}"
+    )
+    latest_lifecycle = live_order_lifecycle["latest"] or {}
+    _metric_strip(
+        st,
+        [
+            ("Overall", str(operator_home["status"]).upper(), operator_home["status"]),
+            ("Safety State", str(safety["state"]).upper(), _status_tone(safety["state"])),
+            ("Health", str(health["status"]).upper(), _status_tone(health["status"])),
+            (
+                "Reconciliation",
+                _reconciliation_label(reconciliation["passed"]),
+                _boolean_tone(reconciliation["passed"]),
+            ),
+            (
+                "Broker Snapshot Age",
+                _duration(operator_summary["broker_snapshot_age_seconds"]),
+                "neutral",
+            ),
+            (
+                "Daily Live Orders",
+                f"{daily_usage['order_count']} / {daily_usage['max_daily_live_order_count']}",
+                _limit_tone(
+                    daily_usage["order_count"],
+                    daily_usage["max_daily_live_order_count"],
+                ),
+            ),
+            (
+                "Daily Live Notional",
+                daily_notional_value,
+                _limit_tone(daily_usage["notional"], daily_usage["max_daily_live_notional"]),
+            ),
+            (
+                "Live Order Issues",
+                live_order_lifecycle["recent_issue_count"],
+                _count_tone(live_order_lifecycle["recent_issue_count"]),
+            ),
+        ],
+    )
+    attention_items = operator_summary["attention_items"]
+    if attention_items:
+        _status_banner(st, "Attention required", f"{len(attention_items)} item(s)", "danger")
+        st.dataframe(
+            [
+                {
+                    "severity": item.get("severity"),
+                    "code": item.get("code"),
+                    "message": item.get("message"),
+                }
+                for item in attention_items
+            ],
+            width="stretch",
+        )
+    else:
+        _status_banner(st, "No attention items", "Operational summary is clear.", "success")
+    _metric_strip(
+        st,
+        [
+            (
+                "Latest Live Order",
+                latest_lifecycle.get("status") or "n/a",
+                _status_tone(latest_lifecycle.get("status")),
+            ),
+            ("Lifecycle Rows", len(live_order_lifecycle["recent"]), "neutral"),
+            ("Risk Decisions", len(risk_decisions), "neutral"),
+            ("Indexed Runs", len(run_index), "neutral"),
+        ],
+    )
+    table("Freshness", freshness, "operator_freshness")
+    table("Health Checks", health["checks"], "operator_health_checks")
+    table(
+        "Live Order Lifecycle Summary",
+        live_order_lifecycle["recent"],
+        "operator_live_order_lifecycle_summary",
+    )
+    table("Recent Risk Decisions", risk_decisions, "operator_risk_decisions")
+    table("Recent Halt / Failure Events", halt_failure_events, "operator_halt_failure_events")
+    with st.expander("Operator Summary Payload"):
+        st.json(operator_summary)
+
+
+def _render_investment_console(
+    st: object,
+    broker_summary: dict[str, object],
+    broker_snapshot: dict[str, object],
+    reconciliation: dict[str, object],
+    account_performance: list[dict[str, object]],
+    currency_sleeve_performance: list[dict[str, object]],
+    total_portfolio_performance: list[dict[str, object]],
+    display_currency: str,
+    fx_snapshot: dict[str, object],
+    strategy_book_performance: list[dict[str, object]],
+    strategy_attribution: list[dict[str, object]],
+    strategy_book_snapshots: list[dict[str, object]],
+    broker_positions: list[dict[str, object]],
+    maestro_exposure: list[dict[str, object]],
+    portfolio_table: list[dict[str, object]],
+    portfolio_history: list[dict[str, object]],
+    broker_history: list[dict[str, object]],
+    table: object,
+) -> None:
+    _section_header(
+        st,
+        "Investment Console",
+        "Capital, exposure, performance, currency sleeves, and strategy contribution.",
+    )
+    latest_performance = account_performance[0] if account_performance else {}
+    _metric_strip(
+        st,
+        [
+            ("Account Value", _money(latest_performance.get("total_value")), "neutral"),
+            ("Broker Cash", _money(broker_summary["cash"]), "neutral"),
+            ("Broker Exposure", _percent(broker_summary["exposure_weight"]), "neutral"),
+            ("Period Return", _percent(latest_performance.get("period_return")), "neutral"),
+            (
+                "Cumulative Return",
+                _percent(latest_performance.get("cumulative_return")),
+                "neutral",
+            ),
+            ("Drawdown", _percent(latest_performance.get("drawdown")), "neutral"),
+            (
+                "Reconciliation",
+                latest_performance.get("reconciliation_status")
+                or _reconciliation_label(reconciliation["passed"]),
+                _status_tone(latest_performance.get("reconciliation_status")),
+            ),
+        ],
+    )
+    if account_performance:
+        chart_rows = list(reversed(account_performance))
+        st.line_chart(chart_rows, x="created_at", y="total_value")
+        return_cols = st.columns(2)
+        with return_cols[0]:
+            st.line_chart(chart_rows, x="created_at", y="cumulative_return")
+        with return_cols[1]:
+            st.line_chart(chart_rows, x="created_at", y="drawdown")
+
+    table("Account Performance", account_performance, "investment_account_performance")
+    _section_header(st, "Total Portfolio Performance")
+    total_chart_rows = [
+        row for row in reversed(total_portfolio_performance) if row.get("total_value") is not None
+    ]
+    if total_chart_rows:
+        st.line_chart(total_chart_rows, x="created_at", y="total_value")
+    if total_portfolio_performance and total_portfolio_performance[0].get("missing_fx"):
+        _status_banner(
+            st,
+            "FX source required",
+            "Total portfolio return needs an explicit FX source for mixed currencies.",
+            "warning",
+        )
+    st.markdown(
+        _badge_row(
+            [
+                ("Display", display_currency, "neutral"),
+                ("FX", fx_snapshot["status"], _status_tone(fx_snapshot["status"])),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
+    table(
+        "Total Portfolio Performance",
+        total_portfolio_performance,
+        "investment_total_portfolio_performance",
+    )
+
+    _section_header(st, "Currency Sleeves")
+    if currency_sleeve_performance:
+        st.line_chart(
+            list(reversed(currency_sleeve_performance)),
+            x="created_at",
+            y="cumulative_return",
+            color="currency",
+        )
+    table(
+        "Currency Sleeve Performance",
+        currency_sleeve_performance,
+        "investment_currency_sleeve_performance",
+    )
+
+    _section_header(st, "Strategy Contribution")
+    if strategy_book_performance:
+        st.line_chart(
+            list(reversed(strategy_book_performance)),
+            x="created_at",
+            y="book_value",
+            color="book_id",
+        )
+    table(
+        "Strategy Book Performance",
+        strategy_book_performance,
+        "investment_strategy_book_performance",
+    )
+    table("Strategy Attribution", strategy_attribution, "investment_strategy_attribution")
+    table(
+        "Strategy Book Snapshots",
+        strategy_book_snapshots,
+        "investment_strategy_book_snapshots",
+    )
+
+    _section_header(st, "Portfolio And Broker Truth")
+    account_cols = st.columns(2)
+    with account_cols[0]:
+        _section_header(st, "Latest Broker Account")
+        st.json(broker_summary)
+    with account_cols[1]:
+        _section_header(st, "Latest Broker / Reconciliation")
+        st.json({"broker_snapshot": broker_snapshot, "reconciliation": reconciliation})
+    table("Broker Position Exposure", broker_positions, "investment_broker_position_exposure")
+    table("Maestro State Exposure", maestro_exposure, "investment_maestro_state_exposure")
+    table("Portfolio", portfolio_table, "investment_portfolio")
+    history_cols = st.columns(2)
+    with history_cols[0]:
+        table(
+            "Maestro Snapshot History",
+            portfolio_history,
+            "investment_portfolio_snapshot_history",
+        )
+    with history_cols[1]:
+        table("Broker Snapshot History", broker_history, "investment_broker_snapshot_history")
+
+
+def _render_audit_trail(
+    st: object,
+    strategy_runs: list[dict[str, object]],
+    orders: list[dict[str, object]],
+    approvals: list[dict[str, object]],
+    broker_snapshots: list[dict[str, object]],
+    live_order_events: list[dict[str, object]],
+    fill_reconciliation: list[dict[str, object]],
+    system_events: list[dict[str, object]],
+    run_index: list[dict[str, object]],
+    store: StateStore,
+    table: object,
+) -> None:
+    _section_header(
+        st,
+        "Audit Trail",
+        "Run-level evidence, proposals, orders, approvals, events, and raw persisted payloads.",
+    )
+    _metric_strip(
+        st,
+        [
+            ("Indexed Runs", len(run_index), "neutral"),
+            ("Strategy Runs", len(strategy_runs), "neutral"),
+            ("Orders", len(orders), "neutral"),
+            ("Approvals", len(approvals), "neutral"),
+            ("Broker Snapshots", len(broker_snapshots), "neutral"),
+            ("System Events", len(system_events), "neutral"),
+        ],
+    )
+
+    _section_header(
+        st,
+        "Strategy Signals / Results",
+        "Normalized proposals, validation state, generated orders, and approvals.",
+    )
+    strategy_signal_columns = [
+        "created_at",
+        "run_id",
+        "strategy_id",
+        "signal_action",
+        "signal_symbol",
+        "rating",
+        "confidence",
+        "allocations",
+        "risk_flags",
+        "validation_ok",
+        "validation_errors",
+    ]
+    strategy_signal_rows = [
+        {column: row.get(column) for column in strategy_signal_columns} for row in strategy_runs
+    ]
+    table("Strategy Signals / Results", strategy_signal_rows, "audit_strategy_runs")
+    with st.expander("Strategy Run Payloads"):
+        st.json([row.get("payload", {}) for row in strategy_runs])
+    table("Recent Paper Orders", orders, "audit_orders")
+    table("Recent Approvals", approvals, "audit_approvals")
+
+    _section_header(
+        st,
+        "Run Detail",
+        "Trace strategy, risk, approval, order, and event rows by run identifier.",
+    )
+    run_ids = [row["run_id"] for row in run_index]
+    selected_run_id = st.selectbox("Run", run_ids, index=0) if run_ids else None
+    if selected_run_id:
+        detail = build_run_detail(store, selected_run_id)
+        st.json(detail["summary"])
+        table("Run Timeline", detail["timeline"], "audit_run_timeline")
+        with st.expander("Run Payloads"):
+            st.json(detail)
+    else:
+        st.info("No run data found.")
+
+    table("Recent Broker Account Snapshots", broker_snapshots, "audit_broker_snapshots")
+    table("Live Order Status / Lifecycle Events", live_order_events, "audit_live_order_events")
+    table("Fill Reconciliation Events", fill_reconciliation, "audit_fill_reconciliation")
+    table("Recent System Events", system_events, "audit_system_events")
 
 
 def _render_virtuoso_tab(
@@ -634,6 +842,60 @@ def _virtuoso_strategy_ids(
     }
     ids.extend(sorted(observed_ids - set(ids)))
     return ids
+
+
+def _system_map(st: object, nodes: list[dict[str, object]]) -> None:
+    cards = []
+    for node in nodes:
+        cards.append(
+            f"""
+            <div class="maestro-flow-card {_tone_class(str(node["tone"]))}">
+              <div class="maestro-flow-step">{_escape(node["step"])}</div>
+              <div class="maestro-flow-title">{_escape(node["title"])}</div>
+              <div class="maestro-flow-status">{_escape(node["status"])}</div>
+              <div class="maestro-flow-detail">{_escape(node["detail"])}</div>
+            </div>
+            """
+        )
+    st.markdown(
+        f'<div class="maestro-flow-grid">{"".join(cards)}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _system_node(
+    title: str,
+    step: str,
+    status: object,
+    detail: object,
+    tone: str,
+) -> dict[str, object]:
+    return {
+        "title": title,
+        "step": step,
+        "status": status,
+        "detail": detail,
+        "tone": tone,
+    }
+
+
+def _freshness_rollup(rows: list[dict[str, object]]) -> str:
+    statuses = {str(row.get("status")) for row in rows}
+    if statuses & {"failed", "missing"}:
+        return "danger"
+    if "stale" in statuses:
+        return "warning"
+    if "fresh" in statuses:
+        return "success"
+    return "neutral"
+
+
+def _approval_label(value: object) -> str:
+    if value is True:
+        return "approved"
+    if value is False:
+        return "blocked"
+    return "missing"
 
 
 def _virtuoso_strategy_overview_row(
@@ -959,6 +1221,45 @@ def _apply_design_theme(st: object, theme: str) -> None:
           font-weight: 600;
           line-height: 1.2;
           word-break: break-word;
+        }
+        .maestro-flow-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+          gap: 8px;
+          margin: 14px 0 20px 0;
+        }
+        .maestro-flow-card {
+          border: 1px solid var(--maestro-hairline);
+          background: var(--maestro-surface-1);
+          border-radius: 8px;
+          padding: 14px;
+          min-height: 132px;
+        }
+        .maestro-flow-step {
+          color: var(--maestro-primary-hover);
+          font-size: 12px;
+          font-weight: 600;
+          margin-bottom: 10px;
+          text-transform: uppercase;
+        }
+        .maestro-flow-title {
+          color: var(--maestro-ink);
+          font-size: 18px;
+          font-weight: 600;
+          line-height: 1.2;
+          margin-bottom: 10px;
+        }
+        .maestro-flow-status {
+          color: var(--maestro-ink-muted);
+          font-size: 13px;
+          font-weight: 500;
+          line-height: 1.35;
+          margin-bottom: 8px;
+        }
+        .maestro-flow-detail {
+          color: var(--maestro-ink-subtle);
+          font-size: 12px;
+          line-height: 1.4;
         }
         .maestro-tone-success { border-color: rgba(39, 166, 68, 0.45); }
         .maestro-tone-warning { border-color: rgba(208, 168, 92, 0.55); }

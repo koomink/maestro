@@ -1126,6 +1126,28 @@ Maestro = decide and execute
 Virtuoso = propose
 ```
 
+The dashboard should present Symphony as a live system map before it presents
+raw tables. Its first job is to answer, in one screen: what is proposing, what
+Maestro accepted or blocked, whether broker truth matches Maestro state, and
+what the operator must inspect next.
+
+Target information architecture:
+
+- **Symphony Map**: the landing view. It should render the flow
+  `Virtuoso proposes -> Maestro validates/protects/executes/records -> Portfolio
+  and Broker reconcile -> Operator observes/approves elsewhere`, with live
+  status labels from persisted read models.
+- **Operator Cockpit**: safety, health, freshness, reconciliation, daily live
+  order usage, live-order lifecycle issues, and attention items.
+- **Investment Console**: total equity, cash/exposure, positions, account
+  return/drawdown, KRW/USD sleeves, total portfolio return, and strategy
+  contribution.
+- **Virtuoso Apps**: configured strategy apps as proposal sources, including
+  data needs, latest proposals/signals, validation/risk verdicts, and
+  strategy-book returns.
+- **Audit Trail**: run-level drill-down, orders/proposals, approvals, events,
+  reconciliation, lifecycle rows, CSV exports, and raw payloads as evidence.
+
 Dashboard should show:
 
 - Total equity
@@ -1148,6 +1170,12 @@ dashboard should render graphs from persisted read models only, including stored
 FX source, rate, timestamp, and freshness status for converted views; it should
 not call KIS or FX endpoints during page rendering and should not expose trading
 or admin write controls.
+
+The current Streamlit dashboard is a transitional read-only surface. It should
+be improved first by restructuring the information architecture and read models.
+A future React/Vite dashboard with REST/WebSocket updates should wait until
+Maestro has a daemon/API event model that can support it without weakening the
+current safety boundary.
 
 Dashboard should not initially allow:
 

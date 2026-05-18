@@ -1152,18 +1152,35 @@ Live trading safety:
 
 Dashboard should be read-only by default.
 
-Streamlit tabs:
+Target dashboard model:
 
-1. Home: operator status, attention items, freshness labels, and run index
-2. Portfolio: broker exposure, Maestro state exposure, and snapshot history
-3. Performance: account, currency-sleeve, total portfolio, strategy book, and
-   strategy attribution views
-4. Operations: operator summary, attention items, safety, health, live-order
-   usage, live-order lifecycle, risk decisions, and halt/failure events
-5. Orders: strategy signals, paper orders, and approvals
-6. Events: broker snapshots, live order lifecycle, fill reconciliation, and system events
-7. Run Detail: persisted rows grouped by `run_id`
-8. Raw: raw status payloads
+1. **Symphony Map**: the landing view. It should show the ecosystem flow from
+   Virtuoso proposals through Maestro validation, risk, approval/execution,
+   state recording, broker reconciliation, and operator observation. Each node
+   should be backed by persisted read models and should expose a current status
+   such as fresh/stale, pass/fail/missing, attention required, or latest run.
+2. **Operator Cockpit**: safety, health, freshness, reconciliation, daily
+   live-order usage, live-order lifecycle issues, recent risk/halt/failure
+   events, and attention items. This is the place to answer whether the operator
+   can trust the next cycle.
+3. **Investment Console**: broker truth beside Maestro state, total equity,
+   cash/exposure, account return/drawdown, KRW/USD sleeve returns, total
+   portfolio return, strategy book return, and strategy contribution.
+4. **Virtuoso Apps**: configured strategy apps as proposal sources. Each app
+   should show app concept, data needs, latest proposals/signals, validation and
+   risk verdicts, and strategy-book performance without embedding
+   strategy-specific logic in Maestro.
+5. **Audit Trail**: run-level drill-down, strategy results, orders/proposals,
+   approvals, broker snapshots, fill reconciliation, live-order lifecycle
+   events, system events, CSV exports, and raw payload evidence.
+
+The implemented Streamlit tabs are a transitional read-only surface. Continue
+using Streamlit for near-term iteration, but organize it around the target model
+above instead of mirroring storage tables. A future React/Vite dashboard with
+REST/WebSocket updates should be treated as a separate product architecture
+milestone after Maestro has a daemon/API event model. Until then, Streamlit must
+remain read-only and must not become an approval, kill-switch, or configuration
+surface.
 
 Current dashboard performance read models in `dashboard/read_models.py` cover
 account, currency-sleeve, and total-portfolio views from persisted broker

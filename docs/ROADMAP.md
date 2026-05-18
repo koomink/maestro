@@ -569,9 +569,16 @@ Planned scope:
   strategy accounting exists.
 - Add read-only dashboard graphs for account equity/PnL, strategy returns,
   currency-sleeve returns, portfolio return, drawdown, and reconciliation status.
+- Restructure the read-only dashboard around a Symphony Map landing view,
+  Operator Cockpit, Investment Console, Virtuoso Apps, and Audit Trail so the UI
+  reflects the Symphony/Maestro/Virtuoso operating model instead of exposing
+  storage tables first.
 - Keep the dashboard read-only and backed by persisted snapshots/aggregates; it
   must not call KIS live endpoints directly and must not expose broker trading
   controls.
+- Defer any React/Vite REST/WebSocket dashboard until Maestro has a daemon/API
+  event model; do not use the current Streamlit dashboard for approval,
+  kill-switch, or configuration writes.
 - Add fixture/fake-client tests for performance calculations and dashboard read
   models before any real-account rehearsal.
 
