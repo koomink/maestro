@@ -35,9 +35,13 @@ class KISReadOnlyService:
 
         run_id = new_run_id()
         account = self.client.get_account_snapshot()
+        current_prices = _prices_with_position_prices(
+            account,
+            self.client.get_current_prices(symbols),
+        )
         snapshot = KISReadOnlySnapshot(
             account=account,
-            current_prices=self.client.get_current_prices(symbols),
+            current_prices=current_prices,
             order_fills=self.client.get_order_fills(),
             unfilled_orders=self.client.get_unfilled_orders(),
         )
@@ -82,10 +86,14 @@ class KISReadOnlyService:
             client = self._build_client(product_config, product_instruments)
             product_symbols = self._symbols_for_product(symbols, product)
             account = client.get_account_snapshot()
+            current_prices = _prices_with_position_prices(
+                account,
+                client.get_current_prices(product_symbols),
+            )
             snapshots.append(
                 KISReadOnlySnapshot(
                     account=account,
-                    current_prices=client.get_current_prices(product_symbols),
+                    current_prices=current_prices,
                     order_fills=client.get_order_fills(),
                     unfilled_orders=client.get_unfilled_orders(),
                 )
@@ -145,3 +153,14 @@ def _merge_snapshots(snapshots: list[KISReadOnlySnapshot]) -> KISReadOnlySnapsho
         order_fills=order_fills,
         unfilled_orders=unfilled_orders,
     )
+
+
+def _prices_with_position_prices(
+    account: KISAccountSnapshot,
+    current_prices: dict[str, float],
+) -> dict[str, float]:
+    prices = dict(current_prices)
+    for position in account.positions:
+        if position.current_price > 0:
+            prices.setdefault(position.symbol, position.current_price)
+    return prices

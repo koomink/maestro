@@ -524,21 +524,17 @@ class MaestroOrchestrator:
         return collect_data_quality_issues(data_bundle)
 
     def _order_generation_prices(self, prices: dict[str, float]) -> dict[str, float]:
-        if (
-            self.config.mode != RunMode.LIVE_APPROVAL
-            or not self.config.execution.broker_validation.require_quote_validation
-        ):
+        if self.config.mode != RunMode.LIVE_APPROVAL:
             return prices
         latest = self.state_store.load_latest_broker_account_snapshot()
         if latest is None:
             return prices
-        current_prices = latest["payload"].get("current_prices", {})
-        if not current_prices:
+        broker_prices = _broker_snapshot_prices(latest["payload"])
+        if not broker_prices:
             return prices
-        broker_prices = {
-            symbol: float(price) for symbol, price in current_prices.items() if float(price) > 0
-        }
-        return {**prices, **broker_prices}
+        if self.config.execution.broker_validation.require_quote_validation:
+            return {**prices, **broker_prices}
+        return {**broker_prices, **prices}
 
     def _initial_prices(self) -> dict[str, float]:
         cash_symbols = self._configured_cash_symbols()
@@ -772,3 +768,18 @@ class MaestroOrchestrator:
             }
             self._record_event(run_id, "live_order_dry_run", event)
         return [], self.state_store.load_latest_portfolio_state()
+
+
+def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:
+    prices = {
+        symbol: float(price)
+        for symbol, price in (snapshot.get("current_prices") or {}).items()
+        if float(price) > 0
+    }
+    account = snapshot.get("account") or {}
+    for position in account.get("positions") or []:
+        symbol = position.get("symbol")
+        current_price = position.get("current_price")
+        if symbol and current_price is not None and float(current_price) > 0:
+            prices.setdefault(str(symbol), float(current_price))
+    return prices

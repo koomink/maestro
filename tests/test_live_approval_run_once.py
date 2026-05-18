@@ -220,6 +220,86 @@ def test_live_approval_order_generation_uses_broker_quote_snapshot(
     assert {request["limit_price"] for request in dry_run_requests} == {123.0, 47.5}
 
 
+def test_live_approval_order_generation_fills_position_prices_from_broker_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    approval_id = "appr_live_position_price_run_once"
+    monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: approval_id)
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["mode"] = "live_approval"
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    del raw["portfolio"]["initial_cash"]
+    raw["portfolio"]["allowed_symbols"] = [
+        "CASH",
+        "MOCK_ETF_A",
+        "MOCK_ETF_B",
+        "MOCK_LEGACY",
+    ]
+    raw["execution"] = {
+        "engine": "paper",
+        "live_order_enabled": False,
+        "live_order_dry_run": True,
+        "require_reconciliation_pass": False,
+        "broker_validation": {"require_quote_validation": False},
+        "live_order_limits": {
+            "max_order_notional": 5_000_000.0,
+            "max_daily_notional": 10_000_000.0,
+            "max_daily_order_count": 3,
+        },
+    }
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "timeout_seconds": 1,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+        "telegram_poll_interval_seconds": 0.0,
+    }
+    raw["kis"] = {"enabled": True, "provider": "mock", "account_id": "MOCK"}
+    config_path = tmp_path / "live_approval_position_price.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    orchestrator = MaestroOrchestrator(
+        load_config(config_path),
+        telegram_client=FakeTelegramClient(approval_id),
+    )
+    orchestrator.state_store.save_broker_account_snapshot(
+        "run_broker_snapshot",
+        "MOCK",
+        {
+            "account": {
+                "account_id": "MOCK",
+                "cash": 10_000_000.0,
+                "buying_power": 10_000_000.0,
+                "positions": [
+                    {
+                        "symbol": "MOCK_LEGACY",
+                        "quantity": 1.0,
+                        "average_price": 700.0,
+                        "current_price": 777.0,
+                    }
+                ],
+            },
+            "current_prices": {},
+        },
+    )
+    _seed_broker_baseline(
+        orchestrator.state_store,
+        cash=10_000_000.0,
+        positions={"MOCK_LEGACY": 1.0},
+    )
+
+    summary = orchestrator.run_once()
+
+    assert summary.orders_created == 2
+    proposal_snapshot = orchestrator.state_store.list_system_events_by_type(
+        "live_proposal_data_snapshot"
+    )[0]["payload"]
+    assert proposal_snapshot["prices"]["MOCK_LEGACY"] == 777.0
+
+
 def test_live_approval_run_once_requires_adopted_broker_baseline(tmp_path):
     config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
     orchestrator = MaestroOrchestrator(
