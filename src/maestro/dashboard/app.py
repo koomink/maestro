@@ -62,7 +62,7 @@ def render(config_path: str | Path | None) -> None:
     operator_summary = build_operator_summary(config, store)
     status = store.status()
 
-    st.set_page_config(page_title="Maestro Dashboard", layout="wide")
+    st.set_page_config(page_title="Symphony", layout="wide")
     theme = st.sidebar.selectbox(
         "Theme",
         THEME_OPTIONS,
@@ -143,7 +143,17 @@ def render(config_path: str | Path | None) -> None:
     )
 
     tabs = st.tabs(
-        ["Home", "Portfolio", "Performance", "Operations", "Orders", "Events", "Run Detail", "Raw"]
+        [
+            "Home",
+            "Virtuoso",
+            "Portfolio",
+            "Performance",
+            "Operations",
+            "Orders",
+            "Events",
+            "Run Detail",
+            "Raw",
+        ]
     )
 
     with tabs[0]:
@@ -184,6 +194,17 @@ def render(config_path: str | Path | None) -> None:
         table("Run Index", run_index, "run_index")
 
     with tabs[1]:
+        _render_virtuoso_tab(
+            st,
+            config,
+            strategy_runs,
+            strategy_book_performance,
+            strategy_attribution,
+            strategy_book_snapshots,
+            table,
+        )
+
+    with tabs[2]:
         _section_header(
             st,
             "Account / Portfolio",
@@ -215,7 +236,7 @@ def render(config_path: str | Path | None) -> None:
         with history_cols[1]:
             table("Broker Snapshot History", broker_history, "broker_snapshot_history")
 
-    with tabs[2]:
+    with tabs[3]:
         _section_header(
             st,
             "Account Performance",
@@ -315,7 +336,7 @@ def render(config_path: str | Path | None) -> None:
             "strategy_book_snapshots",
         )
 
-    with tabs[3]:
+    with tabs[4]:
         _section_header(
             st,
             "Operational Summary",
@@ -399,7 +420,7 @@ def render(config_path: str | Path | None) -> None:
         with st.expander("Operator Summary Payload"):
             st.json(operator_summary)
 
-    with tabs[4]:
+    with tabs[5]:
         _section_header(
             st,
             "Strategy Signals / Results",
@@ -427,7 +448,7 @@ def render(config_path: str | Path | None) -> None:
         table("Recent Paper Orders", orders, "orders")
         table("Recent Approvals", approvals, "approvals")
 
-    with tabs[5]:
+    with tabs[6]:
         table("Recent Broker Account Snapshots", broker_snapshots, "broker_snapshots")
         table("Live Order Status / Lifecycle Events", live_order_events, "live_order_events")
         table(
@@ -437,7 +458,7 @@ def render(config_path: str | Path | None) -> None:
         )
         table("Recent System Events", system_events, "system_events")
 
-    with tabs[6]:
+    with tabs[7]:
         _section_header(
             st,
             "Run Detail",
@@ -454,9 +475,326 @@ def render(config_path: str | Path | None) -> None:
         else:
             st.info("No run data found.")
 
-    with tabs[7]:
+    with tabs[8]:
         st.subheader("Raw System Status")
         st.json(status)
+
+
+def _render_virtuoso_tab(
+    st: object,
+    config: object,
+    strategy_runs: list[dict[str, object]],
+    strategy_book_performance: list[dict[str, object]],
+    strategy_attribution: list[dict[str, object]],
+    strategy_book_snapshots: list[dict[str, object]],
+    table: object,
+) -> None:
+    strategy_configs = {strategy.id: strategy for strategy in getattr(config, "strategies", [])}
+    strategy_ids = _virtuoso_strategy_ids(
+        list(strategy_configs),
+        strategy_runs,
+        strategy_book_performance,
+        strategy_book_snapshots,
+    )
+    enabled_count = sum(1 for strategy in strategy_configs.values() if strategy.enabled)
+    observed_count = len(
+        {
+            row.get("strategy_id")
+            for row in [*strategy_runs, *strategy_book_performance, *strategy_book_snapshots]
+            if row.get("strategy_id")
+        }
+    )
+    latest_run = strategy_runs[0] if strategy_runs else {}
+
+    _section_header(
+        st,
+        "Virtuoso",
+        "Configured strategy apps, persisted execution state, and strategy-book returns.",
+    )
+    _metric_strip(
+        st,
+        [
+            ("Configured Apps", len(strategy_configs), "neutral"),
+            ("Enabled Apps", enabled_count, _count_tone(len(strategy_configs) - enabled_count)),
+            ("Observed Apps", observed_count, "neutral"),
+            ("Latest Strategy Run", latest_run.get("created_at") or "n/a", "neutral"),
+        ],
+    )
+    if not strategy_ids:
+        _status_banner(
+            st,
+            "No Virtuoso strategies",
+            "No configured or persisted strategy app state was found.",
+            "warning",
+        )
+        return
+
+    overview_rows = [
+        _virtuoso_strategy_overview_row(
+            strategy_id,
+            strategy_configs.get(strategy_id),
+            _strategy_rows(strategy_runs, strategy_id),
+            _strategy_rows(strategy_book_performance, strategy_id),
+        )
+        for strategy_id in strategy_ids
+    ]
+    table("Virtuoso Strategy Overview", overview_rows, "virtuoso_strategy_overview")
+
+    strategy_tabs = st.tabs(strategy_ids)
+    for strategy_tab, strategy_id in zip(strategy_tabs, strategy_ids, strict=True):
+        with strategy_tab:
+            _render_virtuoso_strategy_tab(
+                st,
+                strategy_id,
+                strategy_configs.get(strategy_id),
+                _strategy_rows(strategy_runs, strategy_id),
+                _strategy_rows(strategy_book_performance, strategy_id),
+                _strategy_rows(strategy_attribution, strategy_id),
+                _strategy_rows(strategy_book_snapshots, strategy_id),
+                table,
+            )
+
+
+def _render_virtuoso_strategy_tab(
+    st: object,
+    strategy_id: str,
+    strategy_config: object | None,
+    runs: list[dict[str, object]],
+    performance: list[dict[str, object]],
+    attribution: list[dict[str, object]],
+    snapshots: list[dict[str, object]],
+    table: object,
+) -> None:
+    summary = _strategy_return_summary(performance)
+    latest_run = runs[0] if runs else {}
+    enabled = getattr(strategy_config, "enabled", bool(runs or performance or snapshots))
+    validation_ok = latest_run.get("validation_ok")
+    key = _key_slug(strategy_id)
+
+    _section_header(
+        st,
+        strategy_id,
+        "Virtuoso app concept, operation state, latest signals, and strategy-book returns.",
+    )
+    _metric_strip(
+        st,
+        [
+            ("State", "enabled" if enabled else "disabled", _boolean_tone(enabled)),
+            ("Weight", getattr(strategy_config, "weight", "n/a"), "neutral"),
+            ("Latest Run", latest_run.get("created_at") or "n/a", "neutral"),
+            ("Validation", _validation_label(validation_ok), _boolean_tone(validation_ok)),
+            ("Book Value", _money(summary["book_value"]), "neutral"),
+            ("Cumulative Return", _percent(summary["cumulative_return"]), "neutral"),
+            ("Drawdown", _percent(summary["drawdown"]), _status_tone("warn")),
+        ],
+    )
+
+    concept_cols = st.columns([1, 1])
+    with concept_cols[0]:
+        _section_header(st, "App Concept")
+        st.dataframe(_virtuoso_concept_rows(strategy_id, strategy_config), width="stretch")
+    with concept_cols[1]:
+        _section_header(st, "Operation State")
+        st.dataframe(
+            _virtuoso_operation_rows(strategy_config, runs, performance, snapshots),
+            width="stretch",
+        )
+
+    if performance:
+        chart_rows = list(reversed(performance))
+        st.line_chart(chart_rows, x="created_at", y="cumulative_return", color="book_id")
+    else:
+        _status_banner(
+            st,
+            "No strategy-book returns",
+            "Returns will appear after Maestro records strategy book snapshots.",
+            "warning",
+        )
+
+    table("Strategy Book Returns", performance, f"virtuoso_{key}_book_returns")
+    table("Strategy Attribution", attribution, f"virtuoso_{key}_attribution")
+    table("Strategy Book Snapshots", snapshots, f"virtuoso_{key}_book_snapshots")
+    table("Recent Strategy Runs", runs, f"virtuoso_{key}_strategy_runs")
+    if strategy_config is not None:
+        with st.expander("Virtuoso App Config"):
+            st.json(_strategy_config_payload(strategy_config))
+
+
+def _virtuoso_strategy_ids(
+    configured_ids: list[str],
+    strategy_runs: list[dict[str, object]],
+    strategy_book_performance: list[dict[str, object]],
+    strategy_book_snapshots: list[dict[str, object]],
+) -> list[str]:
+    ids = list(configured_ids)
+    observed_ids = {
+        str(row.get("strategy_id"))
+        for row in [*strategy_runs, *strategy_book_performance, *strategy_book_snapshots]
+        if row.get("strategy_id")
+    }
+    ids.extend(sorted(observed_ids - set(ids)))
+    return ids
+
+
+def _virtuoso_strategy_overview_row(
+    strategy_id: str,
+    strategy_config: object | None,
+    runs: list[dict[str, object]],
+    performance: list[dict[str, object]],
+) -> dict[str, object]:
+    summary = _strategy_return_summary(performance)
+    latest_run = runs[0] if runs else {}
+    enabled = getattr(strategy_config, "enabled", bool(runs or performance))
+    return {
+        "strategy_id": strategy_id,
+        "enabled": enabled,
+        "entrypoint": getattr(strategy_config, "entrypoint", None),
+        "weight": getattr(strategy_config, "weight", None),
+        "latest_run_at": latest_run.get("created_at"),
+        "latest_run_id": latest_run.get("run_id"),
+        "validation_ok": latest_run.get("validation_ok"),
+        "book_count": summary["book_count"],
+        "book_value": summary["book_value"],
+        "period_return": summary["period_return"],
+        "cumulative_return": summary["cumulative_return"],
+        "drawdown": summary["drawdown"],
+    }
+
+
+def _virtuoso_concept_rows(
+    strategy_id: str,
+    strategy_config: object | None,
+) -> list[dict[str, object]]:
+    entrypoint = getattr(strategy_config, "entrypoint", None)
+    app_module, app_class = _entrypoint_parts(entrypoint)
+    allocation_policy = getattr(strategy_config, "signal_to_allocation", None)
+    config_payload = getattr(strategy_config, "config", {}) or {}
+    return [
+        {"aspect": "Virtuoso app", "value": strategy_id},
+        {"aspect": "Python module", "value": app_module or "n/a"},
+        {"aspect": "Strategy class", "value": app_class or "n/a"},
+        {
+            "aspect": "Result handling",
+            "value": "signal-to-allocation" if allocation_policy else "target allocation",
+        },
+        {
+            "aspect": "Configured weight",
+            "value": _display_value(getattr(strategy_config, "weight", "n/a")),
+        },
+        {"aspect": "Config keys", "value": ", ".join(sorted(config_payload)) or "none"},
+    ]
+
+
+def _virtuoso_operation_rows(
+    strategy_config: object | None,
+    runs: list[dict[str, object]],
+    performance: list[dict[str, object]],
+    snapshots: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    latest_run = runs[0] if runs else {}
+    latest_performance = performance[0] if performance else {}
+    latest_snapshot = snapshots[0] if snapshots else {}
+    return [
+        {
+            "item": "Configured",
+            "value": _display_value(strategy_config is not None),
+            "status": "ok" if strategy_config is not None else "missing",
+        },
+        {
+            "item": "Enabled",
+            "value": _display_value(getattr(strategy_config, "enabled", "observed-only")),
+            "status": "ok" if getattr(strategy_config, "enabled", False) else "warn",
+        },
+        {
+            "item": "Latest run",
+            "value": _display_value(latest_run.get("created_at")),
+            "status": _validation_label(latest_run.get("validation_ok")),
+        },
+        {
+            "item": "Latest book snapshot",
+            "value": _display_value(latest_snapshot.get("created_at")),
+            "status": "ok" if latest_snapshot else "missing",
+        },
+        {
+            "item": "Latest book value",
+            "value": _display_value(latest_performance.get("book_value")),
+            "status": "ok" if latest_performance else "missing",
+        },
+    ]
+
+
+def _strategy_return_summary(rows: list[dict[str, object]]) -> dict[str, object]:
+    latest_by_book: dict[str, dict[str, object]] = {}
+    for row in rows:
+        book_id = str(row.get("book_id") or row.get("strategy_id") or "default")
+        latest_by_book.setdefault(book_id, row)
+    latest_rows = list(latest_by_book.values())
+    book_value = sum(_float_value(row.get("book_value")) or 0.0 for row in latest_rows)
+    return {
+        "book_count": len(latest_rows),
+        "book_value": book_value if latest_rows else None,
+        "period_return": _weighted_return(latest_rows, "period_return"),
+        "cumulative_return": _weighted_return(latest_rows, "cumulative_return"),
+        "drawdown": _weighted_return(latest_rows, "drawdown"),
+    }
+
+
+def _weighted_return(rows: list[dict[str, object]], key: str) -> float | None:
+    valued_rows = [
+        (value, weight)
+        for row in rows
+        if (value := _float_value(row.get(key))) is not None
+        for weight in [_float_value(row.get("book_value")) or 0.0]
+    ]
+    total_weight = sum(weight for _, weight in valued_rows)
+    if total_weight > 0:
+        return sum(value * weight for value, weight in valued_rows) / total_weight
+    values = [value for value, _ in valued_rows]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _strategy_rows(rows: list[dict[str, object]], strategy_id: str) -> list[dict[str, object]]:
+    return [row for row in rows if row.get("strategy_id") == strategy_id]
+
+
+def _entrypoint_parts(entrypoint: object) -> tuple[str | None, str | None]:
+    if not entrypoint:
+        return None, None
+    module, _, class_name = str(entrypoint).partition(":")
+    return module or None, class_name or None
+
+
+def _strategy_config_payload(strategy_config: object) -> dict[str, object]:
+    model_dump = getattr(strategy_config, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    return {
+        "id": getattr(strategy_config, "id", None),
+        "enabled": getattr(strategy_config, "enabled", None),
+        "weight": getattr(strategy_config, "weight", None),
+        "entrypoint": getattr(strategy_config, "entrypoint", None),
+        "config": getattr(strategy_config, "config", {}),
+    }
+
+
+def _validation_label(value: object) -> str:
+    if value is True:
+        return "passed"
+    if value is False:
+        return "failed"
+    return "missing"
+
+
+def _display_value(value: object) -> str:
+    if value is None:
+        return "n/a"
+    return str(value)
+
+
+def _key_slug(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value.lower())
 
 
 def _dashboard_filters(st: object) -> dict[str, object]:
@@ -753,7 +1091,7 @@ def _page_header(st: object, mode: str, operator_config: dict[str, str] | None) 
         f"""
         <div class="maestro-header">
           <div class="maestro-eyebrow">SYMPHONY / MAESTRO</div>
-          <h1 class="maestro-title">Maestro Dashboard</h1>
+          <h1 class="maestro-title">Symphony</h1>
           <p class="maestro-subtitle">
             Read-only portfolio OS visibility for stock/ETF and KIS
             domestic/overseas workflows.
@@ -977,6 +1315,15 @@ def _resolve_config(config_path: str | Path | None) -> Path:
     if env_config:
         return Path(env_config)
     raise ValueError(f"--config is required or set {CONFIG_ENV_VAR}")
+
+
+def _float_value(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _money(value: object) -> str:
