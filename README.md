@@ -436,14 +436,15 @@ Use
 [configs/examples/live_approval_ataraxia_kis_paper_trading.yaml](configs/examples/live_approval_ataraxia_kis_paper_trading.yaml)
 as the Ataraxia/KRW domestic ETF rehearsal template. It targets the real KIS
 mock-investment OpenAPI path with `kis.paper_trading: true`, is dry-run by
-default, keeps live submit disabled, requires Telegram approval, uses the
+default through `execution.order_posture: dry_run`, keeps broker submit skipped,
+requires Telegram approval, uses the
 `kis_domestic_stock` product only, and routes contribution orders through
 `order_generation_mode: buy_only_contribution` for KRW symbols such as
 `TIGER_NASDAQ100_LEVERAGE` and `KODEX_US_DIVIDEND_DOWJONES`. Copy it to an
 operator-local path outside the repo before use; the source-controlled example
 is not an operating config. For a KIS mock-investment broker-submit pilot, switch
-only the operator-local config to `execution.live_order_enabled=true` and
-`execution.live_order_dry_run=false` after read-only reconciliation, Telegram
+only the operator-local config to `execution.order_posture: armed` after
+read-only reconciliation, Telegram
 approval rehearsal, live dry-run review, and `beta-preflight` readiness.
 Install Ataraxia into the Maestro virtualenv with
 `uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/Ataraxia`
@@ -454,7 +455,7 @@ Safe execution config defaults:
 ```yaml
 execution:
   engine: paper
-  live_order_enabled: false
+  order_posture: disabled
   require_reconciliation_pass: true
   live_order_limits:
     max_order_notional: 0
@@ -947,7 +948,12 @@ presence, token cache path, live approval preflight configuration, latest broker
 snapshot age, and latest reconciliation status. Missing KIS env vars or broker
 snapshots are reported without printing secret values.
 
-For live approval rehearsal, set `execution.live_order_dry_run=true` in an
+`maestro reconcile --config ...` refreshes the KIS read-only broker snapshot
+before comparing broker cash and positions with Maestro state. Use `kis-sync`
+when you only need to store a fresh broker snapshot without recording a
+reconciliation event.
+
+For live approval rehearsal, set `execution.order_posture: dry_run` in an
 operator-local config. `run-once` still performs strategy, risk, reconciliation,
 and approval work, then writes `live_order_dry_run` events instead of calling the
 broker submit adapter.
@@ -1211,10 +1217,13 @@ Implemented operator commands:
 - `/pause`
 - `/kill_switch`
 
-Telegram operator commands are intentionally constrained. Read commands must use
-stored SQLite state or the latest broker snapshot only; they must not call KIS
-or other broker network endpoints directly. `/pause` and `/kill_switch` require
-a whitelisted user, confirmation button, and persisted audit/system event.
+Telegram operator commands are intentionally constrained. Most read commands use
+stored SQLite state; `/account` refreshes the KIS read-only broker snapshot
+before replying so reported cash and positions reflect current broker truth.
+`/status` reports broker total value, broker cash, broker positions, and the
+snapshot timestamp instead of the internal dry-run portfolio cash.
+`/pause` and `/kill_switch` require a whitelisted user, confirmation button, and
+persisted audit/system event.
 Run the polling operator UI with:
 
 ```bash

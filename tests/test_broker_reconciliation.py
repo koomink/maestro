@@ -133,12 +133,16 @@ def test_reconciliation_no_broker_snapshot_fails_and_persists(tmp_path):
 def test_reconcile_cli_outputs_passed_result(tmp_path):
     config, store, _ = _reconciliation_context(tmp_path)
     config_path = tmp_path / "live_readonly.yaml"
-    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
-    _save_portfolio_and_broker(
-        store,
-        portfolio=PortfolioState(cash=1000.0, positions={"005930": 2.0}),
-        broker_cash=1000.0,
-        broker_positions={"005930": 2.0},
+    raw = config.model_dump(mode="json")
+    raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]
+    config_path.write_text(yaml.safe_dump(raw))
+    store.save_portfolio_snapshot(
+        new_run_id(),
+        PortfolioState(
+            cash=5_000_000.0,
+            cash_by_currency={"KRW": 5_000_000.0},
+            positions={"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0},
+        ),
     )
 
     result = CliRunner().invoke(app, ["reconcile", "--config", str(config_path)])

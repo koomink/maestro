@@ -46,6 +46,14 @@ class TelegramBotClient(Protocol):
     ) -> Mapping[str, Any]:
         """Edit a Telegram message."""
 
+    def edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        """Edit only a Telegram message's inline keyboard."""
+
     def set_my_commands(self, commands: Sequence[Mapping[str, str]]) -> Mapping[str, Any]:
         """Register bot slash commands."""
 
@@ -110,6 +118,20 @@ class TelegramBotAPIClient:
         if reply_markup is not None:
             payload["reply_markup"] = json.dumps(reply_markup)
         return self._post("editMessageText", payload)
+
+    def edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
+        payload: dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+        }
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        return self._post("editMessageReplyMarkup", payload)
 
     def set_my_commands(self, commands: Sequence[Mapping[str, str]]) -> Mapping[str, Any]:
         return self._post("setMyCommands", {"commands": json.dumps(list(commands))})
@@ -318,19 +340,29 @@ class TelegramApprovalService:
             return
         chat_id = chat.get("id")
         message_id = message.get("message_id")
-        text = message.get("text")
-        if (
-            not isinstance(chat_id, int)
-            or not isinstance(message_id, int)
-            or not isinstance(text, str)
-        ):
-            return
-        edit_message_text = getattr(self.client, "edit_message_text", None)
-        if not callable(edit_message_text):
+        if not isinstance(chat_id, int) or not isinstance(message_id, int):
             return
 
-        updated_text = _append_decision_log(text, decision)
         reply_markup = _decision_reply_markup(decision.status, decision.approval_id)
+        if self._edit_decision_text(message, chat_id, message_id, decision, reply_markup):
+            return
+        if self._edit_decision_reply_markup(chat_id, message_id, reply_markup):
+            return
+        self._send_decision_confirmation(chat_id, decision)
+
+    def _edit_decision_text(
+        self,
+        message: Mapping[str, Any],
+        chat_id: int,
+        message_id: int,
+        decision: ApprovalDecision,
+        reply_markup: Mapping[str, Any],
+    ) -> bool:
+        text = message.get("text")
+        edit_message_text = getattr(self.client, "edit_message_text", None)
+        if not isinstance(text, str) or not callable(edit_message_text):
+            return False
+        updated_text = _append_decision_log(text, decision)
         try:
             edit_message_text(
                 chat_id,
@@ -338,6 +370,28 @@ class TelegramApprovalService:
                 updated_text,
                 reply_markup=reply_markup,
             )
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            return False
+        return True
+
+    def _edit_decision_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: Mapping[str, Any],
+    ) -> bool:
+        edit_message_reply_markup = getattr(self.client, "edit_message_reply_markup", None)
+        if not callable(edit_message_reply_markup):
+            return False
+        try:
+            edit_message_reply_markup(chat_id, message_id, reply_markup=reply_markup)
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            return False
+        return True
+
+    def _send_decision_confirmation(self, chat_id: int, decision: ApprovalDecision) -> None:
+        try:
+            self.client.send_message(chat_id, _decision_confirmation_text(decision))
         except (RuntimeError, TimeoutError, TypeError, ValueError):
             return
 
@@ -354,8 +408,21 @@ def _approval_reply_markup(approval_id: str) -> dict[str, Any]:
 
 
 def _decision_reply_markup(status: str, approval_id: str) -> dict[str, Any]:
-    label = "Approved" if status == "approved" else "Rejected"
+    label = "✅ Approved" if status == "approved" else "⛔ Rejected"
     return {"inline_keyboard": [[{"text": label, "callback_data": f"decision:{approval_id}"}]]}
+
+
+def _decision_confirmation_text(decision: ApprovalDecision) -> str:
+    return "\n".join(
+        [
+            "Maestro approval decision recorded",
+            f"approval_id: {decision.approval_id}",
+            f"run_id: {decision.run_id}",
+            f"status: {decision.status}",
+            f"decided_by: {decision.decided_by}",
+            f"decided_at: {decision.decided_at.isoformat()}",
+        ]
+    )
 
 
 def _append_decision_log(text: str, decision: ApprovalDecision) -> str:

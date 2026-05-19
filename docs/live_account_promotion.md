@@ -17,7 +17,7 @@ or Telegram admin controls.
    broker snapshot accepted through `adopt-broker-snapshot`.
 4. Telegram approval smoke: verify the real bot can reach only the configured
    chats and requires whitelisted users for approvals.
-5. Live dry-run: set `execution.live_order_dry_run=true`, run approval-gated
+5. Live dry-run: set `execution.order_posture=dry_run`, run approval-gated
    `run_once`, and inspect `live_order_dry_run` plus
    `live_proposal_data_snapshot` events.
 6. First minimum-size order: set the smallest practical per-order and daily caps,
@@ -37,7 +37,11 @@ or Telegram admin controls.
   optional KIS access token, and Telegram bot token.
 - Confirm `portfolio.allowed_symbols`, `universe.instruments`, DataHub symbol
   maps, and KIS broker symbols describe the same intended instruments.
-- Keep `execution.live_order_enabled=false` until read-only sync,
+- Use a real DataHub provider for the first live submission; `mock` DataHub is
+  rehearsal-only and fails the private beta gate.
+- Confirm `kis.paper_trading=false` before real-account submission; KIS VTS
+  mock-investment mode is rehearsal-only and fails the private beta gate.
+- Keep `execution.order_posture` at `disabled` or `dry_run` until read-only sync,
   reconciliation, Telegram smoke, and live dry-run all pass.
 - Use small `execution.live_order_limits.max_order_notional`,
   `execution.live_order_limits.max_daily_notional`, and
@@ -59,6 +63,8 @@ or Telegram admin controls.
 - Run `maestro live-smoke --config <operator-live-approval-config> --check live-dry-run`.
 - Restart `maestro-telegram-operator.service`.
 - Run `maestro operator-evidence --config <operator-live-approval-config> --output <evidence-after.json>`.
+- Run `maestro beta-preflight --config <operator-live-approval-config>` after
+  switching to the real DataHub provider and `kis.paper_trading=false`.
 - Review `live_proposal_data_snapshot` and confirm symbol, side, limit price,
   quantity, notional, DataHub price basis, and broker product.
 - Enable live submission only for the intended order, approve only the expected

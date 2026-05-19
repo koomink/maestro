@@ -518,7 +518,8 @@
 
 - [x] Add `maestro init-personal --output ...` for safe operator-local config generation
 - [x] Keep generated config secret-free and source-control agnostic
-- [x] Default generated config to live approval, dry-run enabled, live submit disabled, limit orders only, and small live notional caps
+- [x] Default generated config to live approval, `execution.order_posture=dry_run`,
+      limit orders only, and small live notional caps
 - [x] Add `maestro personal-check --config ...` staged readiness output for paper, KIS read-only, Telegram approval, live dry-run, and minimum-size live order gates
 - [x] Add `maestro operator-evidence --config ... --output ...` read-only
       readiness evidence report for operator rehearsals

@@ -46,6 +46,7 @@ def build_operator_home(config: MaestroConfig, store: StateStore) -> dict[str, A
     return {
         "status": status,
         "mode": str(config.mode),
+        "order_posture": config.execution.order_posture,
         "operator_config": overview.get("operator_config"),
         "latest_run_id": overview.get("latest_run_id"),
         "latest_run_time": overview.get("latest_run_time"),

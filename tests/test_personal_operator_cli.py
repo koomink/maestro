@@ -304,8 +304,9 @@ def _personal_config(
     raw = yaml.safe_load(output.read_text())
     raw["approval"]["telegram_allowed_chat_ids"] = [123456789]
     raw["approval"]["whitelisted_user_ids"] = [123456789]
-    raw["execution"]["live_order_enabled"] = live_order_enabled
-    raw["execution"]["live_order_dry_run"] = live_order_dry_run
+    raw["execution"]["order_posture"] = (
+        "dry_run" if live_order_dry_run else "armed" if live_order_enabled else "disabled"
+    )
     raw["execution"]["broker_validation"]["require_quote_validation"] = (
         require_broker_quote_validation
     )

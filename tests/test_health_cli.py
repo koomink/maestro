@@ -241,6 +241,7 @@ def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_
         daily_loss_limit=100.0,
         heartbeat_max_age_seconds=60,
         scheduled_run_max_age_seconds=60,
+        datahub_provider="yahoo",
     )
     config = load_config(config_path)
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -263,6 +264,48 @@ def test_beta_preflight_cli_exits_one_when_hardening_missing(tmp_path):
     assert "broker_risk_validation_not_required" in result.output
 
 
+def test_beta_preflight_cli_fails_when_kis_paper_trading_is_enabled(tmp_path):
+    config_path = _live_approval_config(
+        tmp_path,
+        require_market_session=True,
+        require_broker_quote_validation=True,
+        require_broker_risk_validation=True,
+        daily_loss_limit=100.0,
+        heartbeat_max_age_seconds=60,
+        scheduled_run_max_age_seconds=60,
+        datahub_provider="yahoo",
+        kis_paper_trading=True,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_beta_ready_events(store)
+
+    result = CliRunner().invoke(app, ["beta-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "kis_paper_trading_enabled" in result.output
+
+
+def test_beta_preflight_cli_fails_when_datahub_is_mock(tmp_path):
+    config_path = _live_approval_config(
+        tmp_path,
+        require_market_session=True,
+        require_broker_quote_validation=True,
+        require_broker_risk_validation=True,
+        daily_loss_limit=100.0,
+        heartbeat_max_age_seconds=60,
+        scheduled_run_max_age_seconds=60,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_beta_ready_events(store)
+
+    result = CliRunner().invoke(app, ["beta-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "datahub_mock_provider" in result.output
+
+
 def test_health_live_approval_preflight_fails_unsafe_config(tmp_path):
     config_path = _live_approval_config(
         tmp_path,
@@ -278,7 +321,7 @@ def test_health_live_approval_preflight_fails_unsafe_config(tmp_path):
 
     assert checks["live_approval_preflight"].status == "fail"
     assert "reconciliation_not_required" in checks["live_approval_preflight"].details["failures"]
-    assert "live_order_disabled" in checks["live_approval_preflight"].details["warnings"]
+    assert "order_posture_disabled" in checks["live_approval_preflight"].details["warnings"]
 
 
 def test_structured_logging_redacts_secret_fields():
@@ -367,12 +410,17 @@ def _live_approval_config(
     daily_loss_limit: float | None = None,
     heartbeat_max_age_seconds: int = 0,
     scheduled_run_max_age_seconds: int = 0,
+    datahub_provider: str | None = None,
+    kis_paper_trading: bool = False,
 ) -> Path:
     raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "live_audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")
-    raw["execution"]["live_order_enabled"] = live_order_enabled
+    raw["kis"]["paper_trading"] = kis_paper_trading
+    if datahub_provider is not None:
+        raw["datahub"] = {"provider": datahub_provider}
+    raw["execution"]["order_posture"] = "armed" if live_order_enabled else "disabled"
     raw["execution"]["require_reconciliation_pass"] = require_reconciliation_pass
     raw["execution"]["live_order_limits"]["max_daily_order_count"] = max_daily_live_order_count
     raw["execution"]["market_session"]["required"] = require_market_session

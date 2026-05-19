@@ -70,7 +70,12 @@ def render(config_path: str | Path | None) -> None:
         help="Display preference only; no broker calls or writes.",
     )
     _apply_design_theme(st, theme)
-    _page_header(st, config.mode.value, status.get("operator_config"))
+    _page_header(
+        st,
+        config.mode.value,
+        config.execution.order_posture,
+        status.get("operator_config"),
+    )
     st.sidebar.caption(f"Config: {identity.path}")
     st.sidebar.caption(f"State: {Path(config.state.sqlite_path).expanduser().resolve()}")
     st.sidebar.caption(f"Audit: {Path(config.audit.jsonl_path).expanduser().resolve()}")
@@ -1385,7 +1390,12 @@ def _theme_variables(theme: str) -> str:
     )
 
 
-def _page_header(st: object, mode: str, operator_config: dict[str, str] | None) -> None:
+def _page_header(
+    st: object,
+    mode: str,
+    order_posture: str,
+    operator_config: dict[str, str] | None,
+) -> None:
     fingerprint = (operator_config or {}).get("fingerprint", "none")
     short_fingerprint = fingerprint[:12] if fingerprint != "none" else "none"
     st.markdown(
@@ -1401,6 +1411,7 @@ def _page_header(st: object, mode: str, operator_config: dict[str, str] | None) 
             _badge_row(
                 [
                     ("Mode", mode, "primary"),
+                    ("Orders", order_posture, "warning" if order_posture != "armed" else "success"),
                     ("Access", "read-only", "success"),
                     ("Config", short_fingerprint, "neutral"),
                 ]

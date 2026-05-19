@@ -12,10 +12,9 @@ from maestro.config.env import load_project_dotenv
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
-from maestro.config.universe import UniverseConfig
 from maestro.core.enums import RunMode
 from maestro.core.ids import new_run_id
-from maestro.core.instruments import TradableInstrument
+from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
@@ -83,6 +82,25 @@ def _state_store(
     )
 
 
+def _broker_snapshot_refresher(
+    maestro_config: MaestroConfig,
+    store: StateStore,
+    audit: AuditLogger,
+):
+    if not maestro_config.kis.enabled:
+        return None
+
+    def refresh() -> None:
+        KISReadOnlyService(
+            maestro_config.kis,
+            store,
+            audit,
+            instruments=maestro_config.universe.instruments,
+        ).fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+
+    return refresh
+
+
 @app.command("run-once")
 def run_once(config: Path | None = CONFIG_OPTION) -> None:
     maestro_config, identity = _load_operator_config(config)
@@ -107,6 +125,8 @@ def status(config: Path | None = CONFIG_OPTION) -> None:
         f"orders={store_status['counts']['orders']} "
         f"approvals={store_status['counts']['approvals']} "
         f"broker_snapshots={store_status['counts']['broker_account_snapshots']} "
+        f"mode={maestro_config.mode.value} "
+        f"order_posture={maestro_config.execution.order_posture} "
         f"config_path={operator_config.get('path', identity.path)} "
         f"config_fingerprint={operator_config.get('fingerprint', 'none')}"
         f" state_path={Path(maestro_config.state.sqlite_path).expanduser().resolve()}"
@@ -540,8 +560,10 @@ def _run_live_dry_run_smoke(
 ) -> None:
     if maestro_config.mode != RunMode.LIVE_APPROVAL:
         raise typer.BadParameter("live-smoke --check live-dry-run requires mode=live_approval")
-    if not maestro_config.execution.live_order_dry_run:
-        raise typer.BadParameter("live-smoke --check live-dry-run requires live_order_dry_run=true")
+    if maestro_config.execution.order_posture != "dry_run":
+        raise typer.BadParameter(
+            "live-smoke --check live-dry-run requires execution.order_posture=dry_run"
+        )
     if not allow_mock:
         if maestro_config.approval.provider != "telegram":
             raise typer.BadParameter("live-smoke --check live-dry-run requires Telegram approval")
@@ -706,11 +728,15 @@ def reconcile(config: Path | None = CONFIG_OPTION) -> None:
         raise typer.BadParameter("reconcile requires mode=live_readonly or live_approval")
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    result = BrokerReconciliationService(
-        maestro_config.reconciliation,
-        store,
-        audit,
-    ).reconcile_latest()
+    try:
+        result = BrokerReconciliationService(
+            maestro_config.reconciliation,
+            store,
+            audit,
+            snapshot_refresher=_broker_snapshot_refresher(maestro_config, store, audit),
+        ).reconcile_latest()
+    except ValueError as exc:
+        raise typer.BadParameter(f"reconcile broker snapshot refresh failed: {exc}") from exc
     status = "passed" if result.passed else "failed"
     typer.echo(
         f"status={status} issues={len(result.issues)} "
@@ -879,75 +905,16 @@ def _portfolio_state_from_broker_account(
     account: dict,
     *,
     allowed_symbols: list[str],
-    universe: UniverseConfig | None = None,
+    universe=None,
 ) -> PortfolioState:
-    positions: dict[str, float] = {}
-    unknown_symbols: list[str] = []
-    policy_rejected_symbols: dict[str, list[str]] = {}
-    allowed = set(allowed_symbols)
-    instruments = {
-        instrument.symbol: instrument for instrument in (universe.instruments if universe else [])
-    }
-    for position in account.get("positions", []):
-        symbol = str(position.get("symbol") or "")
-        quantity = float(position.get("quantity", 0.0))
-        if not symbol or quantity == 0:
-            continue
-        if symbol in allowed:
-            positions[symbol] = positions.get(symbol, 0.0) + quantity
-            continue
-        instrument = instruments.get(symbol)
-        if instrument is None:
-            unknown_symbols.append(symbol)
-            continue
-        rejections = _universe_policy_rejections(instrument, universe)
-        if rejections:
-            policy_rejected_symbols[symbol] = rejections
-            continue
-        positions[symbol] = positions.get(symbol, 0.0) + quantity
-    if unknown_symbols:
-        raise typer.BadParameter(
-            "broker snapshot contains positions outside portfolio.allowed_symbols and "
-            "universe.instruments: " + ",".join(sorted(set(unknown_symbols)))
+    try:
+        return portfolio_state_from_broker_account(
+            account,
+            allowed_symbols=allowed_symbols,
+            universe=universe,
         )
-    if policy_rejected_symbols:
-        details = [
-            f"{symbol}({','.join(reasons)})"
-            for symbol, reasons in sorted(policy_rejected_symbols.items())
-        ]
-        raise typer.BadParameter(
-            "broker snapshot contains positions rejected by universe.policy: " + ";".join(details)
-        )
-    return PortfolioState(
-        cash=float(account.get("cash", 0.0)),
-        cash_by_currency=dict(account.get("cash_by_currency") or {}),
-        positions=positions,
-    )
-
-
-def _universe_policy_rejections(
-    instrument: TradableInstrument,
-    universe: UniverseConfig | None,
-) -> list[str]:
-    if universe is None:
-        return []
-    policy = universe.policy
-    reasons = []
-    if instrument.symbol in policy.denied_symbols:
-        reasons.append("denied_symbol")
-    if set(instrument.asset_tags) & set(policy.denied_asset_tags):
-        reasons.append("denied_asset_tag")
-    if instrument.asset_type not in policy.allowed_asset_types:
-        reasons.append("asset_type_not_allowed")
-    if instrument.region not in policy.allowed_regions:
-        reasons.append("region_not_allowed")
-    if instrument.currency not in policy.allowed_currencies:
-        reasons.append("currency_not_allowed")
-    if instrument.broker_product not in policy.allowed_broker_products:
-        reasons.append("broker_product_not_allowed")
-    if instrument.exchange_code not in policy.allowed_exchange_codes:
-        reasons.append("exchange_not_allowed")
-    return reasons
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _configured_secret_values(maestro_config) -> list[str]:
@@ -1044,8 +1011,7 @@ def _personal_operator_config(output: Path) -> dict:
         },
         "execution": {
             "engine": "paper",
-            "live_order_enabled": False,
-            "live_order_dry_run": True,
+            "order_posture": "dry_run",
             "require_reconciliation_pass": True,
             "live_order_limits": {
                 "max_order_notional": 100,
@@ -1182,7 +1148,7 @@ def _telegram_personal_status(config: MaestroConfig) -> str:
 
 def _dry_run_personal_status(config: MaestroConfig, checks: dict) -> str:
     preflight = checks.get("live_approval_preflight")
-    if config.mode != RunMode.LIVE_APPROVAL or not config.execution.live_order_dry_run:
+    if config.mode != RunMode.LIVE_APPROVAL or config.execution.order_posture != "dry_run":
         return "fail"
     if preflight is None or preflight.status == "fail":
         return "fail"
@@ -1194,7 +1160,7 @@ def _dry_run_personal_status(config: MaestroConfig, checks: dict) -> str:
 def _minimum_live_personal_status(config: MaestroConfig, report) -> str:
     if config.mode != RunMode.LIVE_APPROVAL:
         return "fail"
-    if not config.execution.live_order_enabled or config.execution.live_order_dry_run:
+    if config.execution.order_posture != "armed":
         return "fail"
     if _telegram_personal_status(config) != "ok":
         return "fail"

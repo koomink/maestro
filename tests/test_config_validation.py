@@ -26,6 +26,8 @@ LEGACY_EXECUTION_CONFIG_KEYS = {
     "max_daily_live_order_count",
     "daily_loss_limit",
     "live_order_fee_buffer_pct",
+    "live_order_enabled",
+    "live_order_dry_run",
     "heartbeat_max_age_seconds",
     "scheduled_run_max_age_seconds",
 }
@@ -64,6 +66,7 @@ def test_unknown_execution_field_fails(tmp_path):
 def test_live_order_config_defaults_are_safe():
     config = load_config("configs/paper.yaml")
 
+    assert config.execution.order_posture == "disabled"
     assert config.execution.live_order_enabled is False
     assert config.execution.live_order_dry_run is False
     assert config.execution.require_reconciliation_pass is True
@@ -161,6 +164,45 @@ def test_execution_nested_blocks_load_canonical_schema(tmp_path):
     assert config.execution.live_order_limits.max_daily_order_count == 3
     assert config.execution.live_order_limits.daily_loss_limit == 50
     assert config.execution.live_order_limits.fee_buffer_pct == 0.01
+
+
+def test_execution_order_posture_derives_live_order_flags(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["execution"]["order_posture"] = "armed"
+    config_path = tmp_path / "armed.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.execution.order_posture == "armed"
+    assert config.execution.live_order_enabled is True
+    assert config.execution.live_order_dry_run is False
+
+
+def test_execution_legacy_live_order_flags_derive_order_posture(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    del raw["execution"]["order_posture"]
+    raw["execution"]["live_order_enabled"] = False
+    raw["execution"]["live_order_dry_run"] = True
+    config_path = tmp_path / "legacy_dry_run.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.execution.order_posture == "dry_run"
+    assert config.execution.live_order_enabled is False
+    assert config.execution.live_order_dry_run is True
+
+
+def test_execution_order_posture_rejects_conflicting_legacy_flags(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["execution"]["order_posture"] = "armed"
+    raw["execution"]["live_order_dry_run"] = True
+    config_path = tmp_path / "conflicting_order_posture.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="order_posture conflicts"):
+        load_config(config_path)
 
 
 def test_execution_legacy_flat_blocks_migrate_for_one_release(tmp_path):
@@ -323,21 +365,21 @@ def test_live_readonly_rejects_approval_and_live_order_settings(tmp_path):
         load_config(config_path)
 
     raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
-    raw["execution"]["live_order_enabled"] = True
+    raw["execution"]["order_posture"] = "dry_run"
     config_path = tmp_path / "live_readonly_with_live_orders.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
-    with pytest.raises(ValidationError, match="live_readonly mode must not enable live order"):
+    with pytest.raises(ValidationError, match="live_readonly mode requires"):
         load_config(config_path)
 
 
 def test_paper_rejects_live_order_execution(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
-    raw["execution"]["live_order_enabled"] = True
+    raw["execution"]["order_posture"] = "armed"
     config_path = tmp_path / "paper_with_live_orders.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
-    with pytest.raises(ValidationError, match="paper mode must not enable live order"):
+    with pytest.raises(ValidationError, match="paper mode must not arm live order"):
         load_config(config_path)
 
 
@@ -485,6 +527,7 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
     assert config.portfolio.base_currency == "KRW"
     assert config.strategies[0].enabled is True
     assert config.execution.order_generation_mode == "buy_only_contribution"
+    assert config.execution.order_posture == "dry_run"
     assert config.execution.live_order_enabled is False
     assert config.execution.live_order_dry_run is True
     assert config.execution.market_session.required is True
@@ -509,8 +552,7 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     raw = yaml.safe_load(
         Path("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
     )
-    raw["execution"]["live_order_enabled"] = True
-    raw["execution"]["live_order_dry_run"] = False
+    raw["execution"]["order_posture"] = "armed"
     raw["approval"]["telegram_allowed_chat_ids"] = [100]
     raw["approval"]["whitelisted_user_ids"] = [100]
     config_path = tmp_path / "ataraxia_kis_paper_submit.yaml"

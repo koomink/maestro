@@ -318,7 +318,7 @@ reliably handled by one-shot jobs plus explicit locks.
 - `RunMode.LIVE_APPROVAL` is defined for approval-gated live trading work. There is
   no `live_auto` mode.
 - Live orders are disabled by default with:
-  `live_order_enabled=false`, `require_reconciliation_pass=true`,
+  `execution.order_posture=disabled`, `require_reconciliation_pass=true`,
   `live_order_limits.max_order_notional=0`,
   `live_order_limits.max_daily_notional=0`, and `allowed_order_type=limit`.
 - `LiveOrderSafetyService` is the only internal live order submission boundary.
@@ -332,7 +332,7 @@ reliably handled by one-shot jobs plus explicit locks.
   events and audit events; unknown broker status is converted to `halted`.
 - `LiveOrderStatusSnapshot`, `FillEvent`, and `PartialFillSummary` define status
   and partial-fill normalization.
-- `execution.live_order_dry_run=true` keeps the live approval path through
+- `execution.order_posture=dry_run` keeps the live approval path through
   strategy, risk, reconciliation, and approval, then persists `live_order_dry_run`
   events without calling the broker submit adapter.
 - When `execution.broker_validation.require_quote_validation=true`, order

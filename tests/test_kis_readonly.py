@@ -145,6 +145,47 @@ def test_live_approval_config_can_run_readonly_sync_and_reconciliation_with_mock
     assert "status=passed" in reconcile_result.output
 
 
+def test_kis_cli_reconcile_refreshes_broker_snapshot_before_compare(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_portfolio_snapshot(
+        "run_current_maestro",
+        PortfolioState(
+            cash=5_000_000.0,
+            cash_by_currency={"KRW": 5_000_000.0},
+            positions={"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0},
+        ),
+    )
+    store.save_broker_account_snapshot(
+        "run_stale_broker",
+        "MOCK-ACCOUNT",
+        {
+            "account": {
+                "account_id": "MOCK-ACCOUNT",
+                "cash": 10_000_000.0,
+                "cash_by_currency": {"KRW": 10_000_000.0},
+                "buying_power": 10_000_000.0,
+                "positions": [],
+                "source": "stale_fixture",
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+
+    result = CliRunner().invoke(app, ["reconcile", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "status=passed" in result.output
+    assert store.status()["counts"]["broker_account_snapshots"] == 2
+    latest = store.load_latest_broker_account_snapshot()
+    assert latest is not None
+    assert latest["payload"]["account"]["source"] == "kis_mock"
+
+
 def test_single_broker_products_list_selects_readonly_product_without_broker_product_default(
     tmp_path,
 ):

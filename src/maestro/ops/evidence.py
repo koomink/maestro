@@ -105,6 +105,7 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
             "telegram_token_present": bool(os.getenv(config.approval.telegram_bot_token_env)),
         },
         "execution": {
+            "order_posture": config.execution.order_posture,
             "live_order_enabled": config.execution.live_order_enabled,
             "live_order_dry_run": config.execution.live_order_dry_run,
             "allowed_order_type": config.execution.allowed_order_type.value,
@@ -407,7 +408,7 @@ def _telegram_personal_status(config: MaestroConfig) -> str:
 
 def _dry_run_personal_status(config: MaestroConfig, checks: dict[str, Any]) -> str:
     preflight = checks.get("live_approval_preflight")
-    if config.mode != RunMode.LIVE_APPROVAL or not config.execution.live_order_dry_run:
+    if config.mode != RunMode.LIVE_APPROVAL or config.execution.order_posture != "dry_run":
         return "fail"
     if preflight is None or preflight.status == "fail":
         return "fail"
@@ -419,7 +420,7 @@ def _dry_run_personal_status(config: MaestroConfig, checks: dict[str, Any]) -> s
 def _minimum_live_personal_status(config: MaestroConfig, report: HealthReport) -> str:
     if config.mode != RunMode.LIVE_APPROVAL:
         return "fail"
-    if not config.execution.live_order_enabled or config.execution.live_order_dry_run:
+    if config.execution.order_posture != "armed":
         return "fail"
     if _telegram_personal_status(config) != "ok":
         return "fail"

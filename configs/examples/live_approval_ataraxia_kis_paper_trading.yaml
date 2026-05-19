@@ -74,8 +74,7 @@ datahub:
 execution:
   engine: paper
   order_generation_mode: buy_only_contribution
-  live_order_enabled: false
-  live_order_dry_run: true
+  order_posture: dry_run
   require_reconciliation_pass: true
   live_order_limits:
     max_order_notional: 1000000

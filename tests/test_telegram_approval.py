@@ -30,6 +30,7 @@ class FakeTelegramClient:
         self.get_updates_calls: list[dict[str, Any]] = []
         self.answered_callbacks: list[dict[str, str]] = []
         self.edited_messages: list[dict[str, Any]] = []
+        self.edited_reply_markups: list[dict[str, Any]] = []
 
     def send_message(
         self,
@@ -66,6 +67,42 @@ class FakeTelegramClient:
             }
         )
         return {"ok": True, "result": {"message_id": message_id}}
+
+    def edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        self.edited_reply_markups.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": reply_markup,
+            }
+        )
+        return {"ok": True, "result": {"message_id": message_id}}
+
+
+class FailingEditTelegramClient(FakeTelegramClient):
+    def edit_message_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raise RuntimeError("edit failed")
+
+
+class FailingAllEditTelegramClient(FailingEditTelegramClient):
+    def edit_message_reply_markup(
+        self,
+        chat_id: int,
+        message_id: int,
+        reply_markup: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        raise RuntimeError("reply markup edit failed")
 
 
 def approval_request() -> ApprovalRequest:
@@ -273,7 +310,9 @@ def test_telegram_service_receives_button_approval():
                 f"Decision: approved by telegram:approver at {decision.decided_at.isoformat()}"
             ),
             "reply_markup": {
-                "inline_keyboard": [[{"text": "Approved", "callback_data": "decision:appr_test"}]]
+                "inline_keyboard": [
+                    [{"text": "✅ Approved", "callback_data": "decision:appr_test"}]
+                ]
             },
         }
     ]
@@ -296,8 +335,52 @@ def test_telegram_service_receives_button_rejection():
         {"callback_query_id": "callback-1", "text": "Approval rejected."}
     ]
     assert client.edited_messages[0]["reply_markup"] == {
-        "inline_keyboard": [[{"text": "Rejected", "callback_data": "decision:appr_test"}]]
+        "inline_keyboard": [[{"text": "⛔ Rejected", "callback_data": "decision:appr_test"}]]
     }
+
+
+def test_telegram_service_updates_buttons_when_text_edit_fails():
+    request = approval_request()
+    client = FailingEditTelegramClient([callback_update(f"approve:{request.approval_id}")])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
+    assert client.edited_reply_markups == [
+        {
+            "chat_id": 100,
+            "message_id": 50,
+            "reply_markup": {
+                "inline_keyboard": [
+                    [{"text": "✅ Approved", "callback_data": "decision:appr_test"}]
+                ]
+            },
+        }
+    ]
+
+
+def test_telegram_service_sends_confirmation_when_message_edits_fail():
+    request = approval_request()
+    client = FailingAllEditTelegramClient([callback_update(f"approve:{request.approval_id}")])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    decision, _ = service.request_decision(request)
+
+    assert decision.status == "approved"
+    assert client.sent_messages[-1]["chat_id"] == 100
+    assert "Maestro approval decision recorded" in client.sent_messages[-1]["text"]
+    assert "status: approved" in client.sent_messages[-1]["text"]
 
 
 def test_telegram_service_ignores_manual_text_commands():
@@ -539,7 +622,7 @@ def test_live_smoke_telegram_approval_validates_config_without_network(tmp_path)
     raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
-    raw["execution"]["live_order_enabled"] = False
+    raw["execution"]["order_posture"] = "dry_run"
     raw["approval"]["telegram_allowed_chat_ids"] = [100]
     raw["approval"]["whitelisted_user_ids"] = [100]
     config_path = tmp_path / "live_approval.yaml"

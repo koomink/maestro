@@ -5,8 +5,10 @@ from maestro.core.enums import BrokerProduct, OrderType
 def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], list[str]]:
     failures: list[str] = []
     warnings: list[str] = []
-    if not config.execution.live_order_enabled:
-        warnings.append("live_order_disabled")
+    if config.execution.order_posture == "disabled":
+        warnings.append("order_posture_disabled")
+    if config.execution.order_posture == "dry_run":
+        warnings.append("order_posture_dry_run")
     if not config.execution.require_reconciliation_pass:
         failures.append("reconciliation_not_required")
     if config.execution.allowed_order_type != OrderType.LIMIT:

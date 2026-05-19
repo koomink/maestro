@@ -310,7 +310,8 @@ Completed scope:
   terminal status, partial fill, rejected status, and unknown-status halt paths
 - Health preflight checks for live approval safety configuration
 - `maestro live-preflight --config ...` for scriptable release gates
-- Live approval dry-run mode that records `live_order_dry_run` events without
+- Live approval `execution.order_posture=dry_run` mode that records
+  `live_order_dry_run` events without
   broker submission
 - KIS real-response fixture redaction guidance
 - KIS overseas cancel adapter behind `LiveOrderCancellationService` policy gates

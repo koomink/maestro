@@ -23,7 +23,7 @@ gates in order:
 3. Run KIS multi-asset read-only sync and broker reconciliation against the real
    account.
 4. Run a real Telegram approval rehearsal without broker submission.
-5. Run `live_order_dry_run=true` through approval and lifecycle preflight.
+5. Run `execution.order_posture=dry_run` through approval and lifecycle preflight.
 6. Submit one minimum-size approval-gated limit order only after every prior
    gate passes.
 7. Confirm broker status, fill reconciliation, broker reconciliation, audit
@@ -39,7 +39,7 @@ For the complete operator-local promotion runbook, see
 ## Preflight Checklist
 
 - Review `configs/live_approval.yaml` and keep
-  `execution.live_order_enabled=false` until every item below passes.
+  `execution.order_posture=disabled` until every item below passes.
 - Confirm the strategy universe, DataHub provider, broker account, and effective
   allowed symbols refer to the same canonical symbols. If
   `portfolio.allowed_symbols` is omitted, Maestro derives it from
@@ -188,7 +188,7 @@ chat/user allowlists, missing KIS overseas broker product config, unsupported
 exchange codes, or missing live notional caps.
 
 For the final rehearsal before broker submission, set
-`execution.live_order_dry_run=true` in the operator-local config and run:
+`execution.order_posture=dry_run` in the operator-local config and run:
 
 ```bash
 maestro run-once --config <live-approval-config>
@@ -196,7 +196,7 @@ maestro run-once --config <live-approval-config>
 
 Confirm the approval path completes and `live_order_dry_run` events contain the
 expected symbol, side, quantity, limit price, and notional. Then set
-`execution.live_order_dry_run=false` only after the dry-run payload matches the
+`execution.order_posture=armed` only after the dry-run payload matches the
 intended first order.
 
 Review the matching `live_proposal_data_snapshot` event before approval. It
@@ -250,7 +250,7 @@ For normal tests this gate validates a Telegram-configured approval path with
 `MAESTRO_RUN_TELEGRAM_LIVE_SMOKE=1` and `MAESTRO_TELEGRAM_LIVE_CONFIG` are set.
 
 The live approval dry-run smoke gate runs `run_once`, requires
-`execution.live_order_dry_run=true`, and verifies that `live_order_dry_run`
+`execution.order_posture=dry_run`, and verifies that `live_order_dry_run`
 events were written without broker submission:
 
 ```bash
@@ -266,15 +266,14 @@ For normal tests this gate can run with console/mock approval by passing
 1. Copy `configs/live_approval.yaml` to an operator-local config.
 2. Replace placeholder account ID, chat IDs, symbols, strategy configuration, and
    state/audit paths.
-3. Keep `execution.live_order_enabled=false` and run config validation/tests.
+3. Keep `execution.order_posture=disabled` and run config validation/tests.
 4. Run KIS read-only sync, inspect the account, and adopt the verified broker
    snapshot as the live baseline.
 5. Run broker reconciliation against the adopted baseline.
 6. Confirm Telegram approval works with the intended operator account.
 7. Set small live notional caps.
-8. Set `execution.live_order_dry_run=true` and run one approved dry-run.
-9. Only after all checks pass, set `execution.live_order_enabled=true` and
-   `execution.live_order_dry_run=false` in the
+8. Set `execution.order_posture=dry_run` and run one approved dry-run.
+9. Only after all checks pass, set `execution.order_posture=armed` in the
    operator-local config.
 10. Run `maestro run-once --config <live-approval-config>`.
 11. Approve only if the proposal, limit price, notional, and symbol are expected.
@@ -342,7 +341,7 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 
 ## Halt Recovery
 
-1. Keep `execution.live_order_enabled=false` until the root cause is resolved.
+1. Keep `execution.order_posture=disabled` until the root cause is resolved.
 2. Review the halt event, audit log, broker account state, latest reconciliation,
    and affected canonical symbols.
 3. Run read-only sync and broker reconciliation again.
@@ -384,11 +383,13 @@ Health verifies heartbeat age, scheduled `run-once` age, broker snapshot age,
 reconciliation status, recent halt/failure events, and audit hash-chain
 integrity. `ops-alerts` sends warn/fail health checks to Telegram; use
 `--allow-mock` only for local rehearsal. `beta-preflight` is the final
-private-beta readiness gate for an operator-local live approval config.
+private-beta readiness gate for an operator-local live approval config. It fails
+if the config still uses mock DataHub or KIS mock-investment
+`kis.paper_trading=true`.
 
 ## Rollback / Stop Procedure
 
-1. Set `execution.live_order_enabled=false` in the operator-local config.
+1. Set `execution.order_posture=disabled` in the operator-local config.
 2. Stop scheduled invocations of `maestro run-once`.
 3. Leave the dashboard read-only.
 4. Use broker-native tools for emergency broker-side action.

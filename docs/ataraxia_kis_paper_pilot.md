@@ -20,8 +20,7 @@ Keep these values for the initial dry-run stages:
 mode: live_approval
 execution:
   allowed_order_type: limit
-  live_order_enabled: false
-  live_order_dry_run: true
+  order_posture: dry_run
   require_reconciliation_pass: true
   market_session:
     required: true
@@ -43,7 +42,7 @@ kis:
 ```
 
 For the first KIS mock-investment broker-submit pilot only, set
-`execution.live_order_enabled=true` and `execution.live_order_dry_run=false`.
+`execution.order_posture=armed`.
 Keep `execution.live_order_limits.max_order_notional`,
 `execution.live_order_limits.max_daily_notional`, and
 `execution.live_order_limits.max_daily_order_count` at minimum-order rehearsal
@@ -112,8 +111,7 @@ operator-local config after the dry-run payload is accepted:
 
 ```yaml
 execution:
-  live_order_enabled: true
-  live_order_dry_run: false
+  order_posture: armed
 ```
 
 ```bash

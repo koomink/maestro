@@ -144,8 +144,8 @@ class MaestroConfig(StrictConfigModel):
                 )
             if self.approval.enabled or self.approval.require_approval:
                 raise ValueError("live_readonly mode must not require approval")
-            if self.execution.live_order_enabled or self.execution.live_order_dry_run:
-                raise ValueError("live_readonly mode must not enable live order execution")
+            if self.execution.order_posture != "disabled":
+                raise ValueError("live_readonly mode requires execution.order_posture=disabled")
             if not self.kis.enabled:
                 raise ValueError("live_readonly mode requires kis.enabled=true")
         if self.mode == RunMode.LIVE_APPROVAL:
@@ -153,8 +153,8 @@ class MaestroConfig(StrictConfigModel):
                 raise ValueError("live_approval mode requires approval.enabled=true")
             if not self.kis.enabled:
                 raise ValueError("live_approval mode requires kis.enabled=true")
-        if self.mode == RunMode.PAPER and self.execution.live_order_enabled:
-            raise ValueError("paper mode must not enable live order execution")
+        if self.mode == RunMode.PAPER and self.execution.order_posture == "armed":
+            raise ValueError("paper mode must not arm live order execution")
         return self
 
 

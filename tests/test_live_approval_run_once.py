@@ -9,6 +9,13 @@ from maestro.cli import app
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus
+from maestro.execution.brokers.kis.models import (
+    KISAccountSnapshot,
+    KISBuyingPower,
+    KISCashBalance,
+    KISReadOnlySnapshot,
+)
+from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import (
     BrokerOrderId,
     BrokerReconciliationRunner,
@@ -63,6 +70,61 @@ class FakeTelegramClient:
                 }
             ],
         }
+
+
+def _kis_snapshot(
+    *,
+    account_id: str,
+    cash: float,
+    symbols: list[str],
+) -> KISReadOnlySnapshot:
+    account = KISAccountSnapshot(
+        account_id=account_id,
+        cash=cash,
+        cash_by_currency={"USD": cash},
+        buying_power=cash,
+        positions=[],
+        cash_balance=KISCashBalance(cash=cash, withdrawable_cash=cash),
+        buying_power_detail=KISBuyingPower(
+            cash_buying_power=cash,
+            source="kis_mock",
+        ),
+        fetched_at=utc_now(),
+        source="kis_mock",
+    )
+    return KISReadOnlySnapshot(
+        account=account,
+        current_prices={symbol: 100.0 for symbol in symbols if symbol != "CASH"},
+        order_fills=[],
+        unfilled_orders=[],
+    )
+
+
+@pytest.fixture(autouse=True)
+def _mock_kis_broker_snapshot(monkeypatch) -> None:
+    def init_service(
+        self: KISReadOnlyService,
+        config,
+        state_store,
+        audit_logger,
+        client=None,
+        instruments=None,
+    ) -> None:
+        self.config = config
+        self.state_store = state_store
+        self.audit_logger = audit_logger
+        self.instruments = instruments or []
+        self.client = client
+
+    def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
+        return _kis_snapshot(
+            account_id=self.config.account_id or "MOCK",
+            cash=1000.0,
+            symbols=symbols,
+        )
+
+    monkeypatch.setattr(KISReadOnlyService, "__init__", init_service)
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
 
 
 def _seed_broker_baseline(
@@ -300,18 +362,69 @@ def test_live_approval_order_generation_fills_position_prices_from_broker_snapsh
     assert proposal_snapshot["prices"]["MOCK_LEGACY"] == 777.0
 
 
-def test_live_approval_run_once_requires_adopted_broker_baseline(tmp_path):
+def test_live_approval_refreshes_broker_cash_before_order_generation(
+    tmp_path,
+    monkeypatch,
+):
+    approval_id = "appr_kis_refresh_cash"
+    monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: approval_id)
+
+    def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
+            return _kis_snapshot(
+                account_id=self.config.account_id or "MOCK",
+                cash=900.0,
+                symbols=symbols,
+            )
+
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
+    config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
+    orchestrator = MaestroOrchestrator(
+        load_config(config_path),
+        broker_reconciliation_service=FakeBrokerReconciliation(),
+        telegram_client=FakeTelegramClient(approval_id),
+    )
+    orchestrator.state_store.save_system_event(
+        "run_reconcile_initial",
+        "broker_reconciliation",
+        {"passed": True},
+    )
+    _seed_broker_baseline(orchestrator.state_store, cash=1000.0)
+
+    summary = orchestrator.run_once()
+
+    dry_run = orchestrator.state_store.list_system_events_by_type("live_order_dry_run")[0][
+        "payload"
+    ]
+    latest_state = orchestrator.state_store.load_latest_portfolio_state()
+    adopted = orchestrator.state_store.list_system_events_by_type("broker_snapshot_adopted")[0][
+        "payload"
+    ]
+    assert summary.cash == 900.0
+    assert latest_state.cash == 900.0
+    assert dry_run["request"]["quantity"] == 1.0
+    assert adopted["cash"] == 900.0
+
+
+def test_live_approval_run_once_fails_closed_when_broker_refresh_fails(
+    tmp_path,
+    monkeypatch,
+):
+    def fail_refresh(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
+        raise ValueError("KIS snapshot unavailable")
+
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fail_refresh)
     config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
     orchestrator = MaestroOrchestrator(
         load_config(config_path),
         telegram_client=FakeTelegramClient("appr_missing_baseline"),
     )
 
-    with pytest.raises(ValueError, match="adopted broker snapshot"):
+    with pytest.raises(ValueError, match="could not refresh KIS broker snapshot"):
         orchestrator.run_once()
 
     events = orchestrator.state_store.list_system_events_by_type("broker_baseline_required")
     assert events[0]["payload"]["mode"] == "live_approval"
+    assert events[0]["payload"]["error"] == "KIS snapshot unavailable"
 
 
 @pytest.mark.parametrize(
@@ -655,8 +768,7 @@ def _overseas_live_approval_config(
         }
     ]
     raw["datahub"] = {"provider": "csv", "csv_path": str(csv_path)}
-    raw["execution"]["live_order_enabled"] = True
-    raw["execution"]["live_order_dry_run"] = dry_run
+    raw["execution"]["order_posture"] = "dry_run" if dry_run else "armed"
     raw["execution"]["live_order_limits"]["max_order_notional"] = 500
     raw["execution"]["live_order_limits"]["max_daily_notional"] = 1000
     raw["execution"]["live_order_limits"]["max_daily_order_count"] = 3

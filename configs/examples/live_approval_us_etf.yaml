@@ -79,8 +79,7 @@ datahub:
 
 execution:
   engine: paper
-  live_order_enabled: false
-  live_order_dry_run: false
+  order_posture: disabled
   require_reconciliation_pass: true
   live_order_limits:
     max_order_notional: 100

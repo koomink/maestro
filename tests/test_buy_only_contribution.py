@@ -141,6 +141,92 @@ def test_duplicate_monthly_execution_does_not_create_another_contribution_order(
     assert second_orders == []
 
 
+def test_target_rebalance_orders_are_rounded_to_instrument_contract():
+    builder = OrderBuilder(
+        config=ExecutionConfig(order_posture="armed"),
+        instruments=[
+            TradableInstrument(
+                symbol="AAPL",
+                asset_type="stock",
+                region="US",
+                currency="USD",
+                broker="kis",
+                broker_product="kis_overseas_stock",
+                broker_symbol="AAPL",
+                exchange_code="NASD",
+                quantity_step=1,
+                price_tick=0.01,
+                min_order_quantity=1,
+                min_order_notional=1,
+            )
+        ]
+    )
+    state = PortfolioState(cash=1_000, positions={})
+    target = PortfolioTarget(
+        timestamp=_dt(2026, 5, 15),
+        allocations={"CASH_USD": 0.0, "AAPL": 1.0},
+        source_strategy_ids=["s"],
+    )
+
+    orders = builder.build_orders(state, target, prices={"CASH_USD": 1.0, "AAPL": 123.456})
+
+    assert len(orders) == 1
+    assert orders[0].quantity == 8
+    assert orders[0].price == 123.45
+    assert orders[0].notional == 987.6
+
+
+def test_live_contribution_duplicate_ignores_rejected_order_intent(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = {
+        "order_id": "ord-live-rejected",
+        "metadata": {
+            "order_generation_mode": "buy_only_contribution",
+            "contribution_month": "2026-05",
+            "contribution_sleeve": "KRW",
+        },
+    }
+    store.save_order("run-1", "ord-live-rejected", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-rejected",
+            "final_status": "rejected",
+            "applied_fills": [],
+        },
+    )
+
+    assert store.monthly_contribution_order_exists("2026-05", "KRW") is True
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is False
+
+
+def test_live_contribution_duplicate_counts_filled_lifecycle(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = {
+        "order_id": "ord-live-filled",
+        "metadata": {
+            "order_generation_mode": "buy_only_contribution",
+            "contribution_month": "2026-05",
+            "contribution_sleeve": "KRW",
+        },
+    }
+    store.save_order("run-1", "ord-live-filled", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-filled",
+            "final_status": "filled",
+            "applied_fills": [],
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
+
+
 def _builder(**contribution_overrides) -> OrderBuilder:
     return OrderBuilder(config=_config(**contribution_overrides), instruments=_instruments())
 

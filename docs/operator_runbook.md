@@ -41,10 +41,11 @@ maestro health --config <config>
    `live_order_recovery_required`, `live_order_recovery_halt`, and
    `live_order_recovery_completed`.
 4. Check broker account state in the broker UI.
-5. Run read-only sync and reconciliation:
+5. Run reconciliation and fill reconciliation. `reconcile` refreshes the KIS
+   read-only broker snapshot before comparing it with Maestro state, so the
+   result is based on current broker truth rather than the last dashboard view.
 
 ```bash
-maestro kis-sync --config <config>
 maestro reconcile --config <config>
 maestro reconcile-fills --config <config>
 ```

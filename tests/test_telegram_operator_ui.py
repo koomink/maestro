@@ -45,6 +45,19 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
             "decision": {"status": "approved", "decided_by": "telegram:operator"},
         },
     )
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "12345678-01",
+        {
+            "account": {
+                "account_id": "12345678-01",
+                "cash": 950.0,
+                "buying_power": 900.0,
+                "positions": [{"symbol": "AAPL", "quantity": 1, "current_price": 50.0}],
+                "source": "fixture",
+            }
+        },
+    )
 
     for command in (
         "/help",
@@ -60,6 +73,12 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
     sent_text = "\n\n".join(message["text"] for message in client.sent_messages)
     assert "Maestro Telegram commands" in sent_text
     assert "Maestro status" in sent_text
+    assert "maestro_cash:" not in sent_text
+    assert "maestro_positions:" not in sent_text
+    assert "broker_total_value: 1,000.00" in sent_text
+    assert "broker_cash: 950.00" in sent_text
+    assert "broker_positions: 1" in sent_text
+    assert "\ncash:" not in sent_text
     assert f"state: {Path(config.state.sqlite_path).resolve()}" in sent_text
     assert f"audit: {Path(config.audit.jsonl_path).resolve()}" in sent_text
     assert "Maestro health" in sent_text
@@ -89,7 +108,7 @@ def test_telegram_operator_account_masks_account_id(tmp_path):
                 "account_id": "12345678-01",
                 "cash": 1000.0,
                 "buying_power": 900.0,
-                "positions": [{"symbol": "AAPL", "quantity": 1}],
+                "positions": [{"symbol": "AAPL", "quantity": 1, "current_price": 50.0}],
                 "source": "fixture",
             }
         },
@@ -100,7 +119,51 @@ def test_telegram_operator_account_masks_account_id(tmp_path):
     text = client.sent_messages[-1]["text"]
     assert "Broker account snapshot" in text
     assert "12345678-01" not in text
+    assert "total_value: 1,050.00" in text
+    assert "positions_market_value: 50.00" in text
+    assert "orderable_cash:" not in text
+    assert "buying_power:" not in text
     assert "positions: 1" in text
+
+
+def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp_path):
+    config = load_config(_telegram_live_readonly_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_broker_account_snapshot(
+        "run_stale_broker",
+        "MOCK-ACCOUNT",
+        {
+            "account": {
+                "account_id": "MOCK-ACCOUNT",
+                "cash": 12_345_678.0,
+                "buying_power": 12_345_678.0,
+                "positions": [],
+                "source": "stale_fixture",
+            }
+        },
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    assert client.sent_messages[-2]["text"] == "Broker account snapshot: refreshing"
+    text = client.sent_messages[-1]["text"]
+    assert "total_value: 10,000,000.00" in text
+    assert "cash: 5,000,000.00" in text
+    assert "positions_market_value: 5,000,000.00" in text
+    assert "orderable_cash:" not in text
+    assert "source: kis_mock" in text
+    assert "12,345,678.00" not in text
+    latest = store.load_latest_broker_account_snapshot()
+    assert latest is not None
+    assert latest["payload"]["account"]["source"] == "kis_mock"
 
 
 def test_telegram_operator_enforces_chat_and_user_whitelist(tmp_path):
@@ -346,5 +409,16 @@ def _telegram_config_path(tmp_path) -> Path:
         "whitelisted_user_ids": [100],
     }
     config_path = tmp_path / "telegram_operator.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
+
+
+def _telegram_live_readonly_config_path(tmp_path) -> Path:
+    raw = yaml.safe_load(Path("configs/examples/live_readonly_mock.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "live_readonly.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "live_readonly.jsonl")
+    raw["approval"]["telegram_allowed_chat_ids"] = [100]
+    raw["approval"]["whitelisted_user_ids"] = [100]
+    config_path = tmp_path / "telegram_live_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path

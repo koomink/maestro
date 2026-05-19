@@ -13,6 +13,8 @@ from maestro.core.ids import new_run_id
 from maestro.core.symbols import is_cash_symbol
 from maestro.datahub.base import BaseDataProvider, build_data_provider
 from maestro.execution.base import OrderIntent
+from maestro.execution.broker_state import portfolio_state_from_broker_account
+from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.factory import build_execution_engine
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_orders import (
@@ -107,23 +109,7 @@ class MaestroOrchestrator:
 
     def _run_once_locked(self) -> RunOnceSummary:
         run_id = new_run_id()
-        if (
-            self.config.mode == RunMode.LIVE_APPROVAL
-            and not self.state_store.has_portfolio_snapshot()
-        ):
-            self._record_event(
-                run_id,
-                SystemEventType.BROKER_BASELINE_REQUIRED,
-                {
-                    "mode": self.config.mode.value,
-                    "reason": "live_approval requires an adopted broker snapshot before run_once",
-                },
-            )
-            raise ValueError(
-                "live_approval requires an adopted broker snapshot before run_once; "
-                "run kis-sync and adopt-broker-snapshot first"
-            )
-        current_state = self.state_store.load_latest_portfolio_state()
+        current_state = self._load_run_portfolio_state(run_id)
         valid_results: list[TargetAllocationResult] = []
         strategy_ids = self.registry.strategy_ids
         data_requests_by_strategy = {}
@@ -445,6 +431,11 @@ class MaestroOrchestrator:
         if self.config.execution.order_generation_mode != "buy_only_contribution":
             return False
         month_key = self.execution.contribution_month_key(as_of)
+        if self.config.mode == RunMode.LIVE_APPROVAL:
+            return self.state_store.monthly_live_contribution_order_exists(
+                month_key,
+                self.config.execution.contribution.sleeve,
+            )
         return self.state_store.monthly_contribution_order_exists(
             month_key,
             self.config.execution.contribution.sleeve,
@@ -577,6 +568,66 @@ class MaestroOrchestrator:
         payload: dict[str, Any],
     ) -> None:
         save_audited_system_event(self.state_store, self.audit, run_id, event_type, payload)
+
+    def _load_run_portfolio_state(self, run_id: str) -> PortfolioState:
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            return self.state_store.load_latest_portfolio_state()
+        if self.config.kis.provider != "kis":
+            if self.state_store.has_portfolio_snapshot():
+                return self.state_store.load_latest_portfolio_state()
+            self._record_event(
+                run_id,
+                SystemEventType.BROKER_BASELINE_REQUIRED,
+                {
+                    "mode": self.config.mode.value,
+                    "reason": "live_approval requires an adopted broker snapshot before run_once",
+                },
+            )
+            raise ValueError(
+                "live_approval requires an adopted broker snapshot before run_once; "
+                "run kis-sync and adopt-broker-snapshot first"
+            )
+        try:
+            snapshot = KISReadOnlyService(
+                self.config.kis,
+                self.state_store,
+                self.audit,
+                instruments=self.config.universe.instruments,
+            ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
+            state = portfolio_state_from_broker_account(
+                snapshot.account.model_dump(mode="json"),
+                allowed_symbols=self.config.portfolio.allowed_symbols,
+                universe=self.config.universe,
+            )
+        except (RuntimeError, TimeoutError, ValueError) as exc:
+            self._record_event(
+                run_id,
+                SystemEventType.BROKER_BASELINE_REQUIRED,
+                {
+                    "mode": self.config.mode.value,
+                    "reason": "live_approval could not refresh KIS broker snapshot before run_once",
+                    "error": str(exc),
+                },
+            )
+            raise ValueError(
+                "live_approval could not refresh KIS broker snapshot before run_once: "
+                f"{exc}"
+            ) from exc
+        self.state_store.save_portfolio_snapshot(run_id, state)
+        self._record_event(
+            run_id,
+            SystemEventType.BROKER_SNAPSHOT_ADOPTED,
+            {
+                "reason": "live_approval refreshed broker snapshot before run_once",
+                "account_id": snapshot.account.account_id,
+                "cash": state.cash,
+                "cash_by_currency": state.cash_by_currency,
+                "positions": state.positions,
+                "source": snapshot.account.source,
+                "fetched_at": snapshot.account.fetched_at.isoformat(),
+            },
+        )
+        return state
 
     def _record_live_proposal_data_snapshot(
         self,

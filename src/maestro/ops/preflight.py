@@ -7,10 +7,12 @@ def private_beta_failures(config: MaestroConfig, report: HealthReport) -> list[s
     checks = {check.name: check for check in report.checks}
     if report.status == "fail":
         failures.extend(f"health:{check.name}" for check in report.checks if check.status == "fail")
-    if not config.execution.live_order_enabled:
-        failures.append("live_order_disabled")
-    if config.execution.live_order_dry_run:
-        failures.append("live_order_dry_run_enabled")
+    if config.execution.order_posture != "armed":
+        failures.append(f"order_posture_not_armed:{config.execution.order_posture}")
+    if config.kis.paper_trading:
+        failures.append("kis_paper_trading_enabled")
+    if _uses_mock_datahub(config):
+        failures.append("datahub_mock_provider")
     if not config.execution.market_session.required:
         failures.append("market_session_not_required")
     if not config.execution.broker_validation.require_quote_validation:
@@ -34,3 +36,10 @@ def private_beta_failures(config: MaestroConfig, report: HealthReport) -> list[s
     if checks.get("audit_integrity") is None or checks["audit_integrity"].status != "ok":
         failures.append("audit_integrity_not_ok")
     return sorted(set(failures))
+
+
+def _uses_mock_datahub(config: MaestroConfig) -> bool:
+    return any(
+        provider.provider == "mock" and provider.enabled
+        for provider in config.datahub.effective_providers()
+    )

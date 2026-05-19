@@ -59,20 +59,41 @@ class OrderBuilder:
             if abs(delta_value) < 0.01:
                 continue
             side = OrderSide.BUY if delta_value > 0 else OrderSide.SELL
+            if self.config.order_posture == "disabled":
+                instrument = self.instruments.get(symbol)
+                orders.append(
+                    OrderIntent(
+                        order_id=new_order_id(),
+                        symbol=symbol,
+                        side=side,
+                        quantity=abs(delta_value) / prices[symbol],
+                        price=prices[symbol],
+                        notional=abs(delta_value),
+                        currency=instrument.currency if instrument else None,
+                        broker_product=instrument.broker_product if instrument else None,
+                    )
+                )
+                continue
+            order_price = self._order_price(symbol, prices[symbol])
+            if order_price <= 0:
+                continue
+            quantity = self._order_quantity(symbol, abs(delta_value) / order_price)
+            instrument = self.instruments.get(symbol)
+            min_quantity = instrument.min_order_quantity if instrument else 0.0
+            notional = quantity * order_price
+            min_notional = instrument.min_order_notional if instrument else 0.0
+            if quantity <= 0 or quantity < min_quantity or notional < min_notional:
+                continue
             orders.append(
                 OrderIntent(
                     order_id=new_order_id(),
                     symbol=symbol,
                     side=side,
-                    quantity=abs(delta_value) / prices[symbol],
-                    price=prices[symbol],
-                    notional=abs(delta_value),
-                    currency=self.instruments.get(symbol).currency
-                    if symbol in self.instruments
-                    else None,
-                    broker_product=self.instruments.get(symbol).broker_product
-                    if symbol in self.instruments
-                    else None,
+                    quantity=quantity,
+                    price=order_price,
+                    notional=notional,
+                    currency=instrument.currency if instrument else None,
+                    broker_product=instrument.broker_product if instrument else None,
                 )
             )
         return orders

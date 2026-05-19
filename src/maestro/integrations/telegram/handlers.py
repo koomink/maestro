@@ -6,14 +6,15 @@ from maestro.config.models import MaestroConfig
 from maestro.core.ids import new_run_id
 from maestro.dashboard.read_models import (
     build_approvals_table,
+    build_broker_account_summary,
     build_health_summary,
-    build_latest_broker_snapshot_card,
     build_orders_table,
     build_overview,
     build_portfolio_table,
     build_safety_state_card,
     build_strategy_runs_table,
 )
+from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.safety.controls import SafetyControlService
@@ -25,7 +26,7 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "Show Maestro command list"),
     ("status", "Show Maestro status summary"),
     ("health", "Show health checks"),
-    ("account", "Show latest stored broker account snapshot"),
+    ("account", "Refresh and show broker account snapshot"),
     ("portfolio", "Show Maestro portfolio state"),
     ("apps", "Show configured strategy apps"),
     ("orders", "Show recent orders"),
@@ -183,6 +184,7 @@ class TelegramOperatorCommandRouter:
 
     def _status(self, chat_id: int) -> None:
         overview = build_overview(self.store)
+        broker = build_broker_account_summary(self.store)
         safety = build_safety_state_card(self.store)
         operator_config = overview.get("operator_config") or {}
         fingerprint = operator_config.get("fingerprint", "none")
@@ -194,13 +196,16 @@ class TelegramOperatorCommandRouter:
                 [
                     "Maestro status",
                     f"mode: {self.config.mode.value}",
+                    f"order_posture: {self.config.execution.order_posture}",
                     f"config: {operator_config.get('path', 'unknown')}",
                     f"config_fingerprint: {fingerprint[:12] if fingerprint != 'none' else 'none'}",
                     f"state: {state_path}",
                     f"audit: {audit_path}",
                     f"safety: {safety['state']}",
-                    f"cash: {_money(overview['cash'])}",
-                    f"positions: {overview['positions_count']}",
+                    f"broker_total_value: {_money(broker['total_value'])}",
+                    f"broker_cash: {_money(broker['cash'])}",
+                    f"broker_positions: {broker['positions_count']}",
+                    f"broker_snapshot_at: {broker['created_at'] or 'none'}",
                     f"orders: {overview['orders_count']}",
                     f"approvals: {overview['approvals_count']}",
                 ]
@@ -226,7 +231,14 @@ class TelegramOperatorCommandRouter:
         self._send(chat_id, "\n".join(lines))
 
     def _account(self, chat_id: int) -> None:
-        account = build_latest_broker_snapshot_card(self.store)
+        try:
+            if self.config.kis.enabled:
+                self._send(chat_id, "Broker account snapshot: refreshing")
+            self._refresh_broker_snapshot()
+        except (RuntimeError, TimeoutError, ValueError) as exc:
+            self._send(chat_id, f"Broker account snapshot refresh failed: {exc}")
+            return
+        account = build_broker_account_summary(self.store)
         if account["created_at"] is None:
             self._send(chat_id, "Broker account snapshot: none")
             return
@@ -237,8 +249,9 @@ class TelegramOperatorCommandRouter:
                     "Broker account snapshot",
                     f"created_at: {account['created_at']}",
                     f"account_id: {_mask_identifier(account['account_id'])}",
+                    f"total_value: {_money(account['total_value'])}",
                     f"cash: {_money(account['cash'])}",
-                    f"buying_power: {_money(account['buying_power'])}",
+                    f"positions_market_value: {_money(account['positions_market_value'])}",
                     f"positions: {account['positions_count']}",
                     f"source: {account['source'] or 'unknown'}",
                 ]
@@ -308,6 +321,16 @@ class TelegramOperatorCommandRouter:
             "Confirm kill-switch. This blocks live execution until manual recovery.",
             reply_markup=_confirmation_markup("kill-switch"),
         )
+
+    def _refresh_broker_snapshot(self) -> None:
+        if not self.config.kis.enabled:
+            return
+        KISReadOnlyService(
+            self.config.kis,
+            self.store,
+            self.audit,
+            instruments=self.config.universe.instruments,
+        ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
 
     def _chat_allowed(self, chat_id: int) -> bool:
         return chat_id in set(self.config.approval.telegram_allowed_chat_ids)

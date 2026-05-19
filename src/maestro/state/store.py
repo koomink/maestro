@@ -280,6 +280,36 @@ class StateStore:
                 return True
         return False
 
+    def monthly_live_contribution_order_exists(self, month_key: str, sleeve: str) -> bool:
+        contribution_order_ids = self._monthly_contribution_order_ids(month_key, sleeve)
+        if not contribution_order_ids:
+            return False
+        lifecycle_rows = self.list_system_events_by_type("live_order_lifecycle", limit=1000)
+        for row in lifecycle_rows:
+            payload = row["payload"]
+            if payload.get("order_id") not in contribution_order_ids:
+                continue
+            if payload.get("applied_fills"):
+                return True
+            if str(payload.get("final_status") or "").lower() == "filled":
+                return True
+        return False
+
+    def _monthly_contribution_order_ids(self, month_key: str, sleeve: str) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute("SELECT order_id, payload FROM orders ORDER BY id DESC").fetchall()
+        order_ids = set()
+        for order_id, raw_payload in rows:
+            payload = json.loads(raw_payload)
+            metadata = payload.get("metadata", {})
+            if (
+                metadata.get("order_generation_mode") == "buy_only_contribution"
+                and metadata.get("contribution_month") == month_key
+                and metadata.get("contribution_sleeve") == sleeve
+            ):
+                order_ids.add(str(payload.get("order_id") or order_id))
+        return order_ids
+
     def list_system_events(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("system_events", limit)
 

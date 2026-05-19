@@ -16,8 +16,7 @@ maestro init-personal --output ~/maestro-operator/maestro_personal.yaml
 The generated config is safe by default:
 
 - `mode=live_approval`
-- `execution.live_order_enabled=false`
-- `execution.live_order_dry_run=true`
+- `execution.order_posture=dry_run`
 - `execution.allowed_order_type=limit`
 - small per-order and daily notional caps
 - KIS overseas stock/ETF broker product
@@ -105,7 +104,7 @@ maestro reconcile --config ~/maestro-operator/maestro_personal.yaml
 ```
 
 Review the dry-run order, audit log, broker UI, and read-only dashboard before
-changing `execution.live_order_enabled` or `execution.live_order_dry_run`.
+changing `execution.order_posture` to `armed`.
 
 ## First Minimum-size Live Order
 
@@ -115,13 +114,12 @@ Only after `personal-check` reports `minimum_live_ready status=ok`:
 2. Set the smallest practical `execution.live_order_limits.max_order_notional`,
    `execution.live_order_limits.max_daily_notional`, and
    `execution.live_order_limits.max_daily_order_count`.
-3. Set `execution.live_order_dry_run=false`.
-4. Set `execution.live_order_enabled=true`.
-5. Run `maestro beta-preflight --config <operator-config>`.
-6. Stop `maestro-telegram-operator.service` if it uses the same Telegram bot.
-7. Run one `maestro run-once --config <operator-config>`.
-8. Approve only the exact expected Telegram proposal.
-9. Restart `maestro-telegram-operator.service`.
+3. Set `execution.order_posture=armed`.
+4. Run `maestro beta-preflight --config <operator-config>`.
+5. Stop `maestro-telegram-operator.service` if it uses the same Telegram bot.
+6. Run one `maestro run-once --config <operator-config>`.
+7. Approve only the exact expected Telegram proposal.
+8. Restart `maestro-telegram-operator.service`.
 10. Stop scheduled runs after the first order.
 
 After the order, verify broker status, fill reconciliation, broker
