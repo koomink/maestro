@@ -8,12 +8,13 @@ def build_execution_engine(
     instruments=None,
     currency_sleeves=None,
 ) -> PaperExecutionEngine:
-    if config.engine == "paper":
+    if config.proposal_engine == "paper":
         return PaperExecutionEngine(
             config=config,
             instruments=instruments,
             currency_sleeves=currency_sleeves,
         )
     raise ValueError(
-        f"Unsupported execution engine: {config.engine}. Maestro v0.1.1 supports only 'paper'."
+        "Unsupported execution proposal engine: "
+        f"{config.proposal_engine}. Maestro v0.1.1 supports only 'paper'."
     )

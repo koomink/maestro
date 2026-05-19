@@ -72,7 +72,7 @@ datahub:
   stale_after_seconds: 604800
 
 execution:
-  engine: paper
+  proposal_engine: paper
   order_generation_mode: buy_only_contribution
   order_posture: dry_run
   require_reconciliation_pass: true

@@ -7,6 +7,16 @@ class RunMode(StrEnum):
     LIVE_APPROVAL = "live_approval"
 
 
+class ProfileStage(StrEnum):
+    PAPER = "paper"
+    PAPER_REAL_DATA = "paper_real_data"
+    LIVE_READONLY = "live_readonly"
+    LIVE_APPROVAL_DISABLED = "live_approval_disabled"
+    LIVE_APPROVAL_DRY_RUN = "live_approval_dry_run"
+    KIS_PAPER_TRADING = "kis_paper_trading"
+    PRODUCTION_ARMED = "production_armed"
+
+
 class StrategyMode(StrEnum):
     PAPER = "paper"
     LIVE_READONLY = "live_readonly"

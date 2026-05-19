@@ -160,14 +160,16 @@ class StateStore:
     def validate_config_identity(self, identity: ConfigIdentity) -> None:
         payload = identity.model_dump()
         existing = self.load_operator_config_identity()
-        if existing is not None and existing != payload:
+        if existing is not None and not _same_state_config_identity(existing, payload):
             raise ValueError(
                 "State DB config identity mismatch: "
                 f"state_db={self.path} existing_path={existing.get('path')} "
                 f"existing_fingerprint={existing.get('fingerprint')} "
-                f"current_path={payload['path']} current_fingerprint={payload['fingerprint']}"
+                f"existing_state_fingerprint={existing.get('state_fingerprint')} "
+                f"current_path={payload['path']} current_fingerprint={payload['fingerprint']} "
+                f"current_state_fingerprint={payload['state_fingerprint']}"
             )
-        if existing is None:
+        if existing != payload:
             self._set_metadata("operator_config_identity", payload)
 
     def load_operator_config_identity(self) -> dict[str, str] | None:
@@ -468,3 +470,10 @@ class StateStore:
             item["payload"] = json.loads(item["payload"])
             output.append(item)
         return output
+
+
+def _same_state_config_identity(existing: dict[str, str], current: dict[str, str]) -> bool:
+    existing_state_fingerprint = existing.get("state_fingerprint")
+    if existing_state_fingerprint is None:
+        return existing.get("fingerprint") == current.get("fingerprint")
+    return existing_state_fingerprint == current.get("state_fingerprint")

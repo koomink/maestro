@@ -572,6 +572,8 @@ class MaestroOrchestrator:
     def _load_run_portfolio_state(self, run_id: str) -> PortfolioState:
         if self.config.mode != RunMode.LIVE_APPROVAL:
             return self.state_store.load_latest_portfolio_state()
+        if not self.registry.strategies and self.state_store.has_portfolio_snapshot():
+            return self.state_store.load_latest_portfolio_state()
         if self.config.kis.provider != "kis":
             if self.state_store.has_portfolio_snapshot():
                 return self.state_store.load_latest_portfolio_state()

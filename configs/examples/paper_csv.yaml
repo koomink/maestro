@@ -24,7 +24,7 @@ datahub:
   csv_path: data/sample_prices.csv
 
 execution:
-  engine: paper
+  proposal_engine: paper
 
 risk:
   max_single_asset_weight: 0.4

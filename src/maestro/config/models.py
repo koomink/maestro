@@ -30,6 +30,7 @@ from maestro.core.enums import (
     Currency,
     ExchangeCode,
     MarketRegion,
+    ProfileStage,
     RunMode,
 )
 from maestro.core.instruments import TradableInstrument
@@ -38,6 +39,7 @@ from maestro.core.symbols import is_cash_symbol
 
 class MaestroConfig(StrictConfigModel):
     mode: RunMode = RunMode.PAPER
+    profile_stage: ProfileStage | None = Field(default=None, exclude=True)
     portfolio: PortfolioConfig
     strategies: list[StrategyPluginConfig]
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
@@ -155,7 +157,29 @@ class MaestroConfig(StrictConfigModel):
                 raise ValueError("live_approval mode requires kis.enabled=true")
         if self.mode == RunMode.PAPER and self.execution.order_posture == "armed":
             raise ValueError("paper mode must not arm live order execution")
+        expected_stage = self._derive_profile_stage()
+        if self.profile_stage is not None and self.profile_stage != expected_stage:
+            raise ValueError(
+                f"profile_stage={self.profile_stage.value} conflicts with config; "
+                f"expected {expected_stage.value}"
+            )
+        self.profile_stage = expected_stage
         return self
+
+    def _derive_profile_stage(self) -> ProfileStage:
+        if self.mode == RunMode.PAPER:
+            if _uses_real_datahub(self.datahub):
+                return ProfileStage.PAPER_REAL_DATA
+            return ProfileStage.PAPER
+        if self.mode == RunMode.LIVE_READONLY:
+            return ProfileStage.LIVE_READONLY
+        if self.kis.paper_trading:
+            return ProfileStage.KIS_PAPER_TRADING
+        if self.execution.order_posture == "armed":
+            return ProfileStage.PRODUCTION_ARMED
+        if self.execution.order_posture == "dry_run":
+            return ProfileStage.LIVE_APPROVAL_DRY_RUN
+        return ProfileStage.LIVE_APPROVAL_DISABLED
 
 
 __all__ = [
@@ -173,6 +197,7 @@ __all__ = [
     "MarketSessionConfig",
     "MonitoringConfig",
     "PortfolioConfig",
+    "ProfileStage",
     "ReconciliationConfig",
     "RiskConfig",
     "SignalActionTargetWeights",
@@ -255,3 +280,11 @@ def _cash_currency(symbol: str, base_currency: str) -> Currency | None:
 
 def _all_cash_symbols(symbols: list[str]) -> bool:
     return bool(symbols) and all(is_cash_symbol(symbol) for symbol in symbols)
+
+
+def _uses_real_datahub(config: DataHubConfig) -> bool:
+    local_or_synthetic = {"mock", "csv"}
+    return any(
+        provider.enabled and provider.provider not in local_or_synthetic
+        for provider in config.effective_providers()
+    )

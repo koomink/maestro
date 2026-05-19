@@ -91,7 +91,7 @@ datahub:
   stale_after_seconds: 604800
 
 execution:
-  engine: paper
+  proposal_engine: paper
 
 risk:
   max_single_asset_weight: 0.5

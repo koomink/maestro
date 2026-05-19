@@ -250,12 +250,22 @@ shared path from `MAESTRO_CONFIG`.
 
 SQLite currently uses connection timeout, `busy_timeout`, and WAL mode for
 basic multi-process coexistence. StateStore also serializes writes with a
-writer lock, stores the operator config path and config fingerprint in state
-metadata, rejects the same state DB being opened with a different config
-identity, and includes config identity in heartbeat/audit payloads. This is the
-current daemon-before safety boundary for CLI jobs plus Telegram/dashboard
-services. Operator status surfaces config identity plus state/audit paths so a
-running process can be checked against the intended deployment config.
+writer lock, stores the operator config path plus full, state-affecting, and
+runtime config fingerprints in state metadata, rejects the same state DB being
+opened with a different state-affecting config identity, and includes config
+identity in heartbeat/audit payloads. Runtime-only config changes, for example
+monitoring thresholds, do not force a new state DB. This is the current
+daemon-before safety boundary for CLI jobs plus Telegram/dashboard services.
+Operator status surfaces config identity plus state/audit paths so a running
+process can be checked against the intended deployment config.
+
+`profile_stage` is derived from the validated config and can optionally be
+pinned in operator-local YAML. It separates promotion stage from `mode`:
+`paper`, `paper_real_data`, `live_readonly`, `live_approval_disabled`,
+`live_approval_dry_run`, `kis_paper_trading`, or `production_armed`. Use
+`maestro profile-diff --left A --right B` before switching operator configs and
+`maestro profile-validate --config A --target-stage production_armed` before
+first real-account submission.
 
 Daemonization is deferred until Maestro needs a central scheduler/job queue,
 coordinated approval/status polling, or live-order recovery that cannot be
@@ -868,7 +878,7 @@ datahub:
   provider: mock
 
 execution:
-  engine: paper
+  proposal_engine: paper
 
 risk:
   max_single_asset_weight: 0.4

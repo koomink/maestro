@@ -59,7 +59,7 @@ Explicitly not implemented:
 Scope:
 
 - Separate ID generators for run, order, and approval IDs
-- `execution.engine` validation through a small execution engine factory
+- `execution.proposal_engine` validation through a small execution engine factory
 - Explicit missing price errors
 - Strict Pydantic config validation using `extra="forbid"`
 - README, config, and docs consistency cleanup
@@ -449,6 +449,24 @@ and conservative paper trading. They are not intended to define the final produc
 limit. Dynamic universe support must keep the same safety constraints: no
 `live_auto`, no market orders, no direct broker calls from strategy apps, no
 direct buy/sell/cancel CLI, and no dashboard write controls.
+
+Future config composition work should start once two or three external Virtuoso
+apps need operator rehearsal at the same time. Until then, app-specific example
+YAMLs and operator-local full YAMLs are acceptable because they are explicit and
+easy to audit. When the number of apps grows, Maestro should add a
+composition/render path that combines:
+
+- a Maestro operator profile, such as KIS live-approval dry-run or paper;
+- a Virtuoso app fragment, such as strategy entrypoint, DataHub needs, and
+  signal-to-allocation policy;
+- an operator-local overlay containing symbols, model choices, approval
+  allowlists, limits, and state/audit paths.
+
+The rendered config should remain a normal validated `MaestroConfig` so
+`profile-diff`, `profile-validate`, audit review, and existing CLI commands keep
+working. Composition must not allow Virtuoso app fragments to own broker,
+approval, execution, state, or audit policy; those remain Maestro/operator
+responsibilities.
 
 ## v1.0 — Private Approval-gated Production Beta
 

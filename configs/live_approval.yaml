@@ -25,7 +25,7 @@ datahub:
   provider: mock
 
 execution:
-  engine: paper
+  proposal_engine: paper
   order_posture: dry_run
   require_reconciliation_pass: true
   live_order_limits:

@@ -477,6 +477,24 @@
 - [x] Keep live auto-trading, market orders, direct broker calls from strategy
       apps, and dashboard write controls deferred
 
+### Future Maestro Config Composition
+
+- [ ] Trigger this work once two or three external Virtuoso apps require
+      operator rehearsal or production-like dry-runs at the same time
+- [ ] Keep current full YAML configs supported for explicit audits, examples,
+      tests, and single-app operator workflows
+- [ ] Add a config composition or render path that can combine a Maestro
+      operator profile, a Virtuoso app fragment, and an operator-local overlay
+- [ ] Define app fragments for strategy entrypoint, strategy config defaults,
+      DataHub needs, and `signal_to_allocation` policy only
+- [ ] Keep broker, approval, execution, risk, state, audit, and promotion gates
+      owned by Maestro/operator profile or local overlay, not by app fragments
+- [ ] Render composed configs into a normal validated `MaestroConfig`
+- [ ] Ensure rendered configs work with `profile-diff`, `profile-validate`,
+      health checks, audit review, and all existing CLI commands
+- [ ] Add tests for merge precedence, forbidden app-fragment keys, secret
+      redaction, and deterministic rendered YAML output
+
 ### v1.0 Private Approval-gated Production Beta
 
 - [x] Add `maestro beta-preflight --config ...` for private beta readiness

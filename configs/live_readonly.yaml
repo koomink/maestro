@@ -11,7 +11,7 @@ datahub:
   provider: mock
 
 execution:
-  engine: paper
+  proposal_engine: paper
 
 risk:
   max_single_asset_weight: 1.0

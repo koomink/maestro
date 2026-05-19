@@ -158,6 +158,11 @@ Use these terms consistently:
   `paper`, `live_readonly`, or `live_approval`.
 - `profile`: an operator recipe made from mode plus strategy, DataHub, KIS,
   approval, execution, reconciliation, monitoring, state, and audit settings.
+- `profile_stage`: the derived promotion stage for the profile, such as
+  `paper`, `paper_real_data`, `live_readonly`, `live_approval_dry_run`,
+  `kis_paper_trading`, or `production_armed`. You may set it explicitly in
+  operator-local YAML, but Maestro rejects values that conflict with the rest
+  of the config.
 - `operator config`: the one operator-local YAML file used by all Maestro
   commands and services for a running deployment.
 
@@ -168,13 +173,22 @@ for isolated tests or examples; they must not be treated as the live operator
 state. Commands still accept `--config`, but operator services should normally
 set `MAESTRO_CONFIG` once and let every CLI process use that same path by
 default. SQLite currently uses connection timeout, `busy_timeout`, and WAL mode
-for CLI/dashboard coexistence. Maestro also records the operator config path and
-config fingerprint in state metadata, rejects the same state DB being opened
-with a different config identity, records that identity in heartbeat/audit
-payloads, surfaces config/state/audit paths in operator status views, and
-serializes state writes through a StateStore writer lock. A future daemon
-architecture remains deferred until scheduling, approval polling, status
-polling, and recovery need one coordinated runtime.
+for CLI/dashboard coexistence. Maestro also records the operator config path,
+full config fingerprint, state-affecting fingerprint, and runtime fingerprint
+in state metadata. The same state DB may be reused after runtime-only changes
+such as monitoring thresholds, but Maestro rejects config changes that alter the
+state-affecting fingerprint. Heartbeat/audit payloads include the identity,
+operator views surface config/state/audit paths, and StateStore serializes
+writes through a writer lock. A future daemon architecture remains deferred
+until scheduling, approval polling, status polling, and recovery need one
+coordinated runtime.
+
+Useful profile checks:
+
+```bash
+maestro profile-diff --left <current.yaml> --right <candidate.yaml>
+maestro profile-validate --config <candidate.yaml> --target-stage production_armed
+```
 
 The root `configs/` directory intentionally contains only these operator-facing
 mode skeletons. Concrete recipes such as CSV paper, Yahoo paper, deterministic
@@ -454,7 +468,7 @@ Safe execution config defaults:
 
 ```yaml
 execution:
-  engine: paper
+  proposal_engine: paper
   order_posture: disabled
   require_reconciliation_pass: true
   live_order_limits:
@@ -1039,7 +1053,7 @@ datahub:
   provider: mock
 
 execution:
-  engine: paper
+  proposal_engine: paper
 
 risk:
   max_single_asset_weight: 0.4

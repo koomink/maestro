@@ -130,7 +130,7 @@ def test_heartbeat_cli_records_event_and_hash_chained_audit(tmp_path):
     assert audit_event["event_hash"]
 
 
-def test_state_store_rejects_same_db_with_different_config_identity(tmp_path):
+def test_state_store_allows_same_db_with_runtime_only_config_change(tmp_path):
     config_path = _live_approval_config(tmp_path)
     config, identity = load_config_with_identity(config_path)
     StateStore(
@@ -143,6 +143,30 @@ def test_state_store_rejects_same_db_with_different_config_identity(tmp_path):
     raw = yaml.safe_load(config_path.read_text())
     raw["approval"]["timeout_seconds"] = 123
     second_config_path = tmp_path / "live_approval_changed.yaml"
+    second_config_path.write_text(yaml.safe_dump(raw))
+    changed_config, changed_identity = load_config_with_identity(second_config_path)
+
+    StateStore(
+        changed_config.state.sqlite_path,
+        changed_config.portfolio.initial_cash,
+        changed_config.portfolio.cash_by_currency,
+        config_identity=changed_identity,
+    )
+
+
+def test_state_store_rejects_same_db_with_state_config_change(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    config, identity = load_config_with_identity(config_path)
+    StateStore(
+        config.state.sqlite_path,
+        config.portfolio.initial_cash,
+        config.portfolio.cash_by_currency,
+        config_identity=identity,
+    )
+
+    raw = yaml.safe_load(config_path.read_text())
+    raw["datahub"] = {"provider": "yahoo"}
+    second_config_path = tmp_path / "live_approval_state_changed.yaml"
     second_config_path.write_text(yaml.safe_dump(raw))
     changed_config, changed_identity = load_config_with_identity(second_config_path)
 
@@ -262,6 +286,74 @@ def test_beta_preflight_cli_exits_one_when_hardening_missing(tmp_path):
     assert "status=fail" in result.output
     assert "market_session_not_required" in result.output
     assert "broker_risk_validation_not_required" in result.output
+
+
+def test_profile_diff_cli_reports_stage_and_fingerprint_changes(tmp_path):
+    left_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(left_path.read_text())
+    raw["monitoring"] = {"heartbeat_max_age_seconds": 60}
+    right_path = tmp_path / "runtime_changed.yaml"
+    right_path.write_text(yaml.safe_dump(raw))
+
+    result = CliRunner().invoke(
+        app,
+        ["profile-diff", "--left", str(left_path), "--right", str(right_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "profile_stage left=production_armed right=production_armed" in result.output
+    assert "state_fingerprint_changed=false" in result.output
+    assert "runtime_fingerprint_changed=true" in result.output
+
+
+def test_profile_validate_cli_fails_wrong_target_stage(tmp_path):
+    config_path = _live_approval_config(tmp_path, live_order_enabled=False)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "profile-validate",
+            "--config",
+            str(config_path),
+            "--target-stage",
+            "production_armed",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "target_stage_mismatch" in result.output
+
+
+def test_profile_validate_cli_passes_private_beta_ready_profile(monkeypatch, tmp_path):
+    monkeypatch.setenv("KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    config_path = _live_approval_config(
+        tmp_path,
+        require_market_session=True,
+        require_broker_quote_validation=True,
+        require_broker_risk_validation=True,
+        daily_loss_limit=100.0,
+        heartbeat_max_age_seconds=60,
+        scheduled_run_max_age_seconds=60,
+        datahub_provider="yahoo",
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_beta_ready_events(store)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "profile-validate",
+            "--config",
+            str(config_path),
+            "--target-stage",
+            "production_armed",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "profile_validate status=ok target_stage=production_armed" in result.output
 
 
 def test_beta_preflight_cli_fails_when_kis_paper_trading_is_enabled(tmp_path):

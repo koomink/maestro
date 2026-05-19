@@ -12,7 +12,7 @@ from maestro.config.env import load_project_dotenv
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
-from maestro.core.enums import RunMode
+from maestro.core.enums import ProfileStage, RunMode
 from maestro.core.ids import new_run_id
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
@@ -101,6 +101,14 @@ def _broker_snapshot_refresher(
     return refresh
 
 
+def _profile_datahub_providers(maestro_config: MaestroConfig) -> str:
+    return ",".join(
+        f"{provider.name}:{provider.provider}"
+        for provider in maestro_config.datahub.effective_providers()
+        if provider.enabled
+    )
+
+
 @app.command("run-once")
 def run_once(config: Path | None = CONFIG_OPTION) -> None:
     maestro_config, identity = _load_operator_config(config)
@@ -132,6 +140,83 @@ def status(config: Path | None = CONFIG_OPTION) -> None:
         f" state_path={Path(maestro_config.state.sqlite_path).expanduser().resolve()}"
         f" audit_path={Path(maestro_config.audit.jsonl_path).expanduser().resolve()}"
     )
+
+
+@app.command("profile-diff")
+def profile_diff(
+    left: Path = typer.Option(..., "--left", help="Left operator config path."),
+    right: Path = typer.Option(..., "--right", help="Right operator config path."),
+) -> None:
+    left_config, left_identity = load_config_with_identity(left)
+    right_config, right_identity = load_config_with_identity(right)
+    profile_fields = {
+        "mode": (left_config.mode.value, right_config.mode.value),
+        "profile_stage": (
+            left_config.profile_stage.value,
+            right_config.profile_stage.value,
+        ),
+        "proposal_engine": (
+            left_config.execution.proposal_engine,
+            right_config.execution.proposal_engine,
+        ),
+        "order_posture": (
+            left_config.execution.order_posture,
+            right_config.execution.order_posture,
+        ),
+        "datahub_providers": (
+            _profile_datahub_providers(left_config),
+            _profile_datahub_providers(right_config),
+        ),
+        "kis_provider": (left_config.kis.provider, right_config.kis.provider),
+        "kis_paper_trading": (
+            str(left_config.kis.paper_trading).lower(),
+            str(right_config.kis.paper_trading).lower(),
+        ),
+        "state_path": (
+            str(Path(left_config.state.sqlite_path).expanduser().resolve()),
+            str(Path(right_config.state.sqlite_path).expanduser().resolve()),
+        ),
+        "audit_path": (
+            str(Path(left_config.audit.jsonl_path).expanduser().resolve()),
+            str(Path(right_config.audit.jsonl_path).expanduser().resolve()),
+        ),
+    }
+    for field, (left_value, right_value) in profile_fields.items():
+        changed = str(left_value != right_value).lower()
+        typer.echo(f"{field} left={left_value} right={right_value} changed={changed}")
+    typer.echo(
+        "state_fingerprint_changed="
+        + str(left_identity.state_fingerprint != right_identity.state_fingerprint).lower()
+    )
+    typer.echo(
+        "runtime_fingerprint_changed="
+        + str(left_identity.runtime_fingerprint != right_identity.runtime_fingerprint).lower()
+    )
+
+
+@app.command("profile-validate")
+def profile_validate(
+    config: Path | None = CONFIG_OPTION,
+    target_stage: ProfileStage = typer.Option(..., "--target-stage"),
+) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    failures: list[str] = []
+    if maestro_config.profile_stage != target_stage:
+        failures.append(
+            "target_stage_mismatch:"
+            f"current={maestro_config.profile_stage.value}:target={target_stage.value}"
+        )
+    if target_stage == ProfileStage.PRODUCTION_ARMED:
+        store = _state_store(maestro_config, identity)
+        report = HealthService(maestro_config, store).run()
+        failures.extend(private_beta_failures(maestro_config, report))
+    if failures:
+        typer.echo(
+            f"profile_validate status=fail target_stage={target_stage.value} "
+            f"failures={','.join(failures)}"
+        )
+        raise typer.Exit(1)
+    typer.echo(f"profile_validate status=ok target_stage={target_stage.value}")
 
 
 @app.command("health")

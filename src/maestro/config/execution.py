@@ -79,7 +79,7 @@ class LiveOrderLimitsConfig(StrictConfigModel):
 
 
 class ExecutionConfig(StrictConfigModel):
-    engine: str = "paper"
+    proposal_engine: str = "paper"
     order_posture: OrderPosture = "disabled"
     order_generation_mode: Literal["target_rebalance", "buy_only_contribution"] = "target_rebalance"
     contribution: ContributionConfig = Field(default_factory=ContributionConfig)
@@ -100,6 +100,7 @@ class ExecutionConfig(StrictConfigModel):
         if not isinstance(data, dict):
             return data
         values = dict(data)
+        _migrate_proposal_engine(values)
         _migrate_legacy_block(
             values,
             "market_session",
@@ -149,6 +150,10 @@ class ExecutionConfig(StrictConfigModel):
         if value != OrderType.LIMIT:
             raise ValueError("allowed_order_type must be limit")
         return value
+
+    @property
+    def engine(self) -> str:
+        return self.proposal_engine
 
     @property
     def require_market_session(self) -> bool:
@@ -221,6 +226,15 @@ def _migrate_legacy_block(
             + ", ".join(legacy_keys)
         )
     values[block_name] = {field_map[key]: values.pop(key) for key in legacy_keys}
+
+
+def _migrate_proposal_engine(values: dict[str, Any]) -> None:
+    if "engine" not in values:
+        return
+    engine = values.pop("engine")
+    if "proposal_engine" in values and values["proposal_engine"] != engine:
+        raise ValueError("execution.proposal_engine conflicts with legacy execution.engine")
+    values["proposal_engine"] = engine
 
 
 def _migrate_order_posture(values: dict[str, Any]) -> None:

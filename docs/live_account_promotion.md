@@ -41,6 +41,9 @@ or Telegram admin controls.
   rehearsal-only and fails the private beta gate.
 - Confirm `kis.paper_trading=false` before real-account submission; KIS VTS
   mock-investment mode is rehearsal-only and fails the private beta gate.
+- Confirm the config derives or explicitly pins the intended `profile_stage`.
+  `profile_stage=production_armed` is only valid when the rest of the config
+  actually describes an armed real-account profile.
 - Keep `execution.order_posture` at `disabled` or `dry_run` until read-only sync,
   reconciliation, Telegram smoke, and live dry-run all pass.
 - Use small `execution.live_order_limits.max_order_notional`,
@@ -65,6 +68,7 @@ or Telegram admin controls.
 - Run `maestro operator-evidence --config <operator-live-approval-config> --output <evidence-after.json>`.
 - Run `maestro beta-preflight --config <operator-live-approval-config>` after
   switching to the real DataHub provider and `kis.paper_trading=false`.
+- Run `maestro profile-validate --config <operator-live-approval-config> --target-stage production_armed`.
 - Review `live_proposal_data_snapshot` and confirm symbol, side, limit price,
   quantity, notional, DataHub price basis, and broker product.
 - Enable live submission only for the intended order, approve only the expected

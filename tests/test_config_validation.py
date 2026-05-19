@@ -4,9 +4,10 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from maestro.config.identity import config_identity
 from maestro.config.loader import load_config
 from maestro.config.models import StrategyPluginConfig
-from maestro.core.enums import BrokerProduct
+from maestro.core.enums import BrokerProduct, ProfileStage
 from maestro.datahub.base import build_data_provider
 from maestro.datahub.router import DataHubRouter
 from maestro.sdk import DataRequest
@@ -30,6 +31,7 @@ LEGACY_EXECUTION_CONFIG_KEYS = {
     "live_order_dry_run",
     "heartbeat_max_age_seconds",
     "scheduled_run_max_age_seconds",
+    "engine",
 }
 
 
@@ -164,6 +166,29 @@ def test_execution_nested_blocks_load_canonical_schema(tmp_path):
     assert config.execution.live_order_limits.max_daily_order_count == 3
     assert config.execution.live_order_limits.daily_loss_limit == 50
     assert config.execution.live_order_limits.fee_buffer_pct == 0.01
+
+
+def test_execution_proposal_engine_alias_loads_canonical_schema(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["engine"] = raw["execution"].pop("proposal_engine")
+    config_path = tmp_path / "proposal_engine.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.execution.proposal_engine == "paper"
+    assert config.execution.engine == "paper"
+
+
+def test_execution_rejects_conflicting_engine_alias(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["proposal_engine"] = "paper"
+    raw["execution"]["engine"] = "other"
+    config_path = tmp_path / "conflicting_engine_alias.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="proposal_engine"):
+        load_config(config_path)
 
 
 def test_execution_order_posture_derives_live_order_flags(tmp_path):
@@ -409,6 +434,69 @@ def test_live_modes_reject_initial_cash(tmp_path):
 
     with pytest.raises(ValidationError, match="uses broker snapshot cash"):
         load_config(config_path)
+
+
+def test_profile_stage_derives_from_existing_profiles(tmp_path):
+    assert load_config("configs/paper.yaml").profile_stage == ProfileStage.PAPER
+    assert (
+        load_config("configs/examples/paper_yahoo_us_etf.yaml").profile_stage
+        == ProfileStage.PAPER_REAL_DATA
+    )
+    assert load_config("configs/live_readonly.yaml").profile_stage == ProfileStage.LIVE_READONLY
+    assert (
+        load_config("configs/live_approval.yaml").profile_stage
+        == ProfileStage.LIVE_APPROVAL_DRY_RUN
+    )
+    assert (
+        load_config("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml").profile_stage
+        == ProfileStage.KIS_PAPER_TRADING
+    )
+
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["execution"]["order_posture"] = "armed"
+    raw["datahub"] = {"provider": "yahoo"}
+    raw["kis"]["paper_trading"] = False
+    config_path = tmp_path / "production_armed.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    assert load_config(config_path).profile_stage == ProfileStage.PRODUCTION_ARMED
+
+
+def test_profile_stage_rejects_conflict(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["profile_stage"] = "paper"
+    config_path = tmp_path / "conflicting_profile_stage.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="profile_stage"):
+        load_config(config_path)
+
+
+def test_config_identity_splits_state_and_runtime_fingerprints(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    first_path = tmp_path / "first.yaml"
+    first_path.write_text(yaml.safe_dump(raw))
+
+    changed_runtime = yaml.safe_load(first_path.read_text())
+    changed_runtime["monitoring"] = {"heartbeat_max_age_seconds": 60}
+    runtime_path = tmp_path / "runtime_changed.yaml"
+    runtime_path.write_text(yaml.safe_dump(changed_runtime))
+
+    changed_state = yaml.safe_load(first_path.read_text())
+    changed_state["datahub"] = {"provider": "yahoo"}
+    state_path = tmp_path / "state_changed.yaml"
+    state_path.write_text(yaml.safe_dump(changed_state))
+
+    first_identity = config_identity(first_path)
+    runtime_identity = config_identity(runtime_path)
+    state_identity = config_identity(state_path)
+
+    assert runtime_identity.fingerprint != first_identity.fingerprint
+    assert runtime_identity.runtime_fingerprint != first_identity.runtime_fingerprint
+    assert runtime_identity.state_fingerprint == first_identity.state_fingerprint
+    assert state_identity.state_fingerprint != first_identity.state_fingerprint
 
 
 def test_signal_to_allocation_type_is_restricted():

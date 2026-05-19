@@ -11,20 +11,23 @@ from maestro.orchestration.orchestrator import MaestroOrchestrator
 
 
 def test_execution_engine_factory_builds_paper_engine():
-    engine = build_execution_engine(ExecutionConfig(engine="paper"))
+    engine = build_execution_engine(ExecutionConfig(proposal_engine="paper"))
 
     assert isinstance(engine, PaperExecutionEngine)
 
 
 @pytest.mark.parametrize("engine_name", ["live", "kis_live"])
 def test_execution_engine_factory_rejects_unsupported_engines(engine_name):
-    with pytest.raises(ValueError, match=f"Unsupported execution engine: {engine_name}"):
-        build_execution_engine(ExecutionConfig(engine=engine_name))
+    with pytest.raises(
+        ValueError,
+        match=f"Unsupported execution proposal engine: {engine_name}",
+    ):
+        build_execution_engine(ExecutionConfig(proposal_engine=engine_name))
 
 
 def test_run_once_rejects_unsupported_execution_engine(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
-    raw["execution"]["engine"] = "kis_live"
+    raw["execution"]["proposal_engine"] = "kis_live"
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     config_path = tmp_path / "unsupported_engine.yaml"
