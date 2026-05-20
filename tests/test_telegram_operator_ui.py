@@ -13,6 +13,7 @@ from maestro.integrations.telegram.handlers import (
 )
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.safety.controls import SafetyControlService
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
@@ -164,6 +165,83 @@ def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp
     latest = store.load_latest_broker_account_snapshot()
     assert latest is not None
     assert latest["payload"]["account"]["source"] == "kis_mock"
+
+
+def test_telegram_operator_account_shows_latest_snapshot_when_refresh_fails(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(_telegram_live_readonly_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_broker_account_snapshot(
+        "run_latest_broker",
+        "MOCK-ACCOUNT",
+        {
+            "account": {
+                "account_id": "MOCK-ACCOUNT",
+                "cash": 12_345_678.0,
+                "buying_power": 12_345_678.0,
+                "positions": [],
+                "source": "stored_fixture",
+            }
+        },
+    )
+
+    def fail_refresh(*args, **kwargs):
+        raise ValueError("KIS request failed with HTTP 500")
+
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.KISReadOnlyService.fetch_and_store_snapshot",
+        fail_refresh,
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    assert client.sent_messages[-2]["text"] == "Broker account snapshot: refreshing"
+    text = client.sent_messages[-1]["text"]
+    assert "Broker account snapshot refresh failed: KIS request failed with HTTP 500" in text
+    assert "Showing latest stored broker snapshot." in text
+    assert "total_value: 12,345,678.00" in text
+    assert "source: stored_fixture" in text
+
+
+def test_telegram_operator_portfolio_refreshes_from_broker_snapshot_before_response(tmp_path):
+    config = load_config(_telegram_live_readonly_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_portfolio_snapshot(
+        "run_stale_portfolio",
+        PortfolioState(cash=12_345_678.0, positions={"MOCK_ETF_A": 1.0}),
+    )
+
+    assert router.process_update(message_update("/portfolio"))
+
+    assert client.sent_messages[-2]["text"] == (
+        "Maestro portfolio: refreshing from broker snapshot"
+    )
+    text = client.sent_messages[-1]["text"]
+    assert "CASH: 5,000,000" in text
+    assert "MOCK_ETF_A: 30,000" in text
+    assert "MOCK_ETF_B: 40,000" in text
+    assert "12,345,678" not in text
+    state = store.load_latest_portfolio_state()
+    assert state.cash == 5_000_000.0
+    assert state.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
 
 
 def test_telegram_operator_enforces_chat_and_user_whitelist(tmp_path):

@@ -5,12 +5,14 @@ def format_approval_request(request: ApprovalRequest) -> str:
     lines = [
         "🔔 Maestro Approval",
         "",
+        f"📁 Profile: {request.profile_name}" if request.profile_name else None,
         f"🧠 Strategy: {_strategy_label(request.source_strategy_ids)}",
         f"📦 Orders: {request.order_count}",
         f"💰 Total: {_money(request.estimated_notional, None)}",
         f"⏳ Expires: {request.expires_at.isoformat()}",
         f"🆔 Approval: {request.approval_id}",
     ]
+    lines = [line for line in lines if line is not None]
     if request.risk_modifications:
         lines.append("")
         lines.append("🛡️ Risk adjustments")

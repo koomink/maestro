@@ -1,4 +1,5 @@
 import traceback
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -88,6 +89,7 @@ class MaestroOrchestrator:
             run_mode=config.mode,
             instruments=config.universe.instruments,
             telegram_client=telegram_client,
+            profile_name=_profile_name(config_identity),
         )
         self.state_store = StateStore(
             config.state.sqlite_path,
@@ -836,3 +838,9 @@ def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:
         if symbol and current_price is not None and float(current_price) > 0:
             prices.setdefault(str(symbol), float(current_price))
     return prices
+
+
+def _profile_name(config_identity: ConfigIdentity | None) -> str | None:
+    if config_identity is None:
+        return None
+    return Path(config_identity.path).stem

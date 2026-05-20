@@ -257,6 +257,7 @@ def test_approval_manager_records_source_strategy_ids():
     manager = ApprovalManager(
         ApprovalConfig(enabled=True, provider="console", require_approval=True),
         run_mode=RunMode.PAPER,
+        profile_name="kis_brokerage_us",
     )
 
     request, decision, message = manager.request_approval(
@@ -280,7 +281,17 @@ def test_approval_manager_records_source_strategy_ids():
     assert decision is not None
     assert message is not None
     assert request.source_strategy_ids == ["strategy_a", "strategy_b"]
+    assert request.profile_name == "kis_brokerage_us"
+    assert "📁 Profile: kis_brokerage_us" in message
     assert "🧠 Strategy: strategy_a, strategy_b" in message
+
+
+def test_approval_formatter_shows_operator_profile_name():
+    request = approval_request().model_copy(update={"profile_name": "kis_brokerage_us"})
+
+    message = format_approval_request(request)
+
+    assert "📁 Profile: kis_brokerage_us" in message
 
 
 def test_telegram_service_receives_button_approval():

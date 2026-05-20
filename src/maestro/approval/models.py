@@ -9,6 +9,7 @@ ApprovalStatus = Literal["approved", "rejected", "expired"]
 class ApprovalRequest(BaseModel):
     approval_id: str
     run_id: str
+    profile_name: str | None = None
     created_at: datetime
     expires_at: datetime
     channel: str

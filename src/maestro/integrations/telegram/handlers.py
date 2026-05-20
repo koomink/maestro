@@ -14,6 +14,7 @@ from maestro.dashboard.read_models import (
     build_safety_state_card,
     build_strategy_runs_table,
 )
+from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
@@ -231,36 +232,63 @@ class TelegramOperatorCommandRouter:
         self._send(chat_id, "\n".join(lines))
 
     def _account(self, chat_id: int) -> None:
+        refresh_error: Exception | None = None
         try:
             if self.config.kis.enabled:
                 self._send(chat_id, "Broker account snapshot: refreshing")
             self._refresh_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError) as exc:
-            self._send(chat_id, f"Broker account snapshot refresh failed: {exc}")
-            return
+            refresh_error = exc
         account = build_broker_account_summary(self.store)
         if account["created_at"] is None:
+            if refresh_error is not None:
+                self._send(chat_id, f"Broker account snapshot refresh failed: {refresh_error}")
+                return
             self._send(chat_id, "Broker account snapshot: none")
             return
+        lines = []
+        if refresh_error is not None:
+            lines.extend(
+                [
+                    f"Broker account snapshot refresh failed: {refresh_error}",
+                    "Showing latest stored broker snapshot.",
+                ]
+            )
+        lines.extend(
+            [
+                "Broker account snapshot",
+                f"created_at: {account['created_at']}",
+                f"account_id: {_mask_identifier(account['account_id'])}",
+                f"total_value: {_money(account['total_value'])}",
+                f"cash: {_money(account['cash'])}",
+                f"positions_market_value: {_money(account['positions_market_value'])}",
+                f"positions: {account['positions_count']}",
+                f"source: {account['source'] or 'unknown'}",
+            ]
+        )
         self._send(
             chat_id,
-            "\n".join(
-                [
-                    "Broker account snapshot",
-                    f"created_at: {account['created_at']}",
-                    f"account_id: {_mask_identifier(account['account_id'])}",
-                    f"total_value: {_money(account['total_value'])}",
-                    f"cash: {_money(account['cash'])}",
-                    f"positions_market_value: {_money(account['positions_market_value'])}",
-                    f"positions: {account['positions_count']}",
-                    f"source: {account['source'] or 'unknown'}",
-                ]
-            ),
+            "\n".join(lines),
         )
 
     def _portfolio(self, chat_id: int) -> None:
+        refresh_error: Exception | None = None
+        try:
+            if self.config.kis.enabled:
+                self._send(chat_id, "Maestro portfolio: refreshing from broker snapshot")
+            self._refresh_portfolio_from_broker_snapshot()
+        except (RuntimeError, TimeoutError, ValueError) as exc:
+            refresh_error = exc
         rows = build_portfolio_table(self.store)
-        lines = ["Maestro portfolio"]
+        lines = []
+        if refresh_error is not None:
+            lines.extend(
+                [
+                    f"Maestro portfolio refresh failed: {refresh_error}",
+                    "Showing latest stored Maestro portfolio.",
+                ]
+            )
+        lines.append("Maestro portfolio")
         for row in rows[:10]:
             lines.append(f"{row['symbol']}: {_number(row['quantity'])}")
         self._send(chat_id, "\n".join(lines))
@@ -331,6 +359,22 @@ class TelegramOperatorCommandRouter:
             self.audit,
             instruments=self.config.universe.instruments,
         ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
+
+    def _refresh_portfolio_from_broker_snapshot(self) -> None:
+        if not self.config.kis.enabled:
+            return
+        snapshot = KISReadOnlyService(
+            self.config.kis,
+            self.store,
+            self.audit,
+            instruments=self.config.universe.instruments,
+        ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
+        state = portfolio_state_from_broker_account(
+            snapshot.account.model_dump(mode="json"),
+            allowed_symbols=self.config.portfolio.allowed_symbols,
+            universe=self.config.universe,
+        )
+        self.store.save_portfolio_snapshot(new_run_id(), state)
 
     def _chat_allowed(self, chat_id: int) -> bool:
         return chat_id in set(self.config.approval.telegram_allowed_chat_ids)

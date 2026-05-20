@@ -23,12 +23,14 @@ class ApprovalManager:
         run_mode: RunMode = RunMode.PAPER,
         instruments: list[TradableInstrument] | None = None,
         telegram_client: TelegramBotClient | None = None,
+        profile_name: str | None = None,
     ) -> None:
         self.config = config
         self.run_mode = run_mode
         self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
         self.notifier = TelegramApprovalNotifier()
         self.telegram_client = telegram_client
+        self.profile_name = profile_name
 
     def is_user_allowed(self, user_id: int) -> bool:
         return not self.config.whitelisted_user_ids or user_id in self.config.whitelisted_user_ids
@@ -48,6 +50,7 @@ class ApprovalManager:
         request = ApprovalRequest(
             approval_id=new_approval_id(),
             run_id=run_id,
+            profile_name=self.profile_name,
             created_at=now,
             expires_at=now + timedelta(seconds=self.config.timeout_seconds),
             channel=self.config.provider,
