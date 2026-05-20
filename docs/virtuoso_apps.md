@@ -63,6 +63,31 @@ strategies:
         CASH: 0.4
 ```
 
+## Operator Config Shape
+
+Each production-like Maestro run still needs one complete, validated operator
+config. For v1-style single-app rehearsals, it is acceptable for each Virtuoso
+app to publish a full example YAML because the file is explicit, reviewable, and
+easy to audit.
+
+Do not let that become long-term copy-paste config management. Once two or
+three external Virtuoso apps need operator rehearsal or production-like dry-runs
+at the same time, Maestro should add a config composition or render path that
+combines:
+
+- a Maestro operator profile, such as paper, KIS live-approval dry-run, or
+  production-armed approval;
+- a Virtuoso app fragment, limited to strategy entrypoint, strategy defaults,
+  DataHub needs, and `signal_to_allocation` policy;
+- an operator-local overlay containing symbols, model choices, approval
+  allowlists, risk/execution limits, and state/audit paths.
+
+The rendered output must remain a normal `MaestroConfig` accepted by every
+existing CLI command. Full YAML configs must continue to work for examples,
+tests, explicit audit review, and simple single-app deployments. App fragments
+must not own broker, approval, execution, state, audit, or promotion-gate policy;
+those remain Maestro/operator responsibilities.
+
 ## Recommended Repository Structure
 
 Put the Virtuoso wrapper inside the strategy or app repository, not inside the

@@ -10,6 +10,7 @@ from maestro.config.models import StrategyPluginConfig
 from maestro.core.enums import BrokerProduct, ProfileStage
 from maestro.datahub.base import build_data_provider
 from maestro.datahub.router import DataHubRouter
+from maestro.plugins.registry import PluginRegistry
 from maestro.sdk import DataRequest
 
 LEGACY_EXECUTION_CONFIG_KEYS = {
@@ -662,6 +663,91 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
     assert config.kis.paper_trading is True
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
+
+
+def test_operator_kis_isa_profile_is_ataraxia_only_domestic_buy_only():
+    config = load_config("configs/operator/kis_isa.yaml")
+
+    assert config.mode == "live_approval"
+    assert config.portfolio.base_currency == "KRW"
+    assert config.portfolio.allocation_mode == "currency_sleeves"
+    assert set(config.portfolio.cash_by_currency) == {"KRW"}
+    assert set(config.portfolio.currency_sleeves) == {"KRW"}
+    assert config.strategies[0].id == "ataraxia"
+    assert config.strategies[0].weight == 1.0
+    assert len(config.strategies) == 1
+    assert config.execution.order_generation_mode == "buy_only_contribution"
+    assert config.execution.contribution.buy_day == 25
+    assert config.execution.contribution.currency == "KRW"
+    assert config.execution.contribution.sleeve == "KRW"
+    assert config.kis.account_id_env == "KIS_ISA_ACCOUNT_ID"
+    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
+    assert config.kis.effective_broker_products() == [BrokerProduct.KIS_DOMESTIC_STOCK]
+    assert config.kis.token_cache_path == "var/kis_isa_access_token.json"
+    assert all(instrument.region == "KR" for instrument in config.universe.instruments)
+    assert all(instrument.currency == "KRW" for instrument in config.universe.instruments)
+    assert all(
+        instrument.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
+        for instrument in config.universe.instruments
+    )
+
+
+def test_operator_kis_brokerage_us_profile_is_usd_snowball_only():
+    config = load_config("configs/operator/kis_brokerage_us.yaml")
+
+    assert config.mode == "live_approval"
+    assert config.portfolio.base_currency == "USD"
+    assert config.portfolio.allowed_symbols[0] == "CASH_USD"
+    assert config.strategies[0].id == "snowball_us"
+    assert config.strategies[0].weight == 1.0
+    assert config.strategies[0].config["sleeve"] == "USD"
+    assert len(config.strategies) == 1
+    assert config.execution.order_generation_mode == "target_rebalance"
+    assert config.kis.account_id_env == "KIS_BROKERAGE_ACCOUNT_ID"
+    assert config.kis.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
+    assert config.kis.effective_broker_products() == [BrokerProduct.KIS_OVERSEAS_STOCK]
+    assert config.kis.token_cache_path == "var/kis_brokerage_us_access_token.json"
+    assert all(instrument.region == "US" for instrument in config.universe.instruments)
+    assert all(instrument.currency == "USD" for instrument in config.universe.instruments)
+    assert all(
+        instrument.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
+        for instrument in config.universe.instruments
+    )
+    registry = PluginRegistry.from_configs(config.strategies, run_mode=config.mode)
+    assert registry.strategies[0].manifest.strategy_id == "snowball_us"
+
+
+def test_operator_kis_brokerage_kr_profile_is_readonly_domestic_scaffold():
+    config = load_config("configs/operator/kis_brokerage_kr.yaml")
+
+    assert config.mode == "live_readonly"
+    assert config.portfolio.base_currency == "KRW"
+    assert config.portfolio.allowed_symbols[0] == "CASH_KRW"
+    assert config.strategies == []
+    assert config.execution.order_posture == "disabled"
+    assert config.approval.enabled is False
+    assert config.kis.account_id_env == "KIS_BROKERAGE_ACCOUNT_ID"
+    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
+    assert config.kis.effective_broker_products() == [BrokerProduct.KIS_DOMESTIC_STOCK]
+    assert config.kis.token_cache_path == "var/kis_brokerage_kr_access_token.json"
+    assert all(instrument.region == "KR" for instrument in config.universe.instruments)
+    assert all(instrument.currency == "KRW" for instrument in config.universe.instruments)
+    assert all(
+        instrument.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
+        for instrument in config.universe.instruments
+    )
+
+
+def test_operator_kis_profiles_keep_state_audit_and_token_paths_distinct():
+    configs = [
+        load_config("configs/operator/kis_isa.yaml"),
+        load_config("configs/operator/kis_brokerage_us.yaml"),
+        load_config("configs/operator/kis_brokerage_kr.yaml"),
+    ]
+
+    assert len({config.state.sqlite_path for config in configs}) == 3
+    assert len({config.audit.jsonl_path for config in configs}) == 3
+    assert len({config.kis.token_cache_path for config in configs}) == 3
 
 
 def test_contribution_config_rejects_invalid_buy_day(tmp_path):

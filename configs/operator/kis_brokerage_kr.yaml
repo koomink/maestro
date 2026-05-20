@@ -1,0 +1,99 @@
+mode: live_readonly
+
+portfolio:
+  base_currency: KRW
+  allocation_mode: currency_sleeves
+  cash_by_currency:
+    KRW: 0
+  currency_sleeves:
+    KRW:
+      cash_symbol: CASH_KRW
+      symbols:
+        - SAMSUNG
+        - KODEX200
+
+universe:
+  instruments:
+    - symbol: SAMSUNG
+      asset_type: stock
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: "005930"
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 1
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: KODEX200
+      asset_type: domestic_etf
+      region: KR
+      currency: KRW
+      broker: kis
+      broker_product: kis_domestic_stock
+      broker_symbol: "069500"
+      exchange_code: KRX
+      quantity_step: 1
+      price_tick: 5
+      min_order_quantity: 1
+      min_order_notional: 1
+  policy:
+    allowed_asset_types: [stock, domestic_etf]
+    allowed_regions: [KR]
+    allowed_currencies: [KRW]
+    allowed_broker_products: [kis_domestic_stock]
+    allowed_exchange_codes: [KRX]
+    denied_symbols: []
+    denied_asset_tags: []
+    max_new_symbols_per_run: 0
+    require_operator_approval_for_tradable: true
+    require_broker_tradability_check: true
+    require_data_freshness_check: true
+
+strategies: []
+
+datahub:
+  provider: yahoo
+  stale_after_seconds: 604800
+
+execution:
+  proposal_engine: paper
+  order_posture: disabled
+  require_reconciliation_pass: true
+
+risk:
+  max_single_asset_weight: 0.5
+  min_cash_weight: 0.05
+
+monitoring:
+  heartbeat_max_age_seconds: 3600
+  scheduled_run_max_age_seconds: 86400
+
+state:
+  sqlite_path: var/kis_brokerage_kr_state.db
+
+audit:
+  jsonl_path: var/kis_brokerage_kr_audit.jsonl
+
+approval:
+  enabled: false
+  provider: console
+  require_approval: false
+  default_decision: approved
+  timeout_seconds: 300
+
+kis:
+  enabled: true
+  provider: kis
+  broker_product: kis_domestic_stock
+  broker_products:
+    - kis_domestic_stock
+  account_id_env: KIS_BROKERAGE_ACCOUNT_ID
+  app_key_env: KIS_APP_KEY
+  app_secret_env: KIS_APP_SECRET
+  access_token_env: KIS_ACCESS_TOKEN
+  approval_key_env: KIS_APPROVAL_KEY
+  token_cache_path: var/kis_brokerage_kr_access_token.json
+  paper_trading: false
+  timeout_seconds: 10
