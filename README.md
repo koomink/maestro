@@ -1168,6 +1168,21 @@ Target information architecture:
 - **Audit Trail**: run-level drill-down, orders/proposals, approvals, events,
   reconciliation, lifecycle rows, CSV exports, and raw payloads as evidence.
 
+Product usability rules:
+
+- The top of the dashboard should be a **System Verdict**, not a storage-table
+  summary. It should show whether the system is operationally trusted, which
+  condition drives the verdict, and where the operator should look next.
+- Every status should include a short reason. Labels such as `DANGER`, `FAIL`,
+  or `STALE` are not sufficient without the freshness check, health check,
+  reconciliation result, lifecycle issue, or attention item that caused them.
+- Every monetary value must show its currency. Native KRW/USD asset sleeves must
+  be shown separately from FX-converted total assets, and converted totals must
+  display the FX source, rate, timestamp, and freshness status.
+- Summary-first, evidence-second: cards and compact verdict rows should answer
+  the operator's question first; tables remain as drill-down evidence and export
+  surfaces.
+
 Dashboard should show:
 
 - Total equity

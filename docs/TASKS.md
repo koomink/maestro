@@ -635,11 +635,18 @@
       reconciliation status
 - [ ] Add read-only dashboard charts for strategy-level returns after strategy
       attribution exists
-- [ ] Redesign dashboard information architecture around Symphony Map, Operator
+- [x] Redesign dashboard information architecture around Symphony Map, Operator
       Cockpit, Investment Console, Virtuoso Apps, and Audit Trail
-- [ ] Make Symphony Map the dashboard landing view with persisted status nodes
+- [x] Make Symphony Map the dashboard landing view with persisted status nodes
       for proposal, validation/risk, execution/state, reconciliation, and
       operator attention
+- [x] Replace top-level duplicate metrics with a System Verdict and Capital
+      Summary that explain why the system is OK, warning, or blocked
+- [x] Add reason rows for dashboard status cards so DANGER/FAIL/STALE states
+      identify the underlying attention item, freshness row, health check,
+      reconciliation issue, lifecycle event, or FX state
+- [x] Standardize money rendering so every visible amount has a native or
+      display currency and converted totals show FX source/rate/timestamp
 - [ ] Keep the Streamlit dashboard read-only during the IA redesign; defer
       React/Vite, REST/WebSocket, approval controls, kill switch, and config
       writes until a daemon/API event model exists

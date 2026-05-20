@@ -22,7 +22,6 @@ from maestro.dashboard.read_models import (
     build_operator_home,
     build_operator_summary,
     build_orders_table,
-    build_overview,
     build_portfolio_snapshot_history_table,
     build_portfolio_table,
     build_recent_halt_failure_events_table,
@@ -58,7 +57,6 @@ def render(config_path: str | Path | None) -> None:
         config.portfolio.cash_by_currency,
         config_identity=identity,
     )
-    overview = build_overview(store)
     operator_summary = build_operator_summary(config, store)
     status = store.status()
 
@@ -121,30 +119,61 @@ def render(config_path: str | Path | None) -> None:
     broker_history = build_broker_snapshot_history_table(store)
     account_performance = build_account_performance_table(store)
     currency_sleeve_performance = build_currency_sleeve_performance_table(store)
-    total_portfolio_performance = build_total_portfolio_performance_table(
+    total_portfolio_performance_krw = build_total_portfolio_performance_table(
         store,
-        display_currency=display_currency,
+        display_currency="KRW",
+    )
+    total_portfolio_performance_usd = build_total_portfolio_performance_table(
+        store,
+        display_currency="USD",
+    )
+    total_portfolio_performance_by_currency = {
+        "KRW": total_portfolio_performance_krw,
+        "USD": total_portfolio_performance_usd,
+    }
+    total_portfolio_performance = total_portfolio_performance_by_currency[display_currency]
+    account_performance_currency = _broker_display_currency(
+        config,
+        account_performance,
+        total_portfolio_performance_krw,
+    )
+    krw_total = _latest_total_value(total_portfolio_performance_krw)
+    usd_total = _latest_total_value(total_portfolio_performance_usd)
+    krw_assets = _latest_component_value(total_portfolio_performance_krw, "KRW")
+    usd_assets = _latest_component_value(total_portfolio_performance_krw, "USD")
+    asset_summary_metrics = _asset_summary_metrics(
+        krw_assets,
+        usd_assets,
+        krw_total,
+        usd_total,
+        fx_snapshot,
+    )
+    asset_summary_rows = _asset_summary_rows(
+        total_portfolio_performance_krw,
+        total_portfolio_performance_usd,
+        fx_snapshot,
+    )
+    verdict_reason_rows = _verdict_reason_rows(
+        operator_summary,
+        freshness,
+        health,
+        reconciliation,
+        live_order_lifecycle,
+        fx_snapshot,
     )
     strategy_book_snapshots = build_strategy_book_snapshots_table(store)
     strategy_book_performance = build_strategy_book_performance_table(store)
     strategy_attribution = build_strategy_attribution_table(store)
     run_index = build_run_index_table(store)
 
-    _metric_strip(
+    _render_system_verdict(
         st,
-        [
-            ("Broker Total Value", _money(broker_summary["total_value"]), "neutral"),
-            ("Broker Cash", _money(broker_summary["cash"]), "neutral"),
-            ("Broker Exposure", _percent(broker_summary["exposure_weight"]), "neutral"),
-            ("Broker PnL", _money(broker_summary["unrealized_pnl"]), "neutral"),
-            ("Maestro Cash", f"{overview['cash']:,.2f}", "neutral"),
-            ("Maestro Positions", overview["positions_count"], "neutral"),
-            (
-                "Reconciliation",
-                _reconciliation_label(reconciliation["passed"]),
-                _boolean_tone(reconciliation["passed"]),
-            ),
-        ],
+        operator_home,
+        safety,
+        health,
+        reconciliation,
+        asset_summary_metrics,
+        verdict_reason_rows,
     )
 
     tabs = st.tabs(
@@ -167,8 +196,10 @@ def render(config_path: str | Path | None) -> None:
             reconciliation,
             freshness,
             safety,
-            broker_summary,
             broker_snapshot,
+            asset_summary_metrics,
+            asset_summary_rows,
+            verdict_reason_rows,
             strategy_runs,
             risk_decisions,
             orders,
@@ -202,10 +233,15 @@ def render(config_path: str | Path | None) -> None:
             broker_snapshot,
             reconciliation,
             account_performance,
+            account_performance_currency,
             currency_sleeve_performance,
             total_portfolio_performance,
+            total_portfolio_performance_krw,
+            total_portfolio_performance_usd,
             display_currency,
             fx_snapshot,
+            asset_summary_metrics,
+            asset_summary_rows,
             strategy_book_performance,
             strategy_attribution,
             strategy_book_snapshots,
@@ -256,8 +292,10 @@ def _render_symphony_map(
     reconciliation: dict[str, object],
     freshness: list[dict[str, object]],
     safety: dict[str, object],
-    broker_summary: dict[str, object],
     broker_snapshot: dict[str, object],
+    asset_summary_metrics: list[tuple[str, object, str]],
+    asset_summary_rows: list[dict[str, object]],
+    verdict_reason_rows: list[dict[str, object]],
     strategy_runs: list[dict[str, object]],
     risk_decisions: list[dict[str, object]],
     orders: list[dict[str, object]],
@@ -295,7 +333,11 @@ def _render_symphony_map(
                 _reconciliation_label(reconciliation_passed),
                 _boolean_tone(reconciliation_passed),
             ),
-            ("Broker Total Value", _money(broker_summary["total_value"]), "neutral"),
+            (
+                "Freshness",
+                str(freshest_status).upper(),
+                freshest_status,
+            ),
             (
                 "Attention",
                 operator_home["attention_count"],
@@ -367,6 +409,20 @@ def _render_symphony_map(
         st.dataframe(operator_home["attention_items"], width="stretch")
     else:
         _status_banner(st, "No attention items", "The observed system map is clear.", "success")
+    if verdict_reason_rows:
+        _section_header(
+            st,
+            "Why This Verdict",
+            "The highest-signal reasons behind the current operating state.",
+        )
+        table("Verdict Reasons", verdict_reason_rows, "symphony_verdict_reasons")
+    _section_header(
+        st,
+        "Asset Map",
+        "Native KRW/USD asset sleeves and total portfolio value in both display currencies.",
+    )
+    _metric_strip(st, asset_summary_metrics)
+    table("Asset Currency Summary", asset_summary_rows, "symphony_asset_currency_summary")
     table("Freshness", freshness, "symphony_freshness")
     table("Run Index", run_index, "symphony_run_index")
 
@@ -479,10 +535,15 @@ def _render_investment_console(
     broker_snapshot: dict[str, object],
     reconciliation: dict[str, object],
     account_performance: list[dict[str, object]],
+    account_performance_currency: str | None,
     currency_sleeve_performance: list[dict[str, object]],
     total_portfolio_performance: list[dict[str, object]],
+    total_portfolio_performance_krw: list[dict[str, object]],
+    total_portfolio_performance_usd: list[dict[str, object]],
     display_currency: str,
     fx_snapshot: dict[str, object],
+    asset_summary_metrics: list[tuple[str, object, str]],
+    asset_summary_rows: list[dict[str, object]],
     strategy_book_performance: list[dict[str, object]],
     strategy_attribution: list[dict[str, object]],
     strategy_book_snapshots: list[dict[str, object]],
@@ -502,8 +563,16 @@ def _render_investment_console(
     _metric_strip(
         st,
         [
-            ("Account Value", _money(latest_performance.get("total_value")), "neutral"),
-            ("Broker Cash", _money(broker_summary["cash"]), "neutral"),
+            (
+                "Account Value",
+                _money(latest_performance.get("total_value"), account_performance_currency),
+                "neutral",
+            ),
+            (
+                "Broker Cash",
+                _money(broker_summary["cash"], account_performance_currency),
+                "neutral",
+            ),
             ("Broker Exposure", _percent(broker_summary["exposure_weight"]), "neutral"),
             ("Period Return", _percent(latest_performance.get("period_return")), "neutral"),
             (
@@ -529,6 +598,13 @@ def _render_investment_console(
         with return_cols[1]:
             st.line_chart(chart_rows, x="created_at", y="drawdown")
 
+    _section_header(
+        st,
+        "Asset Currency Summary",
+        "Native KRW/USD sleeves plus total assets converted to KRW and USD when FX is fresh.",
+    )
+    _metric_strip(st, asset_summary_metrics)
+    table("Asset Currency Summary", asset_summary_rows, "investment_asset_currency_summary")
     table("Account Performance", account_performance, "investment_account_performance")
     _section_header(st, "Total Portfolio Performance")
     total_chart_rows = [
@@ -557,6 +633,19 @@ def _render_investment_console(
         total_portfolio_performance,
         "investment_total_portfolio_performance",
     )
+    total_display_cols = st.columns(2)
+    with total_display_cols[0]:
+        table(
+            "Total Portfolio Performance KRW View",
+            total_portfolio_performance_krw,
+            "investment_total_portfolio_performance_krw",
+        )
+    with total_display_cols[1]:
+        table(
+            "Total Portfolio Performance USD View",
+            total_portfolio_performance_usd,
+            "investment_total_portfolio_performance_usd",
+        )
 
     _section_header(st, "Currency Sleeves")
     if currency_sleeve_performance:
@@ -852,15 +941,14 @@ def _virtuoso_strategy_ids(
 def _system_map(st: object, nodes: list[dict[str, object]]) -> None:
     cards = []
     for node in nodes:
+        tone_class = _tone_class(str(node["tone"]))
         cards.append(
-            f"""
-            <div class="maestro-flow-card {_tone_class(str(node["tone"]))}">
-              <div class="maestro-flow-step">{_escape(node["step"])}</div>
-              <div class="maestro-flow-title">{_escape(node["title"])}</div>
-              <div class="maestro-flow-status">{_escape(node["status"])}</div>
-              <div class="maestro-flow-detail">{_escape(node["detail"])}</div>
-            </div>
-            """
+            f'<div class="maestro-flow-card {tone_class}">'
+            f'<div class="maestro-flow-step">{_escape(node["step"])}</div>'
+            f'<div class="maestro-flow-title">{_escape(node["title"])}</div>'
+            f'<div class="maestro-flow-status">{_escape(node["status"])}</div>'
+            f'<div class="maestro-flow-detail">{_escape(node["detail"])}</div>'
+            "</div>"
         )
     st.markdown(
         f'<div class="maestro-flow-grid">{"".join(cards)}</div>',
@@ -1436,17 +1524,69 @@ def _section_header(st: object, title: str, copy: str | None = None) -> None:
     )
 
 
+def _render_system_verdict(
+    st: object,
+    operator_home: dict[str, object],
+    safety: dict[str, object],
+    health: dict[str, object],
+    reconciliation: dict[str, object],
+    asset_summary_metrics: list[tuple[str, object, str]],
+    verdict_reason_rows: list[dict[str, object]],
+) -> None:
+    top_reason = verdict_reason_rows[0] if verdict_reason_rows else None
+    verdict_tone = str(top_reason["tone"]) if top_reason else _status_tone(operator_home["status"])
+    verdict_title = str(operator_home["status"]).upper()
+    if top_reason:
+        verdict_title = f"{verdict_title} · {top_reason['source']}"
+        verdict_copy = str(top_reason["reason"])
+    else:
+        verdict_copy = (
+            "No blocking attention, health, reconciliation, lifecycle, or FX reason found."
+        )
+
+    _section_header(
+        st,
+        "System Verdict",
+        "Operational trust, immediate reason, and capital summary before drill-down evidence.",
+    )
+    _status_banner(st, verdict_title, verdict_copy, verdict_tone)
+    _metric_strip(
+        st,
+        [
+            ("Operational State", str(operator_home["status"]).upper(), operator_home["status"]),
+            ("Safety", str(safety["state"]).upper(), _status_tone(safety["state"])),
+            ("Health", str(health["status"]).upper(), _status_tone(health["status"])),
+            (
+                "Reconciliation",
+                _reconciliation_label(reconciliation["passed"]),
+                _boolean_tone(reconciliation["passed"]),
+            ),
+            (
+                "Attention",
+                operator_home["attention_count"],
+                _count_tone(operator_home["attention_count"]),
+            ),
+        ],
+    )
+    _section_header(
+        st,
+        "Capital Summary",
+        "Native KRW/USD sleeves and total assets converted into both display currencies.",
+    )
+    _metric_strip(st, asset_summary_metrics)
+    if verdict_reason_rows:
+        st.dataframe(verdict_reason_rows[:6], width="stretch")
+
+
 def _metric_strip(st: object, metrics: list[tuple[str, object, str]]) -> None:
     cards = []
     for label, value, tone in metrics:
         tone_class = _tone_class(tone)
         cards.append(
-            f"""
-            <div class="maestro-metric {tone_class}">
-              <div class="maestro-metric-label">{_escape(label)}</div>
-              <div class="maestro-metric-value">{_escape(value)}</div>
-            </div>
-            """
+            f'<div class="maestro-metric {tone_class}">'
+            f'<div class="maestro-metric-label">{_escape(label)}</div>'
+            f'<div class="maestro-metric-value">{_escape(value)}</div>'
+            "</div>"
         )
     st.markdown(
         f'<div class="maestro-metric-grid">{"".join(cards)}</div>',
@@ -1638,10 +1778,276 @@ def _float_value(value: object) -> float | None:
         return None
 
 
-def _money(value: object) -> str:
+def _latest_currency(rows: list[dict[str, object]]) -> str | None:
+    if not rows:
+        return None
+    currency = rows[0].get("currency") or rows[0].get("display_currency")
+    if not currency:
+        return None
+    currency_text = str(currency).upper()
+    if currency_text in {"UNKNOWN", "MIXED", "N/A"}:
+        return None
+    return currency_text
+
+
+def _broker_display_currency(
+    config: object,
+    account_performance: list[dict[str, object]],
+    total_portfolio_performance_krw: list[dict[str, object]],
+) -> str:
+    explicit_currency = _latest_currency(account_performance)
+    if explicit_currency:
+        return explicit_currency
+    component_values = (
+        total_portfolio_performance_krw[0].get("component_values")
+        if total_portfolio_performance_krw
+        else None
+    )
+    if isinstance(component_values, dict) and len(component_values) == 1:
+        return str(next(iter(component_values))).upper()
+    broker_products = getattr(getattr(config, "kis", None), "effective_broker_products", None)
+    if callable(broker_products):
+        product_values = {str(product) for product in broker_products()}
+        if any("DOMESTIC" in value for value in product_values):
+            return "KRW"
+        if product_values and all("OVERSEAS" in value for value in product_values):
+            return "USD"
+    base_currency = getattr(getattr(config, "portfolio", None), "base_currency", None)
+    return str(base_currency or "KRW").upper()
+
+
+def _latest_total_value(rows: list[dict[str, object]]) -> float | None:
+    if not rows:
+        return None
+    return _float_value(rows[0].get("total_value"))
+
+
+def _latest_component_value(
+    rows: list[dict[str, object]],
+    currency: str,
+) -> float | None:
+    if not rows:
+        return None
+    component_values = rows[0].get("component_values")
+    if not isinstance(component_values, dict):
+        return None
+    return _float_value(component_values.get(currency))
+
+
+def _asset_summary_metrics(
+    krw_assets: object,
+    usd_assets: object,
+    krw_total: object,
+    usd_total: object,
+    fx_snapshot: dict[str, object],
+) -> list[tuple[str, object, str]]:
+    return [
+        ("KRW Assets", _money(krw_assets, "KRW"), "neutral"),
+        ("USD Assets", _money(usd_assets, "USD"), "neutral"),
+        ("Total Assets (KRW)", _money(krw_total, "KRW"), _asset_total_tone(krw_total)),
+        ("Total Assets (USD)", _money(usd_total, "USD"), _asset_total_tone(usd_total)),
+        ("FX", fx_snapshot["status"], _status_tone(fx_snapshot["status"])),
+    ]
+
+
+def _asset_summary_rows(
+    krw_rows: list[dict[str, object]],
+    usd_rows: list[dict[str, object]],
+    fx_snapshot: dict[str, object],
+) -> list[dict[str, object]]:
+    krw_row = krw_rows[0] if krw_rows else {}
+    usd_row = usd_rows[0] if usd_rows else {}
+    krw_assets = _latest_component_value(krw_rows, "KRW")
+    usd_assets = _latest_component_value(krw_rows, "USD")
+    return [
+        {
+            "label": "Native KRW assets",
+            "amount": krw_assets,
+            "currency": "KRW",
+            "display": _money(krw_assets, "KRW"),
+            "fx_status": "not_needed",
+        },
+        {
+            "label": "Native USD assets",
+            "amount": usd_assets,
+            "currency": "USD",
+            "display": _money(usd_assets, "USD"),
+            "fx_status": "not_needed",
+        },
+        {
+            "label": "Total assets in KRW",
+            "amount": _float_value(krw_row.get("total_value")),
+            "currency": "KRW",
+            "display": _money(krw_row.get("total_value"), "KRW"),
+            "fx_status": krw_row.get("fx_status"),
+            "fx_rate": krw_row.get("fx_rate"),
+            "fx_timestamp": krw_row.get("fx_timestamp"),
+        },
+        {
+            "label": "Total assets in USD",
+            "amount": _float_value(usd_row.get("total_value")),
+            "currency": "USD",
+            "display": _money(usd_row.get("total_value"), "USD"),
+            "fx_status": usd_row.get("fx_status"),
+            "fx_rate": usd_row.get("fx_rate"),
+            "fx_timestamp": usd_row.get("fx_timestamp"),
+        },
+        {
+            "label": "FX snapshot",
+            "amount": fx_snapshot.get("rate"),
+            "currency": "USD/KRW",
+            "display": _display_value(fx_snapshot.get("rate")),
+            "fx_status": fx_snapshot.get("status"),
+            "fx_source": fx_snapshot.get("source"),
+            "fx_timestamp": fx_snapshot.get("as_of"),
+        },
+    ]
+
+
+def _asset_total_tone(value: object) -> str:
+    return "success" if value is not None else "warning"
+
+
+def _verdict_reason_rows(
+    operator_summary: dict[str, object],
+    freshness: list[dict[str, object]],
+    health: dict[str, object],
+    reconciliation: dict[str, object],
+    live_order_lifecycle: dict[str, object],
+    fx_snapshot: dict[str, object],
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for item in operator_summary.get("attention_items", []):
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "warning")
+        rows.append(
+            _verdict_reason_row(
+                source=item.get("code") or "Attention",
+                status=severity,
+                reason=item.get("message") or item.get("code") or "Attention item needs review",
+                next_check="Open Operator Cockpit attention queue",
+                tone=_status_tone(severity),
+            )
+        )
+
+    for row in freshness:
+        status = str(row.get("status") or "")
+        if _status_tone(status) in {"warning", "danger"}:
+            source = _row_label(row, "Freshness")
+            age = row.get("age_seconds")
+            max_age = row.get("max_age_seconds")
+            detail = f"{source} is {status}"
+            if age is not None and max_age is not None:
+                detail = f"{detail} ({_duration(age)} old, limit {_duration(max_age)})"
+            rows.append(
+                _verdict_reason_row(
+                    source=source,
+                    status=status,
+                    reason=detail,
+                    next_check="Review freshness evidence and run the relevant sync if needed",
+                    tone=_status_tone(status),
+                )
+            )
+
+    health_checks = health.get("checks") if isinstance(health.get("checks"), list) else []
+    for check in health_checks:
+        if not isinstance(check, dict):
+            continue
+        status = str(check.get("status") or "")
+        if status.lower() in {"", "ok", "pass", "passed", "fresh"}:
+            continue
+        rows.append(
+            _verdict_reason_row(
+                source=_row_label(check, "Health"),
+                status=status,
+                reason=check.get("message") or f"{_row_label(check, 'Health')} is {status}",
+                next_check="Open Operator Cockpit health checks",
+                tone=_status_tone(status),
+            )
+        )
+
+    if reconciliation.get("passed") is not True:
+        passed = reconciliation.get("passed")
+        rows.append(
+            _verdict_reason_row(
+                source="Reconciliation",
+                status=_reconciliation_label(passed).lower(),
+                reason="Latest broker and Maestro state reconciliation is not passed",
+                next_check="Review reconciliation card and broker/portfolio evidence",
+                tone=_boolean_tone(passed),
+            )
+        )
+
+    recent_issue_count = int(live_order_lifecycle.get("recent_issue_count") or 0)
+    if recent_issue_count > 0:
+        rows.append(
+            _verdict_reason_row(
+                source="Live orders",
+                status="issues",
+                reason=f"{recent_issue_count} recent live order lifecycle issue(s)",
+                next_check="Review live order lifecycle events",
+                tone="danger",
+            )
+        )
+
+    fx_status = str(fx_snapshot.get("status") or "")
+    if _status_tone(fx_status) in {"warning", "danger"}:
+        fx_source = fx_snapshot.get("source") or "unknown source"
+        rows.append(
+            _verdict_reason_row(
+                source="FX",
+                status=fx_status,
+                reason=f"FX snapshot from {fx_source} is {fx_status}",
+                next_check="Review FX snapshot before trusting converted totals",
+                tone=_status_tone(fx_status),
+            )
+        )
+
+    return sorted(rows, key=lambda row: _tone_sort_key(row["tone"]))
+
+
+def _verdict_reason_row(
+    source: object,
+    status: object,
+    reason: object,
+    next_check: object,
+    tone: str,
+) -> dict[str, object]:
+    return {
+        "severity": tone,
+        "source": source,
+        "status": status,
+        "reason": reason,
+        "next_check": next_check,
+        "tone": tone,
+    }
+
+
+def _row_label(row: dict[str, object], fallback: str) -> str:
+    return str(
+        row.get("name") or row.get("check") or row.get("source") or row.get("component") or fallback
+    )
+
+
+def _tone_sort_key(tone: object) -> int:
+    return {
+        "danger": 0,
+        "fail": 0,
+        "error": 0,
+        "warning": 1,
+        "success": 2,
+        "neutral": 3,
+    }.get(str(tone or "neutral"), 3)
+
+
+def _money(value: object, currency: str | None = None) -> str:
     if value is None:
         return "n/a"
-    return f"{float(value):,.2f}"
+    formatted = f"{float(value):,.2f}"
+    if currency and str(currency).upper() not in {"UNKNOWN", "MIXED", "N/A"}:
+        return f"{formatted} {currency}"
+    return formatted
 
 
 def _percent(value: object) -> str:

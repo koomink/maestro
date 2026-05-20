@@ -1192,6 +1192,21 @@ milestone after Maestro has a daemon/API event model. Until then, Streamlit must
 remain read-only and must not become an approval, kill-switch, or configuration
 surface.
 
+Product interaction model:
+
+- The global header area should show a System Verdict and Capital Summary. It
+  should not duplicate every broker/account metric that appears later in the
+  Investment Console.
+- Verdict cards must include reason rows derived from persisted read models:
+  attention items, freshness rows, health checks, reconciliation state, live
+  order lifecycle issues, and FX freshness.
+- Money rendering must be explicit: amount plus currency for native values,
+  and converted-total rows must include display currency, component values,
+  FX status, FX source, rate, and timestamp when applicable.
+- Tables are evidence. The primary user path should start with compact status,
+  reason, and capital cards, then let the operator drill into filtered tables,
+  run details, payloads, and CSV exports.
+
 Current dashboard performance read models in `dashboard/read_models.py` cover
 account, currency-sleeve, and total-portfolio views from persisted broker
 snapshots and reconciliation events. The dashboard renders these persisted-state
