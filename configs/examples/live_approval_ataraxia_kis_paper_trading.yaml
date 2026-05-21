@@ -108,9 +108,6 @@ execution:
     non_trading_day_policy: next_trading_day
     target_policy: buy_only_toward_target
 
-risk:
-  max_single_asset_weight: 0.7
-  min_cash_weight: 0.0
 
 monitoring:
   heartbeat_max_age_seconds: 3600
@@ -129,8 +126,6 @@ approval:
   default_decision: expired
   timeout_seconds: 300
   telegram_bot_token_env: TELEGRAM_BOT_TOKEN
-  telegram_allowed_chat_ids: []
-  whitelisted_user_ids: []
   telegram_poll_interval_seconds: 1.0
 
 kis:

@@ -39,7 +39,6 @@ class ApprovalManager:
         self,
         run_id: str,
         orders: list[OrderIntent],
-        risk_modifications: list[str],
         risk_violations: list[str],
         source_strategy_ids: list[str] | None = None,
     ) -> tuple[ApprovalRequest | None, ApprovalDecision | None, str | None]:
@@ -58,7 +57,6 @@ class ApprovalManager:
             order_count=len(orders),
             estimated_notional=sum(order.notional for order in orders),
             proposed_orders=[self._proposed_order_payload(order) for order in orders],
-            risk_modifications=risk_modifications,
             risk_violations=risk_violations,
         )
         if self.config.provider == "telegram":

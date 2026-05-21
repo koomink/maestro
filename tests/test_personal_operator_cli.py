@@ -15,6 +15,8 @@ def test_init_personal_creates_safe_operator_config(monkeypatch, tmp_path):
     monkeypatch.setenv("KIS_APP_KEY", "real-app-key")
     monkeypatch.setenv("KIS_APP_SECRET", "real-app-secret")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "real-telegram-token")
+    monkeypatch.delenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    monkeypatch.delenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", raising=False)
     output = tmp_path / "operator" / "maestro_personal.yaml"
 
     result = CliRunner().invoke(app, ["init-personal", "--output", str(output)])

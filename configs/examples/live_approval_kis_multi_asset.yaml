@@ -114,9 +114,6 @@ execution:
     max_quote_deviation_pct: 0.05
     require_risk_validation: false
 
-risk:
-  max_single_asset_weight: 0.5
-  min_cash_weight: 0.05
 
 monitoring:
   heartbeat_max_age_seconds: 0

@@ -13,9 +13,6 @@ datahub:
 execution:
   proposal_engine: paper
 
-risk:
-  max_single_asset_weight: 1.0
-  min_cash_weight: 0.0
 
 state:
   sqlite_path: var/live_readonly_state.db

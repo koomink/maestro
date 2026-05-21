@@ -236,9 +236,9 @@ And Maestro will:
   live dry-run, first minimum-size live order, and limited repeated operation
 - Production DataHub hardening for freshness, proposal snapshots, market
   sessions, provider failures, and broker quote validation
-- Operator-enabled broker risk controls for buying power, cash reserve, position
-  exposure, PnL-based daily loss limit, pending orders, fees, settlement, and
-  unreconciled broker activity
+- Operator-enabled broker risk controls for buying power, post-order cash,
+  PnL-based daily loss limit, pending orders, fees, settlement, and unreconciled
+  broker activity
 - Live order recovery for ambiguous submit results, process crashes, status
   persistence gaps, partial fills, broker truth replay, and explicit recovery
   completion before another live approval order
@@ -329,11 +329,9 @@ tables remain future work.
 - v0.1 must enforce:
   - No short positions
   - No leverage
-  - Max single asset weight
-  - Min cash weight
   - Allowed asset universe
   - Strategy weight limits
-- RiskManager may modify target allocations, but all modifications must be logged.
+- RiskManager rejects invalid targets before execution.
 - Dynamic-universe checks reject unknown, unresolved, untradable, and
   research-only symbols in `TargetAllocationResult`.
 - Virtuoso apps must not directly approve tradability, call broker APIs, submit
@@ -489,8 +487,8 @@ Future requirement:
 - Account, strategy, currency-sleeve, and total portfolio performance views are
   computed from reconciled broker snapshots and persisted Maestro events, with
   stale/unreconciled periods clearly labeled.
-- Buying power, cash reserve, exposure limits, pending orders, and daily loss
-  limits are enforced before submission.
+- Buying power, post-order cash, pending orders, and daily loss limits are
+  enforced before submission.
 - Ambiguous broker submit, process crash, timeout, and manual broker
   intervention procedures are documented and rehearsed.
 - Heartbeat, alerting, audit integrity, backup, and halt recovery are exercised.

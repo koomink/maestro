@@ -1,4 +1,6 @@
-from pydantic import Field, field_validator
+import os
+
+from pydantic import Field, field_validator, model_validator
 
 from maestro.config.base import StrictConfigModel
 
@@ -20,6 +22,26 @@ class ApprovalConfig(StrictConfigModel):
         if value not in {"approved", "rejected", "expired"}:
             raise ValueError("default_decision must be approved, rejected, or expired")
         return value
+
+    @model_validator(mode="after")
+    def apply_maestro_telegram_env_defaults(self) -> "ApprovalConfig":
+        if self.provider != "telegram":
+            return self
+        if not self.telegram_allowed_chat_ids:
+            self.telegram_allowed_chat_ids = _parse_env_int_list(
+                "MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS"
+            )
+        if not self.whitelisted_user_ids:
+            self.whitelisted_user_ids = _parse_env_int_list(
+                "MAESTRO_TELEGRAM_WHITELISTED_USER_IDS"
+            )
+        return self
+
+
+def _parse_env_int_list(name: str) -> list[int]:
+    raw = os.getenv(name, "")
+    values = [item.strip() for item in raw.split(",")]
+    return [int(item) for item in values if item]
 
 
 __all__ = ["ApprovalConfig"]

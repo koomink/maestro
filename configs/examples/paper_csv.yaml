@@ -26,9 +26,6 @@ datahub:
 execution:
   proposal_engine: paper
 
-risk:
-  max_single_asset_weight: 0.4
-  min_cash_weight: 0.05
 
 state:
   sqlite_path: var/maestro_state.db

@@ -85,9 +85,6 @@ datahub:
 execution:
   proposal_engine: paper
 
-risk:
-  max_single_asset_weight: 0.5
-  min_cash_weight: 0.05
 
 state:
   sqlite_path: var/multi_asset_readonly_state.db

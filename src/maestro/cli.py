@@ -1127,7 +1127,6 @@ def _personal_operator_config(output: Path) -> dict:
             "heartbeat_max_age_seconds": 3600,
             "scheduled_run_max_age_seconds": 86400,
         },
-        "risk": {"max_single_asset_weight": 0.5, "min_cash_weight": 0.05},
         "state": {"sqlite_path": str(state_dir / "maestro_personal_state.db")},
         "audit": {"jsonl_path": str(state_dir / "maestro_personal_audit.jsonl")},
         "approval": {

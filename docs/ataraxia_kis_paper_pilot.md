@@ -50,7 +50,9 @@ levels.
 
 Secrets belong only in environment variables or an operator-local env file:
 `KIS_ACCOUNT_ID`, `KIS_APP_KEY`, `KIS_APP_SECRET`, optional
-`KIS_ACCESS_TOKEN`, optional `KIS_APPROVAL_KEY`, and `TELEGRAM_BOT_TOKEN`.
+`KIS_ACCESS_TOKEN`, optional `KIS_APPROVAL_KEY`, `TELEGRAM_BOT_TOKEN`,
+`MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS`, and
+`MAESTRO_TELEGRAM_WHITELISTED_USER_IDS`.
 
 ## Promotion Steps
 

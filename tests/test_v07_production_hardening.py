@@ -295,7 +295,7 @@ def test_broker_risk_validation_blocks_unreconciled_broker_snapshot(tmp_path):
     assert "broker_snapshot_not_reconciled" in reasons
 
 
-def test_broker_risk_validation_blocks_symbol_exposure_from_broker_truth(tmp_path):
+def test_broker_risk_validation_allows_concentrated_broker_truth(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
         execution_overrides={
@@ -314,10 +314,8 @@ def test_broker_risk_validation_blocks_symbol_exposure_from_broker_truth(tmp_pat
 
     summary = orchestrator.run_once()
 
-    assert summary.orders_created == 0
-    event = orchestrator.state_store.list_system_events_by_type("broker_risk_halt")[0]
-    reasons = {issue["reason"] for issue in event["payload"]["issues"]}
-    assert "symbol_exposure_exceeded" in reasons
+    assert summary.orders_created == 2
+    assert orchestrator.state_store.list_system_events_by_type("broker_risk_halt") == []
 
 
 def test_daily_loss_limit_blocks_from_normalized_broker_pnl(tmp_path):

@@ -62,9 +62,6 @@ execution:
   order_posture: disabled
   require_reconciliation_pass: true
 
-risk:
-  max_single_asset_weight: 0.5
-  min_cash_weight: 0.05
 
 monitoring:
   heartbeat_max_age_seconds: 3600

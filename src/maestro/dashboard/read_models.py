@@ -197,7 +197,6 @@ def build_risk_decisions_table(store: StateStore, limit: int = 20) -> list[dict[
                 "run_id": row.get("run_id"),
                 "approved": payload.get("approved"),
                 "violations": payload.get("violations", []),
-                "modifications": payload.get("modifications", []),
                 "target_allocations": (payload.get("target") or {}).get("allocations", {}),
                 "payload": payload,
             }

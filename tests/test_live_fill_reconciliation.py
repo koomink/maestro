@@ -162,7 +162,6 @@ def test_reconcile_fills_cli_outputs_result(tmp_path):
                 "strategies": [],
                 "datahub": {"provider": "mock"},
                 "execution": {"engine": "paper"},
-                "risk": {"max_single_asset_weight": 0.4, "min_cash_weight": 0.05},
                 "state": {"sqlite_path": str(tmp_path / "state.db")},
                 "audit": {"jsonl_path": str(tmp_path / "audit.jsonl")},
                 "kis": {"enabled": True, "provider": "mock", "account_id": "MOCK-ACCOUNT"},

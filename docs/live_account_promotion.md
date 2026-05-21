@@ -52,8 +52,8 @@ or Telegram admin controls.
 - Enable market-session and broker-quote validation in the operator config once
   the required market calendar and broker snapshot flow are verified.
 - Enable broker-risk validation only after the latest broker snapshot is
-  reconciled; confirm buying power, cash reserve, fee buffer, pending orders,
-  exposure limits, and daily PnL source before first live submission.
+  reconciled; confirm buying power, post-order cash, fee buffer, pending orders,
+  and daily PnL source before first live submission.
 
 ## First Minimum-size Order Checklist
 

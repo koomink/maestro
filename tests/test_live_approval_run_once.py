@@ -774,7 +774,6 @@ def _overseas_live_approval_config(
     raw["execution"]["live_order_limits"]["max_daily_order_count"] = 3
     raw["execution"]["order_status_max_polls"] = max_polls
     raw["execution"]["order_status_poll_interval_seconds"] = 0.0
-    raw["risk"] = {"max_single_asset_weight": 1.0, "min_cash_weight": 0.0}
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["approval"]["timeout_seconds"] = 1

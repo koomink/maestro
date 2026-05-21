@@ -87,9 +87,6 @@ execution:
     non_trading_day_policy: next_trading_day
     target_policy: buy_only_toward_target
 
-risk:
-  max_single_asset_weight: 0.7
-  min_cash_weight: 0.0
 
 state:
   sqlite_path: var/ataraxia_yahoo_paper_state.db

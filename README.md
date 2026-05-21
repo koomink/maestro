@@ -347,7 +347,7 @@ and `portfolio.allocation_mode=currency_sleeves` so KRW and USD sleeves
 rebalance independently without automatic FX conversion or cross-currency
 orders. FX conversion is a reporting concern only: operators may view
 FX-adjusted total performance in the dashboard, but order generation, buying
-power, reconciliation cash gates, and risk cash checks stay in each sleeve's
+power, reconciliation cash gates, and broker risk gates stay in each sleeve's
 native currency.
 
 `universe.instruments` is the source of truth for tradable instrument metadata.
@@ -394,9 +394,9 @@ fields when present, then falls back to summed position `unrealized_pnl`.
 For real-account rehearsals,
 `execution.broker_validation.require_risk_validation=true`
 adds a broker-snapshot risk gate before approval submission. It checks settled
-buying power with `execution.live_order_limits.fee_buffer_pct`, post-order cash
-reserve, per-symbol exposure, portfolio exposure, pending broker orders, and
-whether the latest broker snapshot is the one that passed reconciliation. When
+buying power with `execution.live_order_limits.fee_buffer_pct`, post-order cash,
+pending broker orders, and whether the latest broker snapshot is the one that
+passed reconciliation. When
 `execution.broker_validation.require_quote_validation=true`, live approval order
 generation can reuse the latest broker snapshot's validated `current_prices` as
 the limit price basis instead of drifting from the broker quote checked during
@@ -812,8 +812,10 @@ maestro approvals --config configs/examples/paper_approval_console.yaml
 By default, `configs/examples/paper_approval_console.yaml` uses the no-network `console`
 approval stub and records the configured decision. For the v0.4 Telegram MVP,
 start from `configs/examples/paper_approval_telegram.yaml`, set
-`TELEGRAM_BOT_TOKEN` in the environment, configure
-`telegram_allowed_chat_ids` and `whitelisted_user_ids`, and keep `mode: paper`.
+`TELEGRAM_BOT_TOKEN`, `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS`, and
+`MAESTRO_TELEGRAM_WHITELISTED_USER_IDS` in the Maestro operator environment,
+and keep `mode: paper`. Per-config `telegram_allowed_chat_ids` and
+`whitelisted_user_ids` remain optional overrides for rehearsals.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
 polling for inline approve/reject button callbacks. Manual typed
 `approve <approval_id>` / `reject <approval_id>` replies are ignored. Webhooks,
@@ -1055,10 +1057,6 @@ datahub:
 execution:
   proposal_engine: paper
 
-risk:
-  max_single_asset_weight: 0.4
-  min_cash_weight: 0.05
-
 state:
   sqlite_path: var/maestro_state.db
 
@@ -1103,7 +1101,7 @@ Maestro must be safe by default.
 - Strategy apps cannot access capital.
 - Live trading must require explicit future mode changes.
 - New strategies should default to research or paper mode.
-- RiskManager is stronger than PortfolioManager.
+- RiskManager rejects invalid targets before execution.
 - Unknown symbols should be rejected.
 - Secrets must never be logged.
 

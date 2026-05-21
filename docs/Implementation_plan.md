@@ -420,14 +420,11 @@ src/maestro/risk/limits.py
 - Gross exposure <= 1.0
 - No short
 - No leverage
-- Modification logging
 
 ### Acceptance Criteria
 
 - Unknown symbols reject the target.
-- Overweight assets are capped and excess moved to `CASH`.
-- Cash minimum is enforced.
-- All modifications appear in `RiskDecision`.
+- Gross exposure above 1.0 rejects the target.
 
 ## 13. Milestone M9: PaperExecutionEngine and StateStore
 

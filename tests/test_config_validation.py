@@ -35,6 +35,10 @@ LEGACY_EXECUTION_CONFIG_KEYS = {
     "engine",
 }
 
+ATARAXIA_LIVE_APPROVAL_CONFIG = Path(
+    "configs/examples/live_approval_ataraxia_kis_paper_trading.yaml"
+)
+
 
 def test_invalid_mode_fails(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
@@ -64,6 +68,46 @@ def test_unknown_execution_field_fails(tmp_path):
 
     with pytest.raises(ValidationError, match="allow_market_orders"):
         load_config(config_path)
+
+
+def test_removed_risk_weight_fields_fail(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["risk"] = {"max_single_asset_weight": 0.4, "min_cash_weight": 0.05}
+    config_path = tmp_path / "removed_risk_fields.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="max_single_asset_weight"):
+        load_config(config_path)
+
+
+def test_telegram_approval_ids_fall_back_to_maestro_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", "1001, 1002")
+    monkeypatch.setenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", "2001")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["approval"]["telegram_allowed_chat_ids"] = []
+    raw["approval"]["whitelisted_user_ids"] = []
+    config_path = tmp_path / "telegram_env_fallback.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.approval.telegram_allowed_chat_ids == [1001, 1002]
+    assert config.approval.whitelisted_user_ids == [2001]
+
+
+def test_telegram_approval_config_ids_override_maestro_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", "1001")
+    monkeypatch.setenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", "2001")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["approval"]["telegram_allowed_chat_ids"] = [3001]
+    raw["approval"]["whitelisted_user_ids"] = [4001]
+    config_path = tmp_path / "telegram_config_override.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.approval.telegram_allowed_chat_ids == [3001]
+    assert config.approval.whitelisted_user_ids == [4001]
 
 
 def test_live_order_config_defaults_are_safe():
@@ -345,7 +389,7 @@ def test_live_order_config_rejects_market_order_type(tmp_path):
 
 def test_unknown_risk_field_fails(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
-    raw["risk"]["allow_short"] = False
+    raw["risk"] = {"allow_short": False}
     config_path = tmp_path / "unknown_risk.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
@@ -812,7 +856,9 @@ def test_multi_asset_readonly_example_uses_env_var_names_only():
     assert "access-token" not in raw_text
 
 
-def test_live_approval_root_config_is_minimal_operator_skeleton():
+def test_live_approval_root_config_is_minimal_operator_skeleton(monkeypatch):
+    monkeypatch.delenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    monkeypatch.delenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", raising=False)
     raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     config = load_config("configs/live_approval.yaml")
 

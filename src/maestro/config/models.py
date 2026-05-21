@@ -46,7 +46,7 @@ class MaestroConfig(StrictConfigModel):
     datahub: DataHubConfig = Field(default_factory=DataHubConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
-    risk: RiskConfig
+    risk: RiskConfig = Field(default_factory=RiskConfig)
     state: StateConfig
     audit: AuditConfig
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)

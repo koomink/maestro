@@ -91,6 +91,8 @@ Set these in the operator environment, not in YAML and not in source control:
 - `KIS_APPROVAL_KEY` only when using a real externally issued WebSocket
   approval key
 - `TELEGRAM_BOT_TOKEN`
+- `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS`
+- `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS`
 
 If `KIS_ACCESS_TOKEN` is absent, the KIS adapter may use `kis.token_cache_path`
 to cache an issued token. Do not keep placeholder token values in `.env`. The
@@ -319,9 +321,9 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 - Halt when daily live notional or order count caps would be exceeded.
 - Halt when a proposed live order violates `universe.instruments` precision,
   minimum, currency, or broker product constraints.
-- Halt when broker risk validation detects insufficient buying power, cash
-  reserve breach, symbol or portfolio exposure breach, pending broker orders, or
-  unreconciled broker snapshot/manual broker activity.
+- Halt when broker risk validation detects insufficient buying power, negative
+  post-order cash, pending broker orders, or unreconciled broker snapshot/manual
+  broker activity.
 - Halt when `execution.live_order_limits.daily_loss_limit` is exceeded or broker
   PnL is unavailable while the limit is configured.
 - Halt or fail when broker reconciliation fails after a fill update.

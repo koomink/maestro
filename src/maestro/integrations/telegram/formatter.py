@@ -13,10 +13,6 @@ def format_approval_request(request: ApprovalRequest) -> str:
         f"🆔 Approval: {request.approval_id}",
     ]
     lines = [line for line in lines if line is not None]
-    if request.risk_modifications:
-        lines.append("")
-        lines.append("🛡️ Risk adjustments")
-        lines.extend(f"- {item}" for item in request.risk_modifications)
     if request.risk_violations:
         lines.append("")
         lines.append("⚠️ Risk violations")

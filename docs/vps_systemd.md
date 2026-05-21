@@ -80,8 +80,10 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-The shared operator config must set `telegram_allowed_chat_ids` and
-`whitelisted_user_ids` to the real operator account. This service handles
+Set `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS` and
+`MAESTRO_TELEGRAM_WHITELISTED_USER_IDS` in the shared Maestro operator
+environment. Per-config `telegram_allowed_chat_ids` and `whitelisted_user_ids`
+are optional overrides. This service handles
 read-only Telegram commands and the limited `/pause` and `/kill_switch`
 confirmations. Approval request polling still happens inside `maestro run-once`
 when an approval-gated run is active.

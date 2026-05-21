@@ -78,7 +78,7 @@ class MaestroOrchestrator:
         self.registry = PluginRegistry.from_configs(config.strategies, run_mode=config.mode)
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
         self.portfolio_manager = PortfolioManager(config.strategies)
-        self.risk_manager = RiskManager(config.portfolio.allowed_symbols, config.risk)
+        self.risk_manager = RiskManager(config.portfolio.allowed_symbols)
         self.execution = build_execution_engine(
             config.execution,
             instruments=config.universe.instruments,
@@ -132,7 +132,7 @@ class MaestroOrchestrator:
                 strategy_ids=strategy_ids,
             )
             risk_manager = (
-                RiskManager(sorted(run_allowed_symbols), self.config.risk)
+                RiskManager(sorted(run_allowed_symbols))
                 if dynamic_symbols
                 else self.risk_manager
             )
@@ -276,7 +276,6 @@ class MaestroOrchestrator:
                     self.approval_manager.request_approval(
                         run_id,
                         orders,
-                        risk_decision.modifications,
                         risk_decision.violations,
                         target.source_strategy_ids,
                     )

@@ -68,6 +68,5 @@ class RejectingRiskManager:
                 allocations=target.allocations,
                 source_strategy_ids=target.source_strategy_ids,
             ),
-            modifications=[],
             violations=["forced rejection"],
         )

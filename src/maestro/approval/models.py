@@ -17,7 +17,6 @@ class ApprovalRequest(BaseModel):
     order_count: int
     estimated_notional: float
     proposed_orders: list[dict]
-    risk_modifications: list[str] = Field(default_factory=list)
     risk_violations: list[str] = Field(default_factory=list)
 
 

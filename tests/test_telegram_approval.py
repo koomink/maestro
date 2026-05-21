@@ -273,7 +273,6 @@ def test_approval_manager_records_source_strategy_ids():
             )
         ],
         [],
-        [],
         source_strategy_ids=["strategy_a", "strategy_b"],
     )
 

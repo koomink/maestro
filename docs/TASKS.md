@@ -201,7 +201,7 @@
 - [x] Decide polling versus webhook for the first Telegram implementation
 - [x] Add minimal Telegram Bot API polling client behind an interface
 - [x] Add bot token environment-variable config without storing or logging token values
-- [x] Add allowed Telegram user and chat ID config
+- [x] Add allowed Telegram user and chat ID config with shared Maestro env fallback
 - [x] Send order proposal messages with approve/reject buttons
 - [x] Receive approve/reject button decisions through polling
 - [x] Document that `run-once` blocks while polling for approval, rejection, or timeout
@@ -410,10 +410,10 @@
 
 ### v0.8.3 Real Risk Engine
 
-- [x] Add cash reserve and buying-power checks before live approval submission
+- [x] Add buying-power and post-order cash checks before live approval submission
 - [x] Add KIS overseas pre-submit buying-power check using the exact live order
       limit price
-- [x] Add position, per-symbol notional, and portfolio exposure limits
+- [x] Add order-count, notional-cap, and pending-order risk checks
 - [x] Normalize broker PnL enough to enforce
       `execution.live_order_limits.daily_loss_limit`
 - [x] Account for fees, settlement, pending orders, and manual broker activity in

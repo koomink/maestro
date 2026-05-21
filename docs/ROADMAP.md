@@ -364,9 +364,8 @@ Completed scope:
 
 Completed scope:
 
-- Extend risk controls beyond target weights: cash reserve, buying power,
-  position size, symbol exposure, order count, per-symbol notional, and
-  portfolio-level exposure.
+- Extend risk controls beyond target validation: buying power, post-order cash,
+  pending broker orders, order count, notional caps, and daily loss limits.
 - Add KIS domestic and overseas pre-submit buying-power/max-quantity validation
   using the exact live order limit price before calling the broker order
   endpoint.

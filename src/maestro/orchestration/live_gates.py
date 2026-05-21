@@ -428,37 +428,6 @@ class LiveExecutionGateService:
         if total_value <= 0:
             issues.append({"reason": "nonpositive_broker_equity_after_orders"})
             return issues
-
-        cash_weight = cash_after_orders / total_value
-        if cash_weight < self.config.risk.min_cash_weight:
-            issues.append(
-                {
-                    "reason": "cash_reserve_breached",
-                    "cash_weight_after_orders": cash_weight,
-                    "min_cash_weight": self.config.risk.min_cash_weight,
-                }
-            )
-        exposure_weight = sum(position_values.values()) / total_value
-        max_exposure_weight = 1.0 - self.config.risk.min_cash_weight
-        if exposure_weight > max_exposure_weight + 1e-9:
-            issues.append(
-                {
-                    "reason": "portfolio_exposure_exceeded",
-                    "exposure_weight_after_orders": exposure_weight,
-                    "max_exposure_weight": max_exposure_weight,
-                }
-            )
-        for symbol, value in sorted(position_values.items()):
-            weight = value / total_value
-            if weight > self.config.risk.max_single_asset_weight + 1e-9:
-                issues.append(
-                    {
-                        "reason": "symbol_exposure_exceeded",
-                        "symbol": symbol,
-                        "weight_after_orders": weight,
-                        "max_single_asset_weight": self.config.risk.max_single_asset_weight,
-                    }
-                )
         return issues
 
     def _daily_loss_risk_issue(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:

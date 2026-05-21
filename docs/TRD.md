@@ -452,9 +452,9 @@ roadmap must close the v0.8.x hardening path:
   snapshots, market session checks, provider retry/rate-limit behavior, and
   broker quote validation.
 - Real risk enforcement now includes an operator-enabled broker snapshot gate for
-  buying power, cash reserve, position exposure, symbol limits, pending orders,
-  fee buffer, settlement/buying-power availability, unreconciled broker
-  activity, and broker PnL based daily loss limits.
+  buying power, post-order cash, pending orders, fee buffer,
+  settlement/buying-power availability, unreconciled broker activity, and broker
+  PnL based daily loss limits.
 - Live order recovery for ambiguous submit results, process crashes, broker
   timeout cases, partial-fill mismatches, and idempotency gaps. Recovery is
   explicit: unresolved submit/lifecycle state records recovery events, blocks
@@ -723,7 +723,6 @@ class RiskDecision(BaseModel):
     original_target: PortfolioTarget
     adjusted_target: PortfolioTarget | None = None
     violations: list[str] = []
-    modifications: list[str] = []
     rationale: str | None = None
 ```
 
@@ -880,10 +879,6 @@ datahub:
 execution:
   proposal_engine: paper
 
-risk:
-  max_single_asset_weight: 0.4
-  min_cash_weight: 0.05
-
 state:
   sqlite_path: var/maestro_state.db
 
@@ -961,17 +956,13 @@ Risk checks:
 - All symbols in allowed universe.
 - All weights >= 0.
 - Total gross exposure <= 1.0.
-- Single symbol weight <= configured cap.
-- Cash weight >= minimum.
 - No short exposure.
 - No leverage.
 
 Risk behavior:
 
 - If an unknown symbol is found, reject.
-- If overweight, cap the symbol and move excess to CASH.
-- If cash below minimum, reduce largest non-cash allocation to satisfy cash minimum.
-- Log all modifications.
+- If gross exposure is below 1.0, leave residual exposure in cash.
 
 ## 12. PaperExecutionEngine v0.1
 
@@ -1045,7 +1036,6 @@ Suggested SQLite tables:
 - cycle_id
 - approved
 - violations_json
-- modifications_json
 - decision_json
 
 Current account, currency-sleeve, and total-portfolio performance read models
@@ -1111,6 +1101,10 @@ integrations/telegram/
 Requirements:
 
 - Whitelist allowed Telegram user IDs.
+- Source shared Telegram chat/user IDs from the Maestro operator environment
+  (`MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS` and
+  `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS`) when a Telegram approval config does
+  not provide explicit overrides.
 - Send order proposal messages.
 - Support approve/reject/detail inline buttons.
 - Expire proposals after timeout.
@@ -1237,7 +1231,7 @@ strategy book views are computed on read from those persisted snapshots/events;
 dedicated persisted performance tables remain pending. The dashboard must not
 call KIS or FX endpoints directly.
 FX conversion is reporting-only and must not feed order generation,
-buying-power checks, reconciliation cash gates, or risk cash checks. Strategy
+buying-power checks, reconciliation cash gates, or broker risk gates. Strategy
 attribution must remain strategy-agnostic: the current dashboard attribution
 uses persisted strategy book snapshots, and future fill/order attribution should
 use persisted lineage where unambiguous plus a documented shared-holding
@@ -1281,7 +1275,7 @@ v0.1 tests:
 - MockDataHub returns DataBundle.
 - Strategy result validation catches invalid allocations.
 - PortfolioManager combines allocations correctly.
-- RiskManager caps overweight positions and rejects unknown symbols.
+- RiskManager rejects invalid targets.
 - PaperExecutionEngine updates state.
 - `run_once()` integration test completes and writes logs.
 

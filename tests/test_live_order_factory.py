@@ -218,7 +218,7 @@ def _config(tmp_path) -> MaestroConfig:
             order_status_max_polls=1,
             order_status_poll_interval_seconds=0.0,
         ),
-        risk=RiskConfig(max_single_asset_weight=0.8, min_cash_weight=0.0),
+        risk=RiskConfig(),
         state=StateConfig(sqlite_path=str(tmp_path / "state.db")),
         audit=AuditConfig(jsonl_path=str(tmp_path / "audit.jsonl")),
         approval=ApprovalConfig(enabled=True, require_approval=True),
