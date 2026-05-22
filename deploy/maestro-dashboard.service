@@ -1,0 +1,21 @@
+[Unit]
+Description=Maestro read-only Dashboard
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --host 127.0.0.1 --port 8503
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

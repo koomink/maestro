@@ -1,4 +1,4 @@
-from maestro.dashboard.app import _asset_summary_metrics, _money, _verdict_reason_rows
+from maestro.dashboard.snapshot import _asset_summary_metrics, _money, _verdict_reason_rows
 
 
 def test_asset_summary_metrics_label_native_and_converted_currencies():
@@ -10,17 +10,17 @@ def test_asset_summary_metrics_label_native_and_converted_currencies():
         fx_snapshot={"status": "fresh"},
     )
 
-    assert [label for label, _, _ in metrics] == [
+    assert [metric["label"] for metric in metrics] == [
         "KRW Assets",
         "USD Assets",
         "Total Assets (KRW)",
         "Total Assets (USD)",
         "FX",
     ]
-    assert metrics[0][1] == "1,000.00 KRW"
-    assert metrics[1][1] == "20.00 USD"
-    assert metrics[2][1] == "30,000.00 KRW"
-    assert metrics[3][1] == "22.00 USD"
+    assert metrics[0]["value"] == "1,000.00 KRW"
+    assert metrics[1]["value"] == "20.00 USD"
+    assert metrics[2]["value"] == "30,000.00 KRW"
+    assert metrics[3]["value"] == "22.00 USD"
     assert _money(1000.0, "UNKNOWN") == "1,000.00"
 
 

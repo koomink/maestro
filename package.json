@@ -1,0 +1,22 @@
+{
+  "name": "maestro-dashboard",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dashboard:build": "vite build",
+    "dashboard:check": "tsc --noEmit",
+    "dashboard:dev": "vite --host 127.0.0.1 --port 5173"
+  },
+  "dependencies": {
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  }
+}

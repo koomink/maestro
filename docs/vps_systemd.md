@@ -99,8 +99,9 @@ MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml maestro telegram-set
 
 ## Example Private Dashboard Service
 
-Run the Streamlit dashboard as a localhost-only service and expose it through
-Tailscale Serve. Do not expose Streamlit directly on the public internet.
+Run the FastAPI/React dashboard as a localhost-only service and expose it
+through Tailscale Serve. Do not expose the dashboard directly on the public
+internet.
 
 ```ini
 [Unit]
@@ -112,7 +113,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/python -m streamlit run src/maestro/dashboard/app.py --server.address 127.0.0.1 --server.port 8503
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --host 127.0.0.1 --port 8503
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

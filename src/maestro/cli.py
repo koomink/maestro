@@ -1,7 +1,5 @@
 import json
 import os
-import subprocess
-import sys
 import time
 from pathlib import Path
 
@@ -930,19 +928,15 @@ def recover_live_order(
 
 
 @app.command("dashboard")
-def dashboard(config: Path | None = CONFIG_OPTION) -> None:
+def dashboard(
+    config: Path | None = CONFIG_OPTION,
+    host: str = typer.Option("127.0.0.1", help="Dashboard bind host."),
+    port: int = typer.Option(8503, help="Dashboard bind port."),
+) -> None:
     resolved_config = _resolve_config(config)
-    command = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        "src/maestro/dashboard/app.py",
-        "--",
-        "--config",
-        str(resolved_config),
-    ]
-    raise typer.Exit(subprocess.call(command))
+    from maestro.dashboard.server import run_dashboard_server
+
+    run_dashboard_server(resolved_config, host=host, port=port)
 
 
 def _safety_service(config: Path | None) -> SafetyControlService:

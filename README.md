@@ -148,7 +148,7 @@ Current runnable modes are:
 
 Current operator architecture is a hybrid operator architecture: one-shot CLI
 jobs such as `run-once`, `kis-sync`, `reconcile`, and `health` coexist with
-long-running operator services such as `telegram-operator` and the Streamlit
+long-running operator services such as `telegram-operator` and the FastAPI/React
 dashboard, all reading the configured SQLite state and JSONL audit paths. It is
 not yet a single always-on Maestro daemon with one in-memory runtime.
 
@@ -258,7 +258,7 @@ and ETFs only.
 Implemented foundations beyond the core v0.1 scope:
 
 - CSVDataProvider for simple historical data loading
-- Optional Streamlit read-only dashboard
+- Optional FastAPI/React read-only dashboard
 - Approval request/decision gate before paper fills
 - Telegram approval message formatter and notifier stub
 - Telegram Bot API polling approval MVP for paper and live approval modes
@@ -992,27 +992,14 @@ uv sync --extra dashboard
 maestro dashboard --config configs/examples/live_readonly_multi_asset_kis.yaml
 ```
 
-The dashboard is read-only. It shows an operator home view, portfolio state,
-broker account exposure, snapshot history, strategy/order/approval tables,
-safety state, health summary, latest reconciliation status, halt/failure events,
-live order status/lifecycle events, fill reconciliation events, and daily live
-order count/notional usage when those events exist. The Home and Operations tabs
-include attention items for halted safety state, degraded health, failed or stale
-reconciliation, stale broker snapshots, daily live-order limit usage, and recent
-live-order lifecycle issues. Tables support local search/status filters and CSV
-download. Strategy rows also expose normalized allocation results and preserved
-source-signal fields when strategy plugins return signal results.
-The Performance tab shows broker-snapshot account value, period return,
-cumulative return, drawdown, and reconciliation labeling from persisted state.
-It also keeps KRW/USD currency-sleeve returns separate, defaults total portfolio
-performance to KRW display, and offers a read-only KRW/USD display-currency
-toggle. Converted total returns are shown only when a fresh persisted
-`fx_rate_snapshot` system event supplies the needed rate; missing or stale FX
-keeps converted return disabled. The Run Detail tab groups persisted strategy,
-risk, approval, order, event, broker snapshot, portfolio snapshot, and strategy
-book rows by `run_id`.
-Refresh and CSV download are local UI actions only; the dashboard does not call
-live KIS endpoints and does not expose state-changing write controls.
+The dashboard is read-only and served by one FastAPI process with a built
+Vite/React frontend. It opens as a compact Command Center with System Verdict
+and Capital Summary, then organizes drill-down views as Overview, Operations,
+Portfolio, Virtuoso, Evidence, and Raw. The backend exposes only read-only JSON
+endpoints over persisted read models; it does not call live KIS endpoints and
+does not expose state-changing write controls. Frontend evidence search/status
+filters, display-currency toggle, theme selection, charts, run drill-down, and
+CSV downloads are browser-local UI actions.
 
 If no CLI entrypoint exists yet during early development, use:
 
@@ -1151,19 +1138,22 @@ what the operator must inspect next.
 
 Target information architecture:
 
-- **Symphony Map**: the landing view. It should render the flow
+- **Command Center**: the always-visible top band. It should show System
+  Verdict, immediate reason, operating posture, access posture, and KRW/USD
+  capital summary before any tables.
+- **Overview**: the system map. It should render the flow
   `Virtuoso proposes -> Maestro validates/protects/executes/records -> Portfolio
   and Broker reconcile -> Operator observes/approves elsewhere`, with live
   status labels from persisted read models.
-- **Operator Cockpit**: safety, health, freshness, reconciliation, daily live
+- **Operations**: safety, health, freshness, reconciliation, daily live
   order usage, live-order lifecycle issues, and attention items.
-- **Investment Console**: total equity, cash/exposure, positions, account
+- **Portfolio**: total equity, cash/exposure, positions, account
   return/drawdown, KRW/USD sleeves, total portfolio return, and strategy
   contribution.
-- **Virtuoso Apps**: configured strategy apps as proposal sources, including
+- **Virtuoso**: configured strategy apps as proposal sources, including
   data needs, latest proposals/signals, validation/risk verdicts, and
   strategy-book returns.
-- **Audit Trail**: run-level drill-down, orders/proposals, approvals, events,
+- **Evidence**: run-level drill-down, orders/proposals, approvals, events,
   reconciliation, lifecycle rows, CSV exports, and raw payloads as evidence.
 
 Product usability rules:
@@ -1178,8 +1168,8 @@ Product usability rules:
   be shown separately from FX-converted total assets, and converted totals must
   display the FX source, rate, timestamp, and freshness status.
 - Summary-first, evidence-second: cards and compact verdict rows should answer
-  the operator's question first; tables remain as drill-down evidence and export
-  surfaces.
+  the operator's question first; tables and JSON should be collapsed drill-down
+  evidence/export surfaces unless they are urgent attention queues.
 
 Dashboard should show:
 
@@ -1204,11 +1194,10 @@ FX source, rate, timestamp, and freshness status for converted views; it should
 not call KIS or FX endpoints during page rendering and should not expose trading
 or admin write controls.
 
-The current Streamlit dashboard is a transitional read-only surface. It should
-be improved first by restructuring the information architecture and read models.
-A future React/Vite dashboard with REST/WebSocket updates should wait until
-Maestro has a daemon/API event model that can support it without weakening the
-current safety boundary.
+The current dashboard is a FastAPI/React read-only surface. A future full
+Maestro daemon/API/WebSocket dashboard should wait until Maestro has a daemon
+event model that can support real-time updates without weakening the current
+safety boundary.
 
 Dashboard should not initially allow:
 

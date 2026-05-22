@@ -236,7 +236,7 @@ database caches, or broker behavior.
 Maestro currently uses a hybrid operator architecture, not a single always-on
 daemon. One-shot CLI jobs (`run-once`, `kis-sync`, `reconcile`, `health`, and
 related recovery commands) coexist with long-running operator services
-(`telegram-operator` and the Streamlit dashboard). These processes coordinate
+(`telegram-operator` and the FastAPI/React dashboard). These processes coordinate
 through the configured SQLite state DB and JSONL audit log.
 
 Every process in one deployment should use the same operator-local config,
@@ -273,8 +273,8 @@ reliably handled by one-shot jobs plus explicit locks.
 
 ### 3.2 Future Integrations
 
-- Streamlit for early read-only dashboard
-- FastAPI for future read-only API
+- FastAPI plus built Vite/React for the read-only dashboard
+- WebSocket/API daemon surface deferred until a Maestro daemon milestone
 - python-telegram-bot or aiogram for Telegram integration
 - Korea Investment Securities Open API via REST and later WebSocket
 - systemd for VPS deployment initially
@@ -1158,33 +1158,35 @@ Dashboard should be read-only by default.
 
 Target dashboard model:
 
-1. **Symphony Map**: the landing view. It should show the ecosystem flow from
+1. **Command Center**: the persistent top band. It should show System Verdict,
+   immediate reason, operating posture, access posture, and KRW/USD Capital
+   Summary before drill-down evidence.
+2. **Overview**: the system map. It should show the ecosystem flow from
    Virtuoso proposals through Maestro validation, risk, approval/execution,
    state recording, broker reconciliation, and operator observation. Each node
    should be backed by persisted read models and should expose a current status
    such as fresh/stale, pass/fail/missing, attention required, or latest run.
-2. **Operator Cockpit**: safety, health, freshness, reconciliation, daily
+3. **Operations**: safety, health, freshness, reconciliation, daily
    live-order usage, live-order lifecycle issues, recent risk/halt/failure
    events, and attention items. This is the place to answer whether the operator
    can trust the next cycle.
-3. **Investment Console**: broker truth beside Maestro state, total equity,
+4. **Portfolio**: broker truth beside Maestro state, total equity,
    cash/exposure, account return/drawdown, KRW/USD sleeve returns, total
    portfolio return, strategy book return, and strategy contribution.
-4. **Virtuoso Apps**: configured strategy apps as proposal sources. Each app
+5. **Virtuoso**: configured strategy apps as proposal sources. Each app
    should show app concept, data needs, latest proposals/signals, validation and
    risk verdicts, and strategy-book performance without embedding
    strategy-specific logic in Maestro.
-5. **Audit Trail**: run-level drill-down, strategy results, orders/proposals,
+6. **Evidence**: run-level drill-down, strategy results, orders/proposals,
    approvals, broker snapshots, fill reconciliation, live-order lifecycle
    events, system events, CSV exports, and raw payload evidence.
 
-The implemented Streamlit tabs are a transitional read-only surface. Continue
-using Streamlit for near-term iteration, but organize it around the target model
-above instead of mirroring storage tables. A future React/Vite dashboard with
-REST/WebSocket updates should be treated as a separate product architecture
-milestone after Maestro has a daemon/API event model. Until then, Streamlit must
-remain read-only and must not become an approval, kill-switch, or configuration
-surface.
+The implemented Dashboard is a FastAPI read-only backend plus a built
+Vite/React frontend served from the same process. It should stay organized
+around the target model above instead of mirroring storage tables. Full daemon
+API/WebSocket updates remain a later product architecture milestone after
+Maestro has a daemon event model. Until then, the Dashboard must remain read-only
+and must not become an approval, kill-switch, or configuration surface.
 
 Product interaction model:
 
@@ -1194,6 +1196,9 @@ Product interaction model:
 - Verdict cards must include reason rows derived from persisted read models:
   attention items, freshness rows, health checks, reconciliation state, live
   order lifecycle issues, and FX freshness.
+- Evidence-heavy tables and JSON payloads should be collapsed by default, with
+  urgent attention queues opened by default. This keeps the Command Center
+  readable while preserving full read-only drill-down and CSV export coverage.
 - Money rendering must be explicit: amount plus currency for native values,
   and converted-total rows must include display currency, component values,
   FX status, FX source, rate, and timestamp when applicable.
