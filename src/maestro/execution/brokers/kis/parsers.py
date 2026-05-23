@@ -44,6 +44,7 @@ def _overseas_position(
         quantity=_first_float(row, "ovrs_cblc_qty", "ord_psbl_qty", "cblc_qty13"),
         average_price=_first_float(row, "pchs_avg_pric", "avg_unpr3"),
         current_price=_overseas_position_current_price(row),
+        currency="USD",
         unrealized_pnl=_optional_first_float(row, "frcr_evlu_pfls_amt", "evlu_pfls_amt2"),
     )
 

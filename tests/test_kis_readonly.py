@@ -326,6 +326,7 @@ def test_kis_rest_client_normalizes_readonly_responses(monkeypatch):
     assert snapshot.cash == 1_000_000
     assert snapshot.buying_power == 750_000
     assert snapshot.positions[0].symbol == "005930"
+    assert snapshot.positions[0].currency == "KRW"
     assert snapshot.positions[0].market_value == 140_000
     assert prices == {"005930": 71000.0, "CASH": 1.0}
     assert fills[0].status == "filled"
@@ -728,6 +729,7 @@ def test_kis_overseas_readonly_client_normalizes_us_account(monkeypatch):
     assert snapshot.cash_balance.withdrawable_cash == 2400.0
     assert snapshot.buying_power == 1500.0
     assert snapshot.positions[0].symbol == "AAPL"
+    assert snapshot.positions[0].currency == "USD"
     assert snapshot.positions[0].quantity == 3.0
     assert snapshot.positions[0].market_value == 570.0
     assert prices == {"AAPL": 191.25, "VOO": 500.5, "CASH_USD": 1.0}

@@ -10,7 +10,6 @@ from maestro.dashboard.read_models import (
     build_health_summary,
     build_orders_table,
     build_overview,
-    build_portfolio_table,
     build_safety_state_card,
     build_strategy_runs_table,
 )
@@ -191,24 +190,33 @@ class TelegramOperatorCommandRouter:
         fingerprint = operator_config.get("fingerprint", "none")
         state_path = Path(self.config.state.sqlite_path).expanduser().resolve()
         audit_path = Path(self.config.audit.jsonl_path).expanduser().resolve()
+        broker_currency = self._broker_currency_breakdowns()
         self._send(
             chat_id,
             "\n".join(
                 [
                     "Maestro status",
-                    f"mode: {self.config.mode.value}",
-                    f"order_posture: {self.config.execution.order_posture}",
-                    f"config: {operator_config.get('path', 'unknown')}",
-                    f"config_fingerprint: {fingerprint[:12] if fingerprint != 'none' else 'none'}",
-                    f"state: {state_path}",
-                    f"audit: {audit_path}",
-                    f"safety: {safety['state']}",
-                    f"broker_total_value: {_money(broker['total_value'])}",
-                    f"broker_cash: {_money(broker['cash'])}",
-                    f"broker_positions: {broker['positions_count']}",
-                    f"broker_snapshot_at: {broker['created_at'] or 'none'}",
-                    f"orders: {overview['orders_count']}",
-                    f"approvals: {overview['approvals_count']}",
+                    "",
+                    "Runtime",
+                    f"- mode: {self.config.mode.value}",
+                    f"- order_posture: {self.config.execution.order_posture}",
+                    f"- safety: {safety['state']}",
+                    "",
+                    "Broker",
+                    f"- total_value: {_money_by_currency(broker_currency['total_value'])}",
+                    f"- cash: {_money_by_currency(broker_currency['cash'])}",
+                    f"- positions: {broker['positions_count']}",
+                    f"- snapshot_at: {broker['created_at'] or 'none'}",
+                    "",
+                    "Activity",
+                    f"- orders: {overview['orders_count']}",
+                    f"- approvals: {overview['approvals_count']}",
+                    "",
+                    "Config",
+                    f"- path: {operator_config.get('path', 'unknown')}",
+                    f"- fingerprint: {fingerprint[:12] if fingerprint != 'none' else 'none'}",
+                    f"- state: {state_path}",
+                    f"- audit: {audit_path}",
                 ]
             ),
         )
@@ -246,6 +254,7 @@ class TelegramOperatorCommandRouter:
                 return
             self._send(chat_id, "Broker account snapshot: none")
             return
+        currency = self._broker_currency_breakdowns()
         lines = []
         if refresh_error is not None:
             lines.extend(
@@ -259,9 +268,9 @@ class TelegramOperatorCommandRouter:
                 "Broker account snapshot",
                 f"created_at: {account['created_at']}",
                 f"account_id: {_mask_identifier(account['account_id'])}",
-                f"total_value: {_money(account['total_value'])}",
-                f"cash: {_money(account['cash'])}",
-                f"positions_market_value: {_money(account['positions_market_value'])}",
+                f"total_value: {_money_by_currency(currency['total_value'])}",
+                f"cash: {_money_by_currency(currency['cash'])}",
+                f"positions_market_value: {_money_by_currency(currency['positions_market_value'])}",
                 f"positions: {account['positions_count']}",
                 f"source: {account['source'] or 'unknown'}",
             ]
@@ -279,7 +288,6 @@ class TelegramOperatorCommandRouter:
             self._refresh_portfolio_from_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError) as exc:
             refresh_error = exc
-        rows = build_portfolio_table(self.store)
         lines = []
         if refresh_error is not None:
             lines.extend(
@@ -289,8 +297,26 @@ class TelegramOperatorCommandRouter:
                 ]
             )
         lines.append("Maestro portfolio")
-        for row in rows[:10]:
-            lines.append(f"{row['symbol']}: {_number(row['quantity'])}")
+        state = self.store.load_latest_portfolio_state()
+        if state.cash_by_currency:
+            lines.append("CASH")
+            for currency, cash in sorted(state.cash_by_currency.items()):
+                lines.append(f"- {currency}: {_number(cash)}")
+        else:
+            lines.append(f"CASH: {_number(state.cash)}")
+        position_prices = self._broker_position_prices()
+        instrument_currencies = self._instrument_currencies()
+        position_labels = self._portfolio_position_labels()
+        for symbol, quantity in sorted(state.positions.items())[:10]:
+            lines.append(
+                _portfolio_position_line(
+                    symbol,
+                    quantity,
+                    position_prices,
+                    instrument_currencies,
+                    position_labels,
+                )
+            )
         self._send(chat_id, "\n".join(lines))
 
     def _apps(self, chat_id: int) -> None:
@@ -332,7 +358,7 @@ class TelegramOperatorCommandRouter:
         for row in rows:
             lines.append(
                 f"{row['approval_id']} status={row['status']} "
-                f"orders={row['order_count']} notional={_money(row['estimated_notional'])}"
+                f"orders={row['order_count']} notional={_approval_notional_label(row)}"
             )
         self._send(chat_id, "\n".join(lines))
 
@@ -375,6 +401,93 @@ class TelegramOperatorCommandRouter:
             universe=self.config.universe,
         )
         self.store.save_portfolio_snapshot(new_run_id(), state)
+
+    def _broker_currency_breakdowns(self) -> dict[str, dict[str, float]]:
+        latest = self.store.load_latest_broker_account_snapshot()
+        if latest is None:
+            return {"cash": {"unknown": 0.0}, "positions_market_value": {}, "total_value": {}}
+        payload = latest.get("payload")
+        account = payload.get("account") if isinstance(payload, Mapping) else None
+        if not isinstance(account, Mapping):
+            return {"cash": {"unknown": 0.0}, "positions_market_value": {}, "total_value": {}}
+        cash = _cash_by_currency(account)
+        positions_market_value = _positions_market_value_by_currency(
+            account,
+            self._instrument_currencies(),
+        )
+        return {
+            "cash": cash,
+            "positions_market_value": positions_market_value,
+            "total_value": _sum_currency_values(cash, positions_market_value),
+        }
+
+    def _instrument_currencies(self) -> dict[str, str]:
+        return {
+            instrument.symbol: _currency_value(instrument.currency)
+            for instrument in self.config.universe.instruments
+        }
+
+    def _broker_position_prices(self) -> dict[str, tuple[float, str]]:
+        latest = self.store.load_latest_broker_account_snapshot()
+        if latest is None:
+            return {}
+        payload = latest.get("payload")
+        if not isinstance(payload, Mapping):
+            return {}
+        account = payload.get("account")
+        prices = {
+            str(symbol): float(price)
+            for symbol, price in _mapping_items(payload.get("current_prices"))
+            if _is_number(price)
+        }
+        currencies: dict[str, str] = {}
+        if isinstance(account, Mapping):
+            positions = account.get("positions")
+            if isinstance(positions, list):
+                for position in positions:
+                    if not isinstance(position, Mapping):
+                        continue
+                    symbol = position.get("symbol")
+                    if not isinstance(symbol, str):
+                        continue
+                    if symbol not in prices and _is_number(position.get("current_price")):
+                        prices[symbol] = float(position["current_price"])
+                    currency = position.get("currency")
+                    if currency:
+                        currencies[symbol] = str(currency)
+        instrument_currencies = self._instrument_currencies()
+        return {
+            symbol: (price, currencies.get(symbol) or instrument_currencies.get(symbol, "unknown"))
+            for symbol, price in prices.items()
+        }
+
+    def _portfolio_position_labels(self) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        for instrument in self.config.universe.instruments:
+            currency = _currency_value(instrument.currency)
+            if currency == "KRW" and instrument.name:
+                labels[instrument.symbol] = f"{instrument.symbol} {instrument.name}"
+        latest = self.store.load_latest_broker_account_snapshot()
+        if latest is None:
+            return labels
+        payload = latest.get("payload")
+        if not isinstance(payload, Mapping):
+            return labels
+        account = payload.get("account")
+        if not isinstance(account, Mapping):
+            return labels
+        positions = account.get("positions")
+        if not isinstance(positions, list):
+            return labels
+        for position in positions:
+            if not isinstance(position, Mapping):
+                continue
+            symbol = position.get("symbol")
+            name = position.get("name")
+            currency = _position_currency(position, self._instrument_currencies())
+            if isinstance(symbol, str) and isinstance(name, str) and name and currency == "KRW":
+                labels[symbol] = f"{symbol} {name}"
+        return labels
 
     def _chat_allowed(self, chat_id: int) -> bool:
         return chat_id in set(self.config.approval.telegram_allowed_chat_ids)
@@ -495,11 +608,146 @@ def _money(value: object) -> str:
         return "unknown"
 
 
+def _money_by_currency(values: Mapping[str, float]) -> str:
+    if not values:
+        return "unknown"
+    return ", ".join(f"{value:,.2f} {currency}" for currency, value in sorted(values.items()))
+
+
 def _number(value: object) -> str:
     try:
         return f"{float(value):,.4f}".rstrip("0").rstrip(".")
     except (TypeError, ValueError):
         return "unknown"
+
+
+def _cash_by_currency(account: Mapping[str, Any]) -> dict[str, float]:
+    cash_by_currency = account.get("cash_by_currency")
+    if isinstance(cash_by_currency, Mapping) and cash_by_currency:
+        return {
+            str(currency): float(value)
+            for currency, value in cash_by_currency.items()
+            if _is_number(value)
+        }
+    cash = account.get("cash")
+    if not _is_number(cash):
+        return {}
+    cash_balance = account.get("cash_balance")
+    currency = "unknown"
+    if isinstance(cash_balance, Mapping):
+        currency = str(cash_balance.get("currency") or currency)
+    return {currency: float(cash)}
+
+
+def _positions_market_value_by_currency(
+    account: Mapping[str, Any],
+    instrument_currencies: Mapping[str, str],
+) -> dict[str, float]:
+    positions = account.get("positions")
+    if not isinstance(positions, list):
+        return {}
+    values: dict[str, float] = {}
+    for position in positions:
+        if not isinstance(position, Mapping):
+            continue
+        value = _position_market_value(position)
+        if value is None:
+            continue
+        currency = _position_currency(position, instrument_currencies)
+        values[currency] = values.get(currency, 0.0) + value
+    return values
+
+
+def _position_market_value(position: Mapping[str, Any]) -> float | None:
+    market_value = position.get("market_value")
+    if _is_number(market_value):
+        return float(market_value)
+    quantity = position.get("quantity")
+    current_price = position.get("current_price")
+    if not _is_number(quantity) or not _is_number(current_price):
+        return None
+    return float(quantity) * float(current_price)
+
+
+def _position_currency(
+    position: Mapping[str, Any],
+    instrument_currencies: Mapping[str, str],
+) -> str:
+    currency = position.get("currency")
+    if currency:
+        return str(currency)
+    symbol = position.get("symbol")
+    if isinstance(symbol, str) and symbol in instrument_currencies:
+        return instrument_currencies[symbol]
+    return "unknown"
+
+
+def _sum_currency_values(
+    left: Mapping[str, float],
+    right: Mapping[str, float],
+) -> dict[str, float]:
+    values = dict(left)
+    for currency, value in right.items():
+        values[currency] = values.get(currency, 0.0) + value
+    return values
+
+
+def _approval_notional_label(row: Mapping[str, Any]) -> str:
+    payload = row.get("payload")
+    request = payload.get("request") if isinstance(payload, Mapping) else None
+    orders = request.get("proposed_orders") if isinstance(request, Mapping) else None
+    totals: dict[str, float] = {}
+    if isinstance(orders, list):
+        for order in orders:
+            if not isinstance(order, Mapping):
+                continue
+            notional = order.get("notional")
+            currency = order.get("currency")
+            if not _is_number(notional) or not currency:
+                continue
+            totals[str(currency)] = totals.get(str(currency), 0.0) + float(notional)
+    if totals:
+        return _money_by_currency(totals)
+    return _money(row.get("estimated_notional"))
+
+
+def _portfolio_position_line(
+    symbol: str,
+    quantity: float,
+    position_prices: Mapping[str, tuple[float, str]],
+    instrument_currencies: Mapping[str, str],
+    position_labels: Mapping[str, str],
+) -> str:
+    label = position_labels.get(symbol, symbol)
+    price = position_prices.get(symbol)
+    if price is None:
+        return f"{label}: {_number(quantity)}"
+    current_price, currency = price
+    if currency == "unknown" and symbol in instrument_currencies:
+        currency = instrument_currencies[symbol]
+    market_value = quantity * current_price
+    return (
+        f"{label}: {_number(quantity)} @ {_number(current_price)} {currency} "
+        f"= {_number(market_value)} {currency}"
+    )
+
+
+def _mapping_items(value: object):
+    if not isinstance(value, Mapping):
+        return []
+    return value.items()
+
+
+def _currency_value(currency: object) -> str:
+    return str(getattr(currency, "value", currency))
+
+
+def _is_number(value: object) -> bool:
+    try:
+        float(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def telegram_bot_commands() -> list[dict[str, str]]:

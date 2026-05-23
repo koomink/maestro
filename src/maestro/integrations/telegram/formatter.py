@@ -8,7 +8,7 @@ def format_approval_request(request: ApprovalRequest) -> str:
         f"📁 Profile: {request.profile_name}" if request.profile_name else None,
         f"🧠 Strategy: {_strategy_label(request.source_strategy_ids)}",
         f"📦 Orders: {request.order_count}",
-        f"💰 Total: {_money(request.estimated_notional, None)}",
+        f"💰 Total: {_approval_total_label(request)}",
         f"⏳ Expires: {request.expires_at.isoformat()}",
         f"🆔 Approval: {request.approval_id}",
     ]
@@ -80,6 +80,19 @@ def _format_order(index: int, order: dict) -> list[str]:
 
 def _strategy_label(strategy_ids: list[str]) -> str:
     return ", ".join(strategy_ids) if strategy_ids else "unknown"
+
+
+def _approval_total_label(request: ApprovalRequest) -> str:
+    totals: dict[str, float] = {}
+    for order in request.proposed_orders:
+        notional = _optional_float(order.get("notional"))
+        currency = _optional_str(order.get("currency"))
+        if notional is None or currency is None:
+            continue
+        totals[currency] = totals.get(currency, 0.0) + notional
+    if not totals:
+        return _money(request.estimated_notional, None)
+    return ", ".join(_money(value, currency) for currency, value in sorted(totals.items()))
 
 
 def _market_label(exchange_code: str | None, broker_product: str | None) -> str:

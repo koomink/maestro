@@ -76,18 +76,57 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
     assert "Maestro status" in sent_text
     assert "maestro_cash:" not in sent_text
     assert "maestro_positions:" not in sent_text
-    assert "broker_total_value: 1,000.00" in sent_text
-    assert "broker_cash: 950.00" in sent_text
-    assert "broker_positions: 1" in sent_text
+    assert (
+        "Broker\n- total_value: 1,000.00 unknown\n- cash: 950.00 unknown\n- positions: 1"
+        in sent_text
+    )
     assert "\ncash:" not in sent_text
-    assert f"state: {Path(config.state.sqlite_path).resolve()}" in sent_text
-    assert f"audit: {Path(config.audit.jsonl_path).resolve()}" in sent_text
+    assert f"- state: {Path(config.state.sqlite_path).resolve()}" in sent_text
+    assert f"- audit: {Path(config.audit.jsonl_path).resolve()}" in sent_text
     assert "Maestro health" in sent_text
     assert "Maestro portfolio" in sent_text
     assert "Maestro apps" in sent_text
     assert "Recent orders" in sent_text
     assert "Recent approvals" in sent_text
     assert len(store.list_system_events_by_type("telegram_command", limit=20)) == 7
+
+
+def test_telegram_operator_status_groups_fields_for_readability(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "12345678-01",
+        {
+            "account": {
+                "account_id": "12345678-01",
+                "cash": 950.0,
+                "positions": [{"symbol": "AAPL", "quantity": 1, "current_price": 50.0}],
+                "source": "fixture",
+            }
+        },
+    )
+
+    assert router.process_update(message_update("/status"))
+
+    text = client.sent_messages[-1]["text"]
+    assert text.startswith("Maestro status\n\nRuntime\n")
+    assert (
+        "\nBroker\n- total_value: 1,000.00 unknown\n- cash: 950.00 unknown\n- positions: 1\n"
+        in text
+    )
+    assert "\nActivity\n- orders: 0\n- approvals: 0\n" in text
+    assert "\nConfig\n- path:" in text
+    assert "broker_total_value:" not in text
+    assert "broker_cash:" not in text
 
 
 def test_telegram_operator_account_masks_account_id(tmp_path):
@@ -120,11 +159,59 @@ def test_telegram_operator_account_masks_account_id(tmp_path):
     text = client.sent_messages[-1]["text"]
     assert "Broker account snapshot" in text
     assert "12345678-01" not in text
-    assert "total_value: 1,050.00" in text
-    assert "positions_market_value: 50.00" in text
+    assert "total_value: 1,050.00 unknown" in text
+    assert "positions_market_value: 50.00 unknown" in text
     assert "orderable_cash:" not in text
     assert "buying_power:" not in text
     assert "positions: 1" in text
+
+
+def test_telegram_operator_account_displays_currency_breakdowns(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "12345678-01",
+        {
+            "account": {
+                "account_id": "12345678-01",
+                "cash": 1020.0,
+                "cash_by_currency": {"KRW": 1000.0, "USD": 20.0},
+                "buying_power": 900.0,
+                "positions": [
+                    {
+                        "symbol": "AAPL",
+                        "quantity": 1,
+                        "current_price": 50.0,
+                        "currency": "USD",
+                    },
+                    {
+                        "symbol": "005930",
+                        "quantity": 1,
+                        "current_price": 1000.0,
+                        "currency": "KRW",
+                    },
+                ],
+                "source": "fixture",
+            }
+        },
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "total_value: 2,000.00 KRW, 70.00 USD" in text
+    assert "cash: 1,000.00 KRW, 20.00 USD" in text
+    assert "positions_market_value: 1,000.00 KRW, 50.00 USD" in text
+    assert "1,070.00" not in text
 
 
 def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp_path):
@@ -156,9 +243,9 @@ def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp
 
     assert client.sent_messages[-2]["text"] == "Broker account snapshot: refreshing"
     text = client.sent_messages[-1]["text"]
-    assert "total_value: 10,000,000.00" in text
-    assert "cash: 5,000,000.00" in text
-    assert "positions_market_value: 5,000,000.00" in text
+    assert "total_value: 10,000,000.00 KRW" in text
+    assert "cash: 5,000,000.00 KRW" in text
+    assert "positions_market_value: 5,000,000.00 KRW" in text
     assert "orderable_cash:" not in text
     assert "source: kis_mock" in text
     assert "12,345,678.00" not in text
@@ -209,7 +296,7 @@ def test_telegram_operator_account_shows_latest_snapshot_when_refresh_fails(
     text = client.sent_messages[-1]["text"]
     assert "Broker account snapshot refresh failed: KIS request failed with HTTP 500" in text
     assert "Showing latest stored broker snapshot." in text
-    assert "total_value: 12,345,678.00" in text
+    assert "total_value: 12,345,678.00 unknown" in text
     assert "source: stored_fixture" in text
 
 
@@ -235,13 +322,107 @@ def test_telegram_operator_portfolio_refreshes_from_broker_snapshot_before_respo
         "Maestro portfolio: refreshing from broker snapshot"
     )
     text = client.sent_messages[-1]["text"]
-    assert "CASH: 5,000,000" in text
-    assert "MOCK_ETF_A: 30,000" in text
-    assert "MOCK_ETF_B: 40,000" in text
+    assert "CASH" in text
+    assert "- KRW: 5,000,000" in text
+    assert "MOCK_ETF_A: 30,000 @ 100 KRW = 3,000,000 KRW" in text
+    assert "MOCK_ETF_B: 40,000 @ 50 KRW = 2,000,000 KRW" in text
     assert "12,345,678" not in text
     state = store.load_latest_portfolio_state()
     assert state.cash == 5_000_000.0
     assert state.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
+
+
+def test_telegram_operator_portfolio_displays_cash_by_currency(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_portfolio_snapshot(
+        "run_multi_currency",
+        PortfolioState(
+            cash=1020.0,
+            cash_by_currency={"KRW": 1000.0, "USD": 20.0},
+            positions={"005930": 1.0, "AAPL": 2.0},
+        ),
+    )
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "12345678-01",
+        {
+            "account": {
+                "account_id": "12345678-01",
+                "cash": 1020.0,
+                "cash_by_currency": {"KRW": 1000.0, "USD": 20.0},
+                "positions": [
+                    {
+                        "symbol": "005930",
+                        "name": "삼성전자",
+                        "quantity": 1,
+                        "current_price": 1000.0,
+                        "currency": "KRW",
+                    },
+                    {
+                        "symbol": "AAPL",
+                        "name": "Apple Inc.",
+                        "quantity": 2,
+                        "current_price": 50.0,
+                        "currency": "USD",
+                    },
+                ],
+            },
+            "current_prices": {"005930": 1000.0, "AAPL": 50.0},
+        },
+    )
+
+    assert router.process_update(message_update("/portfolio"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "CASH" in text
+    assert "- KRW: 1,000" in text
+    assert "- USD: 20" in text
+    assert "005930 삼성전자: 1 @ 1,000 KRW = 1,000 KRW" in text
+    assert "AAPL: 2 @ 50 USD = 100 USD" in text
+    assert "AAPL Apple Inc." not in text
+
+
+def test_telegram_operator_approvals_displays_notional_currency_breakdown(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_approval(
+        "run_approval",
+        "appr_1",
+        {
+            "request": {
+                "order_count": 2,
+                "estimated_notional": 1900180.5,
+                "proposed_orders": [
+                    {"symbol": "133690", "notional": 1_900_000.0, "currency": "KRW"},
+                    {"symbol": "QLD", "notional": 180.5, "currency": "USD"},
+                ],
+            },
+            "decision": {"status": "approved", "decided_by": "telegram:operator"},
+        },
+    )
+
+    assert router.process_update(message_update("/approvals"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "notional=1,900,000.00 KRW, 180.50 USD" in text
+    assert "1,900,180.50" not in text
 
 
 def test_telegram_operator_enforces_chat_and_user_whitelist(tmp_path):

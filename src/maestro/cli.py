@@ -110,12 +110,71 @@ def _profile_datahub_providers(maestro_config: MaestroConfig) -> str:
 @app.command("run-once")
 def run_once(config: Path | None = CONFIG_OPTION) -> None:
     maestro_config, identity = _load_operator_config(config)
-    summary = MaestroOrchestrator(maestro_config, config_identity=identity).run_once()
+    try:
+        summary = MaestroOrchestrator(maestro_config, config_identity=identity).run_once()
+    except Exception as exc:
+        _send_run_once_failure_notification(maestro_config, exc)
+        raise
     typer.echo(
         f"run_id={summary.run_id} strategies={summary.loaded_strategies} "
         f"orders={summary.orders_created} total_value={summary.total_value:.2f} "
         f"cash={summary.cash:.2f}"
     )
+    _send_run_once_success_notification(maestro_config, summary)
+
+
+def _send_run_once_success_notification(maestro_config: MaestroConfig, summary) -> None:
+    strategies = ", ".join(summary.loaded_strategies) if summary.loaded_strategies else "none"
+    base_currency = maestro_config.portfolio.base_currency
+    message = "\n".join(
+        [
+            "Maestro run-once completed",
+            f"run_id: {summary.run_id}",
+            f"mode: {maestro_config.mode.value}",
+            f"strategies: {strategies}",
+            f"orders: {summary.orders_created}",
+            f"total_value: {summary.total_value:,.2f} {base_currency}",
+            f"cash: {summary.cash:,.2f} {base_currency}",
+        ]
+    )
+    _send_run_once_telegram_notification(maestro_config, message)
+
+
+def _send_run_once_failure_notification(maestro_config: MaestroConfig, exc: Exception) -> None:
+    message = "\n".join(
+        [
+            "Maestro run-once failed",
+            f"mode: {maestro_config.mode.value}",
+            f"error_type: {type(exc).__name__}",
+            f"error: {exc}",
+        ]
+    )
+    _send_run_once_telegram_notification(maestro_config, message)
+
+
+def _send_run_once_telegram_notification(
+    maestro_config: MaestroConfig,
+    message: str,
+) -> None:
+    if maestro_config.approval.provider != "telegram":
+        return
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return
+    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_notification=warn message=missing_bot_token")
+        return
+    try:
+        client = TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        for chat_id in chat_ids:
+            client.send_message(chat_id, message)
+    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+        typer.echo(f"telegram_notification=warn message={exc}")
+        return
+    typer.echo(f"telegram_notification=sent chats={len(chat_ids)}")
 
 
 @app.command("status")

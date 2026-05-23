@@ -142,6 +142,7 @@ class KISRestDomesticStockReadOnlyClient(KISReadOnlyClient):
                 quantity=_first_float(row, "hldg_qty", "ord_psbl_qty"),
                 average_price=_first_float(row, "pchs_avg_pric", "avg_unpr"),
                 current_price=_position_current_price(row),
+                currency="KRW",
                 unrealized_pnl=_optional_first_float(row, "evlu_pfls_amt", "evlu_pfls_rt"),
             )
             for row in position_rows

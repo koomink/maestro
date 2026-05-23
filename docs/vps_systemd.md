@@ -169,6 +169,13 @@ For the current polling-based Telegram approval flow, stop
 process consumes Telegram `getUpdates` for the shared bot token. The service
 below restarts the Telegram operator when `run-once` exits.
 
+When the shared operator config uses `approval.provider: telegram`, has
+`telegram_allowed_chat_ids`, and the configured bot token environment variable
+is present, `maestro run-once` sends a Telegram completion or failure
+notification to those chats. Notification delivery failures are logged as a
+warning and do not turn a successful `run-once` into a failed one; execution
+failures still fail the service after the failure notification is attempted.
+
 ```ini
 [Unit]
 Description=Maestro scheduled run-once

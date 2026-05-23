@@ -15,6 +15,7 @@ class KISPosition(BaseModel):
     quantity: float
     average_price: float
     current_price: float
+    currency: str | None = None
     name: str | None = None
     unrealized_pnl: float | None = None
 

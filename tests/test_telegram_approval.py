@@ -241,6 +241,7 @@ def test_telegram_approval_message_shows_order_details_and_strategy_source():
     message = format_approval_request(request)
 
     assert "🧠 Strategy: sample_static_allocation" in message
+    assert "💰 Total: 1,900,000.00 KRW, 180.50 USD" in message
     assert "1. 🟢 BUY · 🇰🇷 국내 KRX" in message
     assert "종목: 133690 TIGER 미국나스닥100" in message
     assert "코드: 133690" in message

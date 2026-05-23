@@ -40,12 +40,14 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
                 quantity=30000.0,
                 average_price=100.0,
                 current_price=self.prices["MOCK_ETF_A"],
+                currency="KRW",
             ),
             KISPosition(
                 symbol="MOCK_ETF_B",
                 quantity=40000.0,
                 average_price=50.0,
                 current_price=self.prices["MOCK_ETF_B"],
+                currency="KRW",
             ),
         ]
 
