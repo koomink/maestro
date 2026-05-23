@@ -222,6 +222,18 @@ def build_dashboard_snapshot(
             "total_portfolio_performance": total_portfolio_performance,
             "total_portfolio_performance_krw": total_portfolio_performance_krw,
             "total_portfolio_performance_usd": total_portfolio_performance_usd,
+            "performance_snapshot": _performance_snapshot(
+                selected_currency,
+                account_performance,
+                account_performance_currency,
+                currency_sleeve_performance,
+                total_portfolio_performance,
+                total_portfolio_performance_krw,
+                total_portfolio_performance_usd,
+                strategy_book_performance,
+                strategy_attribution,
+                fx_snapshot,
+            ),
             "fx_snapshot": fx_snapshot,
             "asset_summary_metrics": asset_summary_metrics,
             "asset_summary_rows": asset_summary_rows,
@@ -480,6 +492,110 @@ def _investment_metrics(
             _status_tone(latest_performance.get("reconciliation_status")),
         ),
     ]
+
+
+def _performance_snapshot(
+    display_currency: str,
+    account_performance: list[dict[str, Any]],
+    account_performance_currency: str | None,
+    currency_sleeve_performance: list[dict[str, Any]],
+    total_portfolio_performance: list[dict[str, Any]],
+    total_portfolio_performance_krw: list[dict[str, Any]],
+    total_portfolio_performance_usd: list[dict[str, Any]],
+    strategy_book_performance: list[dict[str, Any]],
+    strategy_attribution: list[dict[str, Any]],
+    fx_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    latest_total = total_portfolio_performance[0] if total_portfolio_performance else {}
+    latest_account = account_performance[0] if account_performance else {}
+    quality = _performance_quality(latest_total, account_performance, total_portfolio_performance)
+    return {
+        "schema_version": 1,
+        "display_currency": display_currency,
+        "latest": {
+            "created_at": latest_total.get("created_at") or latest_account.get("created_at"),
+            "run_id": latest_total.get("run_id") or latest_account.get("run_id"),
+            "display_currency": display_currency,
+            "currency": latest_total.get("currency"),
+            "total_value": latest_total.get("total_value"),
+            "period_return": latest_total.get("period_return"),
+            "daily_return": latest_total.get("daily_return"),
+            "cumulative_return": latest_total.get("cumulative_return"),
+            "drawdown": latest_total.get("drawdown"),
+            "local_return": latest_total.get("local_return"),
+            "fx_effect": latest_total.get("fx_effect"),
+            "fx_status": latest_total.get("fx_status"),
+            "reconciliation_status": latest_total.get("reconciliation_status")
+            or latest_account.get("reconciliation_status"),
+            "account_value": latest_account.get("total_value"),
+            "account_currency": account_performance_currency or latest_account.get("currency"),
+        },
+        "series": {
+            "account": account_performance,
+            "currency_sleeves": currency_sleeve_performance,
+            "total_portfolio": total_portfolio_performance,
+            "total_portfolio_krw": total_portfolio_performance_krw,
+            "total_portfolio_usd": total_portfolio_performance_usd,
+            "strategy_books": strategy_book_performance,
+            "strategy_attribution": strategy_attribution,
+        },
+        "quality": quality,
+        "fx": {
+            "status": fx_snapshot.get("status"),
+            "source": fx_snapshot.get("source"),
+            "rate": fx_snapshot.get("rate"),
+            "as_of": fx_snapshot.get("as_of"),
+            "age_seconds": fx_snapshot.get("age_seconds"),
+        },
+        "lineage": {
+            "source_tables": [
+                "broker_account_snapshots",
+                "system_events",
+                "strategy_book_snapshots",
+                "strategy_runs",
+            ],
+            "return_method": "time_series_return_with_cash_flow_adjustment",
+            "fx_policy": "converted_totals_require_fresh_persisted_fx",
+        },
+    }
+
+
+def _performance_quality(
+    latest_total: dict[str, Any],
+    account_performance: list[dict[str, Any]],
+    total_portfolio_performance: list[dict[str, Any]],
+) -> dict[str, Any]:
+    reasons = []
+    if not account_performance and not total_portfolio_performance:
+        reasons.append(
+            {
+                "code": "missing_performance_history",
+                "message": "No broker account snapshots are available for performance history.",
+            }
+        )
+    if latest_total.get("missing_fx"):
+        reasons.append(
+            {
+                "code": "missing_fx",
+                "message": (
+                    "Converted total portfolio values are unavailable because FX is missing."
+                ),
+            }
+        )
+    if latest_total.get("stale_fx"):
+        reasons.append(
+            {
+                "code": "stale_fx",
+                "message": "Converted total portfolio values are unavailable because FX is stale.",
+            }
+        )
+    if not reasons:
+        status = "ok"
+    elif reasons[0]["code"] == "missing_performance_history":
+        status = "missing"
+    else:
+        status = "warning"
+    return {"status": status, "reasons": reasons}
 
 
 def _virtuoso_apps(

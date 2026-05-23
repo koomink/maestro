@@ -9,6 +9,7 @@ from maestro.state.store import StateStore
 
 CONFIG_ENV_VAR = "MAESTRO_CONFIG"
 WEB_DIR = Path(__file__).with_name("web")
+CONFIG_STATE_MISMATCH_PREFIX = "State DB config identity mismatch"
 
 
 def create_app(config_path: str | Path, web_dir: str | Path | None = None):
@@ -28,21 +29,55 @@ def create_app(config_path: str | Path, web_dir: str | Path | None = None):
     if (static_root / "assets").exists():
         app.mount("/assets", StaticFiles(directory=static_root / "assets"), name="assets")
 
+    def config_state_mismatch_error(
+        exc: ValueError,
+        *,
+        config_identity_path: str | None = None,
+        state_path: str | None = None,
+    ) -> HTTPException:
+        if not str(exc).startswith(CONFIG_STATE_MISMATCH_PREFIX):
+            raise exc
+        if config_identity_path is None or state_path is None:
+            config, identity = load_config_with_identity(resolved_config)
+            config_identity_path = str(identity.path)
+            state_path = str(Path(config.state.sqlite_path).expanduser().resolve())
+        return HTTPException(
+            status_code=409,
+            detail={
+                "status": "config_state_mismatch",
+                "read_only": True,
+                "message": (
+                    "Dashboard config does not match the existing state DB. "
+                    "Use the matching operator config or point the dashboard at a fresh state DB."
+                ),
+                "config_path": config_identity_path,
+                "state_path": state_path,
+            },
+        )
+
     @app.get("/api/health")
     def health() -> dict[str, object]:
         config, identity = load_config_with_identity(resolved_config)
-        store = StateStore(
-            config.state.sqlite_path,
-            config.portfolio.initial_cash,
-            config.portfolio.cash_by_currency,
-            config_identity=identity,
-        )
+        state_path = str(Path(config.state.sqlite_path).expanduser().resolve())
+        try:
+            store = StateStore(
+                config.state.sqlite_path,
+                config.portfolio.initial_cash,
+                config.portfolio.cash_by_currency,
+                config_identity=identity,
+            )
+        except ValueError as exc:
+            raise config_state_mismatch_error(
+                exc,
+                config_identity_path=str(identity.path),
+                state_path=state_path,
+            ) from exc
         status = store.status()
         return {
             "status": "ok",
             "read_only": True,
             "config_path": str(identity.path),
-            "state_path": str(Path(config.state.sqlite_path).expanduser().resolve()),
+            "state_path": state_path,
             "audit_path": str(Path(config.audit.jsonl_path).expanduser().resolve()),
             "counts": status.get("counts", {}),
         }
@@ -51,11 +86,17 @@ def create_app(config_path: str | Path, web_dir: str | Path | None = None):
     def snapshot(
         display_currency: Annotated[str, Query(pattern="^(KRW|USD|krw|usd)$")] = "KRW",
     ) -> dict[str, object]:
-        return build_dashboard_snapshot(resolved_config, display_currency=display_currency)
+        try:
+            return build_dashboard_snapshot(resolved_config, display_currency=display_currency)
+        except ValueError as exc:
+            raise config_state_mismatch_error(exc) from exc
 
     @app.get("/api/dashboard/runs/{run_id}")
     def run_detail(run_id: str) -> dict[str, object]:
-        detail = build_dashboard_run_detail(resolved_config, run_id)
+        try:
+            detail = build_dashboard_run_detail(resolved_config, run_id)
+        except ValueError as exc:
+            raise config_state_mismatch_error(exc) from exc
         summary = detail.get("summary", {})
         if isinstance(summary, dict) and not any(summary.values()):
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")

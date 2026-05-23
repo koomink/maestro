@@ -10,6 +10,10 @@ from maestro.core.time_display import (
     operator_timezone,
 )
 from maestro.monitoring.health import HealthService
+from maestro.state.events import (
+    missing_system_event_required_fields,
+    required_system_event_fields,
+)
 from maestro.state.store import StateStore
 
 
@@ -741,10 +745,16 @@ def build_strategy_attribution_table(
     signals_by_run = {
         str(row.get("run_id")): row for row in build_strategy_runs_table(store, limit=limit)
     }
+    orders_by_run = _rows_by_run(build_orders_table(store, limit=limit))
+    fills_by_run = _fill_lineage_by_run(store, limit=limit)
     rows = []
     for row in build_strategy_book_performance_table(store, limit=limit):
-        signal = signals_by_run.get(str(row.get("run_id"))) or {}
+        run_id = str(row.get("run_id"))
+        signal = signals_by_run.get(run_id) or {}
         allocations = _mapping(row.get("allocations"))
+        orders = _strategy_lineage_orders(orders_by_run.get(run_id, []), allocations)
+        fills = _strategy_lineage_fills(fills_by_run.get(run_id, []), orders, allocations)
+        allocation_symbols = sorted(str(symbol) for symbol in allocations)
         rows.append(
             {
                 "created_at": row.get("created_at"),
@@ -756,13 +766,141 @@ def build_strategy_attribution_table(
                 "cumulative_return": row.get("cumulative_return"),
                 "drawdown": row.get("drawdown"),
                 "allocation_count": len(allocations),
+                "order_count": len(orders),
+                "fill_count": len(fills),
                 "signal_action": signal.get("signal_action"),
                 "signal_symbol": signal.get("signal_symbol"),
                 "confidence": signal.get("confidence"),
                 "attribution_source": "strategy_book_snapshot",
+                "lineage": {
+                    "status": _strategy_lineage_status(signal, orders, fills),
+                    "strategy_run": _strategy_run_lineage(signal),
+                    "allocation_symbols": allocation_symbols,
+                    "orders": orders,
+                    "fills": fills,
+                    "source_tables": [
+                        "strategy_book_snapshots",
+                        "strategy_runs",
+                        "orders",
+                        "system_events.fill_reconciliation",
+                    ],
+                    "attribution_rule": (
+                        "strategy_book_snapshot_first; same-run orders and fills "
+                        "linked by symbol or broker order id"
+                    ),
+                },
             }
         )
     return rows
+
+
+def _rows_by_run(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        run_id = row.get("run_id")
+        if run_id is not None:
+            grouped.setdefault(str(run_id), []).append(row)
+    return grouped
+
+
+def _fill_lineage_by_run(store: StateStore, limit: int) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in store.list_system_events_by_type("fill_reconciliation", limit=limit):
+        payload = _mapping(row.get("payload"))
+        fills = payload.get("applied_fills", [])
+        if not isinstance(fills, list):
+            continue
+        run_id = row.get("run_id")
+        if run_id is None:
+            continue
+        grouped.setdefault(str(run_id), []).extend(
+            _fill_lineage_item(fill) for fill in fills if isinstance(fill, dict)
+        )
+    return grouped
+
+
+def _strategy_lineage_orders(
+    orders: list[dict[str, Any]],
+    allocations: dict[str, Any],
+) -> list[dict[str, Any]]:
+    allocation_symbols = {str(symbol) for symbol in allocations}
+    output = []
+    for order in orders:
+        payload = _mapping(order.get("payload"))
+        symbol = order.get("symbol") or payload.get("symbol")
+        if allocation_symbols and str(symbol) not in allocation_symbols:
+            continue
+        output.append(
+            {
+                "created_at": order.get("created_at"),
+                "run_id": order.get("run_id"),
+                "order_id": order.get("order_id") or payload.get("order_id"),
+                "broker_order_id": payload.get("broker_order_id"),
+                "symbol": symbol,
+                "side": order.get("side") or payload.get("side"),
+                "notional": order.get("notional") or payload.get("notional"),
+            }
+        )
+    return output
+
+
+def _strategy_lineage_fills(
+    fills: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    allocations: dict[str, Any],
+) -> list[dict[str, Any]]:
+    broker_order_ids = {
+        str(order["broker_order_id"]) for order in orders if order.get("broker_order_id")
+    }
+    allocation_symbols = {str(symbol) for symbol in allocations}
+    output = []
+    for fill in fills:
+        broker_order_id = fill.get("broker_order_id")
+        symbol = fill.get("symbol")
+        if broker_order_ids and str(broker_order_id) not in broker_order_ids:
+            continue
+        if not broker_order_ids and allocation_symbols and str(symbol) not in allocation_symbols:
+            continue
+        output.append(fill)
+    return output
+
+
+def _fill_lineage_item(fill: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "broker_order_id": fill.get("broker_order_id"),
+        "symbol": fill.get("symbol"),
+        "side": fill.get("side"),
+        "quantity": fill.get("quantity"),
+        "notional": fill.get("notional"),
+        "price": fill.get("price"),
+        "filled_at": fill.get("filled_at"),
+    }
+
+
+def _strategy_run_lineage(signal: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "created_at": signal.get("created_at"),
+        "run_id": signal.get("run_id"),
+        "strategy_id": signal.get("strategy_id"),
+        "signal_action": signal.get("signal_action"),
+        "signal_symbol": signal.get("signal_symbol"),
+        "confidence": signal.get("confidence"),
+        "validation_ok": signal.get("validation_ok"),
+    }
+
+
+def _strategy_lineage_status(
+    signal: dict[str, Any],
+    orders: list[dict[str, Any]],
+    fills: list[dict[str, Any]],
+) -> str:
+    if fills:
+        return "filled"
+    if orders:
+        return "ordered"
+    if signal:
+        return "proposed"
+    return "book_only"
 
 
 def build_run_index_table(store: StateStore, limit: int = 50) -> list[dict[str, Any]]:
@@ -1102,17 +1240,31 @@ def build_system_events_table(store: StateStore, limit: int = 20) -> list[dict[s
     rows = []
     for row in store.list_system_events(limit=limit):
         payload = row.get("payload", {})
+        event_type = row.get("event_type")
+        required_fields = list(required_system_event_fields(str(event_type)))
+        missing_fields = missing_system_event_required_fields(str(event_type), payload)
         rows.append(
             {
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
-                "event_type": row.get("event_type"),
+                "event_type": event_type,
+                "schema_status": _event_schema_status(required_fields, missing_fields),
+                "required_fields": required_fields,
+                "missing_required_fields": missing_fields,
                 "error_type": payload.get("error_type"),
                 "error_message": payload.get("error_message") or payload.get("error"),
                 "payload": payload,
             }
         )
     return rows
+
+
+def _event_schema_status(required_fields: list[str], missing_fields: list[str]) -> str:
+    if not required_fields:
+        return "untracked"
+    if missing_fields:
+        return "missing_required_fields"
+    return "ok"
 
 
 def _operator_attention_items(
@@ -1315,37 +1467,52 @@ def _freshness_row(
     timezone: str = "UTC",
     failed: bool = False,
 ) -> dict[str, Any]:
+    policy = {
+        "max_age_seconds": max_age_seconds,
+        "stale_when_age_gt_max": True,
+        "failed_precedence": True,
+    }
     if max_age_seconds <= 0:
         return {
             "name": name,
             "status": "not_configured",
+            "payload_status": None,
             "created_at": None,
             "created_at_display": None,
             "age_seconds": None,
             "max_age_seconds": max_age_seconds,
+            "policy": policy,
             "run_id": None,
         }
     if row is None:
         return {
             "name": name,
             "status": "missing",
+            "payload_status": None,
             "created_at": None,
             "created_at_display": None,
             "age_seconds": None,
             "max_age_seconds": max_age_seconds,
+            "policy": policy,
             "run_id": None,
         }
     age_seconds = _age_seconds(row.get("created_at"))
-    status = "failed" if failed else "fresh"
-    if age_seconds is None or age_seconds > max_age_seconds:
+    payload_status = "failed" if failed else "fresh"
+    if failed:
+        status = "failed"
+    elif age_seconds is None or age_seconds > max_age_seconds:
         status = "stale"
+    else:
+        status = "fresh"
     return {
         "name": name,
         "status": status,
+        "payload_status": payload_status,
         "created_at": row.get("created_at"),
         "created_at_display": format_operator_time(row.get("created_at"), timezone),
         "age_seconds": age_seconds,
         "max_age_seconds": max_age_seconds,
+        "policy": policy,
         "run_id": row.get("run_id"),
     }
 

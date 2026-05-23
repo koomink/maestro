@@ -602,7 +602,7 @@
       keeps KRW/USD returns separate
 - [x] Add total portfolio performance read model that marks mixed-currency rows
       as missing FX instead of force-converting values
-- [ ] Define persisted performance snapshot/read-model schema for account,
+- [x] Define persisted performance snapshot/read-model schema for account,
       strategy, currency sleeve, and total portfolio returns
 - [x] Use persisted broker snapshots as the broker-truth source for account equity,
       cash, positions, realized/unrealized PnL, fees, and settlement fields when
@@ -623,9 +623,9 @@
       checks
 - [x] Add missing/stale FX dashboard labels and disable converted total return
       calculations when FX is unavailable or stale
-- [ ] Attribute strategy returns from persisted proposal, order, fill, and
+- [x] Attribute strategy returns from persisted proposal, order, fill, and
       strategy-run lineage without adding strategy-specific code paths
-- [ ] Define the documented fallback attribution rule for shared holdings until
+- [x] Define the documented fallback attribution rule for shared holdings until
       lot-level strategy accounting exists
 - [x] Add account-level daily/cumulative return and drawdown calculations
 - [ ] Add strategy-level daily/cumulative return and drawdown calculations
@@ -633,8 +633,14 @@
 - [x] Add total portfolio daily/cumulative return and drawdown calculations
 - [x] Label performance rows with persisted reconciliation pass/fail/missing
       state
+- [x] Add a versioned dashboard `performance_snapshot` contract with latest
+      values, series, FX quality, and persisted lineage metadata
+- [x] Define system-event required-field contracts and expose missing-field
+      status in dashboard system event read models
 - [x] Add freshness-age/stale labels so old broker snapshots or old
       reconciliations are not presented as fresh truth
+- [x] Add freshness policy tests and expose policy metadata for stale, missing,
+      not-configured, and failed rows
 - [x] Add read-only dashboard charts for account value/return/drawdown,
       currency-sleeve returns, total portfolio return/drawdown, and latest
       reconciliation status
@@ -663,7 +669,8 @@
       user-question tabs, collapsed evidence tables/JSON, and DESIGN.md-aligned
       surfaces/typography
 - [x] Add fixture/fake-client tests for account, currency-sleeve,
-      total-portfolio, multi-currency, and dashboard read model calculations
+      total-portfolio, multi-currency, multi-strategy, and dashboard read model
+      calculations
 - [x] Add fixture/fake-client tests for strategy attribution and stale data
       labeling once implemented
 - [x] Document current operator usage and limitations in README/TRD

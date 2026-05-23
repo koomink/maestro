@@ -1217,6 +1217,12 @@ read models, freshness labels, local filters, run drill-downs, and CSV exports
 without calling KIS during page rendering. Performance tracking should continue
 to extend that surface with:
 
+The dashboard snapshot also exposes
+`investment_console.performance_snapshot` as a versioned read-model contract
+for backend/API consumers. It groups latest performance values, typed series,
+FX metadata, quality reasons, and lineage while preserving the legacy table
+arrays for compatibility.
+
 - Persisted performance tables/views for KIS account equity, realized/unrealized
   PnL, daily return, cumulative return, and drawdown.
 - Strategy-level PnL/return derived from Maestro proposal, order, fill,
@@ -1237,6 +1243,24 @@ portfolio snapshots, broker reconciliation events, live order status/lifecycle
 events, fill reconciliation events, strategy book snapshots, and strategy run
 payloads. The implemented account, currency-sleeve, total-portfolio, and
 strategy book views are computed on read from those persisted snapshots/events;
+strategy attribution rows include a `lineage` object that ties each strategy
+book performance row back to same-run strategy proposals, allocation symbols,
+orders, and fill-reconciliation events where those records exist. Until
+lot-level strategy accounting exists, the attribution value still comes from
+the strategy book snapshot first; order and fill lineage is explanatory
+evidence, not an independent PnL allocator.
+
+System event read models use a centralized required-field contract from
+`maestro.state.events`. Dashboard event rows expose `schema_status`,
+`required_fields`, and `missing_required_fields` so persisted evidence can be
+audited without failing old/custom events at read time. Unknown event types are
+reported as untracked rather than invalid.
+
+Dashboard freshness rows expose their policy metadata. Configured checks with
+no row are `missing`; disabled checks are `not_configured`; rows with invalid
+or over-limit timestamps are `stale`; and failed reconciliation rows remain
+`failed` even when old so the operator does not lose the failure cause.
+
 dedicated persisted performance tables remain pending. The dashboard must not
 call KIS or FX endpoints directly.
 FX conversion is reporting-only and must not feed order generation,

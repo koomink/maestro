@@ -757,7 +757,7 @@ async function loadSnapshot(
   try {
     const response = await fetch(`/api/dashboard/snapshot?display_currency=${currency}`);
     if (!response.ok) {
-      throw new Error(`Snapshot request failed: ${response.status}`);
+      throw new Error(await dashboardErrorMessage(response));
     }
     setSnapshot((await response.json()) as DashboardSnapshot);
   } catch (error) {
@@ -765,6 +765,21 @@ async function loadSnapshot(
   } finally {
     setLoading(false);
   }
+}
+
+async function dashboardErrorMessage(response: Response): Promise<string> {
+  try {
+    const payload = (await response.json()) as { detail?: string | { message?: string } };
+    if (typeof payload.detail === "string") {
+      return payload.detail;
+    }
+    if (payload.detail?.message) {
+      return payload.detail.message;
+    }
+  } catch {
+    // Keep the fallback below for non-JSON server errors.
+  }
+  return `Dashboard snapshot is unavailable (${response.status}).`;
 }
 
 type TrustSummary = {

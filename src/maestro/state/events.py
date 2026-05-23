@@ -37,6 +37,46 @@ class SystemEventType(StrEnum):
     TELEGRAM_COMMAND = "telegram_command"
 
 
+SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    SystemEventType.MAESTRO_HEARTBEAT: ("mode", "source"),
+    SystemEventType.RUN_ONCE_COMPLETED: ("orders_created", "total_value", "cash"),
+    SystemEventType.RUN_ONCE_FAILED: ("error_type", "error_message"),
+    SystemEventType.LIVE_ORDER_STATUS: ("broker_order_id", "symbol", "status", "checked_at"),
+    SystemEventType.LIVE_ORDER_LIFECYCLE: ("run_id", "order_id", "final_status", "checked_at"),
+    SystemEventType.LIVE_ORDER_RESULT: ("submitted_date", "notional", "request", "result"),
+    SystemEventType.LIVE_ORDER_HALT: ("reason",),
+    SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED: ("reason", "order_id"),
+    SystemEventType.LIVE_ORDER_RECOVERY_COMPLETED: (
+        "broker_reconciliation_event_id",
+        "fill_reconciliation",
+    ),
+    SystemEventType.BROKER_RECONCILIATION: ("passed", "checked_at", "issues"),
+    SystemEventType.BROKER_RECONCILIATION_HALT: ("reason",),
+    SystemEventType.FILL_RECONCILIATION: (
+        "checked_at",
+        "applied_fills",
+        "skipped_fills",
+        "portfolio_updated",
+    ),
+    "fx_rate_snapshot": ("source", "as_of", "rates"),
+}
+
+
+def required_system_event_fields(event_type: SystemEventType | str) -> tuple[str, ...]:
+    return SYSTEM_EVENT_REQUIRED_FIELDS.get(str(event_type), ())
+
+
+def missing_system_event_required_fields(
+    event_type: SystemEventType | str,
+    payload: dict[str, Any],
+) -> list[str]:
+    return [
+        field
+        for field in required_system_event_fields(event_type)
+        if field not in payload or payload[field] is None
+    ]
+
+
 def save_audited_system_event(
     store: StateStore,
     audit: AuditLogger,

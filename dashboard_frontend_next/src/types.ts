@@ -62,6 +62,23 @@ export type DashboardSnapshot = {
     total_portfolio_performance: Row[];
     total_portfolio_performance_krw: Row[];
     total_portfolio_performance_usd: Row[];
+    performance_snapshot: {
+      schema_version: number;
+      display_currency: "KRW" | "USD";
+      latest: Row;
+      series: {
+        account: Row[];
+        currency_sleeves: Row[];
+        total_portfolio: Row[];
+        total_portfolio_krw: Row[];
+        total_portfolio_usd: Row[];
+        strategy_books: Row[];
+        strategy_attribution: Row[];
+      };
+      quality: { status: "ok" | "warning" | "missing" | string; reasons: Row[] };
+      fx: Row;
+      lineage: Row;
+    };
     fx_snapshot: Row;
     asset_summary_metrics: Metric[];
     asset_summary_rows: Row[];

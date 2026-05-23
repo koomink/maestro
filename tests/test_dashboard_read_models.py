@@ -150,6 +150,40 @@ def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
     assert build_broker_snapshot_history_table(store)[0]["account_id"] == "acct"
 
 
+def test_system_events_table_reports_required_field_status(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_system_event(
+        "run_valid",
+        "broker_reconciliation",
+        {
+            "passed": True,
+            "checked_at": utc_now().isoformat(),
+            "issues": [],
+        },
+    )
+    store.save_system_event(
+        "run_invalid",
+        "fill_reconciliation",
+        {
+            "applied_fills": [],
+            "skipped_fills": [],
+        },
+    )
+    store.save_system_event("run_custom", "custom_event", {})
+
+    rows = build_system_events_table(store, limit=3)
+    by_type = {row["event_type"]: row for row in rows}
+
+    assert by_type["broker_reconciliation"]["schema_status"] == "ok"
+    assert by_type["broker_reconciliation"]["missing_required_fields"] == []
+    assert by_type["fill_reconciliation"]["schema_status"] == "missing_required_fields"
+    assert by_type["fill_reconciliation"]["missing_required_fields"] == [
+        "checked_at",
+        "portfolio_updated",
+    ]
+    assert by_type["custom_event"]["schema_status"] == "untracked"
+
+
 def test_strategy_runs_table_includes_top_level_source_signal(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     store.save_strategy_run(
@@ -462,6 +496,57 @@ def test_freshness_table_labels_fresh_stale_missing_and_disabled_rows(tmp_path):
     assert rows["broker_reconciliation"]["status"] == "missing"
     assert rows["heartbeat"]["status"] == "fresh"
     assert rows["scheduled_run"]["status"] == "not_configured"
+
+
+def test_freshness_policy_marks_stale_invalid_and_failed_precedence(tmp_path):
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
+    raw.setdefault("reconciliation", {})["max_age_seconds"] = 60
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": 60,
+        "scheduled_run_max_age_seconds": 60,
+    }
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    store.save_broker_account_snapshot(
+        "run_broker",
+        "acct",
+        {"account": {"account_id": "acct", "cash": 1000.0, "positions": []}},
+    )
+    store.save_system_event(
+        "run_reconciliation",
+        "broker_reconciliation",
+        {"passed": False, "checked_at": utc_now().isoformat(), "issues": []},
+    )
+    store.save_system_event("run_heartbeat", "maestro_heartbeat", {"source": "test"})
+    store.save_system_event(
+        "run_completed",
+        "run_once_completed",
+        {"orders_created": 0, "total_value": 1000.0, "cash": 1000.0},
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = '2000-01-01 00:00:00'"
+        )
+        conn.execute("UPDATE system_events SET created_at = '2000-01-01 00:00:00'")
+        conn.execute(
+            "UPDATE system_events SET created_at = 'not-a-date' "
+            "WHERE event_type = 'maestro_heartbeat'"
+        )
+
+    rows = {row["name"]: row for row in build_freshness_table(config, store)}
+
+    assert rows["broker_snapshot"]["status"] == "stale"
+    assert rows["broker_reconciliation"]["status"] == "failed"
+    assert rows["heartbeat"]["status"] == "stale"
+    assert rows["scheduled_run"]["status"] == "stale"
+    assert rows["heartbeat"]["age_seconds"] is None
+    assert rows["broker_reconciliation"]["payload_status"] == "failed"
 
 
 def test_dashboard_broker_portfolio_analytics_from_latest_snapshot(tmp_path):
@@ -784,9 +869,34 @@ def test_run_detail_and_strategy_attribution_group_persisted_rows_by_run(tmp_pat
             "validation": {"ok": True, "errors": []},
         },
     )
-    store.save_order("run_1", "ord_1", {"symbol": "AAPL", "side": "buy"})
+    store.save_order(
+        "run_1",
+        "ord_1",
+        {
+            "order_id": "ord_1",
+            "broker_order_id": "KIS-1",
+            "symbol": "AAPL",
+            "side": "buy",
+            "notional": 500.0,
+        },
+    )
     store.save_risk_decision("run_1", True, {"violations": []})
     store.save_system_event("run_1", "run_once_completed", {"orders_created": 1})
+    store.save_system_event(
+        "run_1",
+        "fill_reconciliation",
+        {
+            "applied_fills": [
+                {
+                    "broker_order_id": "KIS-1",
+                    "symbol": "AAPL",
+                    "quantity": 2.0,
+                    "notional": 300.0,
+                }
+            ],
+            "skipped_fills": [],
+        },
+    )
     store.save_strategy_book_snapshots(
         "run_1",
         [
@@ -814,6 +924,12 @@ def test_run_detail_and_strategy_attribution_group_persisted_rows_by_run(tmp_pat
     assert attribution[0]["strategy_id"] == "strategy_1"
     assert attribution[0]["signal_action"] == "buy"
     assert attribution[0]["allocation_count"] == 2
+    assert attribution[0]["order_count"] == 1
+    assert attribution[0]["fill_count"] == 1
+    assert attribution[0]["lineage"]["strategy_run"]["run_id"] == "run_1"
+    assert attribution[0]["lineage"]["orders"][0]["order_id"] == "ord_1"
+    assert attribution[0]["lineage"]["fills"][0]["broker_order_id"] == "KIS-1"
+    assert attribution[0]["lineage"]["allocation_symbols"] == ["AAPL", "CASH_USD"]
 
 
 def test_dashboard_maestro_state_exposure_uses_latest_broker_prices(tmp_path):

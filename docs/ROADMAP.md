@@ -602,8 +602,9 @@ Planned scope:
 - Defer full redesign items such as drawers, command palette, WebSocket live
   stream, richer timelines, and action controls until Maestro has a daemon/API
   event model.
-- Add fixture/fake-client tests for performance calculations and dashboard read
-  models before any real-account rehearsal.
+- Add fixture/fake-client tests for performance calculations, multi-strategy
+  and multi-currency dashboard snapshots, and dashboard read models before any
+  real-account rehearsal.
 
 ## Post-v1.0 — Structural Refactor R1-R5
 
