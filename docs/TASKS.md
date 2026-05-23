@@ -296,6 +296,7 @@
 - [x] Add audit log rotation or hash chain
 - [x] Add monitoring and health checks
 - [x] Add live approval preflight checks to health output
+- [x] Add enabled strategy plugin import checks to health/preflight output
 - [x] Add `maestro live-preflight --config ...` with nonzero exit on failed live approval preflight
 - [x] Add deployment, VPS/systemd, and backup/restore guides
 - [x] Keep dashboard write controls deferred
@@ -506,6 +507,8 @@
       CLI, dashboard write controls, or high-risk Telegram resume, clear-halt,
       live enablement, direct trading, or risk-change controls
 - [x] Add tests for beta preflight pass/fail behavior
+- [x] Add provider-derived LLM API-key checks to live approval preflight for
+      LLM-backed Virtuoso apps such as TradingAgents
 
 ### Post-v1.0 Structural Refactor R1-R5
 
@@ -647,13 +650,16 @@
       reconciliation issue, lifecycle event, or FX state
 - [x] Standardize money rendering so every visible amount has a native or
       display currency and converted totals show FX source/rate/timestamp
-- [ ] Keep the Streamlit dashboard read-only during the IA redesign; defer
-      React/Vite, REST/WebSocket, approval controls, kill switch, and config
-      writes until a daemon/API event model exists
+- [x] Replace Streamlit with a FastAPI/React read-only dashboard while keeping
+      approval controls, kill switch, config writes, and WebSocket/daemon APIs
+      deferred until a daemon/API event model exists
 - [x] Keep dashboard graphs backed by persisted state/read models only; do not
       call KIS live endpoints from dashboard rendering
 - [x] Add CSV export for performance tables without adding dashboard write
       controls
+- [x] Rework the FastAPI/React dashboard into a compact Command Center with
+      user-question tabs, collapsed evidence tables/JSON, and DESIGN.md-aligned
+      surfaces/typography
 - [x] Add fixture/fake-client tests for account, currency-sleeve,
       total-portfolio, multi-currency, and dashboard read model calculations
 - [x] Add fixture/fake-client tests for strategy attribution and stale data

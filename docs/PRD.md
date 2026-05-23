@@ -162,7 +162,7 @@ And Maestro will:
 
 - CSVDataProvider
 - Simple historical data loading
-- Streamlit read-only dashboard
+- FastAPI/React read-only dashboard
 - Portfolio overview
 - Recent strategy runs
 - Recent paper orders
@@ -227,7 +227,7 @@ And Maestro will:
 - Broker PnL normalization for risk checks
 - Strategy lifecycle management
 - Enhanced dashboard
-- Optional FastAPI read-only API
+- Full daemon/API/WebSocket dashboard surface
 - Deployment via systemd or Docker Compose
 
 ### Phase 7: Practical Live Operations Hardening

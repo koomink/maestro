@@ -1,0 +1,1103 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Symphony Architecture: Maestro & Virtuoso Apps</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5d687a;
+      --line: #d9dfeb;
+      --blue: #2563eb;
+      --green: #12805c;
+      --amber: #a16207;
+      --red: #b42318;
+      --violet: #6d5bd0;
+      --shadow: 0 12px 32px rgba(23, 32, 51, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+      line-height: 1.55;
+    }
+
+    header {
+      background: #111827;
+      color: #fff;
+      padding: 48px 24px 36px;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto 64px;
+    }
+
+    h1, h2, h3 {
+      line-height: 1.18;
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(30px, 5vw, 56px);
+      letter-spacing: 0;
+      max-width: 980px;
+    }
+
+    h2 {
+      font-size: 26px;
+      margin-bottom: 14px;
+    }
+
+    h3 {
+      font-size: 18px;
+      margin-bottom: 10px;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    code {
+      background: #eef2f7;
+      border: 1px solid #dfe5ef;
+      border-radius: 6px;
+      padding: 1px 6px;
+      font-size: 0.92em;
+    }
+
+    .hero {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+    }
+
+    .hero p {
+      color: #cbd5e1;
+      font-size: 18px;
+      max-width: 900px;
+      margin-top: 18px;
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 26px;
+    }
+
+    .pill {
+      border: 1px solid rgba(255, 255, 255, 0.24);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: #e5e7eb;
+      font-size: 14px;
+    }
+
+    .section {
+      margin-top: 28px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 26px;
+    }
+
+    .section:first-child {
+      margin-top: -22px;
+    }
+
+    .tabs {
+      margin-top: -22px;
+    }
+
+    .tab-input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .tab-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 10px;
+      margin-bottom: 18px;
+    }
+
+    .tab-label {
+      cursor: pointer;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: var(--muted);
+      font-weight: 800;
+      background: #f8fafc;
+    }
+
+    #tab-maestro:checked ~ .tab-nav label[for="tab-maestro"],
+    #tab-virtuoso:checked ~ .tab-nav label[for="tab-virtuoso"] {
+      background: #111827;
+      color: #fff;
+      border-color: #111827;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    #tab-maestro:checked ~ .tab-panels #maestro-panel,
+    #tab-virtuoso:checked ~ .tab-panels #virtuoso-panel {
+      display: block;
+    }
+
+    .tab-panel .section:first-child {
+      margin-top: 0;
+    }
+
+    .lead {
+      color: var(--muted);
+      max-width: 940px;
+      margin-bottom: 18px;
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .grid.cols-2 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid.cols-3 {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      background: #fff;
+      min-width: 0;
+    }
+
+    .card p, .card li {
+      color: var(--muted);
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #fff;
+      background: var(--blue);
+      margin-bottom: 10px;
+    }
+
+    .tag.green { background: var(--green); }
+    .tag.amber { background: var(--amber); }
+    .tag.red { background: var(--red); }
+    .tag.violet { background: var(--violet); }
+
+    .diagram {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .flow-row {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(130px, 1fr));
+      gap: 10px;
+      align-items: stretch;
+    }
+
+    .node {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      background: #fbfcff;
+      min-height: 92px;
+      position: relative;
+    }
+
+    .node strong {
+      display: block;
+      margin-bottom: 6px;
+    }
+
+    .node span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .arrow {
+      text-align: center;
+      color: var(--muted);
+      font-weight: 700;
+      margin: 0;
+    }
+
+    .lane {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      overflow: hidden;
+      background: #fff;
+    }
+
+    .lane-title {
+      padding: 12px 14px;
+      background: #f0f4fa;
+      font-weight: 800;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .lane-body {
+      padding: 14px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .mini {
+      border: 1px solid #e3e8f2;
+      border-radius: 8px;
+      padding: 11px;
+      background: #fff;
+    }
+
+    .mini strong {
+      display: block;
+      margin-bottom: 3px;
+    }
+
+    .mini span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 14px;
+      overflow: hidden;
+      border-radius: 8px;
+    }
+
+    th, td {
+      border: 1px solid var(--line);
+      padding: 11px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #f0f4fa;
+      font-size: 13px;
+    }
+
+    td {
+      color: var(--muted);
+      background: #fff;
+    }
+
+    .status {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 800;
+      color: #fff;
+      background: var(--green);
+    }
+
+    .status.warn {
+      background: var(--amber);
+    }
+
+    .status.stop {
+      background: var(--red);
+    }
+
+    .callout {
+      border-left: 4px solid var(--blue);
+      background: #eff6ff;
+      padding: 14px 16px;
+      border-radius: 8px;
+      color: #1f365e;
+    }
+
+    .warning {
+      border-left-color: var(--amber);
+      background: #fffbeb;
+      color: #5f3e05;
+    }
+
+    .codeblock {
+      white-space: pre-wrap;
+      background: #111827;
+      color: #e5e7eb;
+      border-radius: 8px;
+      padding: 14px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 13px;
+    }
+
+    ul {
+      margin: 8px 0 0;
+      padding-left: 20px;
+    }
+
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 6px;
+      background: var(--blue);
+    }
+
+    .dot.green { background: var(--green); }
+    .dot.amber { background: var(--amber); }
+    .dot.red { background: var(--red); }
+    .dot.violet { background: var(--violet); }
+
+    @media (max-width: 920px) {
+      .grid.cols-2,
+      .grid.cols-3,
+      .flow-row {
+        grid-template-columns: 1fr;
+      }
+
+      header {
+        padding-top: 36px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hero">
+      <h1>Symphony 작동 구조: Maestro OS와 Virtuoso Apps</h1>
+      <p>
+        Symphony는 Maestro portfolio OS와 Virtuoso 전략 앱들의 생태계입니다. 이 문서는
+        Maestro의 운영 workflow와 Virtuoso 앱의 계약/현황을 탭으로 나누어 설명합니다.
+      </p>
+      <div class="meta">
+        <span class="pill">Symphony = ecosystem</span>
+        <span class="pill">Maestro = portfolio OS</span>
+        <span class="pill">Virtuoso apps = strategy plugins</span>
+        <span class="pill">KIS = broker adapter</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="tabs">
+      <input class="tab-input" type="radio" name="main-tabs" id="tab-maestro" checked>
+      <input class="tab-input" type="radio" name="main-tabs" id="tab-virtuoso">
+      <div class="tab-nav" role="tablist" aria-label="Symphony sections">
+        <label class="tab-label" for="tab-maestro" role="tab">Maestro OS</label>
+        <label class="tab-label" for="tab-virtuoso" role="tab">Virtuoso Apps</label>
+      </div>
+      <div class="tab-panels">
+        <div class="tab-panel" id="maestro-panel" role="tabpanel" aria-labelledby="tab-maestro">
+    <section class="section">
+      <h2>한 문장으로 보기</h2>
+      <p class="lead">
+        Virtuoso 앱은 투자 제안을 만들고, Maestro는 그 제안을 데이터, 유니버스, 위험 한도,
+        승인, 브로커 상태와 대조한 뒤 실행하거나 멈춥니다.
+      </p>
+      <div class="callout">
+        <strong>핵심 원칙:</strong>
+        Virtuoso apps propose. Maestro decides. Maestro protects. Maestro executes. Maestro records.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>전체 연결 관계</h2>
+      <p class="lead">
+        전략 데이터와 브로커 실행 데이터는 의도적으로 분리되어 있습니다. KIS 시세는 실행 검증용
+        broker quote로는 쓸 수 있지만, 전략 리서치의 주 데이터 소스는 DataHub입니다.
+      </p>
+      <div class="grid cols-3">
+        <div class="lane">
+          <div class="lane-title">External research data</div>
+          <div class="lane-body">
+            <div class="mini"><strong>Yahoo / yfinance</strong><span>price, OHLCV, fundamentals</span></div>
+            <div class="mini"><strong>FRED</strong><span>macro series</span></div>
+            <div class="mini"><strong>RSS / GDELT / NewsAPI</strong><span>news research</span></div>
+            <div class="mini"><strong>CSV / fixtures</strong><span>local data and tests</span></div>
+          </div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">Maestro OS</div>
+          <div class="lane-body">
+            <div class="mini"><strong>DataHub</strong><span>research data routing and freshness</span></div>
+            <div class="mini"><strong>Orchestrator</strong><span>run_once lifecycle coordinator</span></div>
+            <div class="mini"><strong>Portfolio / Risk / Approval</strong><span>target, limits, human gate</span></div>
+            <div class="mini"><strong>Execution / State / Audit</strong><span>orders, snapshots, JSONL trail</span></div>
+          </div>
+        </div>
+        <div class="lane">
+          <div class="lane-title">Broker and operator systems</div>
+          <div class="lane-body">
+            <div class="mini"><strong>KIS Open API</strong><span>account, buying power, submit/status, fills</span></div>
+            <div class="mini"><strong>Telegram Bot API</strong><span>approval and urgent notifications</span></div>
+            <div class="mini"><strong>Streamlit Dashboard</strong><span>read-only state and performance views</span></div>
+            <div class="mini"><strong>systemd / CLI</strong><span>scheduled operation and recovery commands</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Run-once Workflow</h2>
+      <p class="lead">
+        가장 중요한 실행 단위는 <code>maestro run-once</code>입니다. 이 한 번의 cycle이 데이터 요청,
+        전략 실행, 위험 검증, 주문 제안, 승인, 실행, 기록을 순서대로 통과합니다.
+      </p>
+      <div class="diagram">
+        <div class="flow-row">
+          <div class="node"><strong>1. Config load</strong><span>operator YAML, mode, profile_stage, state/audit path</span></div>
+          <div class="node"><strong>2. Plugin load</strong><span>Virtuoso app entrypoint and SDK contract</span></div>
+          <div class="node"><strong>3. Data requests</strong><span>DataRequest objects through Maestro DataHub</span></div>
+          <div class="node"><strong>4. Strategy result</strong><span>TargetAllocationResult or normalized signal</span></div>
+          <div class="node"><strong>5. Validation</strong><span>strategy id, symbols, research/tradable boundary</span></div>
+        </div>
+        <p class="arrow">↓</p>
+        <div class="flow-row">
+          <div class="node"><strong>6. Portfolio target</strong><span>combine weighted strategy proposals</span></div>
+          <div class="node"><strong>7. Risk gate</strong><span>cash, exposure, order count, broker risk checks</span></div>
+          <div class="node"><strong>8. Order proposal</strong><span>paper proposal engine creates limit order intents</span></div>
+          <div class="node"><strong>9. Approval gate</strong><span>console or Telegram approval where required</span></div>
+          <div class="node"><strong>10. Execute & record</strong><span>paper fill or live approval lifecycle, SQLite, audit JSONL</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Mode와 Profile Stage</h2>
+      <p class="lead">
+        <code>mode</code>는 Maestro가 강제하는 안전 계약이고, <code>profile_stage</code>는 설정 조합에서
+        파생되는 운영 단계입니다. 같은 mode라도 실제 데이터, dry-run, KIS 모의투자 여부에 따라 stage가 달라집니다.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>구분</th>
+            <th>의미</th>
+            <th>주요 제약</th>
+            <th>대표 config</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="status">paper</span></td>
+            <td>Maestro 내부 PaperExecutionEngine으로 시뮬레이션합니다.</td>
+            <td>실제 브로커 주문을 보낼 수 없고, live order posture를 armed로 둘 수 없습니다.</td>
+            <td><code>configs/paper.yaml</code>, <code>configs/examples/paper_yahoo_us_etf.yaml</code></td>
+          </tr>
+          <tr>
+            <td><span class="status warn">live_readonly</span></td>
+            <td>KIS 계좌 스냅샷, 포지션, buying power, 주문/체결 조회를 읽기 전용으로 가져옵니다.</td>
+            <td>전략을 실행하지 않고, approval과 execution은 disabled 상태여야 합니다.</td>
+            <td><code>configs/live_readonly.yaml</code>, <code>configs/examples/live_readonly_multi_asset_kis.yaml</code></td>
+          </tr>
+          <tr>
+            <td><span class="status stop">live_approval</span></td>
+            <td>전략 제안이 승인 게이트를 통과한 뒤 live order lifecycle로 들어갑니다.</td>
+            <td>Telegram/approval 필수, KIS enabled 필수, limit order only, safety gates 필수.</td>
+            <td><code>configs/live_approval.yaml</code>, <code>configs/examples/live_approval_kis_multi_asset.yaml</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="grid cols-3" style="margin-top: 16px;">
+        <div class="card">
+          <span class="tag">paper</span>
+          <h3>Mock 또는 local data</h3>
+          <p>개발과 테스트용입니다. 빠르고 안전하지만 실제 시장 상태를 반영하지 않습니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag green">paper_real_data</span>
+          <h3>Real Data + 내부 체결</h3>
+          <p>Yahoo/yfinance 등 실제 DataHub provider를 쓰지만 주문 체결은 Maestro 내부 시뮬레이션입니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag amber">kis_paper_trading</span>
+          <h3>KIS 모의투자 계좌</h3>
+          <p><code>kis.paper_trading=true</code>인 KIS OpenAPI 계좌 경로입니다. Maestro의 paper mode와 다릅니다.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Mode, Order, Broker, Account Type</h2>
+      <p class="lead">
+        운영 config가 헷갈리는 이유는 네 가지 축이 한 파일에 같이 있기 때문입니다.
+        각각은 같은 의미가 아니라 서로 다른 질문에 답합니다.
+      </p>
+
+      <div class="grid cols-2">
+        <div class="card">
+          <span class="tag">Mode</span>
+          <h3>이 run이 어디까지 들어갈 수 있나</h3>
+          <p>
+            <code>paper</code>, <code>live_readonly</code>, <code>live_approval</code>처럼
+            Maestro workflow의 큰 안전 계약을 정합니다. 전략 실행, approval 필요 여부,
+            broker snapshot 사용 여부가 여기서 갈립니다.
+          </p>
+        </div>
+        <div class="card">
+          <span class="tag amber">Order posture</span>
+          <h3>주문 후보가 실제 submit까지 갈 수 있나</h3>
+          <p>
+            <code>disabled</code>는 주문 제출 차단, <code>dry_run</code>은 승인까지 연습하되
+            broker submit 생략, <code>armed</code>는 승인 후 submit 가능 상태입니다.
+          </p>
+        </div>
+        <div class="card">
+          <span class="tag violet">Broker boundary</span>
+          <h3>어느 외부 시스템에 닿나</h3>
+          <p>
+            <code>PaperExecutionEngine</code>은 내부 state만 바꾸고, <code>KIS read-only</code>는
+            계좌를 읽기만 하며, <code>KIS live approval</code>은 승인된 limit order를 KIS로 보냅니다.
+          </p>
+        </div>
+        <div class="card">
+          <span class="tag green">Account type</span>
+          <h3>KIS가 모의투자인가 실계좌인가</h3>
+          <p>
+            <code>kis.paper_trading=true</code>는 KIS 모의투자 서버를 뜻합니다.
+            Maestro의 <code>mode: paper</code>와 다르며, KIS 모의계좌도 실제 broker API 경계를 탑니다.
+          </p>
+        </div>
+      </div>
+
+      <table style="margin-top: 16px;">
+        <thead>
+          <tr>
+            <th>질문</th>
+            <th>보는 설정</th>
+            <th>쉬운 해석</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>전략을 돌리는가?</td>
+            <td><code>mode</code>, <code>strategies[].enabled</code></td>
+            <td><code>live_readonly</code>는 전략을 돌리지 않고, <code>live_approval</code>은 enabled 전략을 실행합니다.</td>
+          </tr>
+          <tr>
+            <td>주문 후보를 실제로 제출할 수 있는가?</td>
+            <td><code>execution.order_posture</code></td>
+            <td><code>disabled</code>와 <code>dry_run</code>은 broker submit을 막고, <code>armed</code>만 submit을 허용합니다.</td>
+          </tr>
+          <tr>
+            <td>KIS 계좌를 읽는가, 주문도 보내는가?</td>
+            <td><code>kis.enabled</code>, broker product, live order client</td>
+            <td>KIS read-only는 account truth를 가져오고, KIS live approval은 승인된 주문 lifecycle까지 담당합니다.</td>
+          </tr>
+          <tr>
+            <td>모의투자인가 실계좌인가?</td>
+            <td><code>kis.paper_trading</code></td>
+            <td><code>true</code>면 KIS 모의투자, <code>false</code>면 실계좌 경로입니다. 둘 다 Maestro paper mode와는 다릅니다.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warning" style="margin-top: 16px;">
+        <strong>핵심 구분:</strong>
+        <code>live_readonly</code>는 계좌를 읽기만 하는 관찰 모드이고,
+        <code>live_approval + order_posture=disabled</code>는 전략과 approval 구조는 켜되
+        최종 주문 제출만 차단한 리허설 상태입니다.
+      </div>
+
+      <div class="codeblock" style="margin-top: 16px;">Example reading
+
+mode: live_approval
+execution.order_posture: dry_run
+kis.paper_trading: true
+
+= live approval workflow를 돌린다
+= Telegram approval까지 연습한다
+= KIS 모의투자 계좌를 읽는다
+= 하지만 KIS submit은 하지 않는다</div>
+    </section>
+
+    <section class="section">
+      <h2>DataHub Boundary</h2>
+      <p class="lead">
+        DataHub는 전략이 시장/리서치 데이터를 요청하는 유일한 통로입니다. Provider는 교체 가능하지만,
+        전략 앱은 yfinance, FRED, NewsAPI, KIS 같은 외부 API를 직접 호출하지 않는 것이 원칙입니다.
+      </p>
+      <div class="grid cols-2">
+        <div class="card">
+          <span class="tag green">Allowed path</span>
+          <h3>전략 데이터 흐름</h3>
+          <div class="codeblock">Virtuoso Strategy
+  → DataRequest
+  → Maestro DataHub Router
+  → yahoo / csv / fred / rss / gdelt / newsapi provider
+  → normalized DataBundle
+  → StrategyResult</div>
+        </div>
+        <div class="card">
+          <span class="tag red">Blocked idea</span>
+          <h3>피해야 할 흐름</h3>
+          <div class="codeblock">Virtuoso Strategy
+  → direct yfinance call
+  → direct KIS quote call
+  → direct Telegram or broker call</div>
+        </div>
+      </div>
+      <div class="callout warning" style="margin-top: 16px;">
+        KIS quote/reference data는 live approval의 주문 가격 검증이나 reconciliation 보조로 사용할 수 있지만,
+        전략 리서치 데이터의 주 소스로 삼지 않습니다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Broker Execution Boundary</h2>
+      <p class="lead">
+        Broker adapter는 계좌와 주문의 세계입니다. DataHub가 “무엇을 살지 판단할 데이터”라면,
+        KIS adapter는 “실제 계좌 상태와 주문 제출/조회/체결을 다루는 경계”입니다.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>경로</th>
+            <th>무엇을 하나</th>
+            <th>무엇을 하지 않나</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>PaperExecutionEngine</td>
+            <td>Maestro 내부 state에서 주문 체결을 시뮬레이션합니다.</td>
+            <td>KIS 계좌나 KIS 모의투자 서버에 주문을 보내지 않습니다.</td>
+          </tr>
+          <tr>
+            <td>KIS read-only</td>
+            <td>잔고, 포지션, buying power, 체결/미체결, current price reference를 읽습니다.</td>
+            <td>주문 submit, cancel, amend를 하지 않습니다.</td>
+          </tr>
+          <tr>
+            <td>KIS live approval</td>
+            <td>승인 후 limit order submit, status polling, fill reconciliation을 수행합니다.</td>
+            <td>live_auto, market order, direct buy/sell/cancel CLI를 제공하지 않습니다.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>운영 서비스와 공유 상태</h2>
+      <p class="lead">
+        현재 Maestro는 하나의 상시 데몬이 아니라, 여러 CLI job과 long-running service가 같은 operator config,
+        SQLite state DB, JSONL audit log를 공유하는 hybrid operator architecture입니다.
+      </p>
+      <div class="grid cols-3">
+        <div class="card">
+          <span class="tag">One-shot CLI</span>
+          <h3>짧게 실행되는 명령</h3>
+          <ul>
+            <li><code>run-once</code>: 전략 cycle 실행</li>
+            <li><code>kis-sync</code>: broker snapshot 저장</li>
+            <li><code>reconcile</code>: Maestro state와 broker truth 비교</li>
+            <li><code>health</code>, <code>live-preflight</code>: readiness 확인</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="tag violet">Long-running</span>
+          <h3>계속 떠 있는 서비스</h3>
+          <ul>
+            <li><code>telegram-operator</code>: 읽기 전용 명령과 제한된 pause/kill</li>
+            <li><code>dashboard</code>: read-only Streamlit UI</li>
+            <li>systemd timer/service: 반복 실행과 heartbeat</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="tag green">Shared truth</span>
+          <h3>공유 저장소</h3>
+          <ul>
+            <li>SQLite state: portfolio, orders, events, broker snapshots</li>
+            <li>JSONL audit: append-only operational trail</li>
+            <li>Config fingerprint: state-affecting 변경 감지</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>권장 Promotion Path</h2>
+      <p class="lead">
+        지금 프로젝트 방향인 “Mock data → Real Data”와 “Maestro paper → KIS 모의투자” 전환은
+        아래 순서로 나누면 가장 안전합니다.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>단계</th>
+            <th>목표</th>
+            <th>확인해야 할 것</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>1. paper</td>
+            <td>MockDataHub와 PaperExecutionEngine으로 기본 cycle 검증</td>
+            <td>plugin loading, target allocation, risk decision, paper orders, audit</td>
+          </tr>
+          <tr>
+            <td>2. paper_real_data</td>
+            <td>Yahoo/yfinance 등 실제 DataHub provider로 가격/OHLCV 전환</td>
+            <td>symbol_map, freshness, stale/missing data behavior, no direct strategy API calls</td>
+          </tr>
+          <tr>
+            <td>3. live_readonly</td>
+            <td>KIS 계좌 snapshot과 reconciliation 검증</td>
+            <td>cash, positions, buying power, current prices, state adoption boundary</td>
+          </tr>
+          <tr>
+            <td>4. live_approval_dry_run</td>
+            <td>승인과 lifecycle 경로를 통과하되 broker submit은 건너뜀</td>
+            <td>Telegram approval, safety gates, proposal snapshot, dry-run event</td>
+          </tr>
+          <tr>
+            <td>5. kis_paper_trading</td>
+            <td>KIS 모의투자 계좌로 approval-gated limit order submit</td>
+            <td>status polling, fill reconciliation, broker reconciliation, recovery runbook</td>
+          </tr>
+          <tr>
+            <td>6. production_armed</td>
+            <td>실계좌 approval-gated 최소 주문</td>
+            <td>beta-preflight, loss limits, audit integrity, heartbeat, backup/restore</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>안전 장치</h2>
+      <p class="lead">
+        Maestro는 의도적으로 자동 거래 시스템이 아닙니다. 실계좌 자동화를 서두르기보다,
+        승인과 상태 기록, 회복 절차를 먼저 단단하게 둡니다.
+      </p>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>계속 유지하는 금지선</h3>
+          <ul>
+            <li>live_auto 없음</li>
+            <li>market order 없음</li>
+            <li>direct buy/sell/cancel CLI 없음</li>
+            <li>dashboard write controls 없음</li>
+            <li>전략 앱의 broker/API 직접 호출 없음</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>주요 gate</h3>
+          <ul>
+            <li>Safety state: active, paused, killed, halted</li>
+            <li>Telegram approval required in live_approval</li>
+            <li>Limit order only</li>
+            <li>Reconciliation freshness</li>
+            <li>Daily notional/order count/loss limits</li>
+            <li>Unknown broker state halt</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>빠른 명령 Map</h2>
+      <p class="lead">
+        아래 명령들은 같은 operator config, 같은 SQLite state, 같은 audit path를 바라보게 맞추는 것이 중요합니다.
+      </p>
+      <div class="codeblock">maestro run-once --config &lt;operator.yaml&gt;
+maestro kis-sync --config &lt;operator.yaml&gt;
+maestro reconcile --config &lt;operator.yaml&gt;
+maestro health --config &lt;operator.yaml&gt;
+maestro live-preflight --config &lt;operator.yaml&gt;
+maestro beta-preflight --config &lt;operator.yaml&gt;
+maestro dashboard --config &lt;operator.yaml&gt;
+maestro telegram-operator --config &lt;operator.yaml&gt;</div>
+      <div class="legend">
+        <span><i class="dot"></i>Data/strategy cycle</span>
+        <span><i class="dot green"></i>Readiness and monitoring</span>
+        <span><i class="dot amber"></i>Broker state and reconciliation</span>
+        <span><i class="dot red"></i>Approval-gated live path</span>
+      </div>
+    </section>
+        </div>
+
+        <div class="tab-panel" id="virtuoso-panel" role="tabpanel" aria-labelledby="tab-virtuoso">
+    <section class="section">
+      <h2>Virtuoso Apps 한 문장 요약</h2>
+      <p class="lead">
+        Virtuoso 앱은 전략별 사고와 제안을 담는 외부 패키지입니다. 앱은 candidate instrument,
+        data need, target allocation 또는 signal을 제안하고, Maestro는 데이터 접근, 유니버스 승인,
+        위험 관리, 승인, 실행, 상태, 감사를 소유합니다.
+      </p>
+      <div class="callout">
+        <strong>핵심 경계:</strong>
+        전략 특화 코드는 Virtuoso 앱 repo에 있고, Maestro core에는 SDK 계약과 실행/검증/운영 spine만 둡니다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>앱 계약과 Loader Boundary</h2>
+      <p class="lead">
+        Maestro는 <code>strategies[*].entrypoint</code>로 앱을 로드합니다. 앱은
+        <code>maestro.sdk</code>만 Maestro 의존성으로 사용해야 하며, broker, state, approval,
+        Telegram, DataHub internals를 직접 import하지 않습니다.
+      </p>
+      <div class="grid cols-3">
+        <div class="card">
+          <span class="tag">Manifest</span>
+          <h3>앱의 신분증</h3>
+          <ul>
+            <li><code>strategy_id</code>가 config id와 일치해야 합니다.</li>
+            <li>지원 mode와 asset type을 선언합니다.</li>
+            <li><code>can_run_live</code> 없이는 live approval에서 실행하지 않습니다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="tag green">SDK 1.1</span>
+          <h3>DataHub runtime</h3>
+          <ul>
+            <li><code>build_data_requests()</code>로 사전 데이터 요청을 만듭니다.</li>
+            <li><code>run_with_runtime()</code>에서 추가 DataHub 요청이 가능합니다.</li>
+            <li>runtime 요청도 Maestro가 감사 기록에 남깁니다.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="tag amber">Result</span>
+          <h3>제안 형태</h3>
+          <ul>
+            <li><code>TargetAllocationResult</code>: 목표 비중 제안</li>
+            <li><code>StrategySignalResult</code>: buy/hold/sell signal</li>
+            <li>signal은 Maestro config의 policy로 allocation으로 변환됩니다.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Virtuoso Runtime Lifecycle</h2>
+      <p class="lead">
+        앱 입장에서 보는 <code>run-once</code> 순서입니다. 앱은 자신의 전략 판단만 수행하고,
+        운영 책임은 Maestro에 넘깁니다.
+      </p>
+      <div class="diagram">
+        <div class="flow-row">
+          <div class="node"><strong>1. Load plugin</strong><span>entrypoint import, manifest validation</span></div>
+          <div class="node"><strong>2. Build context</strong><span>run id, timestamp, mode, portfolio state, app config</span></div>
+          <div class="node"><strong>3. Candidate requests</strong><span>optional dynamic universe proposals</span></div>
+          <div class="node"><strong>4. Data requests</strong><span>price, OHLCV, macro, news, fundamentals</span></div>
+          <div class="node"><strong>5. DataHub fetch</strong><span>Maestro-owned provider routing</span></div>
+        </div>
+        <p class="arrow">↓</p>
+        <div class="flow-row">
+          <div class="node"><strong>6. Run strategy</strong><span>app computes signal or allocation</span></div>
+          <div class="node"><strong>7. Normalize</strong><span>signal_to_allocation when needed</span></div>
+          <div class="node"><strong>8. Validate</strong><span>symbols, boundaries, SDK contract</span></div>
+          <div class="node"><strong>9. Combine</strong><span>Maestro strategy weights</span></div>
+          <div class="node"><strong>10. Handoff</strong><span>risk, approval, execution, state, audit</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>현재 Virtuoso App 현황</h2>
+      <p class="lead">
+        현재 Symphony workspace에는 성격이 다른 Virtuoso 앱들이 있습니다. 공통점은 모두
+        Maestro SDK로 제안만 하고, 실행/계좌/주문/감사는 Maestro가 맡는다는 점입니다.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>앱</th>
+            <th>역할</th>
+            <th>현재 작동 구조</th>
+            <th>운영 단계</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Ataraxia</strong></td>
+            <td>KRW sleeve 월 적립식 buy-only contribution 전략</td>
+            <td>국내 ETF 2종 목표 비중을 <code>TargetAllocationResult</code>로 반환합니다. KIS나 데이터 API를 직접 호출하지 않습니다.</td>
+            <td>Yahoo paper, live approval dry-run, KIS 국내 ETF 모의/승인 리허설 준비</td>
+          </tr>
+          <tr>
+            <td><strong>Snowball</strong></td>
+            <td>동적 자산배분 전략 묶음</td>
+            <td>DGA, Accelerated Dual Momentum, GTT-UE, BAA(A)를 실행하고 strategy book metadata를 냅니다.</td>
+            <td>USD ETF paper 중심, per-strategy accounting/dashboard attribution에 적합</td>
+          </tr>
+          <tr>
+            <td><strong>TradingAgents</strong></td>
+            <td>LLM multi-agent research engine adapter</td>
+            <td>market/news/fundamentals 분석을 Maestro DataHub payload와 runtime 요청으로 공급받고 <code>StrategySignalResult</code>를 반환합니다.</td>
+            <td>paper와 live approval dry-run rehearsal. social sentiment는 DataHub 공급 전까지 deferred</td>
+          </tr>
+          <tr>
+            <td><strong>sample_static_allocation</strong></td>
+            <td>참조용 단순 allocation app</td>
+            <td>고정 비중을 반환하는 테스트/문서용 앱입니다.</td>
+            <td>paper와 live approval path 테스트 fixture</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>App이 소유하는 것과 소유하지 않는 것</h2>
+      <p class="lead">
+        Virtuoso 앱은 투자 아이디어와 전략별 계산을 소유합니다. 하지만 운영 위험이 큰 부분은
+        Maestro가 중앙에서 통제합니다.
+      </p>
+      <div class="grid cols-2">
+        <div class="card">
+          <span class="tag green">Virtuoso App owns</span>
+          <h3>전략 고유 영역</h3>
+          <ul>
+            <li>전략 파라미터와 내부 알고리즘</li>
+            <li>candidate symbol/data need 제안</li>
+            <li>목표 allocation 또는 signal 산출</li>
+            <li>LLM/model 선택과 strategy-specific dependencies</li>
+            <li>앱 repo 안의 adapter와 contract tests</li>
+          </ul>
+        </div>
+        <div class="card">
+          <span class="tag red">Maestro owns</span>
+          <h3>운영/자본 경계</h3>
+          <ul>
+            <li>DataHub provider routing, freshness, audit</li>
+            <li>tradable universe approval</li>
+            <li>portfolio construction and risk gates</li>
+            <li>Telegram/human approval</li>
+            <li>paper/KIS execution, reconciliation, recovery</li>
+            <li>SQLite state, JSONL audit, dashboard</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>App 개발 Workflow</h2>
+      <p class="lead">
+        새 앱은 Maestro repo 안에 직접 섞기보다, 앱 repo에서 wrapper를 만들고 Maestro runtime에 설치하는 방식이 권장됩니다.
+      </p>
+      <div class="codeblock">maestro init-virtuoso-app \
+  --output ./my_app \
+  --package-name my_virtuoso_app \
+  --class-name MyVirtuosoStrategy
+
+uv pip install -e /path/to/Maestro
+uv pip install -e ./my_app</div>
+      <div class="grid cols-3" style="margin-top: 16px;">
+        <div class="card">
+          <span class="tag">1. Scaffold</span>
+          <h3>SDK contract로 시작</h3>
+          <p><code>BaseStrategyPlugin</code>, manifest, data request, run method, contract test를 생성합니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag green">2. Paper first</span>
+          <h3>실행은 작게</h3>
+          <p>새 앱은 기본적으로 <code>supported_modes=["paper"]</code>, <code>can_run_live=false</code>에서 시작합니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag amber">3. Promote</span>
+          <h3>운영 profile로 승격</h3>
+          <p>real DataHub, live_readonly, dry-run, KIS paper trading 순서로 Maestro profile을 통해 승격합니다.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Config Fragment 관점</h2>
+      <p class="lead">
+        장기적으로 앱은 전체 operator YAML을 소유하지 않고, 전략 fragment만 제공하는 방향이 좋습니다.
+        broker, approval, execution, state, audit, promotion gate는 Maestro/operator profile 책임입니다.
+      </p>
+      <div class="codeblock">strategies:
+  - id: my_virtuoso_app
+    enabled: true
+    weight: 1.0
+    entrypoint: "my_virtuoso_app.strategy:MyVirtuosoStrategy"
+    config:
+      symbols: ["SPY", "CASH_USD"]
+      allocations:
+        SPY: 0.6
+        CASH_USD: 0.4</div>
+      <div class="callout warning" style="margin-top: 16px;">
+        앱 fragment는 전략 entrypoint, strategy defaults, DataHub needs, signal_to_allocation policy 정도로 제한하는 것이 안전합니다.
+        KIS 계좌, Telegram allowlist, 주문 한도, state/audit path는 operator-local config가 소유해야 합니다.
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>Virtuoso Apps의 현재 과제</h2>
+      <p class="lead">
+        Maestro의 현재 방향이 real DataHub와 KIS 모의투자 계좌로 이동하는 만큼,
+        Virtuoso 앱들도 “직접 호출하지 않고 Maestro 경계를 통과하는 방식”을 더 단단히 해야 합니다.
+      </p>
+      <div class="grid cols-2">
+        <div class="card">
+          <h3>가까운 과제</h3>
+          <ul>
+            <li>KR+US multi-asset real DataHub config에서 symbol_map과 freshness 검증</li>
+            <li>Ataraxia KIS paper trading rehearsal</li>
+            <li>Snowball strategy book performance와 attribution dashboard 검증</li>
+            <li>TradingAgents의 LLM/API credentials와 DataHub payload audit 정리</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>계속 지킬 원칙</h3>
+          <ul>
+            <li>전략 앱은 주문을 제출하지 않습니다.</li>
+            <li>전략 앱은 KIS 계좌를 읽지 않습니다.</li>
+            <li>전략 앱은 외부 market/news API를 직접 호출하지 않습니다.</li>
+            <li>live approval 승격은 Maestro의 preflight와 operator 승인 뒤에만 진행합니다.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+        </div>
+      </div>
+    </div>
+  </main>
+</body>
+</html>

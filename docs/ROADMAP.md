@@ -39,7 +39,7 @@ Implemented scope:
 Implemented foundations beyond the strict v0.1.0 core:
 
 - CSVDataProvider
-- Read-only Streamlit dashboard foundation
+- Read-only FastAPI/React dashboard foundation
 - Approval request/decision models
 - Approval gate stub
 - Telegram formatter/no-network notifier stub
@@ -594,9 +594,11 @@ Planned scope:
 - Keep the dashboard read-only and backed by persisted snapshots/aggregates; it
   must not call KIS live endpoints directly and must not expose broker trading
   controls.
-- Defer any React/Vite REST/WebSocket dashboard until Maestro has a daemon/API
-  event model; do not use the current Streamlit dashboard for approval,
-  kill-switch, or configuration writes.
+- Keep the current FastAPI/React dashboard read-only and backed by persisted
+  read models.
+- Defer full redesign items such as drawers, command palette, WebSocket live
+  stream, richer timelines, and action controls until Maestro has a daemon/API
+  event model.
 - Add fixture/fake-client tests for performance calculations and dashboard read
   models before any real-account rehearsal.
 

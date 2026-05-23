@@ -60,7 +60,7 @@ Implemented scope:
 - Provider selection through `datahub.provider`.
 - SQLite read APIs for portfolio snapshots, strategy runs, orders, and system events.
 - CLI `maestro status --config ...`.
-- Optional Streamlit read-only dashboard entrypoint through `maestro dashboard --config ...`.
+- Optional FastAPI/React read-only dashboard entrypoint through `maestro dashboard --config ...`.
 
 Out of scope remains unchanged:
 
@@ -558,7 +558,7 @@ Make v0.1 reliable and understandable.
 ### v0.2: CSV Data and Minimal Dashboard
 
 - Add CSVDataProvider.
-- Add Streamlit read-only dashboard.
+- Add FastAPI/React read-only dashboard.
 - Display portfolio snapshots, recent strategy runs, recent orders, and system events.
 
 ### v0.3: Telegram Notification and Approval in Paper Mode
