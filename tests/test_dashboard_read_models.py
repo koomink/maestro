@@ -73,6 +73,35 @@ def test_operator_summary_works_with_empty_db(tmp_path):
     assert isinstance(summary["attention_items"], list)
 
 
+def test_health_summary_includes_operator_timezone_display_fields(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["market_session"] = {
+        "required": False,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": 3600,
+        "scheduled_run_max_age_seconds": 3600,
+    }
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    config_path = tmp_path / "paper.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event("run_heartbeat", "maestro_heartbeat", {})
+
+    summary = build_health_summary(config, store)
+
+    heartbeat = next(row for row in summary["checks"] if row["check"] == "heartbeat")
+    assert summary["generated_at_display"].endswith("KST")
+    assert heartbeat["details"]["created_at_display"].endswith("KST")
+
+
 def test_dashboard_read_models_work_after_run(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")

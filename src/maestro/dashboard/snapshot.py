@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 
 from maestro.config.loader import load_config_with_identity
+from maestro.core.time_display import add_operator_time_fields, operator_timezone
 from maestro.dashboard.read_models import (
     build_account_performance_table,
     build_approvals_table,
@@ -120,7 +121,7 @@ def build_dashboard_snapshot(
         if getattr(strategy, "enabled", False)
     ]
 
-    return {
+    snapshot = {
         "title": "Symphony",
         "read_only": True,
         "display_currency": selected_currency,
@@ -261,6 +262,7 @@ def build_dashboard_snapshot(
         },
         "raw": {"status": status},
     }
+    return add_operator_time_fields(snapshot, operator_timezone(config))
 
 
 def build_dashboard_run_detail(config_path: str | Path, run_id: str) -> dict[str, Any]:

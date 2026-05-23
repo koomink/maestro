@@ -216,6 +216,9 @@ Completed scope:
 - Stale required DataHub data halts live approval and warns in paper mode
 - Missing, stale, or failed broker reconciliation halts live approval when
   reconciliation is required
+- KIS-backed `live_approval run-once` refreshes/adopts broker state and records
+  broker reconciliation before approval/order gates when reconciliation is
+  required
 - Daily live notional and order count gates use persisted live order events
 - Instrument-aware live order validation uses `universe.instruments`
 - Daily loss limit config starts fail-closed until broker PnL normalization is

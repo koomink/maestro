@@ -505,7 +505,10 @@ Config fields:
   provider maps timeout failures to provider-unavailable so the router can try a
   lower-priority fallback.
 - `stale_after_seconds`: optional threshold for marking the latest Yahoo bar as
-  stale. Omit it when staleness should be evaluated elsewhere.
+  stale. OHLCV freshness is timeframe-aware: weekly bars use at least a 14-day
+  window and monthly bars use at least a 45-day window, so current monthly bars
+  dated at the start of the month are not treated like stale daily data. Omit it
+  when staleness should be evaluated elsewhere.
 - `symbol_map`: optional override for Maestro canonical symbols to
   Yahoo/yfinance symbols. In a full Maestro config, omit it when
   `universe.instruments[].broker_symbol` can derive the Yahoo symbol. Keep

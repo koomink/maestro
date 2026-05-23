@@ -183,7 +183,12 @@ class YahooDataProvider(BaseDataProvider):
             if lookback > len(rows):
                 warnings.append(f"Requested lookback {lookback} exceeds available rows {len(rows)}")
 
-            is_stale = self._is_stale(latest.timestamp, generated_at)
+            is_stale = self._is_stale(
+                latest.timestamp,
+                generated_at,
+                timeframe=request.timeframe,
+                data_type=request.data_type,
+            )
             if is_stale:
                 warnings.append("Yahoo data is stale")
 
@@ -463,7 +468,29 @@ class YahooDataProvider(BaseDataProvider):
             return timestamp.replace(tzinfo=UTC)
         return timestamp.astimezone(UTC)
 
-    def _is_stale(self, timestamp: datetime, generated_at: datetime) -> bool:
+    def _is_stale(
+        self,
+        timestamp: datetime,
+        generated_at: datetime,
+        *,
+        timeframe: str | None = None,
+        data_type: str | None = None,
+    ) -> bool:
         if self.stale_after_seconds is None:
             return False
-        return timestamp < generated_at - timedelta(seconds=self.stale_after_seconds)
+        stale_after_seconds = self._effective_stale_after_seconds(timeframe, data_type)
+        return timestamp < generated_at - timedelta(seconds=stale_after_seconds)
+
+    def _effective_stale_after_seconds(
+        self,
+        timeframe: str | None,
+        data_type: str | None,
+    ) -> int:
+        configured = self.stale_after_seconds
+        if configured is None:
+            raise ValueError("stale_after_seconds is required")
+        if data_type == "ohlcv" and timeframe in {"1mo", "1M", "month", "monthly"}:
+            return max(configured, 45 * 24 * 60 * 60)
+        if data_type == "ohlcv" and timeframe in {"1wk", "1w", "week", "weekly"}:
+            return max(configured, 14 * 24 * 60 * 60)
+        return configured

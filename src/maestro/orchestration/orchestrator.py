@@ -26,6 +26,7 @@ from maestro.execution.live_orders import (
     LiveOrderRequest,
     LiveOrderStatusClient,
 )
+from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.data_quality import (
     data_quality_issues as collect_data_quality_issues,
@@ -132,9 +133,7 @@ class MaestroOrchestrator:
                 strategy_ids=strategy_ids,
             )
             risk_manager = (
-                RiskManager(sorted(run_allowed_symbols))
-                if dynamic_symbols
-                else self.risk_manager
+                RiskManager(sorted(run_allowed_symbols)) if dynamic_symbols else self.risk_manager
             )
             for loaded in self.registry.strategies:
                 context = self._strategy_context(run_id, loaded, current_state)
@@ -613,8 +612,7 @@ class MaestroOrchestrator:
                 },
             )
             raise ValueError(
-                "live_approval could not refresh KIS broker snapshot before run_once: "
-                f"{exc}"
+                f"live_approval could not refresh KIS broker snapshot before run_once: {exc}"
             ) from exc
         self.state_store.save_portfolio_snapshot(run_id, state)
         self._record_event(
@@ -630,7 +628,19 @@ class MaestroOrchestrator:
                 "fetched_at": snapshot.account.fetched_at.isoformat(),
             },
         )
+        self._auto_reconcile_live_baseline(run_id)
         return state
+
+    def _auto_reconcile_live_baseline(self, run_id: str) -> None:
+        if not self.config.execution.require_reconciliation_pass:
+            return
+        if self.state_store.load_latest_broker_account_snapshot() is None:
+            return
+        BrokerReconciliationService(
+            self.config.reconciliation,
+            self.state_store,
+            self.audit,
+        ).reconcile_latest(run_id=run_id)
 
     def _record_live_proposal_data_snapshot(
         self,

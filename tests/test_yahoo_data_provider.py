@@ -237,6 +237,36 @@ def test_yahoo_provider_preserves_fresh_metadata():
     assert payload["warnings"] == []
 
 
+def test_yahoo_provider_uses_monthly_freshness_for_monthly_ohlcv():
+    now = datetime.now(UTC)
+    monthly_bar_timestamp = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                {
+                    "timestamp": monthly_bar_timestamp,
+                    "open": 100.0,
+                    "high": 102.0,
+                    "low": 99.0,
+                    "close": 101.0,
+                    "volume": 1000,
+                }
+            ]
+        }
+    )
+    provider = YahooDataProvider(client=client, stale_after_seconds=604800)
+
+    payload = provider.get_data([request(data_type="ohlcv", lookback=1, timeframe="1mo")]).data[
+        "SPY"
+    ]
+
+    assert payload["latest_price"]["timestamp"] == monthly_bar_timestamp.isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert payload["is_stale"] is False
+    assert payload["warnings"] == []
+
+
 def test_yahoo_provider_maps_timeout_to_provider_unavailable():
     provider = YahooDataProvider(client=FakeYahooClient({}, error=TimeoutError("slow")))
 

@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -136,6 +137,22 @@ def _seed_broker_baseline(
     store.save_portfolio_snapshot(
         "run_adopted_broker_baseline",
         PortfolioState(cash=cash, positions=positions or {}),
+    )
+
+
+def _save_kis_snapshot_as_broker_snapshot(
+    service: KISReadOnlyService,
+    snapshot: KISReadOnlySnapshot,
+) -> None:
+    service.state_store.save_broker_account_snapshot(
+        "run_kis_snapshot",
+        snapshot.account.account_id,
+        {
+            "account": snapshot.account.model_dump(mode="json"),
+            "current_prices": snapshot.current_prices,
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
     )
 
 
@@ -370,11 +387,11 @@ def test_live_approval_refreshes_broker_cash_before_order_generation(
     monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: approval_id)
 
     def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
-            return _kis_snapshot(
-                account_id=self.config.account_id or "MOCK",
-                cash=900.0,
-                symbols=symbols,
-            )
+        return _kis_snapshot(
+            account_id=self.config.account_id or "MOCK",
+            cash=900.0,
+            symbols=symbols,
+        )
 
     monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
     config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
@@ -403,6 +420,96 @@ def test_live_approval_refreshes_broker_cash_before_order_generation(
     assert latest_state.cash == 900.0
     assert dry_run["request"]["quantity"] == 1.0
     assert adopted["cash"] == 900.0
+
+
+def test_live_approval_run_once_auto_reconciles_refreshed_broker_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    approval_id = "appr_kis_auto_reconcile"
+    monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: approval_id)
+
+    def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
+        snapshot = _kis_snapshot(
+            account_id=self.config.account_id or "MOCK",
+            cash=900.0,
+            symbols=symbols,
+        )
+        _save_kis_snapshot_as_broker_snapshot(self, snapshot)
+        return snapshot
+
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
+    config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
+    orchestrator = MaestroOrchestrator(
+        load_config(config_path),
+        telegram_client=FakeTelegramClient(approval_id),
+    )
+    orchestrator.state_store.save_system_event(
+        "run_old_reconcile",
+        "broker_reconciliation",
+        {"passed": True},
+    )
+    with sqlite3.connect(orchestrator.state_store.path) as conn:
+        conn.execute(
+            "UPDATE system_events SET created_at = ? WHERE event_type = ?",
+            ("2026-05-20 00:00:00", "broker_reconciliation"),
+        )
+
+    summary = orchestrator.run_once()
+
+    latest_reconciliation = orchestrator.state_store.load_latest_system_event(
+        "broker_reconciliation"
+    )
+    assert latest_reconciliation is not None
+    assert summary.orders_created == 1
+    assert latest_reconciliation["run_id"] == summary.run_id
+    assert latest_reconciliation["payload"]["passed"] is True
+    assert orchestrator.state_store.list_system_events_by_type("broker_reconciliation_halt") == []
+
+
+def test_live_approval_run_once_auto_reconciliation_failure_blocks_approval(
+    tmp_path,
+    monkeypatch,
+):
+    approval_id = "appr_kis_auto_reconcile_fail"
+    telegram_client = FakeTelegramClient(approval_id)
+    monkeypatch.setattr("maestro.approval.manager.new_approval_id", lambda: approval_id)
+
+    def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
+        snapshot = _kis_snapshot(
+            account_id=self.config.account_id or "MOCK",
+            cash=900.0,
+            symbols=symbols,
+        )
+        _save_kis_snapshot_as_broker_snapshot(self, snapshot)
+        return snapshot
+
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
+    monkeypatch.setattr(
+        "maestro.orchestration.orchestrator.portfolio_state_from_broker_account",
+        lambda account, *, allowed_symbols, universe: PortfolioState(
+            cash=800.0,
+            cash_by_currency={"USD": 800.0},
+            positions={},
+        ),
+    )
+    config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
+    orchestrator = MaestroOrchestrator(
+        load_config(config_path),
+        telegram_client=telegram_client,
+    )
+
+    summary = orchestrator.run_once()
+
+    reconciliation = orchestrator.state_store.load_latest_system_event("broker_reconciliation")
+    halt = orchestrator.state_store.list_system_events_by_type("broker_reconciliation_halt")[0]
+    assert reconciliation is not None
+    assert summary.orders_created == 0
+    assert reconciliation["run_id"] == summary.run_id
+    assert reconciliation["payload"]["passed"] is False
+    assert reconciliation["payload"]["issues"][0]["issue_type"] == "cash_mismatch"
+    assert halt["payload"]["reason"] == "failed_reconciliation"
+    assert telegram_client.sent_messages == []
 
 
 def test_live_approval_run_once_fails_closed_when_broker_refresh_fails(

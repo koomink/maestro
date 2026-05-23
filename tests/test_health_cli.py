@@ -77,6 +77,34 @@ def test_health_reports_recent_broker_snapshot_and_reconciliation(tmp_path):
     assert checks["reconciliation"].status == "ok"
 
 
+def test_health_cli_displays_operator_timezone_for_event_times(tmp_path):
+    config_path = _readonly_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["execution"]["market_session"] = {
+        "required": False,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": 3600,
+        "scheduled_run_max_age_seconds": 3600,
+    }
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    run_id = new_run_id()
+    store.save_system_event(run_id, "maestro_heartbeat", {})
+
+    result = CliRunner().invoke(app, ["health", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "created_at=" in result.output
+    assert "KST" in result.output
+
+
 def test_health_reports_failed_reconciliation(tmp_path):
     config_path = _readonly_config(tmp_path)
     config = load_config(config_path)

@@ -12,6 +12,7 @@ from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.enums import ProfileStage, RunMode
 from maestro.core.ids import new_run_id
+from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import PartialFillReconciliationService
@@ -281,7 +282,7 @@ def health(config: Path | None = CONFIG_OPTION) -> None:
     maestro_config, identity = _load_operator_config(config)
     store = _state_store(maestro_config, identity)
     report = HealthService(maestro_config, store).run()
-    for line in report.text_lines():
+    for line in report.text_lines(operator_timezone(maestro_config)):
         typer.echo(line)
 
 
@@ -768,7 +769,8 @@ def approvals(
     for row in store.list_approvals(limit=limit):
         decision = row["payload"]["decision"]
         typer.echo(
-            f"{row['created_at']} approval_id={row['approval_id']} "
+            f"{format_operator_time(row['created_at'], operator_timezone(maestro_config))} "
+            f"approval_id={row['approval_id']} "
             f"run_id={row['run_id']} status={decision['status']}"
         )
 
@@ -781,8 +783,9 @@ def safety_status(config: Path | None = CONFIG_OPTION) -> None:
     current = SafetyControlService(store, audit).current_state()
     typer.echo(
         f"state={current.state.value} source={current.source} "
-        f"reason={current.reason} created_at={current.created_at} "
-        f"updated_at={current.updated_at}"
+        f"reason={current.reason} "
+        f"created_at={format_operator_time(current.created_at, operator_timezone(maestro_config))} "
+        f"updated_at={format_operator_time(current.updated_at, operator_timezone(maestro_config))}"
     )
 
 
@@ -856,8 +859,9 @@ def kis_account(config: Path | None = CONFIG_OPTION) -> None:
         typer.echo("No broker account snapshot found.")
         raise typer.Exit(1)
     account = latest["payload"]["account"]
+    created_at = format_operator_time(latest["created_at"], operator_timezone(maestro_config))
     typer.echo(
-        f"created_at={latest['created_at']} account_id={account['account_id']} "
+        f"created_at={created_at} account_id={account['account_id']} "
         f"cash={account['cash']:.2f} buying_power={account['buying_power']:.2f} "
         f"positions={len(account['positions'])}"
     )

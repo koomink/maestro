@@ -55,8 +55,8 @@ class BrokerReconciliationService:
         self.audit_logger = audit_logger
         self.snapshot_refresher = snapshot_refresher
 
-    def reconcile_latest(self) -> ReconciliationResult:
-        run_id = new_run_id()
+    def reconcile_latest(self, run_id: str | None = None) -> ReconciliationResult:
+        run_id = run_id or new_run_id()
         if self.snapshot_refresher is not None:
             self.snapshot_refresher()
         portfolio_state = self.state_store.load_latest_portfolio_state()

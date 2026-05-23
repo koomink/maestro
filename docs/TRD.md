@@ -359,8 +359,12 @@ reliably handled by one-shot jobs plus explicit locks.
   `portfolio.allowed_symbols` nor known `universe.instruments` allowed by
   `universe.policy`.
 - Live configs do not carry `portfolio.initial_cash`; live cash and positions
-  are sourced from the adopted broker snapshot. `live_approval run-once` fails
-  before strategy execution when no broker baseline has been adopted.
+  are sourced from the adopted broker snapshot. KIS-backed
+  `live_approval run-once` refreshes and adopts the broker snapshot before
+  strategy execution. When `execution.require_reconciliation_pass=true`, it
+  reconciles the adopted Maestro state against that same saved broker snapshot
+  under the run id before approval and order gates, without issuing a second KIS
+  snapshot fetch.
 - KIS domestic and overseas live buy orders implement a pre-submit broker
   validation step with the request symbol and exact limit price before broker
   submit. Domestic orders use the domestic buying-power path; overseas orders

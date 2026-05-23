@@ -175,6 +175,12 @@ is present, `maestro run-once` sends a Telegram completion or failure
 notification to those chats. Notification delivery failures are logged as a
 warning and do not turn a successful `run-once` into a failed one; execution
 failures still fail the service after the failure notification is attempted.
+For `mode: live_approval` with KIS enabled and
+`execution.require_reconciliation_pass=true`, the same `run-once` refreshes and
+adopts the KIS broker snapshot, records broker reconciliation under the run id,
+and only then reaches approval/order gates. A separate reconcile timer can still
+be useful for monitoring, but scheduled `run-once` satisfies its own live-order
+reconciliation precondition.
 
 ```ini
 [Unit]

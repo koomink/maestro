@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from maestro.core.time_display import add_operator_time_details, format_operator_time
+
 
 class HealthCheck(BaseModel):
     name: str
@@ -15,10 +17,16 @@ class HealthReport(BaseModel):
     generated_at: str
     checks: list[HealthCheck]
 
-    def text_lines(self) -> list[str]:
-        lines = [f"status={self.status} generated_at={self.generated_at}"]
+    def text_lines(self, operator_timezone: str | None = None) -> list[str]:
+        generated_at = self.generated_at
+        if operator_timezone:
+            generated_at = format_operator_time(self.generated_at, operator_timezone)
+        lines = [f"status={self.status} generated_at={generated_at}"]
         for check in self.checks:
-            detail_text = " ".join(f"{key}={value}" for key, value in check.details.items())
+            details = check.details
+            if operator_timezone:
+                details = add_operator_time_details(details, operator_timezone)
+            detail_text = " ".join(f"{key}={value}" for key, value in details.items())
             suffix = f" {detail_text}" if detail_text else ""
             lines.append(
                 f"check={check.name} status={check.status} message={check.message}{suffix}"

@@ -158,6 +158,8 @@ def test_telegram_operator_account_masks_account_id(tmp_path):
 
     text = client.sent_messages[-1]["text"]
     assert "Broker account snapshot" in text
+    assert "created_at: " in text
+    assert "KST" in text
     assert "12345678-01" not in text
     assert "total_value: 1,050.00 unknown" in text
     assert "positions_market_value: 50.00 unknown" in text
@@ -658,6 +660,14 @@ def callback_update(
 
 def _telegram_config_path(tmp_path) -> Path:
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["market_session"] = {
+        "required": False,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["approval"] = {

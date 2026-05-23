@@ -183,6 +183,12 @@ writes through a writer lock. A future daemon architecture remains deferred
 until scheduling, approval polling, status polling, and recovery need one
 coordinated runtime.
 
+Maestro persists event timestamps in UTC for stable age checks. CLI, Telegram,
+health, and dashboard read-model surfaces convert those timestamps to the
+operator timezone from `execution.market_session.timezone` and include the
+timezone suffix. With `Asia/Seoul`, a SQLite timestamp like
+`2026-05-23 06:43:23` is displayed as `2026-05-23 15:43:23 KST`.
+
 Useful profile checks:
 
 ```bash
@@ -853,7 +859,10 @@ operator has accepted that snapshot as the rehearsal baseline, records
 `portfolio.allowed_symbols`.
 Live configs do not set `portfolio.initial_cash`; KIS cash and positions become
 Maestro's live baseline only after this adoption step. `live_approval run-once`
-fails closed until a broker snapshot has been adopted.
+refreshes and adopts the KIS broker snapshot before strategy work. When
+`execution.require_reconciliation_pass=true`, the same run records
+`broker_reconciliation` under its run id before approval/order gates, so stale
+manual reconciliation does not block a run that has just refreshed broker truth.
 The paper-to-live promotion path does not promote the paper SQLite DB into live
 truth. Paper runs validate strategy behavior; live readiness starts from broker
 truth through `kis-sync`, reconciliation, and `adopt-broker-snapshot`.
@@ -972,8 +981,10 @@ reconciliation event.
 
 For live approval rehearsal, set `execution.order_posture: dry_run` in an
 operator-local config. `run-once` still performs strategy, risk, reconciliation,
-and approval work, then writes `live_order_dry_run` events instead of calling the
-broker submit adapter.
+and approval work, then writes `live_order_dry_run` events instead of calling
+the broker submit adapter. In KIS-backed `live_approval`, that reconciliation is
+based on the broker snapshot already refreshed and adopted by the same run; it
+does not make a second KIS snapshot fetch.
 
 Operational docs:
 

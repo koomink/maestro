@@ -24,6 +24,15 @@ identity drift check. If a command reports a state DB config identity mismatch,
 stop scheduled services and verify every unit points at the intended operator
 config before continuing.
 
+## Time Display
+
+Maestro stores SQLite `created_at` values and audit timestamps as UTC so age
+checks remain stable across servers. Operator-facing surfaces should display
+those times in the operator timezone from `execution.market_session.timezone`
+such as `Asia/Seoul`, with the timezone suffix included. For example,
+`2026-05-23 06:43:23` in SQLite is shown as
+`2026-05-23 15:43:23 KST` when the operator timezone is `Asia/Seoul`.
+
 ## Halt Recovery
 
 1. Stop scheduled jobs that could submit or approve work.
@@ -44,6 +53,11 @@ maestro health --config <config>
 5. Run reconciliation and fill reconciliation. `reconcile` refreshes the KIS
    read-only broker snapshot before comparing it with Maestro state, so the
    result is based on current broker truth rather than the last dashboard view.
+   In `live_approval`, `run-once` also refreshes and adopts the KIS broker
+   snapshot before strategy work and, when
+   `execution.require_reconciliation_pass=true`, records a
+   `broker_reconciliation` event under the same run id before approval and order
+   gates.
 
 ```bash
 maestro reconcile --config <config>
@@ -120,6 +134,14 @@ maestro reconcile --config <config>
 6. If reconciliation fails, do not proceed to live approval. Review the reported
    cash and position differences, manual broker activity, fills, and the latest
    Maestro portfolio state.
+
+For scheduled `live_approval run-once`, the KIS broker snapshot is refreshed and
+adopted at the start of the run. If
+`execution.require_reconciliation_pass=true`, the run immediately reconciles
+that adopted Maestro state against the same saved broker snapshot without a
+second KIS fetch. A mismatch records `broker_reconciliation` with
+`passed=false`; the existing live approval gate then halts before Telegram
+approval or order submission.
 
 KIS current price data is broker reference data for checks and reconciliation.
 Strategy research data must still come through Maestro DataHub.

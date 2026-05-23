@@ -28,6 +28,25 @@ def test_reconciliation_exact_match_passes(tmp_path):
     assert store.list_system_events()[0]["payload"]["passed"] is True
 
 
+def test_reconciliation_can_persist_with_supplied_run_id(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    _save_portfolio_and_broker(
+        store,
+        portfolio=PortfolioState(cash=1000.0, positions={"005930": 2.0}),
+        broker_cash=1000.0,
+        broker_positions={"005930": 2.0},
+    )
+
+    result = BrokerReconciliationService(config.reconciliation, store, audit).reconcile_latest(
+        run_id="run_parent"
+    )
+
+    assert result.run_id == "run_parent"
+    latest_event = store.load_latest_system_event("broker_reconciliation")
+    assert latest_event is not None
+    assert latest_event["run_id"] == "run_parent"
+
+
 def test_reconciliation_refreshes_broker_snapshot_before_compare(tmp_path):
     config, store, audit = _reconciliation_context(tmp_path)
     store.save_portfolio_snapshot(

@@ -4,6 +4,7 @@ from typing import Any
 
 from maestro.config.models import MaestroConfig
 from maestro.core.ids import new_run_id
+from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.dashboard.read_models import (
     build_approvals_table,
     build_broker_account_summary,
@@ -206,7 +207,7 @@ class TelegramOperatorCommandRouter:
                     f"- total_value: {_money_by_currency(broker_currency['total_value'])}",
                     f"- cash: {_money_by_currency(broker_currency['cash'])}",
                     f"- positions: {broker['positions_count']}",
-                    f"- snapshot_at: {broker['created_at'] or 'none'}",
+                    f"- snapshot_at: {_operator_time(broker['created_at'], self.config)}",
                     "",
                     "Activity",
                     f"- orders: {overview['orders_count']}",
@@ -266,7 +267,7 @@ class TelegramOperatorCommandRouter:
         lines.extend(
             [
                 "Broker account snapshot",
-                f"created_at: {account['created_at']}",
+                f"created_at: {_operator_time(account['created_at'], self.config)}",
                 f"account_id: {_mask_identifier(account['account_id'])}",
                 f"total_value: {_money_by_currency(currency['total_value'])}",
                 f"cash: {_money_by_currency(currency['cash'])}",
@@ -748,6 +749,12 @@ def _is_number(value: object) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _operator_time(value: object, config: MaestroConfig) -> str:
+    if not value:
+        return "none"
+    return format_operator_time(value, operator_timezone(config))
 
 
 def telegram_bot_commands() -> list[dict[str, str]]:

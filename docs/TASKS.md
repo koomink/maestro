@@ -289,6 +289,8 @@
 - [x] Add explicit halted-state recovery procedure
 - [x] Add stale data halt for live approval and stale-data warning for paper
 - [x] Add missing, stale, and failed reconciliation halt
+- [x] Auto-record broker reconciliation inside KIS-backed `live_approval run-once`
+      before approval/order gates when reconciliation is required
 - [x] Add daily loss limit config skeleton that fails closed until broker PnL normalization exists
 - [x] Add daily order count and notional limits
 - [x] Add instrument-aware live order validation for quantity step, price tick, minimums, currency, and broker product

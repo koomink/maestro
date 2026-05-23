@@ -4,6 +4,11 @@ from typing import Any
 
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
+from maestro.core.time_display import (
+    add_operator_time_details,
+    format_operator_time,
+    operator_timezone,
+)
 from maestro.monitoring.health import HealthService
 from maestro.state.store import StateStore
 
@@ -64,16 +69,19 @@ def build_freshness_table(config: MaestroConfig, store: StateStore) -> list[dict
     heartbeat = store.load_latest_system_event("maestro_heartbeat")
     scheduled_run = store.load_latest_system_event("run_once_completed")
     max_reconciliation_age = config.reconciliation.max_age_seconds
+    timezone = operator_timezone(config)
     return [
         _freshness_row(
             "broker_snapshot",
             broker_snapshot,
             max_reconciliation_age,
+            timezone=timezone,
         ),
         _freshness_row(
             "broker_reconciliation",
             reconciliation,
             max_reconciliation_age,
+            timezone=timezone,
             failed=reconciliation is not None
             and reconciliation.get("payload", {}).get("passed") is False,
         ),
@@ -81,11 +89,13 @@ def build_freshness_table(config: MaestroConfig, store: StateStore) -> list[dict
             "heartbeat",
             heartbeat,
             config.monitoring.heartbeat_max_age_seconds,
+            timezone=timezone,
         ),
         _freshness_row(
             "scheduled_run",
             scheduled_run,
             config.monitoring.scheduled_run_max_age_seconds,
+            timezone=timezone,
         ),
     ]
 
@@ -865,6 +875,7 @@ def build_safety_state_card(store: StateStore) -> dict[str, Any]:
 
 def build_health_summary(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
     report = HealthService(config, store).run()
+    timezone = operator_timezone(config)
     counts = {"ok": 0, "warn": 0, "fail": 0}
     rows = []
     for check in report.checks:
@@ -874,12 +885,13 @@ def build_health_summary(config: MaestroConfig, store: StateStore) -> dict[str, 
                 "check": check.name,
                 "status": check.status,
                 "message": check.message,
-                "details": check.details,
+                "details": add_operator_time_details(check.details, timezone),
             }
         )
     return {
         "status": report.status,
         "generated_at": report.generated_at,
+        "generated_at_display": format_operator_time(report.generated_at, timezone),
         "counts": counts,
         "checks": rows,
     }
@@ -1300,6 +1312,7 @@ def _freshness_row(
     row: dict[str, Any] | None,
     max_age_seconds: int,
     *,
+    timezone: str = "UTC",
     failed: bool = False,
 ) -> dict[str, Any]:
     if max_age_seconds <= 0:
@@ -1307,6 +1320,7 @@ def _freshness_row(
             "name": name,
             "status": "not_configured",
             "created_at": None,
+            "created_at_display": None,
             "age_seconds": None,
             "max_age_seconds": max_age_seconds,
             "run_id": None,
@@ -1316,6 +1330,7 @@ def _freshness_row(
             "name": name,
             "status": "missing",
             "created_at": None,
+            "created_at_display": None,
             "age_seconds": None,
             "max_age_seconds": max_age_seconds,
             "run_id": None,
@@ -1328,6 +1343,7 @@ def _freshness_row(
         "name": name,
         "status": status,
         "created_at": row.get("created_at"),
+        "created_at_display": format_operator_time(row.get("created_at"), timezone),
         "age_seconds": age_seconds,
         "max_age_seconds": max_age_seconds,
         "run_id": row.get("run_id"),
