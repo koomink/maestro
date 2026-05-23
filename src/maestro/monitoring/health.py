@@ -17,7 +17,10 @@ from maestro.monitoring.health_providers import (
     FunctionHealthCheckProvider,
     HealthCheckProvider,
 )
-from maestro.monitoring.live_preflight import live_approval_preflight_findings
+from maestro.monitoring.live_preflight import (
+    live_approval_preflight_findings,
+    strategy_plugin_load_failures,
+)
 from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
 
@@ -38,6 +41,7 @@ class HealthService:
     def _providers(self) -> list[HealthCheckProvider]:
         return [
             FunctionHealthCheckProvider("config", self._config_check),
+            FunctionHealthCheckProvider("strategy_plugins", self._strategy_plugins_check),
             FunctionHealthCheckProvider("state_db", self._state_db_check),
             FunctionHealthCheckProvider("audit_path", self._audit_path_check),
             FunctionHealthCheckProvider("audit_integrity", self._audit_integrity_check),
@@ -65,6 +69,28 @@ class HealthService:
             status="ok",
             message="loaded",
             details={"mode": self.config.mode.value},
+        )
+
+    def _strategy_plugins_check(self) -> HealthCheck:
+        enabled = [strategy.id for strategy in self.config.strategies if strategy.enabled]
+        failures = strategy_plugin_load_failures(self.config)
+        if failures:
+            return HealthCheck(
+                name="strategy_plugins",
+                status="fail",
+                message="load_failed",
+                details={
+                    "enabled": ",".join(enabled) if enabled else "none",
+                    "failures": ";".join(
+                        f"{strategy_id}:{message}" for strategy_id, message in failures
+                    ),
+                },
+            )
+        return HealthCheck(
+            name="strategy_plugins",
+            status="ok",
+            message="loaded" if enabled else "none_enabled",
+            details={"enabled": ",".join(enabled) if enabled else "none"},
         )
 
     def _state_db_check(self) -> HealthCheck:

@@ -233,6 +233,35 @@ def test_health_live_approval_preflight_reports_ready_when_config_is_safe(
     assert checks["live_approval_preflight"].message == "ready"
 
 
+def test_health_fails_when_enabled_strategy_entrypoint_cannot_load(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["strategies"] = [
+        {
+            "id": "ataraxia",
+            "enabled": True,
+            "weight": 1.0,
+            "entrypoint": "missing_ataraxia.strategy:AtaraxiaStrategy",
+            "config": {},
+        }
+    ]
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert report.status == "fail"
+    assert checks["strategy_plugins"].status == "fail"
+    assert checks["strategy_plugins"].message == "load_failed"
+    assert "ataraxia" in checks["strategy_plugins"].details["failures"]
+    assert (
+        "strategy_plugin_load_failed:ataraxia"
+        in (checks["live_approval_preflight"].details["failures"])
+    )
+
+
 def test_live_preflight_cli_exits_zero_when_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("KIS_APP_KEY", "app-key")
     monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
@@ -252,6 +281,26 @@ def test_live_preflight_cli_exits_one_when_failed(tmp_path):
     assert result.exit_code == 1
     assert "status=fail" in result.output
     assert "reconciliation_not_required" in result.output
+
+
+def test_live_preflight_cli_fails_when_enabled_strategy_entrypoint_cannot_load(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["strategies"] = [
+        {
+            "id": "ataraxia",
+            "enabled": True,
+            "weight": 1.0,
+            "entrypoint": "missing_ataraxia.strategy:AtaraxiaStrategy",
+            "config": {},
+        }
+    ]
+    config_path.write_text(yaml.safe_dump(raw))
+
+    result = CliRunner().invoke(app, ["live-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "strategy_plugin_load_failed:ataraxia" in result.output
 
 
 def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_path):
@@ -416,6 +465,74 @@ def test_health_live_approval_preflight_fails_unsafe_config(tmp_path):
     assert "order_posture_disabled" in checks["live_approval_preflight"].details["warnings"]
 
 
+def test_live_approval_preflight_fails_missing_tradingagents_llm_env(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _install_fake_tradingagents_plugin(monkeypatch, tmp_path)
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    _add_tradingagents_strategy(
+        raw,
+        {
+            "llm_provider": "openrouter",
+            "quick_think_llm": "openai/gpt-4o-mini",
+            "deep_think_llm": "anthropic/claude-sonnet-4.5",
+        },
+    )
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["live_approval_preflight"].status == "fail"
+    assert (
+        "llm_env_missing:tradingagents:openrouter:OPENROUTER_API_KEY"
+        in checks["live_approval_preflight"].details["failures"]
+    )
+
+
+def test_live_approval_preflight_accepts_agent_level_llm_env(
+    monkeypatch,
+    tmp_path,
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    _install_fake_tradingagents_plugin(monkeypatch, tmp_path)
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    _add_tradingagents_strategy(
+        raw,
+        {
+            "llm_provider": "openrouter",
+            "quick_think_llm": "openai/gpt-4o-mini",
+            "deep_think_llm": "anthropic/claude-sonnet-4.5",
+            "agent_llms": {
+                "market": {
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                },
+                "portfolio_manager": {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-5",
+                },
+            },
+        },
+    )
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["live_approval_preflight"].status == "ok"
+    assert checks["live_approval_preflight"].message == "ready"
+
+
 def test_structured_logging_redacts_secret_fields():
     formatter = JsonFormatter()
     record = logging.LogRecord(
@@ -530,6 +647,83 @@ def _live_approval_config(
     config_path = tmp_path / "live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+def _add_tradingagents_strategy(raw: dict, strategy_config: dict) -> None:
+    raw["strategies"] = [
+        {
+            "id": "tradingagents",
+            "enabled": True,
+            "weight": 1.0,
+            "entrypoint": ("tradingagents_virtuoso.strategy:TradingAgentsVirtuosoStrategy"),
+            "signal_to_allocation": {
+                "type": "single_symbol_action_map",
+                "cash_symbol": "CASH_USD",
+                "action_target_weights": {
+                    "buy": 0.30,
+                    "hold": 0.10,
+                    "sell": 0.0,
+                },
+            },
+            "config": {
+                "symbol": "AAPL",
+                "asset_type": "stock",
+                "cash_symbol": "CASH_USD",
+                **strategy_config,
+            },
+        }
+    ]
+
+
+def _install_fake_tradingagents_plugin(monkeypatch, tmp_path: Path) -> None:
+    package_dir = tmp_path / "tradingagents_virtuoso"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("")
+    (package_dir / "strategy.py").write_text(
+        """
+from datetime import datetime, timezone
+
+from maestro.core.enums import AssetType, StrategyMode
+from maestro.sdk import (
+    BaseStrategyPlugin,
+    DataBundle,
+    DataRequest,
+    StrategyContext,
+    StrategyManifest,
+    StrategySignalResult,
+)
+
+
+class TradingAgentsVirtuosoStrategy(BaseStrategyPlugin):
+    def manifest(self) -> StrategyManifest:
+        return StrategyManifest(
+            sdk_contract_version="1.1",
+            strategy_id="tradingagents",
+            name="TradingAgents Test Strategy",
+            version="0.1.0",
+            supported_modes=[StrategyMode.LIVE_APPROVAL],
+            supported_asset_types=[AssetType.STOCK],
+            result_type="strategy_signal",
+            can_run_live=True,
+        )
+
+    def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
+        del context
+        return []
+
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> StrategySignalResult:
+        del data_bundle
+        return StrategySignalResult(
+            strategy_id=context.strategy_id,
+            strategy_version="0.1.0",
+            timestamp=datetime.now(timezone.utc),
+            symbol="AAPL",
+            action="hold",
+            confidence=0.5,
+        )
+""".lstrip()
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
 
 
 def _save_beta_ready_events(store: StateStore) -> None:

@@ -88,6 +88,26 @@ tests, explicit audit review, and simple single-app deployments. App fragments
 must not own broker, approval, execution, state, audit, or promotion-gate policy;
 those remain Maestro/operator responsibilities.
 
+## Live Approval Operator Gates
+
+For LLM-backed Virtuoso apps such as TradingAgents, a production-like
+`live_approval` dry-run should fail before strategy execution when the selected
+model provider cannot run. Maestro's live approval preflight inspects enabled
+strategy configs for `llm_provider` and `agent_llms[*].provider`, then checks
+only the matching API-key environment variables. Findings name env var names,
+not secret values.
+
+TradingAgents defaults to `openai` when no `llm_provider` is set. Operator
+configs that use OpenRouter or agent-level overrides must set the corresponding
+env vars, for example `OPENROUTER_API_KEY` for `openrouter`,
+`OPENAI_API_KEY` for `openai`, and `ANTHROPIC_API_KEY` for `anthropic`.
+
+One `maestro run-once` equals one full app research cycle. Scheduling remains
+outside the app: use a shared operator-local config for `kis-sync`, `reconcile`,
+`health`, `live-preflight`, `run-once`, Telegram operator services, dashboard,
+and any timer/cron unit. Enable `monitoring.scheduled_run_max_age_seconds` only
+after the chosen schedule is known.
+
 ## Recommended Repository Structure
 
 Put the Virtuoso wrapper inside the strategy or app repository, not inside the
@@ -468,6 +488,8 @@ Before shipping a Virtuoso app or wrapper change:
 - Run the app's `tests/test_strategy_contract.py`.
 - Run `ruff format --check .`, `ruff check .`, and `pytest -q` in the app repo.
 - Install the app into the Maestro environment with `uv pip install -e .`.
+- Run `maestro health --config <operator config>` and confirm the
+  `strategy_plugins` check can load every enabled app entrypoint.
 - Run `maestro run-once --config <paper config>` before live-readiness work.
 - Confirm the app imports only from `maestro.sdk`.
 - Confirm manifest live/network/LLM fields accurately disclose behavior.

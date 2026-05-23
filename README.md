@@ -959,10 +959,11 @@ no market order path, and no normal test that calls the KIS network.
 network calls. `maestro live-preflight --config ...` prints only the live
 approval preflight result and exits nonzero when the live approval safety
 configuration fails. Health checks cover config loading, SQLite state, audit
-path, safety state, recent halt/failure events, DataHub config, KIS env var
-presence, token cache path, live approval preflight configuration, latest broker
-snapshot age, and latest reconciliation status. Missing KIS env vars or broker
-snapshots are reported without printing secret values.
+path, enabled strategy plugin loading, safety state, recent halt/failure events,
+DataHub config, KIS env var presence, token cache path, live approval preflight
+configuration, latest broker snapshot age, and latest reconciliation status.
+Missing KIS env vars, plugin import errors, or broker snapshots are reported
+without printing secret values.
 
 `maestro reconcile --config ...` refreshes the KIS read-only broker snapshot
 before comparing broker cash and positions with Maestro state. Use `kis-sync`
