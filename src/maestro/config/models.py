@@ -4,7 +4,7 @@ from pydantic import Field, model_validator
 
 from maestro.config.approval import ApprovalConfig
 from maestro.config.base import StrictConfigModel
-from maestro.config.broker import KISConfig
+from maestro.config.broker import BrokerAccountConfig, KISConfig
 from maestro.config.datahub import DataHubConfig, DataHubProviderConfig
 from maestro.config.execution import (
     BrokerValidationConfig,
@@ -40,6 +40,9 @@ from maestro.core.symbols import is_cash_symbol
 class MaestroConfig(StrictConfigModel):
     mode: RunMode = RunMode.PAPER
     profile_stage: ProfileStage | None = Field(default=None, exclude=True)
+    app_fragment_paths: list[str] = Field(default_factory=list)
+    app_fragment_recommendations: dict[str, Any] = Field(default_factory=dict, exclude=True)
+    strategy_account_map_path: str | None = None
     portfolio: PortfolioConfig
     strategies: list[StrategyPluginConfig]
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
@@ -51,6 +54,7 @@ class MaestroConfig(StrictConfigModel):
     audit: AuditConfig
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     kis: KISConfig = Field(default_factory=KISConfig)
+    accounts: list[BrokerAccountConfig] = Field(default_factory=list)
     reconciliation: ReconciliationConfig = Field(default_factory=ReconciliationConfig)
 
     @model_validator(mode="before")
@@ -128,6 +132,8 @@ class MaestroConfig(StrictConfigModel):
     @model_validator(mode="after")
     def validate_mode_contract(self) -> "MaestroConfig":
         enabled_strategies = [strategy.id for strategy in self.strategies if strategy.enabled]
+        self._derive_legacy_accounts()
+        self._validate_account_mappings()
         if self.mode == RunMode.PAPER and self.portfolio.initial_cash is None:
             raise ValueError("paper mode requires portfolio.initial_cash")
         if self.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
@@ -148,13 +154,13 @@ class MaestroConfig(StrictConfigModel):
                 raise ValueError("live_readonly mode must not require approval")
             if self.execution.order_posture != "disabled":
                 raise ValueError("live_readonly mode requires execution.order_posture=disabled")
-            if not self.kis.enabled:
-                raise ValueError("live_readonly mode requires kis.enabled=true")
+            if not self._has_enabled_account():
+                raise ValueError("live_readonly mode requires an enabled broker account")
         if self.mode == RunMode.LIVE_APPROVAL:
             if not self.approval.enabled or not self.approval.require_approval:
                 raise ValueError("live_approval mode requires approval.enabled=true")
-            if not self.kis.enabled:
-                raise ValueError("live_approval mode requires kis.enabled=true")
+            if not self._has_enabled_account():
+                raise ValueError("live_approval mode requires an enabled broker account")
         if self.mode == RunMode.PAPER and self.execution.order_posture == "armed":
             raise ValueError("paper mode must not arm live order execution")
         expected_stage = self._derive_profile_stage()
@@ -166,6 +172,93 @@ class MaestroConfig(StrictConfigModel):
         self.profile_stage = expected_stage
         return self
 
+    def _derive_legacy_accounts(self) -> None:
+        if self.accounts or not self.kis.enabled:
+            return
+        default_account_id = "default_kis"
+        self.accounts = [
+            BrokerAccountConfig(
+                id=default_account_id,
+                broker="kis",
+                environment="paper_trading" if self.kis.paper_trading else "real",
+                enabled=True,
+                provider=self.kis.provider,
+                broker_product=self.kis.broker_product,
+                broker_products=list(self.kis.broker_products),
+                account_id=self.kis.account_id,
+                account_id_env=self.kis.account_id_env,
+                app_key_env=self.kis.app_key_env,
+                app_secret_env=self.kis.app_secret_env,
+                access_token_env=self.kis.access_token_env,
+                approval_key_env=self.kis.approval_key_env,
+                token_cache_path=self.kis.token_cache_path,
+                base_url=self.kis.base_url,
+                timeout_seconds=self.kis.timeout_seconds,
+                quote_market_code=self.kis.quote_market_code,
+            )
+        ]
+        self.strategies = [
+            strategy.model_copy(update={"account_id": strategy.account_id or default_account_id})
+            for strategy in self.strategies
+        ]
+
+    def _validate_account_mappings(self) -> None:
+        account_ids = [account.id for account in self.accounts]
+        duplicate_ids = sorted(
+            {account_id for account_id in account_ids if account_ids.count(account_id) > 1}
+        )
+        if duplicate_ids:
+            raise ValueError("accounts.id must be unique: " + ", ".join(duplicate_ids))
+        enabled_accounts = {account.id for account in self.accounts if account.enabled}
+        account_by_id = {account.id: account for account in self.accounts if account.enabled}
+        postures_by_account: dict[str, set[str]] = {}
+        for strategy in self.strategies:
+            if not strategy.enabled:
+                continue
+            if (
+                self.mode == RunMode.LIVE_APPROVAL
+                and strategy.signal_enabled
+                and not strategy.account_id
+            ):
+                raise ValueError(
+                    f"live_approval strategy {strategy.id} requires strategy.account_id"
+                )
+            if not strategy.account_id:
+                continue
+            if strategy.account_id not in enabled_accounts:
+                raise ValueError(
+                    f"strategy {strategy.id} references unknown or disabled account_id: "
+                    f"{strategy.account_id}"
+                )
+            account = account_by_id[strategy.account_id]
+            if account.broker == "sandbox" and strategy.order_posture == "armed":
+                raise ValueError(
+                    f"strategy {strategy.id} uses sandbox account with order_posture=armed"
+                )
+            if strategy.signal_enabled:
+                postures_by_account.setdefault(strategy.account_id, set()).add(
+                    strategy.order_posture or self._effective_strategy_order_posture(strategy)
+                )
+        mixed_accounts = sorted(
+            account_id for account_id, postures in postures_by_account.items() if len(postures) > 1
+        )
+        if mixed_accounts:
+            raise ValueError(
+                "strategies mapped to one account must not use mixed order_posture: "
+                + ", ".join(mixed_accounts)
+            )
+
+    def _effective_strategy_order_posture(self, strategy: StrategyPluginConfig) -> str:
+        posture = strategy.order_posture or self.execution.order_posture
+        if self.execution.order_posture == "disabled":
+            return "disabled"
+        if self.execution.order_posture == "dry_run" and posture == "armed":
+            return "dry_run"
+        return posture
+
+    def _has_enabled_account(self) -> bool:
+        return any(account.enabled for account in self.accounts) or self.kis.enabled
+
     def _derive_profile_stage(self) -> ProfileStage:
         if self.mode == RunMode.PAPER:
             if _uses_real_datahub(self.datahub):
@@ -173,6 +266,11 @@ class MaestroConfig(StrictConfigModel):
             return ProfileStage.PAPER
         if self.mode == RunMode.LIVE_READONLY:
             return ProfileStage.LIVE_READONLY
+        if any(
+            account.enabled and account.environment == "paper_trading"
+            for account in self.accounts
+        ):
+            return ProfileStage.KIS_PAPER_TRADING
         if self.kis.paper_trading:
             return ProfileStage.KIS_PAPER_TRADING
         if self.execution.order_posture == "armed":
@@ -187,6 +285,7 @@ __all__ = [
     "BrokerValidationConfig",
     "ContributionConfig",
     "AuditConfig",
+    "BrokerAccountConfig",
     "CurrencySleeveConfig",
     "DataHubConfig",
     "DataHubProviderConfig",

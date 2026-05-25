@@ -208,7 +208,7 @@ class FakeBrokerReconciliation(BrokerReconciliationRunner):
 
 def _config_path(tmp_path) -> Path:
     raw = yaml.safe_load(
-        Path("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+        Path("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
     )
     raw["datahub"] = {"provider": "mock"}
     raw["execution"]["order_posture"] = "armed"

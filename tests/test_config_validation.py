@@ -10,7 +10,6 @@ from maestro.config.models import StrategyPluginConfig
 from maestro.core.enums import BrokerProduct, ProfileStage
 from maestro.datahub.base import build_data_provider
 from maestro.datahub.router import DataHubRouter
-from maestro.plugins.registry import PluginRegistry
 from maestro.sdk import DataRequest
 
 LEGACY_EXECUTION_CONFIG_KEYS = {
@@ -36,7 +35,7 @@ LEGACY_EXECUTION_CONFIG_KEYS = {
 }
 
 ATARAXIA_LIVE_APPROVAL_CONFIG = Path(
-    "configs/examples/live_approval_ataraxia_kis_paper_trading.yaml"
+    "tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml"
 )
 
 
@@ -108,6 +107,74 @@ def test_telegram_approval_config_ids_override_maestro_env(tmp_path, monkeypatch
 
     assert config.approval.telegram_allowed_chat_ids == [3001]
     assert config.approval.whitelisted_user_ids == [4001]
+
+
+def test_legacy_kis_live_strategy_derives_default_account_id():
+    config = load_config(ATARAXIA_LIVE_APPROVAL_CONFIG)
+
+    assert [account.id for account in config.accounts] == ["default_kis"]
+    assert config.strategies[0].account_id == "default_kis"
+
+
+def test_explicit_live_accounts_require_strategy_account_id(tmp_path):
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["accounts"] = [
+        {
+            "id": "kis_isa",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+        }
+    ]
+    config_path = tmp_path / "missing_strategy_account.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="requires strategy.account_id"):
+        load_config(config_path)
+
+
+def test_explicit_live_accounts_reject_unknown_strategy_account_id(tmp_path):
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["accounts"] = [
+        {
+            "id": "kis_isa",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+        }
+    ]
+    raw["strategies"][0]["account_id"] = "missing_account"
+    config_path = tmp_path / "unknown_strategy_account.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="unknown or disabled account_id"):
+        load_config(config_path)
+
+
+def test_multiple_accounts_allow_shared_strategy_mapping(tmp_path):
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["accounts"] = [
+        {
+            "id": "kis_isa",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+        },
+        {
+            "id": "toss_brokerage",
+            "broker": "toss",
+            "environment": "real",
+            "enabled": True,
+        },
+    ]
+    raw["strategies"][0]["account_id"] = "kis_isa"
+    config_path = tmp_path / "multi_account.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert [account.id for account in config.accounts] == ["kis_isa", "toss_brokerage"]
+    assert config.strategies[0].account_id == "kis_isa"
 
 
 def test_live_order_config_defaults_are_safe():
@@ -484,7 +551,7 @@ def test_live_modes_reject_initial_cash(tmp_path):
 def test_profile_stage_derives_from_existing_profiles(tmp_path):
     assert load_config("configs/paper.yaml").profile_stage == ProfileStage.PAPER
     assert (
-        load_config("configs/examples/paper_yahoo_us_etf.yaml").profile_stage
+        load_config("tests/fixtures/configs/paper_yahoo_us_etf.yaml").profile_stage
         == ProfileStage.PAPER_REAL_DATA
     )
     assert load_config("configs/live_readonly.yaml").profile_stage == ProfileStage.LIVE_READONLY
@@ -493,7 +560,7 @@ def test_profile_stage_derives_from_existing_profiles(tmp_path):
         == ProfileStage.LIVE_APPROVAL_DRY_RUN
     )
     assert (
-        load_config("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml").profile_stage
+        load_config("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").profile_stage
         == ProfileStage.KIS_PAPER_TRADING
     )
 
@@ -542,6 +609,114 @@ def test_config_identity_splits_state_and_runtime_fingerprints(tmp_path):
     assert runtime_identity.runtime_fingerprint != first_identity.runtime_fingerprint
     assert runtime_identity.state_fingerprint == first_identity.state_fingerprint
     assert state_identity.state_fingerprint != first_identity.state_fingerprint
+
+
+def test_app_fragment_composes_ataraxia_defaults(tmp_path):
+    fragment_path = tmp_path / "ataraxia.yaml"
+    fragment_path.write_text(yaml.safe_dump(_ataraxia_fragment()), encoding="utf-8")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["app_fragment_paths"] = ["ataraxia.yaml"]
+    raw["strategies"] = [{"id": "ataraxia", "enabled": True, "weight": 1.0}]
+    raw["portfolio"].pop("currency_sleeves", None)
+    raw["universe"]["instruments"] = []
+    raw["datahub"].pop("symbol_map", None)
+    config_path = tmp_path / "composed_ataraxia.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.app_fragment_paths == ["ataraxia.yaml"]
+    assert config.strategies[0].entrypoint == "ataraxia.strategy:AtaraxiaStrategy"
+    assert config.strategies[0].config["allocations"] == {
+        "TIGER_NASDAQ100_LEVERAGE": 0.60,
+        "KODEX_US_DIVIDEND_DOWJONES": 0.40,
+    }
+    assert config.portfolio.currency_sleeves["KRW"].symbols == [
+        "TIGER_NASDAQ100_LEVERAGE",
+        "KODEX_US_DIVIDEND_DOWJONES",
+    ]
+    assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_symbol == "418660"
+    assert config.datahub.symbol_map["TIGER_NASDAQ100_LEVERAGE"] == "418660.KS"
+    assert config.app_fragment_recommendations == {
+        "execution": {"order_generation_mode": "buy_only_contribution"}
+    }
+
+
+def test_app_fragment_rejects_operator_owned_keys(tmp_path):
+    fragment = _ataraxia_fragment()
+    fragment["execution"] = {"order_generation_mode": "buy_only_contribution"}
+    fragment_path = tmp_path / "bad_fragment.yaml"
+    fragment_path.write_text(yaml.safe_dump(fragment), encoding="utf-8")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["app_fragment_paths"] = ["bad_fragment.yaml"]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="operator-owned"):
+        load_config(config_path)
+
+
+def test_app_fragment_rejects_conflicting_duplicate_instrument(tmp_path):
+    fragment_path = tmp_path / "ataraxia.yaml"
+    fragment_path.write_text(yaml.safe_dump(_ataraxia_fragment()), encoding="utf-8")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["app_fragment_paths"] = ["ataraxia.yaml"]
+    raw["universe"]["instruments"][0]["broker_symbol"] = "999999"
+    config_path = tmp_path / "conflicting_instrument.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Conflicting app fragment instrument"):
+        load_config(config_path)
+
+
+def test_app_fragment_allows_operator_strategy_config_overrides(tmp_path):
+    fragment_path = tmp_path / "ataraxia.yaml"
+    fragment_path.write_text(yaml.safe_dump(_ataraxia_fragment()), encoding="utf-8")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["app_fragment_paths"] = ["ataraxia.yaml"]
+    raw["strategies"] = [
+        {
+            "id": "ataraxia",
+            "enabled": True,
+            "weight": 1.0,
+            "config": {
+                "allocations": {
+                    "TIGER_NASDAQ100_LEVERAGE": 0.50,
+                    "KODEX_US_DIVIDEND_DOWJONES": 0.50,
+                }
+            },
+        }
+    ]
+    config_path = tmp_path / "operator_override.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    config = load_config(config_path)
+
+    assert config.strategies[0].entrypoint == "ataraxia.strategy:AtaraxiaStrategy"
+    assert config.strategies[0].config == {
+        "sleeve": "KRW",
+        "allocations": {
+            "TIGER_NASDAQ100_LEVERAGE": 0.50,
+            "KODEX_US_DIVIDEND_DOWJONES": 0.50,
+        },
+    }
+
+
+def test_app_fragment_identity_changes_when_fragment_changes(tmp_path):
+    fragment_path = tmp_path / "ataraxia.yaml"
+    fragment = _ataraxia_fragment()
+    fragment_path.write_text(yaml.safe_dump(fragment), encoding="utf-8")
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["app_fragment_paths"] = ["ataraxia.yaml"]
+    config_path = tmp_path / "composed_ataraxia.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    before_identity = config_identity(config_path)
+    fragment["strategy"]["config"]["allocations"]["TIGER_NASDAQ100_LEVERAGE"] = 0.61
+    fragment_path.write_text(yaml.safe_dump(fragment), encoding="utf-8")
+    after_identity = config_identity(config_path)
+
+    assert after_identity.fingerprint != before_identity.fingerprint
 
 
 def test_signal_to_allocation_type_is_restricted():
@@ -608,20 +783,330 @@ def test_signal_to_allocation_unknown_field_fails():
         )
 
 
-def test_current_sample_configs_load():
+def test_current_runtime_configs_load():
     paths = [
         "configs/paper.yaml",
         "configs/live_readonly.yaml",
         "configs/live_approval.yaml",
-        *(str(path) for path in sorted(Path("configs/examples").glob("*.yaml"))),
+        *(
+            str(path)
+            for path in sorted(Path("configs/operator").glob("*.yaml"))
+            if path.name != "strategy_accounts.yaml"
+        ),
     ]
-    assert len(paths) == 14
+    assert len(paths) == 6
     for path in paths:
         assert load_config(path)
 
 
-def test_example_configs_use_canonical_execution_schema():
-    paths = sorted(Path("configs/examples").glob("*.yaml"))
+def test_operator_symphony_phase_configs_share_state_and_route_strategies():
+    readonly = load_config("configs/operator/symphony_readonly.yaml")
+    signal = load_config("configs/operator/symphony_signal.yaml")
+    approval = load_config("configs/operator/symphony_approval.yaml")
+    signal_raw = yaml.safe_load(Path("configs/operator/symphony_signal.yaml").read_text())
+    approval_raw = yaml.safe_load(Path("configs/operator/symphony_approval.yaml").read_text())
+
+    assert readonly.mode == "live_readonly"
+    assert signal.mode == "live_approval"
+    assert approval.mode == "live_approval"
+    assert readonly.strategy_account_map_path == "strategy_accounts.yaml"
+    assert signal.strategy_account_map_path == "strategy_accounts.yaml"
+    assert approval.strategy_account_map_path == "strategy_accounts.yaml"
+    assert [strategy.get("account_id") for strategy in signal_raw["strategies"]] == [
+        None,
+        None,
+        None,
+    ]
+    assert [strategy.get("account_id") for strategy in approval_raw["strategies"]] == [
+        None,
+        None,
+        None,
+    ]
+    assert [(strategy.id, strategy.readonly_enabled) for strategy in readonly.strategies] == [
+        ("ataraxia", True),
+        ("snowball_us", True),
+        ("trading_agents", True),
+    ]
+    assert signal.execution.order_posture == "disabled"
+    assert approval.execution.order_posture == "dry_run"
+    assert readonly.execution.order_posture == "disabled"
+    assert readonly.approval.enabled is False
+    assert signal.approval.enabled is True
+    assert approval.approval.enabled is True
+
+    assert {
+        readonly.state.sqlite_path,
+        signal.state.sqlite_path,
+        approval.state.sqlite_path,
+    } == {"var/symphony_state.db"}
+    assert {
+        readonly.state.identity_group,
+        signal.state.identity_group,
+        approval.state.identity_group,
+    } == {"symphony"}
+    assert {
+        readonly.audit.jsonl_path,
+        signal.audit.jsonl_path,
+        approval.audit.jsonl_path,
+    } == {"var/symphony_audit.jsonl"}
+
+    assert {
+        config_identity("configs/operator/symphony_readonly.yaml").state_fingerprint,
+        config_identity("configs/operator/symphony_signal.yaml").state_fingerprint,
+        config_identity("configs/operator/symphony_approval.yaml").state_fingerprint,
+    } == {config_identity("configs/operator/symphony_readonly.yaml").state_fingerprint}
+
+    assert [(account.id, account.broker, account.environment) for account in signal.accounts] == [
+        ("kis_mock", "kis", "paper_trading"),
+        ("kis_isa", "kis", "real"),
+        ("kis_brokerage", "kis", "real"),
+        ("dev_sandbox", "sandbox", "paper_trading"),
+    ]
+    assert [
+        (account.id, account.account_id_env, account.app_key_env, account.app_secret_env)
+        for account in signal.accounts
+    ] == [
+        ("kis_mock", "KIS_MOCK_ACCOUNT_ID", "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET"),
+        ("kis_isa", "KIS_ISA_ACCOUNT_ID", "KIS_ISA_APP_KEY", "KIS_ISA_APP_SECRET"),
+        (
+            "kis_brokerage",
+            "KIS_BROKERAGE_ACCOUNT_ID",
+            "KIS_BROKERAGE_APP_KEY",
+            "KIS_BROKERAGE_APP_SECRET",
+        ),
+        ("dev_sandbox", None, "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET"),
+    ]
+    assert [
+        (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
+        for strategy in signal.strategies
+    ] == [
+        ("ataraxia", "kis_mock", True, "dry_run"),
+        ("snowball_us", "dev_sandbox", True, "dry_run"),
+        ("trading_agents", "dev_sandbox", False, "disabled"),
+    ]
+    assert [
+        (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
+        for strategy in approval.strategies
+    ] == [
+        ("ataraxia", "kis_mock", True, "dry_run"),
+        ("snowball_us", "dev_sandbox", True, "dry_run"),
+        ("trading_agents", "dev_sandbox", False, "disabled"),
+    ]
+
+
+def test_shared_strategy_account_map_routes_strategies_and_affects_identity(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": "kis_isa",
+                    "snowball_us": "kis_brokerage",
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    before_identity = config_identity(config_path)
+
+    assert [(strategy.id, strategy.account_id) for strategy in config.strategies] == [
+        ("ataraxia", "kis_isa"),
+        ("snowball_us", "kis_brokerage"),
+        ("trading_agents", "dev_sandbox"),
+    ]
+
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": "kis_mock",
+                    "snowball_us": "kis_brokerage",
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    after_identity = config_identity(config_path)
+
+    assert load_config(config_path).strategies[0].account_id == "kis_mock"
+    assert after_identity.fingerprint != before_identity.fingerprint
+    assert after_identity.runtime_fingerprint != before_identity.runtime_fingerprint
+    assert after_identity.state_fingerprint == before_identity.state_fingerprint
+
+
+def test_shared_strategy_account_map_applies_phase_controls(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": {
+                        "account_id": "kis_isa",
+                        "readonly": True,
+                        "signal": True,
+                        "order_posture": "dry_run",
+                    },
+                    "snowball_us": {
+                        "account_id": "dev_sandbox",
+                        "readonly": True,
+                        "signal": True,
+                        "order_posture": "dry_run",
+                    },
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "readonly": True,
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert [
+        (
+            strategy.id,
+            strategy.account_id,
+            strategy.readonly_enabled,
+            strategy.signal_enabled,
+            strategy.order_posture,
+        )
+        for strategy in config.strategies
+    ] == [
+        ("ataraxia", "kis_isa", True, True, "dry_run"),
+        ("snowball_us", "dev_sandbox", True, True, "dry_run"),
+        ("trading_agents", "dev_sandbox", True, False, "disabled"),
+    ]
+
+
+def test_strategy_phase_controls_reject_sandbox_armed(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": {"account_id": "kis_isa", "order_posture": "dry_run"},
+                    "snowball_us": {"account_id": "dev_sandbox", "order_posture": "armed"},
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="sandbox.*armed"):
+        load_config(config_path)
+
+
+def test_strategy_phase_controls_reject_mixed_posture_in_same_account(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": {"account_id": "kis_isa", "order_posture": "dry_run"},
+                    "snowball_us": {"account_id": "kis_isa", "order_posture": "armed"},
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="mixed order_posture"):
+        load_config(config_path)
+
+
+def test_shared_strategy_account_map_rejects_unknown_strategy(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": "kis_isa",
+                    "snowball_us": "kis_brokerage",
+                    "ghost": "kis_mock",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="unknown strategy ids"):
+        load_config(config_path)
+
+
+def test_shared_strategy_account_map_rejects_inline_mismatch(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    raw["strategies"][0]["account_id"] = "kis_isa"
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {"strategies": {"ataraxia": "kis_mock", "snowball_us": "kis_brokerage"}}
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="inline account_id"):
+        load_config(config_path)
+
+
+def test_fixture_configs_use_canonical_execution_schema():
+    paths = sorted(Path("tests/fixtures/configs").glob("*.yaml"))
     assert len(paths) == 11
     for path in paths:
         raw = yaml.safe_load(path.read_text())
@@ -632,8 +1117,8 @@ def test_example_configs_use_canonical_execution_schema():
 
 
 def test_ataraxia_contribution_config_declares_budget_range_and_domestic_universe():
-    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
-    config = load_config("configs/examples/paper_ataraxia_yahoo.yaml")
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
+    config = load_config("tests/fixtures/configs/paper_ataraxia_yahoo.yaml")
 
     assert "symbol_map" not in raw["datahub"]
     assert config.execution.order_generation_mode == "buy_only_contribution"
@@ -654,7 +1139,7 @@ def test_ataraxia_contribution_config_declares_budget_range_and_domestic_univers
 
 
 def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
-    config = load_config("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml")
+    config = load_config("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml")
 
     assert config.mode == "live_approval"
     assert config.portfolio.base_currency == "KRW"
@@ -676,14 +1161,14 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
     assert config.kis.paper_trading is True
     assert config.kis.account_id is None
-    assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
+    assert config.kis.account_id_env == "KIS_MOCK_ACCOUNT_ID"
     assert config.universe.get("TIGER_NASDAQ100_LEVERAGE").broker_symbol == "418660"
     assert config.universe.get("KODEX_US_DIVIDEND_DOWJONES").broker_symbol == "489250"
 
 
 def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     raw = yaml.safe_load(
-        Path("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+        Path("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
     )
     raw["execution"]["order_posture"] = "armed"
     raw["approval"]["telegram_allowed_chat_ids"] = [100]
@@ -709,93 +1194,8 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
 
 
-def test_operator_kis_isa_profile_is_ataraxia_only_domestic_buy_only():
-    config = load_config("configs/operator/kis_isa.yaml")
-
-    assert config.mode == "live_approval"
-    assert config.portfolio.base_currency == "KRW"
-    assert config.portfolio.allocation_mode == "currency_sleeves"
-    assert set(config.portfolio.cash_by_currency) == {"KRW"}
-    assert set(config.portfolio.currency_sleeves) == {"KRW"}
-    assert config.strategies[0].id == "ataraxia"
-    assert config.strategies[0].weight == 1.0
-    assert len(config.strategies) == 1
-    assert config.execution.order_generation_mode == "buy_only_contribution"
-    assert config.execution.contribution.buy_day == 25
-    assert config.execution.contribution.currency == "KRW"
-    assert config.execution.contribution.sleeve == "KRW"
-    assert config.kis.account_id_env == "KIS_ISA_ACCOUNT_ID"
-    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
-    assert config.kis.effective_broker_products() == [BrokerProduct.KIS_DOMESTIC_STOCK]
-    assert config.kis.token_cache_path == "var/kis_isa_access_token.json"
-    assert all(instrument.region == "KR" for instrument in config.universe.instruments)
-    assert all(instrument.currency == "KRW" for instrument in config.universe.instruments)
-    assert all(
-        instrument.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
-        for instrument in config.universe.instruments
-    )
-
-
-def test_operator_kis_brokerage_us_profile_is_usd_snowball_only():
-    config = load_config("configs/operator/kis_brokerage_us.yaml")
-
-    assert config.mode == "live_approval"
-    assert config.portfolio.base_currency == "USD"
-    assert config.portfolio.allowed_symbols[0] == "CASH_USD"
-    assert config.strategies[0].id == "snowball_us"
-    assert config.strategies[0].weight == 1.0
-    assert config.strategies[0].config["sleeve"] == "USD"
-    assert len(config.strategies) == 1
-    assert config.execution.order_generation_mode == "target_rebalance"
-    assert config.kis.account_id_env == "KIS_BROKERAGE_ACCOUNT_ID"
-    assert config.kis.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
-    assert config.kis.effective_broker_products() == [BrokerProduct.KIS_OVERSEAS_STOCK]
-    assert config.kis.token_cache_path == "var/kis_brokerage_us_access_token.json"
-    assert all(instrument.region == "US" for instrument in config.universe.instruments)
-    assert all(instrument.currency == "USD" for instrument in config.universe.instruments)
-    assert all(
-        instrument.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
-        for instrument in config.universe.instruments
-    )
-    registry = PluginRegistry.from_configs(config.strategies, run_mode=config.mode)
-    assert registry.strategies[0].manifest.strategy_id == "snowball_us"
-
-
-def test_operator_kis_brokerage_kr_profile_is_readonly_domestic_scaffold():
-    config = load_config("configs/operator/kis_brokerage_kr.yaml")
-
-    assert config.mode == "live_readonly"
-    assert config.portfolio.base_currency == "KRW"
-    assert config.portfolio.allowed_symbols[0] == "CASH_KRW"
-    assert config.strategies == []
-    assert config.execution.order_posture == "disabled"
-    assert config.approval.enabled is False
-    assert config.kis.account_id_env == "KIS_BROKERAGE_ACCOUNT_ID"
-    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
-    assert config.kis.effective_broker_products() == [BrokerProduct.KIS_DOMESTIC_STOCK]
-    assert config.kis.token_cache_path == "var/kis_brokerage_kr_access_token.json"
-    assert all(instrument.region == "KR" for instrument in config.universe.instruments)
-    assert all(instrument.currency == "KRW" for instrument in config.universe.instruments)
-    assert all(
-        instrument.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
-        for instrument in config.universe.instruments
-    )
-
-
-def test_operator_kis_profiles_keep_state_audit_and_token_paths_distinct():
-    configs = [
-        load_config("configs/operator/kis_isa.yaml"),
-        load_config("configs/operator/kis_brokerage_us.yaml"),
-        load_config("configs/operator/kis_brokerage_kr.yaml"),
-    ]
-
-    assert len({config.state.sqlite_path for config in configs}) == 3
-    assert len({config.audit.jsonl_path for config in configs}) == 3
-    assert len({config.kis.token_cache_path for config in configs}) == 3
-
-
 def test_contribution_config_rejects_invalid_buy_day(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["buy_day"] = 32
     config_path = tmp_path / "invalid_buy_day.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -805,7 +1205,7 @@ def test_contribution_config_rejects_invalid_buy_day(tmp_path):
 
 
 def test_contribution_config_rejects_budget_outside_range(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["monthly_budget"] = 5_000_000
     config_path = tmp_path / "invalid_monthly_budget.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -815,7 +1215,7 @@ def test_contribution_config_rejects_budget_outside_range(tmp_path):
 
 
 def test_contribution_config_rejects_unsupported_policy(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/paper_ataraxia_yahoo.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["non_trading_day_policy"] = "skip"
     config_path = tmp_path / "invalid_policy.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -824,9 +1224,89 @@ def test_contribution_config_rejects_unsupported_policy(tmp_path):
         load_config(config_path)
 
 
+def _ataraxia_fragment() -> dict:
+    return {
+        "fragment_version": 1,
+        "strategy": {
+            "id": "ataraxia",
+            "enabled": True,
+            "weight": 1.0,
+            "entrypoint": "ataraxia.strategy:AtaraxiaStrategy",
+            "config": {
+                "sleeve": "KRW",
+                "allocations": {
+                    "TIGER_NASDAQ100_LEVERAGE": 0.60,
+                    "KODEX_US_DIVIDEND_DOWJONES": 0.40,
+                },
+            },
+        },
+        "portfolio": {
+            "currency_sleeves": {
+                "KRW": {
+                    "cash_symbol": "CASH_KRW",
+                    "symbols": [
+                        "TIGER_NASDAQ100_LEVERAGE",
+                        "KODEX_US_DIVIDEND_DOWJONES",
+                    ],
+                }
+            }
+        },
+        "universe": {
+            "instruments": [
+                {
+                    "symbol": "TIGER_NASDAQ100_LEVERAGE",
+                    "asset_type": "domestic_etf",
+                    "region": "KR",
+                    "currency": "KRW",
+                    "broker": "kis",
+                    "broker_product": "kis_domestic_stock",
+                    "broker_symbol": "418660",
+                    "exchange_code": "KRX",
+                    "quantity_step": 1,
+                    "price_tick": 1,
+                    "min_order_quantity": 1,
+                    "min_order_notional": 1,
+                },
+                {
+                    "symbol": "KODEX_US_DIVIDEND_DOWJONES",
+                    "asset_type": "domestic_etf",
+                    "region": "KR",
+                    "currency": "KRW",
+                    "broker": "kis",
+                    "broker_product": "kis_domestic_stock",
+                    "broker_symbol": "489250",
+                    "exchange_code": "KRX",
+                    "quantity_step": 1,
+                    "price_tick": 1,
+                    "min_order_quantity": 1,
+                    "min_order_notional": 1,
+                },
+            ]
+        },
+        "datahub": {
+            "symbol_map": {
+                "TIGER_NASDAQ100_LEVERAGE": "418660.KS",
+                "KODEX_US_DIVIDEND_DOWJONES": "489250.KS",
+            }
+        },
+        "recommendations": {
+            "execution": {"order_generation_mode": "buy_only_contribution"}
+        },
+    }
+
+
+def _operator_signal_raw_with_absolute_fragments() -> dict:
+    config_path = Path("configs/operator/symphony_signal.yaml")
+    raw = yaml.safe_load(config_path.read_text())
+    raw["app_fragment_paths"] = [
+        str((config_path.parent / path).resolve()) for path in raw.get("app_fragment_paths", [])
+    ]
+    return raw
+
+
 def test_multi_asset_readonly_example_uses_env_var_names_only():
-    raw_text = Path("configs/examples/live_readonly_multi_asset_kis.yaml").read_text()
-    config = load_config("configs/examples/live_readonly_multi_asset_kis.yaml")
+    raw_text = Path("tests/fixtures/configs/live_readonly_multi_asset_kis.yaml").read_text()
+    config = load_config("tests/fixtures/configs/live_readonly_multi_asset_kis.yaml")
 
     assert config.mode == "live_readonly"
     assert config.portfolio.base_currency == "KRW"
@@ -839,9 +1319,9 @@ def test_multi_asset_readonly_example_uses_env_var_names_only():
         BrokerProduct.KIS_OVERSEAS_STOCK,
     ]
     assert config.kis.account_id is None
-    assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
-    assert config.kis.app_key_env == "KIS_APP_KEY"
-    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.account_id_env == "KIS_MOCK_ACCOUNT_ID"
+    assert config.kis.app_key_env == "KIS_MOCK_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_MOCK_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
     assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
     assert config.state.sqlite_path == "var/multi_asset_readonly_state.db"
@@ -886,8 +1366,8 @@ def test_live_approval_root_config_is_minimal_operator_skeleton(monkeypatch):
     assert config.approval.whitelisted_user_ids == []
     assert config.kis.provider == "kis"
     assert config.kis.broker_product == "kis_domestic_stock"
-    assert config.kis.app_key_env == "KIS_APP_KEY"
-    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.app_key_env == "KIS_MOCK_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_MOCK_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
     assert config.kis.token_cache_path == "var/kis_access_token.json"
     cash = config.universe.get("CASH_KRW")
@@ -914,7 +1394,7 @@ def test_live_readonly_root_config_uses_broker_cash_baseline():
 
 
 def test_live_approval_us_etf_example_keeps_concrete_universe_out_of_root_config():
-    config = load_config("configs/examples/live_approval_us_etf.yaml")
+    config = load_config("tests/fixtures/configs/live_approval_us_etf.yaml")
 
     assert config.mode == "live_approval"
     assert config.portfolio.base_currency == "USD"
@@ -927,8 +1407,10 @@ def test_live_approval_us_etf_example_keeps_concrete_universe_out_of_root_config
 
 
 def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fallback():
-    raw = yaml.safe_load(Path("configs/examples/live_approval_kis_multi_asset.yaml").read_text())
-    config = load_config("configs/examples/live_approval_kis_multi_asset.yaml")
+    raw = yaml.safe_load(
+        Path("tests/fixtures/configs/live_approval_kis_multi_asset.yaml").read_text()
+    )
+    config = load_config("tests/fixtures/configs/live_approval_kis_multi_asset.yaml")
 
     assert "allowed_symbols" not in raw["portfolio"]
     assert all(instrument["asset_type"] != "cash" for instrument in raw["universe"]["instruments"])
@@ -964,7 +1446,7 @@ def test_kis_multi_asset_live_approval_uses_yahoo_multi_provider_without_mock_fa
 
 
 def test_allowed_symbols_can_be_derived_from_universe_when_omitted(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_approval_us_etf.yaml").read_text())
     del raw["portfolio"]["allowed_symbols"]
     config_path = tmp_path / "live_approval_us_etf_without_allowed_symbols.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -977,7 +1459,7 @@ def test_allowed_symbols_can_be_derived_from_universe_when_omitted(tmp_path):
 
 
 def test_yahoo_symbol_map_explicit_values_override_universe_derivation(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/paper_yahoo_us_etf.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_yahoo_us_etf.yaml").read_text())
     raw["datahub"]["symbol_map"] = {"AAPL": "AAPL-CUSTOM"}
     config_path = tmp_path / "paper_yahoo_us_etf_custom_symbol_map.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -989,7 +1471,7 @@ def test_yahoo_symbol_map_explicit_values_override_universe_derivation(tmp_path)
 
 
 def test_research_multi_provider_example_registers_research_data_types():
-    config = load_config("configs/examples/paper_research_multi_provider.yaml")
+    config = load_config("tests/fixtures/configs/paper_research_multi_provider.yaml")
     provider_names = [provider.name for provider in config.datahub.providers]
 
     assert provider_names == [
@@ -1022,7 +1504,7 @@ def test_research_multi_provider_example_registers_research_data_types():
 
 
 def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_approval_us_etf.yaml").read_text())
     raw["portfolio"]["allowed_symbols"].append("TSLA")
     config_path = tmp_path / "missing_universe_symbol.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -1032,8 +1514,8 @@ def test_universe_requires_portfolio_symbols_to_be_declared(tmp_path):
 
 
 def test_us_etf_yahoo_paper_config_declares_usd_universe_and_symbol_map():
-    raw = yaml.safe_load(Path("configs/examples/paper_yahoo_us_etf.yaml").read_text())
-    config = load_config("configs/examples/paper_yahoo_us_etf.yaml")
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_yahoo_us_etf.yaml").read_text())
+    config = load_config("tests/fixtures/configs/paper_yahoo_us_etf.yaml")
 
     assert "symbol_map" not in raw["datahub"]
     assert config.mode == "paper"
@@ -1067,8 +1549,8 @@ def test_us_etf_yahoo_paper_config_declares_usd_universe_and_symbol_map():
 def test_live_approval_example_config_has_no_hardcoded_secrets(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.delenv("KIS_APP_KEY", raising=False)
-    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
     monkeypatch.delenv("KIS_ACCESS_TOKEN", raising=False)
     monkeypatch.delenv("KIS_APPROVAL_KEY", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -1076,8 +1558,8 @@ def test_live_approval_example_config_has_no_hardcoded_secrets(
     raw_text = Path("configs/live_approval.yaml").read_text()
     config = load_config("configs/live_approval.yaml")
 
-    assert config.kis.app_key_env == "KIS_APP_KEY"
-    assert config.kis.app_secret_env == "KIS_APP_SECRET"
+    assert config.kis.app_key_env == "KIS_MOCK_APP_KEY"
+    assert config.kis.app_secret_env == "KIS_MOCK_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
     assert config.kis.approval_key_env == "KIS_APPROVAL_KEY"
     assert config.approval.telegram_bot_token_env == "TELEGRAM_BOT_TOKEN"
@@ -1085,8 +1567,8 @@ def test_live_approval_example_config_has_no_hardcoded_secrets(
     assert "Bearer " not in raw_text
     assert "ghp_" not in raw_text
     assert "telegram.org/bot" not in raw_text
-    assert "KIS_APP_KEY:" not in raw_text
-    assert "KIS_APP_SECRET:" not in raw_text
+    assert "KIS_MOCK_APP_KEY:" not in raw_text
+    assert "KIS_MOCK_APP_SECRET:" not in raw_text
     assert "KIS_ACCESS_TOKEN:" not in raw_text
     assert "KIS_APPROVAL_KEY:" not in raw_text
     assert "TELEGRAM_BOT_TOKEN:" not in raw_text

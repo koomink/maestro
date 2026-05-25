@@ -9,7 +9,7 @@ from maestro.sdk import BaseStrategyPlugin, DataBundle, DataRequest, StrategyCon
 
 
 def test_init_virtuoso_app_creates_installable_scaffold(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_APP_SECRET", "shell-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "shell-secret")
     output = tmp_path / "my_app"
 
     result = CliRunner().invoke(

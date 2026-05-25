@@ -11,6 +11,7 @@ class ApprovalConfig(StrictConfigModel):
     require_approval: bool = False
     default_decision: str = "approved"
     timeout_seconds: int = Field(default=300, gt=0)
+    signal_max_age_seconds: int = Field(default=3600, gt=0)
     whitelisted_user_ids: list[int] = Field(default_factory=list)
     telegram_bot_token_env: str = "TELEGRAM_BOT_TOKEN"
     telegram_allowed_chat_ids: list[int] = Field(default_factory=list)

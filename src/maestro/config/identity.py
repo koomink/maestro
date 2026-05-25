@@ -3,9 +3,8 @@ from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 
-import yaml
-
 from maestro.config.models import MaestroConfig
+from maestro.config.strategy_account_mapping import prepare_config
 
 STATE_IDENTITY_KEYS = (
     "mode",
@@ -36,14 +35,20 @@ class ConfigIdentity:
 
 def config_identity(path: str | Path) -> ConfigIdentity:
     config_path = Path(path).expanduser().resolve()
-    raw_bytes = config_path.read_bytes()
-    config = MaestroConfig.model_validate(yaml.safe_load(raw_bytes))
+    prepared = prepare_config(config_path)
+    config = MaestroConfig.model_validate(prepared.raw)
     canonical = config.model_dump(mode="json")
     canonical["profile_stage"] = config.profile_stage.value
-    state_payload = {key: canonical.get(key) for key in STATE_IDENTITY_KEYS}
+    if config.state.identity_group:
+        state_payload = {
+            "state": canonical.get("state"),
+            "state_identity_group": config.state.identity_group,
+        }
+    else:
+        state_payload = {key: canonical.get(key) for key in STATE_IDENTITY_KEYS}
     return ConfigIdentity(
         path=str(config_path),
-        fingerprint=sha256(raw_bytes).hexdigest(),
+        fingerprint=sha256(prepared.fingerprint_bytes).hexdigest(),
         state_fingerprint=_fingerprint_payload(state_payload),
         runtime_fingerprint=_fingerprint_payload(canonical),
     )

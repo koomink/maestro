@@ -1,9 +1,13 @@
 mode: live_approval
+app_fragment_paths:
+  - ../../../Virtuoso/Ataraxia/configs/fragments/ataraxia.yaml
+strategy_account_map_path: strategy_accounts.yaml
 
 portfolio:
-  base_currency: USD
+  base_currency: KRW
   allocation_mode: currency_sleeves
   cash_by_currency:
+    KRW: 0
     USD: 0
   currency_sleeves:
     USD:
@@ -185,11 +189,11 @@ universe:
       min_order_quantity: 1
       min_order_notional: 1
   policy:
-    allowed_asset_types: [etf, us_etf]
-    allowed_regions: [US]
-    allowed_currencies: [USD]
-    allowed_broker_products: [kis_overseas_stock]
-    allowed_exchange_codes: [NASD, AMEX]
+    allowed_asset_types: [domestic_etf, etf, us_etf]
+    allowed_regions: [KR, US]
+    allowed_currencies: [KRW, USD]
+    allowed_broker_products: [kis_domestic_stock, kis_overseas_stock]
+    allowed_exchange_codes: [KRX, NASD, AMEX]
     denied_symbols: []
     denied_asset_tags: []
     max_new_symbols_per_run: 0
@@ -197,7 +201,70 @@ universe:
     require_broker_tradability_check: true
     require_data_freshness_check: true
 
+accounts:
+  - id: kis_mock
+    broker: kis
+    environment: paper_trading
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_MOCK_ACCOUNT_ID
+    app_key_env: KIS_MOCK_APP_KEY
+    app_secret_env: KIS_MOCK_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_mock_access_token.json
+    timeout_seconds: 10
+
+  - id: kis_isa
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_ISA_ACCOUNT_ID
+    app_key_env: KIS_ISA_APP_KEY
+    app_secret_env: KIS_ISA_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_isa_access_token.json
+    timeout_seconds: 10
+
+  - id: kis_brokerage
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_overseas_stock
+    broker_products:
+      - kis_overseas_stock
+    account_id_env: KIS_BROKERAGE_ACCOUNT_ID
+    app_key_env: KIS_BROKERAGE_APP_KEY
+    app_secret_env: KIS_BROKERAGE_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_brokerage_us_access_token.json
+    timeout_seconds: 10
+    quote_market_code: J
+
+  - id: dev_sandbox
+    broker: sandbox
+    environment: paper_trading
+    enabled: true
+    broker_product: kis_overseas_stock
+    broker_products:
+      - kis_domestic_stock
+      - kis_overseas_stock
+
 strategies:
+  - id: ataraxia
+    enabled: true
+    weight: 1.0
+
   - id: snowball_us
     enabled: true
     weight: 1.0
@@ -210,6 +277,14 @@ strategies:
         - accelerated_dual_momentum
         - gtt_ue
         - baa_a
+
+  - id: trading_agents
+    enabled: true
+    weight: 1.0
+    entrypoint: "tradingagents_app.strategy:TradingAgentsStrategy"
+    config:
+      sleeve: USD
+      cash_symbol: CASH_USD
 
 datahub:
   providers:
@@ -233,23 +308,23 @@ datahub:
 execution:
   proposal_engine: paper
   order_generation_mode: target_rebalance
-  order_posture: dry_run
+  order_posture: disabled
   require_reconciliation_pass: true
   live_order_limits:
-    max_order_notional: 1000
-    max_daily_notional: 3000
-    max_daily_order_count: 3
-    daily_loss_limit: null
+    max_order_notional: 1000000
+    max_daily_notional: 3000000
+    max_daily_order_count: 5
+    daily_loss_limit: 100000
     fee_buffer_pct: 0.002
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
   market_session:
-    required: true
-    timezone: America/New_York
-    open: "09:30"
-    close: "16:00"
+    required: false
+    timezone: Asia/Seoul
+    open: "09:00"
+    close: "15:30"
     weekdays: [0, 1, 2, 3, 4]
     holidays: []
   broker_validation:
@@ -257,16 +332,16 @@ execution:
     max_quote_deviation_pct: 0.02
     require_risk_validation: true
 
-
 monitoring:
   heartbeat_max_age_seconds: 3600
   scheduled_run_max_age_seconds: 86400
 
 state:
-  sqlite_path: var/kis_brokerage_us_state.db
+  sqlite_path: var/symphony_state.db
+  identity_group: symphony
 
 audit:
-  jsonl_path: var/kis_brokerage_us_audit.jsonl
+  jsonl_path: var/symphony_audit.jsonl
 
 approval:
   enabled: true
@@ -278,19 +353,3 @@ approval:
   telegram_allowed_chat_ids: []
   whitelisted_user_ids: []
   telegram_poll_interval_seconds: 1.0
-
-kis:
-  enabled: true
-  provider: kis
-  broker_product: kis_overseas_stock
-  broker_products:
-    - kis_overseas_stock
-  account_id_env: KIS_BROKERAGE_ACCOUNT_ID
-  app_key_env: KIS_APP_KEY
-  app_secret_env: KIS_APP_SECRET
-  access_token_env: KIS_ACCESS_TOKEN
-  approval_key_env: KIS_APPROVAL_KEY
-  token_cache_path: var/kis_brokerage_us_access_token.json
-  paper_trading: false
-  timeout_seconds: 10
-  quote_market_code: J

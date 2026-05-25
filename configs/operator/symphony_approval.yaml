@@ -1,0 +1,355 @@
+mode: live_approval
+app_fragment_paths:
+  - ../../../Virtuoso/Ataraxia/configs/fragments/ataraxia.yaml
+strategy_account_map_path: strategy_accounts.yaml
+
+portfolio:
+  base_currency: KRW
+  allocation_mode: currency_sleeves
+  cash_by_currency:
+    KRW: 0
+    USD: 0
+  currency_sleeves:
+    USD:
+      cash_symbol: CASH_USD
+      symbols:
+        - QQQ
+        - SCHD
+        - BIL
+        - TLT
+        - PDBC
+        - TIP
+        - SPY
+        - SCZ
+        - EFA
+        - EEM
+        - AGG
+        - IEF
+        - LQD
+
+universe:
+  research_symbols:
+    - T10Y3M
+    - UNRATE
+  instruments:
+    - symbol: QQQ
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: QQQ
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: SCHD
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: SCHD
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: BIL
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: BIL
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: TLT
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: TLT
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: PDBC
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: PDBC
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: TIP
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: TIP
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: SPY
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: SPY
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: SCZ
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: SCZ
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: EFA
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: EFA
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: EEM
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: EEM
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: AGG
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: AGG
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: IEF
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: IEF
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: LQD
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: kis
+      broker_product: kis_overseas_stock
+      broker_symbol: LQD
+      exchange_code: AMEX
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+  policy:
+    allowed_asset_types: [domestic_etf, etf, us_etf]
+    allowed_regions: [KR, US]
+    allowed_currencies: [KRW, USD]
+    allowed_broker_products: [kis_domestic_stock, kis_overseas_stock]
+    allowed_exchange_codes: [KRX, NASD, AMEX]
+    denied_symbols: []
+    denied_asset_tags: []
+    max_new_symbols_per_run: 0
+    require_operator_approval_for_tradable: true
+    require_broker_tradability_check: true
+    require_data_freshness_check: true
+
+accounts:
+  - id: kis_mock
+    broker: kis
+    environment: paper_trading
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_MOCK_ACCOUNT_ID
+    app_key_env: KIS_MOCK_APP_KEY
+    app_secret_env: KIS_MOCK_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_mock_access_token.json
+    timeout_seconds: 10
+
+  - id: kis_isa
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_ISA_ACCOUNT_ID
+    app_key_env: KIS_ISA_APP_KEY
+    app_secret_env: KIS_ISA_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_isa_access_token.json
+    timeout_seconds: 10
+
+  - id: kis_brokerage
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_overseas_stock
+    broker_products:
+      - kis_overseas_stock
+    account_id_env: KIS_BROKERAGE_ACCOUNT_ID
+    app_key_env: KIS_BROKERAGE_APP_KEY
+    app_secret_env: KIS_BROKERAGE_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_brokerage_us_access_token.json
+    timeout_seconds: 10
+    quote_market_code: J
+
+  - id: dev_sandbox
+    broker: sandbox
+    environment: paper_trading
+    enabled: true
+    broker_product: kis_overseas_stock
+    broker_products:
+      - kis_domestic_stock
+      - kis_overseas_stock
+
+strategies:
+  - id: ataraxia
+    enabled: true
+    weight: 1.0
+
+  - id: snowball_us
+    enabled: true
+    weight: 1.0
+    entrypoint: "snowball.strategy:SnowballUSStrategy"
+    config:
+      sleeve: USD
+      cash_symbol: CASH_USD
+      selected_strategies:
+        - dga
+        - accelerated_dual_momentum
+        - gtt_ue
+        - baa_a
+
+  - id: trading_agents
+    enabled: true
+    weight: 1.0
+    entrypoint: "tradingagents_app.strategy:TradingAgentsStrategy"
+    config:
+      sleeve: USD
+      cash_symbol: CASH_USD
+
+datahub:
+  providers:
+    - name: yahoo_market
+      provider: yahoo
+      priority: 10
+      data_types: [price, ohlcv, fundamental]
+      timeout_seconds: 5
+      stale_after_seconds: 604800
+    - name: fred_macro
+      provider: fred
+      priority: 20
+      data_types: [macro]
+      api_key_env: FRED_API_KEY
+      timeout_seconds: 5
+      stale_after_seconds: 7776000
+      symbol_map:
+        T10Y3M: T10Y3M
+        UNRATE: UNRATE
+
+execution:
+  proposal_engine: paper
+  order_generation_mode: target_rebalance
+  order_posture: dry_run
+  require_reconciliation_pass: true
+  live_order_limits:
+    max_order_notional: 1000000
+    max_daily_notional: 3000000
+    max_daily_order_count: 5
+    daily_loss_limit: 100000
+    fee_buffer_pct: 0.002
+  allowed_order_type: limit
+  order_status_poll_interval_seconds: 30
+  order_status_max_polls: 20
+  order_status_terminal_timeout_seconds: 1800
+  market_session:
+    required: false
+    timezone: Asia/Seoul
+    open: "09:00"
+    close: "15:30"
+    weekdays: [0, 1, 2, 3, 4]
+    holidays: []
+  broker_validation:
+    require_quote_validation: true
+    max_quote_deviation_pct: 0.02
+    require_risk_validation: true
+
+monitoring:
+  heartbeat_max_age_seconds: 3600
+  scheduled_run_max_age_seconds: 86400
+
+state:
+  sqlite_path: var/symphony_state.db
+  identity_group: symphony
+
+audit:
+  jsonl_path: var/symphony_audit.jsonl
+
+approval:
+  enabled: true
+  provider: telegram
+  require_approval: true
+  default_decision: expired
+  timeout_seconds: 300
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_allowed_chat_ids: []
+  whitelisted_user_ids: []
+  telegram_poll_interval_seconds: 1.0

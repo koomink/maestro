@@ -11,7 +11,7 @@ from maestro.state.store import StateStore
 
 
 def test_us_etf_yahoo_paper_run_uses_fixture_data_without_network(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/paper_yahoo_us_etf.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_yahoo_us_etf.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     config_path = tmp_path / "us_etf_yahoo_paper.yaml"

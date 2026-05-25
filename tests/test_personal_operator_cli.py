@@ -12,8 +12,8 @@ from maestro.state.store import StateStore
 
 
 def test_init_personal_creates_safe_operator_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_APP_KEY", "real-app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "real-app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "real-app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "real-app-secret")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "real-telegram-token")
     monkeypatch.delenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
     monkeypatch.delenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", raising=False)
@@ -38,7 +38,7 @@ def test_init_personal_creates_safe_operator_config(monkeypatch, tmp_path):
     assert config.approval.whitelisted_user_ids == []
     assert config.kis.provider == "kis"
     assert config.kis.account_id is None
-    assert config.kis.account_id_env == "KIS_ACCOUNT_ID"
+    assert config.kis.account_id_env == "KIS_MOCK_ACCOUNT_ID"
     assert str(tmp_path / "operator" / "var") in config.state.sqlite_path
 
 
@@ -55,14 +55,14 @@ def test_init_personal_refuses_overwrite_without_force(tmp_path):
 
 def test_cli_loads_dotenv_without_overriding_shell_env(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    monkeypatch.setenv("KIS_APP_KEY", "shell-app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "shell-app-key")
     (tmp_path / ".env").write_text(
         "\n".join(
             [
-                "KIS_ACCOUNT_ID=12345678-01",
-                "KIS_APP_KEY=dotenv-app-key",
+                "KIS_MOCK_ACCOUNT_ID=12345678-01",
+                "KIS_MOCK_APP_KEY=dotenv-app-key",
                 "TELEGRAM_BOT_TOKEN=dotenv-telegram-token",
             ]
         )
@@ -70,18 +70,18 @@ def test_cli_loads_dotenv_without_overriding_shell_env(monkeypatch, tmp_path):
 
     _load_dotenv()
 
-    assert os.environ["KIS_ACCOUNT_ID"] == "12345678-01"
-    assert os.environ["KIS_APP_KEY"] == "shell-app-key"
+    assert os.environ["KIS_MOCK_ACCOUNT_ID"] == "12345678-01"
+    assert os.environ["KIS_MOCK_APP_KEY"] == "shell-app-key"
     assert os.environ["TELEGRAM_BOT_TOKEN"] == "dotenv-telegram-token"
 
 
 def test_project_dotenv_loader_does_not_override_shell_env(monkeypatch, tmp_path):
     monkeypatch.delenv("FRED_API_KEY", raising=False)
-    monkeypatch.setenv("KIS_APP_KEY", "shell-app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "shell-app-key")
     (tmp_path / ".env").write_text(
         "\n".join(
             [
-                "KIS_APP_KEY=dotenv-app-key",
+                "KIS_MOCK_APP_KEY=dotenv-app-key",
                 "FRED_API_KEY=dotenv-fred-key",
             ]
         )
@@ -89,7 +89,7 @@ def test_project_dotenv_loader_does_not_override_shell_env(monkeypatch, tmp_path
 
     load_project_dotenv(tmp_path)
 
-    assert os.environ["KIS_APP_KEY"] == "shell-app-key"
+    assert os.environ["KIS_MOCK_APP_KEY"] == "shell-app-key"
     assert os.environ["FRED_API_KEY"] == "dotenv-fred-key"
 
 
@@ -144,9 +144,9 @@ def test_operator_evidence_writes_blocked_readiness_report(tmp_path):
 
 
 def test_personal_check_reports_ready_operator_gates(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_ACCOUNT_ID", "12345678-01")
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_ACCOUNT_ID", "12345678-01")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
     config_path = _personal_config(
         tmp_path,
@@ -195,9 +195,9 @@ def test_personal_check_reports_ready_operator_gates(monkeypatch, tmp_path):
 
 
 def test_operator_evidence_summarizes_ready_state_without_secrets(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_ACCOUNT_ID", "12345678-01")
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_ACCOUNT_ID", "12345678-01")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
     config_path = _personal_config(
         tmp_path,

@@ -20,6 +20,10 @@ class SignalToAllocationConfig(StrictConfigModel):
 class StrategyPluginConfig(StrictConfigModel):
     id: str
     enabled: bool = True
+    account_id: str | None = None
+    readonly_enabled: bool = True
+    signal_enabled: bool = True
+    order_posture: Literal["disabled", "dry_run", "armed"] | None = None
     weight: float = Field(ge=0.0)
     entrypoint: str
     config: dict[str, Any] = Field(default_factory=dict)
