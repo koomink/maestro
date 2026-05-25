@@ -47,6 +47,27 @@ def test_reconciliation_can_persist_with_supplied_run_id(tmp_path):
     assert latest_event["run_id"] == "run_parent"
 
 
+def test_reconciliation_persists_signal_run_id(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    _save_portfolio_and_broker(
+        store,
+        portfolio=PortfolioState(cash=1000.0, positions={"005930": 2.0}),
+        broker_cash=1000.0,
+        broker_positions={"005930": 2.0},
+    )
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        signal_run_id="signal_abc",
+    ).reconcile_latest(run_id="run_parent")
+
+    assert result.run_id == "run_parent"
+    latest_event = store.load_latest_system_event("broker_reconciliation")
+    assert latest_event["payload"]["signal_run_id"] == "signal_abc"
+
+
 def test_reconciliation_refreshes_broker_snapshot_before_compare(tmp_path):
     config, store, audit = _reconciliation_context(tmp_path)
     store.save_portfolio_snapshot(
@@ -172,7 +193,7 @@ def test_reconcile_cli_outputs_passed_result(tmp_path):
 
 
 def _reconciliation_context(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/live_readonly_mock.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_readonly_mock.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["portfolio"]["allowed_symbols"] = ["CASH", "005930", "000660"]

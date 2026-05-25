@@ -62,11 +62,46 @@ def test_kis_cli_sync_and_account(tmp_path):
     assert "positions=2" in account_result.output
 
 
+def test_kis_cli_sync_fetches_each_configured_kis_account(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    raw = config.model_dump(mode="json")
+    raw["kis"]["enabled"] = False
+    raw["accounts"] = [
+        {
+            "id": "kis_isa",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK-ISA",
+            "broker_product": "kis_domestic_stock",
+        },
+        {
+            "id": "kis_brokerage",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK-BROKERAGE",
+            "broker_product": "kis_overseas_stock",
+        },
+    ]
+    config_path = tmp_path / "multi_account_live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    result = CliRunner().invoke(app, ["kis-sync", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "account_id=kis_isa broker_account_id=MOCK-ISA" in result.output
+    assert "account_id=kis_brokerage broker_account_id=MOCK-BROKERAGE" in result.output
+    assert "accounts_synced=2" in result.output
+
+
 def test_kis_cli_sync_reports_missing_credentials_without_traceback(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("KIS_APP_KEY", raising=False)
-    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
-    monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
+    monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
     config_path = tmp_path / "maestro_personal.yaml"
     init_result = CliRunner().invoke(app, ["init-personal", "--output", str(config_path)])
     assert init_result.exit_code == 0, init_result.output
@@ -75,8 +110,8 @@ def test_kis_cli_sync_reports_missing_credentials_without_traceback(monkeypatch,
 
     assert result.exit_code == 2
     assert "kis-sync failed" in result.output
-    assert "KIS_APP_KEY" in result.output
-    assert "KIS_APP_SECRET" in result.output
+    assert "KIS_MOCK_APP_KEY" in result.output
+    assert "KIS_MOCK_APP_SECRET" in result.output
     assert "Traceback" not in result.output
 
 
@@ -187,9 +222,13 @@ def test_kis_cli_reconcile_refreshes_broker_snapshot_before_compare(tmp_path):
 
 
 def test_single_broker_products_list_selects_readonly_product_without_broker_product_default(
+    monkeypatch,
     tmp_path,
 ):
-    config = load_config("configs/examples/live_approval_ataraxia_kis_paper_trading.yaml")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_ACCOUNT_ID", "12345678-01")
+    config = load_config("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml")
     raw_kis = config.kis.model_dump(mode="json")
     raw_kis.pop("broker_product")
     kis_config = KISConfig.model_validate(raw_kis)
@@ -1268,7 +1307,7 @@ def test_kis_live_order_client_returns_unknown_for_missing_order(monkeypatch):
 
 
 def _live_readonly_config(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/live_readonly_mock.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_readonly_mock.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_readonly.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "live_readonly.jsonl")
     config_path = tmp_path / "source_live_readonly.yaml"

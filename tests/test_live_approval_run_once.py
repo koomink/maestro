@@ -834,7 +834,7 @@ def _overseas_live_approval_config(
         )
         + "\n"
     )
-    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_approval_us_etf.yaml").read_text())
     raw["portfolio"]["allowed_symbols"] = ["CASH", "AAPL"]
     raw["universe"]["instruments"] = [
         {

@@ -45,6 +45,7 @@ class LiveOrderSafetyService:
             halted = LiveOrderResult(
                 order_id=request.order_id,
                 status=OrderStatus.HALTED,
+                signal_run_id=request.signal_run_id,
                 message=(
                     "Live order submission outcome is ambiguous; operator recovery "
                     "is required before another live order."
@@ -62,6 +63,7 @@ class LiveOrderSafetyService:
                 order_id=request.order_id,
                 status=OrderStatus.HALTED,
                 broker_order=result.broker_order,
+                signal_run_id=request.signal_run_id,
                 message="Live order halted because broker returned an unknown order state.",
                 raw=result.raw,
             )
@@ -86,6 +88,8 @@ class LiveOrderSafetyService:
             )
             self._persist(SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED, request, halted)
             return halted
+        if request.signal_run_id and result.signal_run_id is None:
+            result = result.model_copy(update={"signal_run_id": request.signal_run_id})
         self._persist(SystemEventType.LIVE_ORDER_RESULT, request, result)
         return result
 
@@ -163,6 +167,7 @@ class LiveOrderSafetyService:
         result: LiveOrderResult,
     ) -> None:
         payload = {
+            "signal_run_id": request.signal_run_id,
             "request": request.model_dump(mode="json"),
             "result": result.model_dump(mode="json"),
             "duplicate_key": _duplicate_key(request),

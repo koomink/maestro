@@ -11,6 +11,7 @@ class BrokerOrderId(BaseModel):
     broker_order_org_no: str | None = None
     order_id: str
     submitted_at: str
+    account_id: str | None = None
     broker_product: BrokerProduct | None = None
 
 
@@ -26,7 +27,9 @@ class LiveOrderRequest(BaseModel):
     duplicate_key: str | None = None
     currency: Currency | None = None
     sleeve: str | None = None
+    account_id: str | None = None
     broker_product: BrokerProduct | None = None
+    signal_run_id: str | None = None
 
     @property
     def notional(self) -> float:
@@ -47,6 +50,7 @@ class LiveOrderResult(BaseModel):
     average_fill_price: float | None = None
     message: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
+    signal_run_id: str | None = None
 
     @property
     def live_notional(self) -> float:
@@ -167,6 +171,7 @@ class LiveOrderLifecycleResult(BaseModel):
     order_id: str
     final_status: OrderStatus
     broker_order_id: str | None = None
+    signal_run_id: str | None = None
     submitted_order: LiveOrderResult | None = None
     poll_count: int = 0
     status_snapshots: list[LiveOrderStatusSnapshot] = Field(default_factory=list)

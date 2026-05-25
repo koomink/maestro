@@ -126,6 +126,7 @@ def build_strategy_runs_table(store: StateStore, limit: int = 20) -> list[dict[s
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
                 "strategy_id": row.get("strategy_id"),
+                "account_id": payload.get("account_id"),
                 "signal_action": source_signal.get("action"),
                 "signal_symbol": source_signal.get("symbol"),
                 "rating": source_signal.get("rating"),
@@ -168,6 +169,7 @@ def build_orders_table(store: StateStore, limit: int = 20) -> list[dict[str, Any
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
                 "order_id": row.get("order_id"),
+                "account_id": payload.get("account_id"),
                 "symbol": payload.get("symbol"),
                 "side": payload.get("side"),
                 "quantity": payload.get("quantity"),
@@ -191,6 +193,8 @@ def build_approvals_table(store: StateStore, limit: int = 20) -> list[dict[str, 
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
                 "approval_id": row.get("approval_id"),
+                "account_id": payload.get("account_id"),
+                "account_ids": payload.get("account_ids", []),
                 "status": decision.get("status"),
                 "order_count": request.get("order_count"),
                 "estimated_notional": request.get("estimated_notional"),
@@ -209,6 +213,8 @@ def build_risk_decisions_table(store: StateStore, limit: int = 20) -> list[dict[
             {
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
+                "account_id": payload.get("account_id"),
+                "account_ids": payload.get("account_ids", []),
                 "approved": payload.get("approved"),
                 "violations": payload.get("violations", []),
                 "target_allocations": (payload.get("target") or {}).get("allocations", {}),
@@ -227,7 +233,10 @@ def build_broker_snapshots_table(store: StateStore, limit: int = 20) -> list[dic
             {
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
-                "account_id": row.get("account_id") or account.get("account_id"),
+                "account_id": payload.get("account_id")
+                or row.get("account_id")
+                or account.get("account_id"),
+                "broker_account_id": payload.get("broker_account_id") or account.get("account_id"),
                 "cash": account.get("cash"),
                 "buying_power": account.get("buying_power"),
                 "positions_count": len(account.get("positions", [])),
@@ -1152,6 +1161,48 @@ def build_latest_reconciliation_card(store: StateStore) -> dict[str, Any]:
         "issues_count": len(payload.get("issues", [])),
         "cash_difference": payload.get("cash_difference"),
         "broker_account_id": payload.get("broker_account_id"),
+    }
+
+
+def build_latest_signal_package_card(store: StateStore) -> dict[str, Any]:
+    rows = store.list_system_events_by_type("signal_package", limit=1)
+    if not rows:
+        return {
+            "created_at": None,
+            "signal_run_id": None,
+            "status": "missing",
+            "action_required": False,
+            "actionable_signal_run_id": None,
+            "approval_consumed": False,
+            "approval_run_id": None,
+            "orders_preview_count": 0,
+            "loaded_strategies": [],
+            "datahub_issue_count": 0,
+            "no_op_reason": None,
+        }
+    row = rows[0]
+    signal_run_id = str(row.get("run_id") or "")
+    payload = store.load_signal_package(signal_run_id) or row.get("payload", {})
+    approval_consumed = bool(payload.get("approval_consumed"))
+    action_required = bool(payload.get("action_required"))
+    return {
+        "created_at": row.get("created_at"),
+        "signal_run_id": payload.get("signal_run_id") or signal_run_id,
+        "status": payload.get("status"),
+        "action_required": action_required,
+        "actionable_signal_run_id": signal_run_id
+        if action_required and not approval_consumed
+        else None,
+        "approval_consumed": approval_consumed,
+        "approval_run_id": payload.get("approval_run_id"),
+        "orders_preview_count": payload.get("orders_preview_count", 0),
+        "loaded_strategies": payload.get("loaded_strategies", []),
+        "datahub_issue_count": (payload.get("datahub_evidence") or {}).get(
+            "issue_count",
+            len(payload.get("data_quality_issues", [])),
+        ),
+        "no_op_reason": payload.get("no_op_reason"),
+        "payload": payload,
     }
 
 

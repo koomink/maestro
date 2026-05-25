@@ -212,6 +212,43 @@ class StateStore:
     def save_system_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self._insert("system_events", run_id, event_type, payload)
 
+    def save_signal_package(self, signal_run_id: str, payload: dict[str, Any]) -> None:
+        payload_with_id = dict(payload)
+        payload_with_id["signal_run_id"] = signal_run_id
+        self.save_system_event(signal_run_id, "signal_package", payload_with_id)
+
+    def mark_signal_package_consumed(self, signal_run_id: str, approval_run_id: str) -> None:
+        self.save_system_event(
+            signal_run_id,
+            "signal_package_consumed",
+            {
+                "signal_run_id": signal_run_id,
+                "approval_run_id": approval_run_id,
+            },
+        )
+
+    def load_signal_package(self, signal_run_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            package_row = conn.execute(
+                "SELECT payload FROM system_events "
+                "WHERE run_id = ? AND event_type = ? ORDER BY id DESC LIMIT 1",
+                (signal_run_id, "signal_package"),
+            ).fetchone()
+            consumed_row = conn.execute(
+                "SELECT payload FROM system_events "
+                "WHERE run_id = ? AND event_type = ? ORDER BY id DESC LIMIT 1",
+                (signal_run_id, "signal_package_consumed"),
+            ).fetchone()
+        if package_row is None:
+            return None
+        payload = json.loads(package_row[0])
+        payload.setdefault("approval_consumed", False)
+        if consumed_row is not None:
+            consumed = json.loads(consumed_row[0])
+            payload["approval_consumed"] = True
+            payload["approval_run_id"] = consumed.get("approval_run_id")
+        return payload
+
     def save_approval(self, run_id: str, approval_id: str, payload: dict[str, Any]) -> None:
         if self.approval_exists(approval_id):
             raise ValueError(f"Approval decision already exists: {approval_id}")

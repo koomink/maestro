@@ -18,11 +18,13 @@ class KISReadOnlyService:
         audit_logger: AuditLogger,
         client: KISReadOnlyClient | None = None,
         instruments: list[TradableInstrument] | None = None,
+        logical_account_id: str | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
         self.instruments = instruments or []
+        self.logical_account_id = logical_account_id
         self.client = client or self._build_client(config)
 
     def fetch_and_store_snapshot(self, symbols: list[str]) -> KISReadOnlySnapshot:
@@ -45,15 +47,12 @@ class KISReadOnlyService:
             order_fills=self.client.get_order_fills(),
             unfilled_orders=self.client.get_unfilled_orders(),
         )
-        self.state_store.save_broker_account_snapshot(
-            run_id,
-            account.account_id,
-            snapshot.model_dump(mode="json"),
-        )
+        payload = self._snapshot_payload(snapshot)
+        self.state_store.save_broker_account_snapshot(run_id, account.account_id, payload)
         self.audit_logger.log(
             run_id,
             "kis_readonly_snapshot",
-            snapshot.model_dump(mode="json"),
+            payload,
         )
         return snapshot
 
@@ -99,12 +98,13 @@ class KISReadOnlyService:
                 )
             )
         snapshot = _merge_snapshots(snapshots)
+        payload = self._snapshot_payload(snapshot)
         self.state_store.save_broker_account_snapshot(
             run_id,
             snapshot.account.account_id,
-            snapshot.model_dump(mode="json"),
+            payload,
         )
-        self.audit_logger.log(run_id, "kis_readonly_snapshot", snapshot.model_dump(mode="json"))
+        self.audit_logger.log(run_id, "kis_readonly_snapshot", payload)
         return snapshot
 
     def _symbols_for_product(self, symbols: list[str], product) -> list[str]:
@@ -120,6 +120,13 @@ class KISReadOnlyService:
         return [
             instrument for instrument in self.instruments if instrument.broker_product == product
         ]
+
+    def _snapshot_payload(self, snapshot: KISReadOnlySnapshot) -> dict:
+        payload = snapshot.model_dump(mode="json")
+        if self.logical_account_id:
+            payload["account_id"] = self.logical_account_id
+            payload["broker_account_id"] = snapshot.account.account_id
+        return payload
 
 
 def _merge_snapshots(snapshots: list[KISReadOnlySnapshot]) -> KISReadOnlySnapshot:

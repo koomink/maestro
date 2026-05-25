@@ -4,6 +4,7 @@ from maestro.approval.models import ApprovalDecision
 from maestro.config.models import (
     ApprovalConfig,
     AuditConfig,
+    BrokerAccountConfig,
     ExecutionConfig,
     KISConfig,
     MaestroConfig,
@@ -14,6 +15,7 @@ from maestro.config.models import (
 )
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, RunMode
+from maestro.execution.broker_router import UnsupportedBrokerOperation
 from maestro.execution.brokers.kis.domestic_live_order import KISRestDomesticStockLiveOrderClient
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_order_factory import (
@@ -74,8 +76,8 @@ def test_live_approval_factory_refreshes_kis_snapshot_before_reconciliation(
 ):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     config = _config(tmp_path).model_copy(
         update={"kis": KISConfig(enabled=True, provider="kis", account_id="12345678-01")}
     )
@@ -186,8 +188,8 @@ def test_single_broker_products_list_selects_live_order_product_without_default(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     config = _config(tmp_path).model_copy(
         update={
             "kis": KISConfig(
@@ -202,6 +204,23 @@ def test_single_broker_products_list_selects_live_order_product_without_default(
     client = _build_live_order_client(config)
 
     assert isinstance(client, KISRestDomesticStockLiveOrderClient)
+
+
+def test_toss_account_live_order_client_fails_closed(tmp_path):
+    config = _config(tmp_path).model_copy(
+        update={
+            "accounts": [
+                BrokerAccountConfig(
+                    id="toss_brokerage",
+                    broker="toss",
+                    environment="real",
+                )
+            ]
+        }
+    )
+
+    with pytest.raises(UnsupportedBrokerOperation, match="Toss Securities"):
+        _build_live_order_client(config, account_id="toss_brokerage")
 
 
 def _config(tmp_path) -> MaestroConfig:

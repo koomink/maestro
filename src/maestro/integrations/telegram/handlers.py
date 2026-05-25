@@ -9,6 +9,7 @@ from maestro.dashboard.read_models import (
     build_approvals_table,
     build_broker_account_summary,
     build_health_summary,
+    build_latest_signal_package_card,
     build_orders_table,
     build_overview,
     build_safety_state_card,
@@ -27,6 +28,7 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "Show Maestro command list"),
     ("status", "Show Maestro status summary"),
     ("health", "Show health checks"),
+    ("signal", "Show latest Symphony signal package"),
     ("account", "Refresh and show broker account snapshot"),
     ("portfolio", "Show Maestro portfolio state"),
     ("apps", "Show configured strategy apps"),
@@ -82,6 +84,7 @@ class TelegramOperatorCommandRouter:
                 "help": self._help,
                 "status": self._status,
                 "health": self._health,
+                "signal": self._signal,
                 "account": self._account,
                 "portfolio": self._portfolio,
                 "apps": self._apps,
@@ -240,6 +243,28 @@ class TelegramOperatorCommandRouter:
             lines.append(f"{check['check']}: {check['status']} {check['message']}")
         self._send(chat_id, "\n".join(lines))
 
+    def _signal(self, chat_id: int) -> None:
+        signal = build_latest_signal_package_card(self.store)
+        if signal["signal_run_id"] is None:
+            self._send(chat_id, "Latest signal: none")
+            return
+        actionable = signal.get("actionable_signal_run_id")
+        lines = [
+            "Latest signal",
+            f"signal_run_id: {signal['signal_run_id']}",
+            f"status: {signal['status']}",
+            f"action_required: {str(signal['action_required']).lower()}",
+            f"approval_consumed: {str(signal['approval_consumed']).lower()}",
+            f"orders_preview_count: {signal['orders_preview_count']}",
+            f"datahub_issues: {signal['datahub_issue_count']}",
+            f"created_at: {_operator_time(signal['created_at'], self.config)}",
+        ]
+        if actionable:
+            lines.append(f"approval_signal_run_id: {actionable}")
+        if signal.get("approval_run_id"):
+            lines.append(f"approval_run_id: {signal['approval_run_id']}")
+        self._send(chat_id, "\n".join(lines))
+
     def _account(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
         try:
@@ -322,12 +347,19 @@ class TelegramOperatorCommandRouter:
 
     def _apps(self, chat_id: int) -> None:
         lines = ["Maestro apps"]
-        for strategy in self.config.strategies[:10]:
+        visible_strategies = [
+            strategy
+            for strategy in self.config.strategies
+            if getattr(strategy, "readonly_enabled", True)
+        ]
+        for strategy in visible_strategies[:10]:
             status = "on" if strategy.enabled else "off"
-            if strategy.enabled:
-                lines.append(f"{strategy.id}: {status} effective_mode={self.config.mode.value}")
-            else:
-                lines.append(f"{strategy.id}: {status}")
+            signal = "signal:on" if strategy.signal_enabled else "signal:off"
+            posture = strategy.order_posture or self.config.execution.order_posture
+            lines.append(
+                f"{strategy.id}: {status} {signal} account={strategy.account_id or 'n/a'} "
+                f"order_posture={posture}"
+            )
         latest_runs = build_strategy_runs_table(self.store, limit=5)
         if latest_runs:
             lines.append("")

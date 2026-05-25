@@ -13,6 +13,7 @@ from maestro.dashboard.read_models import (
     build_fill_reconciliation_table,
     build_freshness_table,
     build_fx_rate_snapshot_card,
+    build_latest_signal_package_card,
     build_live_order_events_table,
     build_maestro_state_exposure_table,
     build_operator_home,
@@ -57,6 +58,7 @@ def build_dashboard_snapshot(
     reconciliation = operator_summary["reconciliation"]
     daily_usage = operator_summary["daily_live_usage"]
     live_order_lifecycle = operator_summary["live_order_lifecycle"]
+    latest_signal_package = build_latest_signal_package_card(store)
 
     strategy_runs = build_strategy_runs_table(store)
     orders = build_orders_table(store)
@@ -202,6 +204,7 @@ def build_dashboard_snapshot(
             "operator_summary": operator_summary,
             "daily_usage": daily_usage,
             "live_order_lifecycle": live_order_lifecycle,
+            "latest_signal_package": latest_signal_package,
             "risk_decisions": risk_decisions,
             "halt_failure_events": halt_failure_events,
             "run_index": run_index,
@@ -605,7 +608,11 @@ def _virtuoso_apps(
     strategy_attribution: list[dict[str, Any]],
     strategy_book_snapshots: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    strategy_configs = {strategy.id: strategy for strategy in getattr(config, "strategies", [])}
+    strategy_configs = {
+        strategy.id: strategy
+        for strategy in getattr(config, "strategies", [])
+        if getattr(strategy, "readonly_enabled", True)
+    }
     strategy_ids = _virtuoso_strategy_ids(
         list(strategy_configs),
         strategy_runs,
@@ -883,6 +890,9 @@ def _virtuoso_strategy_overview_row(
         "strategy_id": strategy_id,
         "enabled": enabled,
         "entrypoint": getattr(strategy_config, "entrypoint", None),
+        "account_id": getattr(strategy_config, "account_id", None),
+        "signal_enabled": getattr(strategy_config, "signal_enabled", None),
+        "order_posture": getattr(strategy_config, "order_posture", None),
         "weight": getattr(strategy_config, "weight", None),
         "latest_run_at": latest_run.get("created_at"),
         "latest_run_id": latest_run.get("run_id"),
@@ -935,6 +945,26 @@ def _virtuoso_operation_rows(
             "item": "Enabled",
             "value": _display_value(getattr(strategy_config, "enabled", "observed-only")),
             "status": "ok" if getattr(strategy_config, "enabled", False) else "warn",
+        },
+        {
+            "item": "Readonly visible",
+            "value": _display_value(getattr(strategy_config, "readonly_enabled", "n/a")),
+            "status": "ok" if getattr(strategy_config, "readonly_enabled", False) else "missing",
+        },
+        {
+            "item": "Signal enabled",
+            "value": _display_value(getattr(strategy_config, "signal_enabled", "n/a")),
+            "status": "ok" if getattr(strategy_config, "signal_enabled", False) else "warn",
+        },
+        {
+            "item": "Account",
+            "value": _display_value(getattr(strategy_config, "account_id", None)),
+            "status": "ok" if getattr(strategy_config, "account_id", None) else "missing",
+        },
+        {
+            "item": "Order posture",
+            "value": _display_value(getattr(strategy_config, "order_posture", None)),
+            "status": "ok" if getattr(strategy_config, "order_posture", None) else "missing",
         },
         {
             "item": "Latest run",

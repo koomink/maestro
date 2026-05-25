@@ -263,6 +263,7 @@ class LiveOrderLifecycleService:
             order_id=request.order_id,
             final_status=final_status,
             broker_order_id=broker_order_id,
+            signal_run_id=request.signal_run_id,
             submitted_order=submitted_order,
             poll_count=poll_count,
             status_snapshots=status_snapshots or [],

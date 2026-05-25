@@ -59,11 +59,22 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
             }
         },
     )
+    store.save_signal_package(
+        "signal_abc",
+        {
+            "status": "action_required",
+            "action_required": True,
+            "orders_preview_count": 2,
+            "loaded_strategies": ["ataraxia"],
+            "datahub_evidence": {"issue_count": 0},
+        },
+    )
 
     for command in (
         "/help",
         "/status",
         "/health",
+        "/signal",
         "/portfolio",
         "/apps",
         "/orders",
@@ -84,11 +95,13 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
     assert f"- state: {Path(config.state.sqlite_path).resolve()}" in sent_text
     assert f"- audit: {Path(config.audit.jsonl_path).resolve()}" in sent_text
     assert "Maestro health" in sent_text
+    assert "Latest signal" in sent_text
+    assert "signal_run_id: signal_abc" in sent_text
     assert "Maestro portfolio" in sent_text
     assert "Maestro apps" in sent_text
     assert "Recent orders" in sent_text
     assert "Recent approvals" in sent_text
-    assert len(store.list_system_events_by_type("telegram_command", limit=20)) == 7
+    assert len(store.list_system_events_by_type("telegram_command", limit=20)) == 8
 
 
 def test_telegram_operator_status_groups_fields_for_readability(tmp_path):
@@ -683,7 +696,7 @@ def _telegram_config_path(tmp_path) -> Path:
 
 
 def _telegram_live_readonly_config_path(tmp_path) -> Path:
-    raw = yaml.safe_load(Path("configs/examples/live_readonly_mock.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_readonly_mock.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_readonly.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "live_readonly.jsonl")
     raw["approval"]["telegram_allowed_chat_ids"] = [100]

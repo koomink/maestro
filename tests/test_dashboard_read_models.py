@@ -19,6 +19,7 @@ from maestro.dashboard.read_models import (
     build_health_summary,
     build_latest_broker_snapshot_card,
     build_latest_reconciliation_card,
+    build_latest_signal_package_card,
     build_live_order_events_table,
     build_maestro_state_exposure_table,
     build_operator_summary,
@@ -53,6 +54,48 @@ def test_build_overview_works_with_empty_db(tmp_path):
     assert overview["orders_count"] == 0
     assert overview["risk_decisions_count"] == 0
     assert overview["latest_run_id"] is None
+
+
+def test_latest_signal_package_card_exposes_actionable_signal_run_id(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_signal_package(
+        "signal_abc",
+        {
+            "status": "action_required",
+            "action_required": True,
+            "orders_preview_count": 2,
+            "loaded_strategies": ["ataraxia"],
+            "datahub_evidence": {"issue_count": 0},
+        },
+    )
+
+    card = build_latest_signal_package_card(store)
+
+    assert card["signal_run_id"] == "signal_abc"
+    assert card["status"] == "action_required"
+    assert card["action_required"] is True
+    assert card["actionable_signal_run_id"] == "signal_abc"
+    assert card["approval_consumed"] is False
+    assert card["orders_preview_count"] == 2
+
+
+def test_latest_signal_package_card_hides_consumed_signal_action(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_signal_package(
+        "signal_consumed",
+        {
+            "status": "action_required",
+            "action_required": True,
+            "orders_preview_count": 1,
+        },
+    )
+    store.mark_signal_package_consumed("signal_consumed", "run_approval")
+
+    card = build_latest_signal_package_card(store)
+
+    assert card["approval_consumed"] is True
+    assert card["approval_run_id"] == "run_approval"
+    assert card["actionable_signal_run_id"] is None
 
 
 def test_operator_summary_works_with_empty_db(tmp_path):
@@ -293,7 +336,9 @@ def test_strategy_runs_table_keeps_target_allocation_payload_compatible(tmp_path
 
 
 def test_dashboard_operational_read_models(tmp_path):
-    raw = yaml.safe_load(Path("configs/examples/live_readonly_multi_asset_kis.yaml").read_text())
+    raw = yaml.safe_load(
+        Path("tests/fixtures/configs/live_readonly_multi_asset_kis.yaml").read_text()
+    )
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")

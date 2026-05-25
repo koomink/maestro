@@ -11,3 +11,7 @@ def new_order_id() -> str:
 
 def new_approval_id() -> str:
     return f"appr_{uuid4().hex}"
+
+
+def new_signal_run_id() -> str:
+    return f"signal_{uuid4().hex}"

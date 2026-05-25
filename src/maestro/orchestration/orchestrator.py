@@ -1,4 +1,5 @@
 import traceback
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +11,15 @@ from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderType, RunMode
-from maestro.core.ids import new_run_id
+from maestro.core.ids import new_run_id, new_signal_run_id
 from maestro.core.symbols import is_cash_symbol
 from maestro.datahub.base import BaseDataProvider, build_data_provider
 from maestro.execution.base import OrderIntent
+from maestro.execution.broker_router import (
+    PAPER_DEFAULT_ACCOUNT_ID,
+    BrokerAccountRouter,
+    UnsupportedBrokerOperation,
+)
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.factory import build_execution_engine
@@ -38,7 +44,7 @@ from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.manager import PortfolioManager, PortfolioTarget
 from maestro.portfolio.strategy_books import build_strategy_book_snapshots
-from maestro.risk.manager import RiskManager
+from maestro.risk.manager import RiskDecision, RiskManager
 from maestro.safety.controls import SafetyControlService
 from maestro.sdk import (
     CandidateInstrumentRequest,
@@ -63,6 +69,20 @@ class RunOnceSummary(BaseModel):
     cash: float
 
 
+class SignalRunSummary(BaseModel):
+    signal_run_id: str
+    loaded_strategies: list[str]
+    action_required: bool
+    orders_preview_count: int
+
+
+class SignalApprovalSummary(BaseModel):
+    signal_run_id: str
+    run_id: str
+    orders_created: int
+    approval_status: str
+
+
 class MaestroOrchestrator:
     def __init__(
         self,
@@ -76,9 +96,12 @@ class MaestroOrchestrator:
         config_identity: ConfigIdentity | None = None,
     ) -> None:
         self.config = config
-        self.registry = PluginRegistry.from_configs(config.strategies, run_mode=config.mode)
+        signal_strategies = [
+            strategy for strategy in config.strategies if strategy.signal_enabled
+        ]
+        self.registry = PluginRegistry.from_configs(signal_strategies, run_mode=config.mode)
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
-        self.portfolio_manager = PortfolioManager(config.strategies)
+        self.portfolio_manager = PortfolioManager(signal_strategies)
         self.risk_manager = RiskManager(config.portfolio.allowed_symbols)
         self.execution = build_execution_engine(
             config.execution,
@@ -105,10 +128,222 @@ class MaestroOrchestrator:
         self.live_order_notification_client = live_order_notification_client
         self.broker_reconciliation_service = broker_reconciliation_service
         self.telegram_client = telegram_client
+        self.account_router = BrokerAccountRouter(config)
+        self.config_identity = config_identity
 
     def run_once(self) -> RunOnceSummary:
         with self.state_store.writer_lock("run_once"):
             return self._run_once_locked()
+
+    def run_signal(self) -> SignalRunSummary:
+        with self.state_store.writer_lock("run_signal"):
+            return self._run_signal_locked()
+
+    def approve_signal(self, signal_run_id: str) -> SignalApprovalSummary:
+        with self.state_store.writer_lock("approve_signal"):
+            return self._approve_signal_locked(signal_run_id)
+
+    def _run_signal_locked(self) -> SignalRunSummary:
+        signal_run_id = new_signal_run_id()
+        current_state = self._load_run_portfolio_state(signal_run_id)
+        broker_snapshot_refs = self._broker_snapshot_refs()
+        valid_results, data_requests_by_strategy, data_quality_issues, prices = (
+            self._collect_strategy_results(signal_run_id, current_state)
+        )
+        target, risk_decision, order_targets = self._build_account_scoped_targets(
+            signal_run_id,
+            valid_results,
+            self.risk_manager,
+        )
+        if not risk_decision.approved:
+            raise ValueError(f"Risk check failed: {risk_decision.violations}")
+        order_generation_time = utc_now()
+        contribution_already_executed = self._contribution_already_executed(
+            order_generation_time
+        )
+        prices = self._order_generation_prices(prices)
+        orders = []
+        for account_id, order_target in order_targets:
+            account_orders = self.execution.propose_orders(
+                current_state,
+                order_target,
+                prices,
+                as_of=order_generation_time,
+                contribution_already_executed=contribution_already_executed,
+            )
+            orders.extend(
+                self._stamp_orders_with_account_id(
+                    account_orders,
+                    order_target.source_strategy_ids,
+                    account_id=account_id,
+                )
+            )
+        approval_orders = self._orders_requiring_approval(orders)
+        status = "action_required" if approval_orders else "no_action"
+        payload = {
+            "signal_run_id": signal_run_id,
+            "status": status,
+            "approval_consumed": False,
+            "generated_at": utc_now().isoformat(),
+            "loaded_strategies": [strategy.config.id for strategy in self.registry.strategies],
+            "strategy_account_mappings": self._strategy_account_mappings(),
+            "strategy_phase_controls": self._strategy_phase_controls(),
+            "data_requests": data_requests_by_strategy,
+            "data_quality_issues": data_quality_issues,
+            "datahub_evidence": self._datahub_evidence(
+                data_requests_by_strategy,
+                data_quality_issues,
+                prices,
+            ),
+            "broker_snapshot_refs": broker_snapshot_refs,
+            "prices": prices,
+            "strategy_results": [result.model_dump(mode="json") for result in valid_results],
+            "portfolio_target": target.model_dump(mode="json"),
+            "risk_decision": risk_decision.model_dump(mode="json"),
+            "orders_preview": [order.model_dump(mode="json") for order in orders],
+            "orders_preview_count": len(orders),
+            "action_required": bool(approval_orders),
+        }
+        if self.config_identity is not None:
+            payload["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
+        self.state_store.save_signal_package(signal_run_id, payload)
+        self.audit.log(signal_run_id, "signal_package", payload)
+        self.state_store.save_system_event(
+            signal_run_id,
+            "signal_run_completed",
+            {
+                "signal_run_id": signal_run_id,
+                "status": status,
+                "orders_preview_count": len(orders),
+                "action_required": bool(orders),
+            },
+        )
+        return SignalRunSummary(
+            signal_run_id=signal_run_id,
+            loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
+            action_required=bool(orders),
+            orders_preview_count=len(orders),
+        )
+
+    def _approve_signal_locked(self, signal_run_id: str) -> SignalApprovalSummary:
+        package = self.state_store.load_signal_package(signal_run_id)
+        if package is None:
+            raise ValueError(f"Unknown signal_run_id: {signal_run_id}")
+        if package.get("approval_consumed"):
+            raise ValueError(f"Signal package already consumed: {signal_run_id}")
+        orders = [
+            OrderIntent.model_validate(order_payload)
+            for order_payload in package.get("orders_preview", [])
+        ]
+        approval_orders = self._orders_requiring_approval(orders)
+        run_id = new_run_id()
+        if not approval_orders:
+            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+            self.state_store.save_system_event(
+                run_id,
+                "signal_approval_completed",
+                {
+                    "signal_run_id": signal_run_id,
+                    "orders_created": 0,
+                    "approval_status": "not_required",
+                },
+            )
+            return SignalApprovalSummary(
+                signal_run_id=signal_run_id,
+                run_id=run_id,
+                orders_created=0,
+                approval_status="not_required",
+            )
+        self._validate_signal_package_for_approval(package)
+        self._validate_signal_approval_gates(run_id, approval_orders, package)
+
+        approval_request = None
+        approval_decision = None
+        approval_message = None
+        source_strategy_ids = (
+            package.get("portfolio_target", {}).get("source_strategy_ids", [])
+        )
+        risk_violations = package.get("risk_decision", {}).get("violations", [])
+        if orders:
+            approval_request, approval_decision, approval_message = (
+                self.approval_manager.request_approval(
+                    run_id,
+                    approval_orders,
+                    risk_violations,
+                    source_strategy_ids,
+                )
+            )
+        current_state = self.state_store.load_latest_portfolio_state()
+        if approval_request and approval_decision:
+            approval_payload = {
+                "signal_run_id": signal_run_id,
+                "request": approval_request.model_dump(mode="json"),
+                "decision": approval_decision.model_dump(mode="json"),
+                "message": approval_message,
+                "account_ids": sorted(
+                    {order.account_id for order in approval_orders if order.account_id}
+                ),
+            }
+            if len(approval_payload["account_ids"]) == 1:
+                approval_payload["account_id"] = approval_payload["account_ids"][0]
+            self.state_store.save_approval(
+                run_id,
+                approval_request.approval_id,
+                approval_payload,
+            )
+            self.audit.log(run_id, "approval_decision", approval_payload)
+            if approval_decision.status != "approved":
+                next_state = current_state
+                self.state_store.save_system_event(
+                    run_id,
+                    SystemEventType.EXECUTION_SKIPPED,
+                    {
+                        "signal_run_id": signal_run_id,
+                        "approval_status": approval_decision.status,
+                    },
+                )
+            elif self.config.mode == RunMode.LIVE_APPROVAL:
+                _, next_state = self._execute_live_approval_orders(
+                    run_id,
+                    approval_orders,
+                    approval_request.approval_id,
+                    approval_decision,
+                    signal_run_id=signal_run_id,
+                )
+            else:
+                _, next_state = self.execution.execute_orders(current_state, approval_orders)
+        else:
+            if self.config.mode == RunMode.LIVE_APPROVAL:
+                raise ValueError("live_approval mode requires an approval decision")
+            next_state = self.execution.execute_orders(current_state, approval_orders)[1]
+
+        approval_status = approval_decision.status if approval_decision else "not_required"
+        for order in approval_orders:
+            order_payload = order.model_dump(mode="json")
+            order_payload["signal_run_id"] = signal_run_id
+            order_payload["approval_status"] = approval_status
+            if not (
+                self.config.mode == RunMode.LIVE_APPROVAL
+                and self._effective_order_posture(order) == "dry_run"
+            ):
+                self.state_store.save_order(run_id, order.order_id, order_payload)
+        self.state_store.save_portfolio_snapshot(run_id, next_state)
+        self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+        self.state_store.save_system_event(
+            run_id,
+            "signal_approval_completed",
+            {
+                "signal_run_id": signal_run_id,
+                "orders_created": len(approval_orders),
+                "approval_status": approval_status,
+            },
+        )
+        return SignalApprovalSummary(
+            signal_run_id=signal_run_id,
+            run_id=run_id,
+            orders_created=len(approval_orders),
+            approval_status=approval_status,
+        )
 
     def _run_once_locked(self) -> RunOnceSummary:
         run_id = new_run_id()
@@ -160,6 +395,7 @@ class MaestroOrchestrator:
                 )
                 validation = validator.validate(result)
                 strategy_run_payload = {
+                    "account_id": self._strategy_account_id(loaded.config.id),
                     "result": result.model_dump(mode="json"),
                     "validation": {"ok": validation.ok, "errors": validation.errors},
                 }
@@ -176,15 +412,10 @@ class MaestroOrchestrator:
                     )
                 valid_results.append(result)
 
-            target = self._target_with_configured_cash(
-                self.portfolio_manager.build_target(valid_results),
-                valid_results,
-            )
-            risk_decision = risk_manager.check(target)
-            self.state_store.save_risk_decision(
+            target, risk_decision, order_targets = self._build_account_scoped_targets(
                 run_id,
-                risk_decision.approved,
-                risk_decision.model_dump(mode="json"),
+                valid_results,
+                risk_manager,
             )
             if not risk_decision.approved:
                 raise ValueError(f"Risk check failed: {risk_decision.violations}")
@@ -216,13 +447,23 @@ class MaestroOrchestrator:
                 order_generation_time
             )
             prices = self._order_generation_prices(prices)
-            orders = self.execution.propose_orders(
-                current_state,
-                risk_decision.target,
-                prices,
-                as_of=order_generation_time,
-                contribution_already_executed=contribution_already_executed,
-            )
+            orders = []
+            for account_id, order_target in order_targets:
+                account_orders = self.execution.propose_orders(
+                    current_state,
+                    order_target,
+                    prices,
+                    as_of=order_generation_time,
+                    contribution_already_executed=contribution_already_executed,
+                )
+                orders.extend(
+                    self._stamp_orders_with_account_id(
+                        account_orders,
+                        order_target.source_strategy_ids,
+                        account_id=account_id,
+                    )
+                )
+            approval_orders = self._orders_requiring_approval(orders)
             if orders and self.config.mode == RunMode.LIVE_APPROVAL:
                 self._record_live_proposal_data_snapshot(
                     run_id,
@@ -233,9 +474,13 @@ class MaestroOrchestrator:
                     target,
                     risk_decision,
                 )
-            live_blocks = self._live_execution_blocks(run_id, orders, data_quality_issues)
+            live_blocks = self._live_execution_blocks(
+                run_id,
+                approval_orders,
+                data_quality_issues,
+            )
             if (
-                orders
+                approval_orders
                 and self.config.mode == RunMode.LIVE_APPROVAL
                 and (safety_state.blocks_live_execution or live_blocks)
             ):
@@ -270,11 +515,11 @@ class MaestroOrchestrator:
                     SystemEventType.STALE_DATA_WARNING,
                     {"issues": data_quality_issues, "mode": self.config.mode.value},
                 )
-            if orders:
+            if approval_orders:
                 approval_request, approval_decision, approval_message = (
                     self.approval_manager.request_approval(
                         run_id,
-                        orders,
+                        approval_orders,
                         risk_decision.violations,
                         target.source_strategy_ids,
                     )
@@ -284,25 +529,27 @@ class MaestroOrchestrator:
                 approval_decision = None
                 approval_message = None
 
-            if orders:
+            if approval_orders:
                 if approval_request and approval_decision:
+                    approval_payload = {
+                        "request": approval_request.model_dump(mode="json"),
+                        "decision": approval_decision.model_dump(mode="json"),
+                        "message": approval_message,
+                        "account_ids": sorted(
+                            {order.account_id for order in approval_orders if order.account_id}
+                        ),
+                    }
+                    if len(approval_payload["account_ids"]) == 1:
+                        approval_payload["account_id"] = approval_payload["account_ids"][0]
                     self.state_store.save_approval(
                         run_id,
                         approval_request.approval_id,
-                        {
-                            "request": approval_request.model_dump(mode="json"),
-                            "decision": approval_decision.model_dump(mode="json"),
-                            "message": approval_message,
-                        },
+                        approval_payload,
                     )
                     self.audit.log(
                         run_id,
                         "approval_decision",
-                        {
-                            "request": approval_request.model_dump(mode="json"),
-                            "decision": approval_decision.model_dump(mode="json"),
-                            "message": approval_message,
-                        },
+                        approval_payload,
                     )
                     if approval_decision.status != "approved":
                         next_state = current_state
@@ -315,32 +562,32 @@ class MaestroOrchestrator:
                     elif self.config.mode == RunMode.LIVE_APPROVAL:
                         execution_results, next_state = self._execute_live_approval_orders(
                             run_id,
-                            orders,
+                            approval_orders,
                             approval_request.approval_id,
                             approval_decision,
                         )
                     else:
                         execution_results, next_state = self.execution.execute_orders(
-                            current_state, orders
+                            current_state, approval_orders
                         )
                 else:
                     if self.config.mode == RunMode.LIVE_APPROVAL:
                         raise ValueError("live_approval mode requires an approval decision")
                     execution_results, next_state = self.execution.execute_orders(
-                        current_state, orders
+                        current_state, approval_orders
                     )
             else:
                 execution_results = []
                 next_state = current_state
 
-            for order in orders:
+            for order in approval_orders:
                 order_payload = order.model_dump(mode="json")
                 order_payload["approval_status"] = (
                     approval_decision.status if approval_decision else "not_required"
                 )
                 if not (
                     self.config.mode == RunMode.LIVE_APPROVAL
-                    and self.config.execution.live_order_dry_run
+                    and self._effective_order_posture(order) == "dry_run"
                 ):
                     self.state_store.save_order(run_id, order.order_id, order_payload)
             self.state_store.save_portfolio_snapshot(run_id, next_state)
@@ -354,7 +601,7 @@ class MaestroOrchestrator:
             summary = RunOnceSummary(
                 run_id=run_id,
                 loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
-                orders_created=len(orders),
+                orders_created=len(approval_orders),
                 total_value=next_state.total_value(prices),
                 cash=next_state.cash,
             )
@@ -377,6 +624,9 @@ class MaestroOrchestrator:
                     if approval_decision
                     else None,
                     "paper_orders": [order.model_dump(mode="json") for order in orders],
+                    "approval_orders": [
+                        order.model_dump(mode="json") for order in approval_orders
+                    ],
                     "execution_results": [
                         result.model_dump(mode="json") for result in execution_results
                     ],
@@ -414,6 +664,69 @@ class MaestroOrchestrator:
                 {"error_type": type(exc).__name__, "error_message": str(exc)},
             )
             raise
+
+    def _collect_strategy_results(
+        self,
+        run_id: str,
+        current_state: PortfolioState,
+    ) -> tuple[
+        list[TargetAllocationResult],
+        dict[str, Any],
+        list[dict[str, Any]],
+        dict[str, float],
+    ]:
+        valid_results: list[TargetAllocationResult] = []
+        data_requests_by_strategy = {}
+        data_quality_issues: list[dict[str, Any]] = []
+        prices = self._initial_prices()
+        validator = SignalValidator.with_universe_boundaries(
+            tradable_symbols=set(self.config.portfolio.allowed_symbols),
+            research_only_symbols=set(self.config.universe.research_symbols),
+            strategy_ids=self.registry.strategy_ids,
+        )
+        for loaded in self.registry.strategies:
+            context = self._strategy_context(run_id, loaded, current_state)
+            requests = loaded.plugin.build_data_requests(context)
+            strategy_data_requests = {
+                "prefetch": [request.model_dump(mode="json") for request in requests],
+                "runtime": {"requests": [], "bundles": [], "errors": []},
+            }
+            data_requests_by_strategy[loaded.config.id] = strategy_data_requests
+            data_bundle = self.datahub.get_data(requests)
+            data_quality_issues.extend(collect_data_quality_issues(data_bundle))
+            prices.update(prices_from_bundle(data_bundle))
+            runtime = StrategyRuntime(self.datahub.get_data, context=context)
+            try:
+                raw_result = loaded.plugin.run_with_runtime(data_bundle, context, runtime)
+            finally:
+                strategy_data_requests["runtime"] = runtime.audit_payload()
+            for runtime_bundle in runtime.bundles:
+                data_quality_issues.extend(collect_data_quality_issues(runtime_bundle))
+                prices.update(prices_from_bundle(runtime_bundle))
+            result = normalize_strategy_result(
+                raw_result,
+                loaded.config.signal_to_allocation,
+            )
+            validation = validator.validate(result)
+            strategy_run_payload = {
+                "account_id": self._strategy_account_id(loaded.config.id),
+                "signal_run_id": run_id,
+                "result": result.model_dump(mode="json"),
+                "validation": {"ok": validation.ok, "errors": validation.errors},
+            }
+            if isinstance(raw_result, StrategySignalResult):
+                strategy_run_payload["source_signal"] = raw_result.model_dump(mode="json")
+            self.state_store.save_strategy_run(
+                run_id,
+                loaded.config.id,
+                strategy_run_payload,
+            )
+            if not validation.ok:
+                raise ValueError(
+                    f"Invalid strategy result for {loaded.config.id}: {validation.errors}"
+                )
+            valid_results.append(result)
+        return valid_results, data_requests_by_strategy, data_quality_issues, prices
 
     def _strategy_context(
         self, run_id: str, loaded, current_state: PortfolioState
@@ -574,7 +887,12 @@ class MaestroOrchestrator:
             return self.state_store.load_latest_portfolio_state()
         if not self.registry.strategies and self.state_store.has_portfolio_snapshot():
             return self.state_store.load_latest_portfolio_state()
-        if self.config.kis.provider != "kis":
+        live_account_ids = self._live_account_ids()
+        if len(live_account_ids) > 1:
+            return self._load_multi_account_live_portfolio_state(run_id, live_account_ids)
+        baseline_account_id = self._single_live_account_id()
+        baseline_kis_config = self.account_router.kis_config(baseline_account_id)
+        if baseline_kis_config.provider != "kis":
             if self.state_store.has_portfolio_snapshot():
                 return self.state_store.load_latest_portfolio_state()
             self._record_event(
@@ -590,12 +908,16 @@ class MaestroOrchestrator:
                 "run kis-sync and adopt-broker-snapshot first"
             )
         try:
-            snapshot = KISReadOnlyService(
-                self.config.kis,
+            readonly_service = KISReadOnlyService(
+                baseline_kis_config,
                 self.state_store,
                 self.audit,
                 instruments=self.config.universe.instruments,
-            ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
+            )
+            readonly_service.logical_account_id = baseline_account_id
+            snapshot = readonly_service.fetch_and_store_snapshot(
+                self.config.portfolio.allowed_symbols
+            )
             state = portfolio_state_from_broker_account(
                 snapshot.account.model_dump(mode="json"),
                 allowed_symbols=self.config.portfolio.allowed_symbols,
@@ -631,6 +953,79 @@ class MaestroOrchestrator:
         self._auto_reconcile_live_baseline(run_id)
         return state
 
+    def _load_multi_account_live_portfolio_state(
+        self,
+        run_id: str,
+        account_ids: list[str],
+    ) -> PortfolioState:
+        states = []
+        snapshot_events = []
+        try:
+            for account_id in account_ids:
+                kis_config = self.account_router.kis_config(account_id)
+                if kis_config.provider != "kis":
+                    raise UnsupportedBrokerOperation(
+                        f"live_approval cannot refresh non-KIS account: {account_id}"
+                    )
+                service = KISReadOnlyService(
+                    kis_config,
+                    self.state_store,
+                    self.audit,
+                    instruments=self.config.universe.instruments,
+                )
+                service.logical_account_id = account_id
+                snapshot = service.fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
+                state = portfolio_state_from_broker_account(
+                    snapshot.account.model_dump(mode="json"),
+                    allowed_symbols=self.config.portfolio.allowed_symbols,
+                    universe=self.config.universe,
+                )
+                states.append(state)
+                snapshot_events.append(
+                    {
+                        "account_id": account_id,
+                        "broker_account_id": snapshot.account.account_id,
+                        "cash": state.cash,
+                        "cash_by_currency": state.cash_by_currency,
+                        "positions": state.positions,
+                        "source": snapshot.account.source,
+                        "fetched_at": snapshot.account.fetched_at.isoformat(),
+                    }
+                )
+        except (RuntimeError, TimeoutError, ValueError, UnsupportedBrokerOperation) as exc:
+            self._record_event(
+                run_id,
+                SystemEventType.BROKER_BASELINE_REQUIRED,
+                {
+                    "mode": self.config.mode.value,
+                    "reason": (
+                        "live_approval could not refresh multi-account broker snapshots "
+                        "before run_once"
+                    ),
+                    "account_ids": account_ids,
+                    "error": str(exc),
+                },
+            )
+            raise ValueError(
+                "live_approval could not refresh multi-account broker snapshots before "
+                f"run_once: {exc}"
+            ) from exc
+        state = _merge_portfolio_states(states)
+        self.state_store.save_portfolio_snapshot(run_id, state)
+        self._record_event(
+            run_id,
+            SystemEventType.BROKER_SNAPSHOT_ADOPTED,
+            {
+                "reason": "live_approval refreshed multi-account broker snapshots before run_once",
+                "accounts": snapshot_events,
+                "cash": state.cash,
+                "cash_by_currency": state.cash_by_currency,
+                "positions": state.positions,
+            },
+        )
+        self._auto_reconcile_live_baseline(run_id)
+        return state
+
     def _auto_reconcile_live_baseline(self, run_id: str) -> None:
         if not self.config.execution.require_reconciliation_pass:
             return
@@ -641,6 +1036,232 @@ class MaestroOrchestrator:
             self.state_store,
             self.audit,
         ).reconcile_latest(run_id=run_id)
+
+    def _broker_snapshot_refs(self) -> list[dict[str, Any]]:
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            return []
+        expected_account_ids = set(self._live_account_ids())
+        if not expected_account_ids:
+            return []
+        refs_by_account: dict[str, dict[str, Any]] = {}
+        for row in self.state_store.list_broker_account_snapshots(
+            limit=max(10, len(expected_account_ids) * 5)
+        ):
+            payload = row["payload"]
+            account_id = payload.get("account_id") or row.get("account_id")
+            if account_id not in expected_account_ids or account_id in refs_by_account:
+                continue
+            refs_by_account[account_id] = {
+                "id": row["id"],
+                "run_id": row["run_id"],
+                "account_id": account_id,
+                "broker_account_id": payload.get("broker_account_id")
+                or (payload.get("account") or {}).get("account_id")
+                or row.get("account_id"),
+                "created_at": row["created_at"],
+                "fetched_at": (payload.get("account") or {}).get("fetched_at"),
+            }
+        return [
+            refs_by_account[account_id]
+            for account_id in sorted(expected_account_ids)
+            if account_id in refs_by_account
+        ]
+
+    def _validate_signal_package_for_approval(self, package: dict[str, Any]) -> None:
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            return
+        generated_at = _parse_signal_ref_time(str(package.get("generated_at") or ""))
+        signal_age_seconds = (utc_now() - generated_at).total_seconds()
+        if signal_age_seconds > self.config.approval.signal_max_age_seconds:
+            raise ValueError(
+                "Signal package expired signal package: "
+                f"age_seconds={signal_age_seconds:.0f} "
+                f"max_age_seconds={self.config.approval.signal_max_age_seconds}"
+            )
+        signal_fingerprint = package.get("config_runtime_fingerprint")
+        current_fingerprint = (
+            self.config_identity.runtime_fingerprint if self.config_identity is not None else None
+        )
+        if signal_fingerprint and current_fingerprint and signal_fingerprint != current_fingerprint:
+            raise ValueError("Signal package config runtime mismatch")
+        signal_account_mappings = package.get("strategy_account_mappings")
+        if signal_account_mappings is not None:
+            current_mappings = self._strategy_account_mappings()
+            if signal_account_mappings != current_mappings:
+                raise ValueError(
+                    "Signal package account mapping mismatch: "
+                    f"signal={signal_account_mappings} current={current_mappings}"
+                )
+        if not package.get("datahub_evidence"):
+            raise ValueError("Signal package missing DataHub evidence")
+        expected_account_ids = set(self._live_account_ids())
+        if not expected_account_ids:
+            return
+        refs = package.get("broker_snapshot_refs") or []
+        actual_account_ids = {str(ref.get("account_id")) for ref in refs}
+        missing_account_ids = sorted(expected_account_ids - actual_account_ids)
+        if missing_account_ids:
+            raise ValueError(
+                "Signal package missing broker_snapshot_refs for account_id: "
+                + ", ".join(missing_account_ids)
+            )
+        now = utc_now()
+        for ref in refs:
+            created_at = _parse_signal_ref_time(str(ref.get("created_at") or ""))
+            age_seconds = (now - created_at).total_seconds()
+            if age_seconds > self.config.reconciliation.max_age_seconds:
+                raise ValueError(
+                    "Signal package stale broker snapshot: "
+                    f"account_id={ref.get('account_id')} "
+                    f"age_seconds={age_seconds:.0f} "
+                    f"max_age_seconds={self.config.reconciliation.max_age_seconds}"
+                )
+        self._validate_signal_broker_baseline(refs)
+
+    def _validate_signal_broker_baseline(self, refs: list[dict[str, Any]]) -> None:
+        snapshot_rows = self.state_store.list_broker_account_snapshots(limit=1000)
+        rows_by_id = {int(row["id"]): row for row in snapshot_rows}
+        latest_by_account: dict[str, dict[str, Any]] = {}
+        for row in snapshot_rows:
+            payload = row["payload"]
+            account_id = payload.get("account_id") or row.get("account_id")
+            if account_id and account_id not in latest_by_account:
+                latest_by_account[str(account_id)] = row
+        for ref in refs:
+            account_id = str(ref.get("account_id") or "")
+            baseline = rows_by_id.get(int(ref.get("id") or 0))
+            latest = latest_by_account.get(account_id)
+            if baseline is None or latest is None:
+                raise ValueError(
+                    f"Signal package broker snapshot changed: account_id={account_id}"
+                )
+            if int(latest["id"]) == int(baseline["id"]):
+                continue
+            difference = _broker_snapshot_material_difference(
+                baseline["payload"],
+                latest["payload"],
+                cash_tolerance=self.config.reconciliation.cash_tolerance,
+                position_tolerance=self.config.reconciliation.position_quantity_tolerance,
+            )
+            if difference is not None:
+                raise ValueError(
+                    "Signal package broker snapshot changed: "
+                    f"account_id={account_id} reason={difference['reason']}"
+                )
+
+    def _datahub_evidence(
+        self,
+        data_requests_by_strategy: dict[str, Any],
+        data_quality_issues: list[dict[str, Any]],
+        prices: dict[str, float],
+    ) -> dict[str, Any]:
+        return {
+            "generated_at": utc_now().isoformat(),
+            "strategies": data_requests_by_strategy,
+            "issue_count": len(data_quality_issues),
+            "issues": data_quality_issues,
+            "price_symbols": sorted(prices),
+        }
+
+    def _validate_signal_approval_gates(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        package: dict[str, Any],
+    ) -> None:
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            return
+        safety_state = self.safety.current_state()
+        if safety_state.blocks_live_execution:
+            self.safety.record_blocked_execution(
+                run_id,
+                self.config.mode.value,
+                safety_state,
+                "approve_signal",
+            )
+            raise ValueError(
+                "Signal approval safety state blocks live execution: "
+                f"state={safety_state.state.value}"
+            )
+        live_blocks = self._live_execution_blocks(
+            run_id,
+            orders,
+            list(package.get("data_quality_issues") or []),
+        )
+        if live_blocks:
+            self.safety.halt(
+                run_id,
+                "Signal approval blocked by production hardening gate.",
+                source="system",
+            )
+            reasons = ", ".join(str(block.get("reason")) for block in live_blocks)
+            raise ValueError(f"Signal approval blocked by live execution gate: {reasons}")
+
+    def _strategy_account_mappings(self) -> list[dict[str, str]]:
+        return [
+            {
+                "strategy_id": loaded.config.id,
+                "account_id": self.account_router.account_id_for_strategy(loaded.config),
+            }
+            for loaded in self.registry.strategies
+            if loaded.config.enabled
+        ]
+
+    def _strategy_phase_controls(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "strategy_id": strategy.id,
+                "account_id": strategy.account_id,
+                "readonly_enabled": strategy.readonly_enabled,
+                "signal_enabled": strategy.signal_enabled,
+                "order_posture": self._effective_strategy_order_posture(strategy.id),
+            }
+            for strategy in self.config.strategies
+            if strategy.enabled
+        ]
+
+    def _orders_requiring_approval(self, orders: list[OrderIntent]) -> list[OrderIntent]:
+        return [
+            order
+            for order in orders
+            if self._effective_order_posture(order) != "disabled"
+        ]
+
+    def _effective_order_posture(self, order: OrderIntent) -> str:
+        posture = str(order.metadata.get("order_posture") or self.config.execution.order_posture)
+        if self.config.mode != RunMode.LIVE_APPROVAL and "order_posture" not in order.metadata:
+            return "dry_run"
+        if (
+            self.config.execution.order_posture == "disabled"
+            and self.config.mode == RunMode.LIVE_APPROVAL
+        ):
+            return "disabled"
+        if self.config.execution.order_posture == "dry_run" and posture == "armed":
+            return "dry_run"
+        return posture
+
+    def _effective_strategy_order_posture(self, strategy_id: str) -> str:
+        strategy = next(
+            (strategy for strategy in self.config.strategies if strategy.id == strategy_id),
+            None,
+        )
+        posture = (
+            strategy.order_posture
+            if strategy is not None and strategy.order_posture is not None
+            else self.config.execution.order_posture
+        )
+        if self.config.mode != RunMode.LIVE_APPROVAL and (
+            strategy is None or strategy.order_posture is None
+        ):
+            return "dry_run"
+        if (
+            self.config.execution.order_posture == "disabled"
+            and self.config.mode == RunMode.LIVE_APPROVAL
+        ):
+            return "disabled"
+        if self.config.execution.order_posture == "dry_run" and posture == "armed":
+            return "dry_run"
+        return posture
 
     def _record_live_proposal_data_snapshot(
         self,
@@ -753,6 +1374,8 @@ class MaestroOrchestrator:
         orders: list[OrderIntent],
         approval_id: str,
         approval_decision: ApprovalDecision,
+        *,
+        signal_run_id: str | None = None,
     ) -> tuple[list[LiveOrderLifecycleResult], PortfolioState]:
         safety_state = self.safety.current_state()
         if safety_state.blocks_live_execution:
@@ -764,26 +1387,45 @@ class MaestroOrchestrator:
             )
             return [], self.state_store.load_latest_portfolio_state()
 
+        dry_run_orders = [
+            order for order in orders if self._effective_order_posture(order) == "dry_run"
+        ]
+        armed_orders = [
+            order for order in orders if self._effective_order_posture(order) == "armed"
+        ]
+        if dry_run_orders:
+            self._record_live_order_dry_run(
+                run_id,
+                dry_run_orders,
+                approval_id,
+                approval_decision,
+                signal_run_id=signal_run_id,
+            )
+        if not armed_orders:
+            return [], self.state_store.load_latest_portfolio_state()
         if self.config.execution.live_order_dry_run:
             return self._record_live_order_dry_run(
                 run_id,
-                orders,
+                armed_orders,
                 approval_id,
                 approval_decision,
+                signal_run_id=signal_run_id,
             )
 
-        dependencies = build_live_approval_dependencies(
-            self.config,
-            self.state_store,
-            self.audit,
-            live_order_client=self.live_order_client,
-            status_client=self.live_order_status_client,
-            broker_reconciliation_service=self.broker_reconciliation_service,
-            notification_client=self.live_order_notification_client,
-            telegram_client=self.telegram_client,
-        )
         lifecycle_results = []
-        for order in orders:
+        for order in armed_orders:
+            dependencies = build_live_approval_dependencies(
+                self.config,
+                self.state_store,
+                self.audit,
+                live_order_client=self.live_order_client,
+                status_client=self.live_order_status_client,
+                broker_reconciliation_service=self.broker_reconciliation_service,
+                notification_client=self.live_order_notification_client,
+                telegram_client=self.telegram_client,
+                account_id=order.account_id,
+                signal_run_id=signal_run_id,
+            )
             request = LiveOrderRequest(
                 order_id=order.order_id,
                 symbol=order.symbol,
@@ -796,7 +1438,9 @@ class MaestroOrchestrator:
                 duplicate_key=f"{run_id}:{order.order_id}",
                 currency=order.currency,
                 sleeve=order.sleeve,
+                account_id=order.account_id,
                 broker_product=order.broker_product,
+                signal_run_id=signal_run_id,
             )
             lifecycle_results.append(dependencies.lifecycle_service.run(request, approval_decision))
         return lifecycle_results, self.state_store.load_latest_portfolio_state()
@@ -807,6 +1451,8 @@ class MaestroOrchestrator:
         orders: list[OrderIntent],
         approval_id: str,
         approval_decision: ApprovalDecision,
+        *,
+        signal_run_id: str | None = None,
     ) -> tuple[list[LiveOrderLifecycleResult], PortfolioState]:
         for order in orders:
             request = LiveOrderRequest(
@@ -821,9 +1467,12 @@ class MaestroOrchestrator:
                 duplicate_key=f"{run_id}:{order.order_id}",
                 currency=order.currency,
                 sleeve=order.sleeve,
+                account_id=order.account_id,
                 broker_product=order.broker_product,
+                signal_run_id=signal_run_id,
             )
             event = {
+                "signal_run_id": signal_run_id,
                 "request": request.model_dump(mode="json"),
                 "approval_decision": approval_decision.model_dump(mode="json"),
                 "notional": request.notional,
@@ -832,6 +1481,158 @@ class MaestroOrchestrator:
             }
             self._record_event(run_id, "live_order_dry_run", event)
         return [], self.state_store.load_latest_portfolio_state()
+
+    def _build_account_scoped_targets(
+        self,
+        run_id: str,
+        valid_results: list[TargetAllocationResult],
+        risk_manager: RiskManager,
+    ) -> tuple[PortfolioTarget, RiskDecision, list[tuple[str | None, PortfolioTarget]]]:
+        account_results = self._results_by_account(valid_results)
+        if len(account_results) <= 1:
+            target = self._target_with_configured_cash(
+                self.portfolio_manager.build_target(valid_results),
+                valid_results,
+            )
+            risk_decision = risk_manager.check(target)
+            self._save_account_risk_decision(run_id, risk_decision, target.source_strategy_ids)
+            account_id = next(iter(account_results), None)
+            return target, risk_decision, [(account_id, risk_decision.target)]
+
+        order_targets: list[tuple[str | None, PortfolioTarget]] = []
+        risk_decisions = []
+        for account_id, results in account_results.items():
+            strategy_configs = [
+                loaded.config
+                for loaded in self.registry.strategies
+                if self.account_router.account_id_for_strategy(loaded.config) == account_id
+            ]
+            account_manager = PortfolioManager(strategy_configs)
+            account_target = self._target_with_configured_cash(
+                account_manager.build_target(results),
+                results,
+            )
+            account_risk = risk_manager.check(account_target)
+            self._save_account_risk_decision(
+                run_id,
+                account_risk,
+                account_target.source_strategy_ids,
+                account_id=account_id,
+            )
+            risk_decisions.append(account_risk)
+            order_targets.append((account_id, account_risk.target))
+
+        aggregate_target = self.portfolio_manager.build_target(valid_results)
+        aggregate_risk = RiskDecision(
+            approved=all(decision.approved for decision in risk_decisions),
+            target=aggregate_target,
+            violations=[
+                violation
+                for decision in risk_decisions
+                for violation in decision.violations
+            ],
+        )
+        return aggregate_target, aggregate_risk, order_targets
+
+    def _results_by_account(
+        self,
+        valid_results: list[TargetAllocationResult],
+    ) -> dict[str, list[TargetAllocationResult]]:
+        results_by_account: dict[str, list[TargetAllocationResult]] = {}
+        for result in valid_results:
+            account_id = self._strategy_account_id(result.strategy_id)
+            results_by_account.setdefault(account_id, []).append(result)
+        if not results_by_account:
+            results_by_account[PAPER_DEFAULT_ACCOUNT_ID] = []
+        return results_by_account
+
+    def _save_account_risk_decision(
+        self,
+        run_id: str,
+        risk_decision: RiskDecision,
+        source_strategy_ids: list[str],
+        *,
+        account_id: str | None = None,
+    ) -> None:
+        account_ids = sorted(
+            {self._strategy_account_id(strategy_id) for strategy_id in source_strategy_ids}
+        )
+        if account_id and account_id not in account_ids:
+            account_ids.append(account_id)
+            account_ids.sort()
+        risk_payload = risk_decision.model_dump(mode="json")
+        risk_payload["account_ids"] = account_ids
+        if len(account_ids) == 1:
+            risk_payload["account_id"] = account_ids[0]
+        self.state_store.save_risk_decision(
+            run_id,
+            risk_decision.approved,
+            risk_payload,
+        )
+
+    def _strategy_account_id(self, strategy_id: str) -> str:
+        for loaded in self.registry.strategies:
+            if loaded.config.id == strategy_id:
+                return self.account_router.account_id_for_strategy(loaded.config)
+        return PAPER_DEFAULT_ACCOUNT_ID
+
+    def _single_live_account_id(self) -> str | None:
+        account_ids = set(self._live_account_ids())
+        if len(account_ids) == 1:
+            return next(iter(account_ids))
+        return None
+
+    def _live_account_ids(self) -> list[str]:
+        return sorted(
+            {
+                self.account_router.account_id_for_strategy(loaded.config)
+                for loaded in self.registry.strategies
+                if loaded.config.enabled
+                and loaded.config.account_id
+                and (
+                    self.account_router.account(loaded.config.account_id) is None
+                    or self.account_router.account(loaded.config.account_id).broker != "sandbox"
+                )
+            }
+        )
+
+    def _stamp_orders_with_account_id(
+        self,
+        orders: list[OrderIntent],
+        source_strategy_ids: list[str],
+        *,
+        account_id: str | None = None,
+    ) -> list[OrderIntent]:
+        account_ids = {
+            self._strategy_account_id(strategy_id)
+            for strategy_id in source_strategy_ids
+            if strategy_id
+        }
+        order_postures = {
+            self._effective_strategy_order_posture(strategy_id)
+            for strategy_id in source_strategy_ids
+            if strategy_id
+        }
+        resolved_account_id = account_id or (
+            next(iter(account_ids)) if len(account_ids) == 1 else None
+        )
+        resolved_order_posture = (
+            next(iter(order_postures)) if len(order_postures) == 1 else None
+        )
+        return [
+            order.model_copy(
+                update={
+                    "account_id": order.account_id or resolved_account_id,
+                    "metadata": {
+                        **order.metadata,
+                        "account_id": order.account_id or resolved_account_id,
+                        "source_strategy_ids": list(source_strategy_ids),
+                        "order_posture": resolved_order_posture,
+                    },
+                }
+            )
+            for order in orders
+        ]
 
 
 def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:
@@ -849,7 +1650,97 @@ def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:
     return prices
 
 
+def _merge_portfolio_states(states: list[PortfolioState]) -> PortfolioState:
+    if not states:
+        return PortfolioState(cash=0.0, cash_by_currency={}, positions={})
+    cash_by_currency: dict[str, float] = {}
+    positions: dict[str, float] = {}
+    for state in states:
+        if state.cash_by_currency:
+            for currency, cash in state.cash_by_currency.items():
+                cash_by_currency[currency] = cash_by_currency.get(currency, 0.0) + cash
+        else:
+            cash_by_currency["CASH"] = cash_by_currency.get("CASH", 0.0) + state.cash
+        for symbol, quantity in state.positions.items():
+            positions[symbol] = positions.get(symbol, 0.0) + quantity
+    return PortfolioState(
+        cash=sum(cash_by_currency.values()),
+        cash_by_currency=cash_by_currency,
+        positions=positions,
+    )
+
+
+def _broker_snapshot_material_difference(
+    baseline_payload: dict[str, Any],
+    latest_payload: dict[str, Any],
+    *,
+    cash_tolerance: float,
+    position_tolerance: float,
+) -> dict[str, Any] | None:
+    baseline_account = baseline_payload.get("account") or {}
+    latest_account = latest_payload.get("account") or {}
+    baseline_broker_id = baseline_account.get("account_id")
+    latest_broker_id = latest_account.get("account_id")
+    if baseline_broker_id != latest_broker_id:
+        return {
+            "reason": "broker_account_id_changed",
+            "baseline": baseline_broker_id,
+            "latest": latest_broker_id,
+        }
+    baseline_cash = _account_cash_by_currency(baseline_account)
+    latest_cash = _account_cash_by_currency(latest_account)
+    for currency in sorted(set(baseline_cash) | set(latest_cash)):
+        difference = latest_cash.get(currency, 0.0) - baseline_cash.get(currency, 0.0)
+        if abs(difference) > cash_tolerance:
+            return {
+                "reason": "cash_changed",
+                "currency": currency,
+                "difference": difference,
+                "tolerance": cash_tolerance,
+            }
+    baseline_positions = _account_position_quantities(baseline_account)
+    latest_positions = _account_position_quantities(latest_account)
+    for symbol in sorted(set(baseline_positions) | set(latest_positions)):
+        difference = latest_positions.get(symbol, 0.0) - baseline_positions.get(symbol, 0.0)
+        if abs(difference) > position_tolerance:
+            return {
+                "reason": "position_changed",
+                "symbol": symbol,
+                "difference": difference,
+                "tolerance": position_tolerance,
+            }
+    return None
+
+
+def _account_cash_by_currency(account: dict[str, Any]) -> dict[str, float]:
+    cash_by_currency = account.get("cash_by_currency") or {}
+    if isinstance(cash_by_currency, dict) and cash_by_currency:
+        return {str(currency): float(value) for currency, value in cash_by_currency.items()}
+    return {"CASH": float(account.get("cash", 0.0))}
+
+
+def _account_position_quantities(account: dict[str, Any]) -> dict[str, float]:
+    quantities: dict[str, float] = {}
+    for position in account.get("positions") or []:
+        if not isinstance(position, dict):
+            continue
+        symbol = str(position.get("symbol") or "")
+        if not symbol:
+            continue
+        quantities[symbol] = quantities.get(symbol, 0.0) + float(position.get("quantity", 0.0))
+    return quantities
+
+
 def _profile_name(config_identity: ConfigIdentity | None) -> str | None:
     if config_identity is None:
         return None
     return Path(config_identity.path).stem
+
+
+def _parse_signal_ref_time(value: str) -> datetime:
+    if not value:
+        raise ValueError("Signal package broker snapshot ref missing created_at")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

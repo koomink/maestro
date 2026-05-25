@@ -49,21 +49,28 @@ class BrokerReconciliationService:
         state_store: StateStore,
         audit_logger: AuditLogger,
         snapshot_refresher: Callable[[], None] | None = None,
+        signal_run_id: str | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
         self.snapshot_refresher = snapshot_refresher
+        self.signal_run_id = signal_run_id
 
-    def reconcile_latest(self, run_id: str | None = None) -> ReconciliationResult:
+    def reconcile_latest(
+        self,
+        run_id: str | None = None,
+        signal_run_id: str | None = None,
+    ) -> ReconciliationResult:
         run_id = run_id or new_run_id()
+        effective_signal_run_id = signal_run_id or self.signal_run_id
         if self.snapshot_refresher is not None:
             self.snapshot_refresher()
         portfolio_state = self.state_store.load_latest_portfolio_state()
         latest_snapshot = self.state_store.load_latest_broker_account_snapshot()
         if latest_snapshot is None:
             result = self._no_snapshot_result(run_id)
-            self._persist(result)
+            self._persist(result, signal_run_id=effective_signal_run_id)
             return result
 
         account = latest_snapshot["payload"]["account"]
@@ -73,7 +80,7 @@ class BrokerReconciliationService:
             broker_account=account,
             broker_snapshot_id=latest_snapshot["id"],
         )
-        self._persist(result)
+        self._persist(result, signal_run_id=effective_signal_run_id)
         return result
 
     def _compare(
@@ -168,8 +175,10 @@ class BrokerReconciliationService:
             tolerances=self._tolerances(),
         )
 
-    def _persist(self, result: ReconciliationResult) -> None:
+    def _persist(self, result: ReconciliationResult, *, signal_run_id: str | None = None) -> None:
         payload = result.model_dump(mode="json")
+        if signal_run_id:
+            payload["signal_run_id"] = signal_run_id
         save_audited_system_event(
             self.state_store,
             self.audit_logger,

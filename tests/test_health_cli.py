@@ -15,9 +15,9 @@ from maestro.state.store import StateStore
 
 
 def test_health_cli_reports_local_checks_without_kis_network(monkeypatch, tmp_path):
-    monkeypatch.delenv("KIS_ACCOUNT_ID", raising=False)
-    monkeypatch.delenv("KIS_APP_KEY", raising=False)
-    monkeypatch.delenv("KIS_APP_SECRET", raising=False)
+    monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
     monkeypatch.delenv("KIS_ACCESS_TOKEN", raising=False)
     config_path = _readonly_config(tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -211,6 +211,74 @@ def test_state_store_rejects_same_db_with_state_config_change(tmp_path):
         raise AssertionError("expected config identity mismatch")
 
 
+def test_state_store_allows_same_db_for_matching_state_identity_group(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["state"]["identity_group"] = "symphony"
+    config_path.write_text(yaml.safe_dump(raw))
+    config, identity = load_config_with_identity(config_path)
+    StateStore(
+        config.state.sqlite_path,
+        config.portfolio.initial_cash,
+        config.portfolio.cash_by_currency,
+        config_identity=identity,
+    )
+
+    changed_raw = yaml.safe_load(config_path.read_text())
+    changed_raw["mode"] = "live_readonly"
+    changed_raw["strategies"] = []
+    changed_raw["approval"] = {
+        "enabled": False,
+        "provider": "console",
+        "require_approval": False,
+        "default_decision": "approved",
+        "timeout_seconds": 300,
+    }
+    changed_raw["execution"]["order_posture"] = "disabled"
+    changed_config_path = tmp_path / "readonly_same_group.yaml"
+    changed_config_path.write_text(yaml.safe_dump(changed_raw))
+    changed_config, changed_identity = load_config_with_identity(changed_config_path)
+
+    StateStore(
+        changed_config.state.sqlite_path,
+        changed_config.portfolio.initial_cash,
+        changed_config.portfolio.cash_by_currency,
+        config_identity=changed_identity,
+    )
+
+
+def test_state_store_rejects_same_db_for_different_state_identity_group(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["state"]["identity_group"] = "symphony"
+    config_path.write_text(yaml.safe_dump(raw))
+    config, identity = load_config_with_identity(config_path)
+    StateStore(
+        config.state.sqlite_path,
+        config.portfolio.initial_cash,
+        config.portfolio.cash_by_currency,
+        config_identity=identity,
+    )
+
+    changed_raw = yaml.safe_load(config_path.read_text())
+    changed_raw["state"]["identity_group"] = "other"
+    changed_config_path = tmp_path / "other_group.yaml"
+    changed_config_path.write_text(yaml.safe_dump(changed_raw))
+    changed_config, changed_identity = load_config_with_identity(changed_config_path)
+
+    try:
+        StateStore(
+            changed_config.state.sqlite_path,
+            changed_config.portfolio.initial_cash,
+            changed_config.portfolio.cash_by_currency,
+            config_identity=changed_identity,
+        )
+    except ValueError as exc:
+        assert "config identity mismatch" in str(exc)
+    else:
+        raise AssertionError("expected config identity mismatch")
+
+
 def test_audit_integrity_check_detects_hash_tampering(tmp_path):
     config_path = _live_approval_config(tmp_path)
     config = load_config(config_path)
@@ -248,8 +316,8 @@ def test_health_live_approval_preflight_reports_ready_when_config_is_safe(
     monkeypatch,
     tmp_path,
 ):
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     config_path = _live_approval_config(tmp_path)
     config = load_config(config_path)
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -291,8 +359,8 @@ def test_health_fails_when_enabled_strategy_entrypoint_cannot_load(tmp_path):
 
 
 def test_live_preflight_cli_exits_zero_when_ready(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     config_path = _live_approval_config(tmp_path)
 
     result = CliRunner().invoke(app, ["live-preflight", "--config", str(config_path)])
@@ -332,8 +400,8 @@ def test_live_preflight_cli_fails_when_enabled_strategy_entrypoint_cannot_load(t
 
 
 def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     config_path = _live_approval_config(
         tmp_path,
         require_market_session=True,
@@ -401,9 +469,53 @@ def test_profile_validate_cli_fails_wrong_target_stage(tmp_path):
     assert "target_stage_mismatch" in result.output
 
 
+def test_profile_validate_cli_fails_app_fragment_recommendation_drift(tmp_path):
+    raw = yaml.safe_load(
+        Path("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+    )
+    raw["app_fragment_paths"] = ["ataraxia_fragment.yaml"]
+    raw["state"]["sqlite_path"] = str(tmp_path / "ataraxia_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "ataraxia_audit.jsonl")
+    raw["execution"]["order_generation_mode"] = "target_rebalance"
+    config_path = tmp_path / "ataraxia_operator.yaml"
+    fragment_path = tmp_path / "ataraxia_fragment.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    fragment_path.write_text(
+        yaml.safe_dump(
+            {
+                "fragment_version": 1,
+                "strategy": {
+                    "id": "ataraxia",
+                    "weight": 1.0,
+                    "entrypoint": "ataraxia.strategy:AtaraxiaStrategy",
+                },
+                "recommendations": {
+                    "execution": {"order_generation_mode": "buy_only_contribution"}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "profile-validate",
+            "--config",
+            str(config_path),
+            "--target-stage",
+            "kis_paper_trading",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "app_fragment_recommendation_mismatch" in result.output
+    assert "execution.order_generation_mode" in result.output
+
+
 def test_profile_validate_cli_passes_private_beta_ready_profile(monkeypatch, tmp_path):
-    monkeypatch.setenv("KIS_APP_KEY", "app-key")
-    monkeypatch.setenv("KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     config_path = _live_approval_config(
         tmp_path,
         require_market_session=True,
@@ -626,7 +738,9 @@ def test_recover_live_order_cli_records_completion_after_reconciliation(tmp_path
 
 
 def _readonly_config(tmp_path: Path) -> Path:
-    raw = yaml.safe_load(Path("configs/examples/live_readonly_multi_asset_kis.yaml").read_text())
+    raw = yaml.safe_load(
+        Path("tests/fixtures/configs/live_readonly_multi_asset_kis.yaml").read_text()
+    )
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")
@@ -650,7 +764,7 @@ def _live_approval_config(
     datahub_provider: str | None = None,
     kis_paper_trading: bool = False,
 ) -> Path:
-    raw = yaml.safe_load(Path("configs/examples/live_approval_us_etf.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/live_approval_us_etf.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "live_state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "live_audit.jsonl")
     raw["kis"]["token_cache_path"] = str(tmp_path / "kis_access_token.json")

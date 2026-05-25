@@ -15,6 +15,7 @@ class OrderIntent(BaseModel):
     order_type: OrderType = OrderType.MARKET
     currency: Currency | None = None
     sleeve: str | None = None
+    account_id: str | None = None
     broker_product: BrokerProduct | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

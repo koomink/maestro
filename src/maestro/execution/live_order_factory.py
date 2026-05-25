@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from maestro.config.models import MaestroConfig
 from maestro.core.enums import BrokerProduct, Currency
 from maestro.core.instruments import TradableInstrument
+from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.execution.brokers.kis.live_order_client import build_kis_rest_live_order_client
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import (
@@ -54,18 +55,30 @@ def build_live_approval_dependencies(
     broker_reconciliation_service: BrokerReconciliationRunner | None = None,
     notification_client: LiveOrderNotificationClient | None = None,
     telegram_client: TelegramBotClient | None = None,
+    account_id: str | None = None,
+    signal_run_id: str | None = None,
 ) -> LiveApprovalDependencies:
-    broker_client = live_order_client or _build_live_order_client(config)
-    order_status_client = status_client or _build_status_client(config, broker_client)
+    broker_client = live_order_client or _build_live_order_client(config, account_id=account_id)
+    order_status_client = status_client or _build_status_client(
+        config,
+        broker_client,
+        account_id=account_id,
+    )
     notifier = notification_client or _build_notification_client(config, telegram_client)
     broker_reconciliation = broker_reconciliation_service
     if broker_reconciliation is None and config.execution.require_reconciliation_pass:
-        snapshot_refresher = _build_broker_snapshot_refresher(config, state_store, audit_logger)
+        snapshot_refresher = _build_broker_snapshot_refresher(
+            config,
+            state_store,
+            audit_logger,
+            account_id=account_id,
+        )
         broker_reconciliation = BrokerReconciliationService(
             config.reconciliation,
             state_store,
             audit_logger,
             snapshot_refresher=snapshot_refresher,
+            signal_run_id=signal_run_id,
         )
 
     safety_service = LiveOrderSafetyService(
@@ -74,8 +87,8 @@ def build_live_approval_dependencies(
         audit_logger,
         broker_client,
         instruments=config.universe.instruments,
-        broker_product=config.kis.broker_product,
-        broker_products=config.kis.effective_broker_products(),
+        broker_product=_kis_config_for_account(config, account_id).broker_product,
+        broker_products=_kis_config_for_account(config, account_id).effective_broker_products(),
         base_currency=Currency(config.portfolio.base_currency),
     )
     status_service = LiveOrderStatusService(state_store, audit_logger, order_status_client)
@@ -98,7 +111,11 @@ def build_live_approval_dependencies(
         broker_reconciliation,
         notifier,
     )
-    cancel_adapter = cancel_client or _build_cancel_client(config, broker_client)
+    cancel_adapter = cancel_client or _build_cancel_client(
+        config,
+        broker_client,
+        account_id=account_id,
+    )
     cancel_service = (
         LiveOrderCancellationService(state_store, audit_logger, cancel_adapter)
         if cancel_adapter is not None
@@ -118,12 +135,16 @@ def build_live_approval_dependencies(
     )
 
 
-def _build_live_order_client(config: MaestroConfig) -> LiveOrderClient:
-    if config.kis.provider == "kis":
-        products = config.kis.effective_broker_products()
+def _build_live_order_client(
+    config: MaestroConfig,
+    *,
+    account_id: str | None = None,
+) -> LiveOrderClient:
+    kis_config = _kis_config_for_account(config, account_id)
+    if kis_config.provider == "kis":
+        products = kis_config.effective_broker_products()
         if len(products) > 1:
-            return ProductRoutingKISLiveOrderClient(config)
-        kis_config = config.kis
+            return ProductRoutingKISLiveOrderClient(config, kis_config=kis_config)
         if kis_config.broker_products:
             kis_config = kis_config.model_copy(
                 update={"broker_product": products[0], "broker_products": []}
@@ -138,17 +159,22 @@ def _build_broker_snapshot_refresher(
     config: MaestroConfig,
     state_store: StateStore,
     audit_logger: AuditLogger,
+    *,
+    account_id: str | None = None,
 ):
-    if config.kis.provider != "kis":
+    kis_config = _kis_config_for_account(config, account_id)
+    if kis_config.provider != "kis":
         return None
 
     def refresh() -> None:
-        KISReadOnlyService(
-            config.kis,
+        service = KISReadOnlyService(
+            kis_config,
             state_store,
             audit_logger,
             instruments=config.universe.instruments,
-        ).fetch_and_store_snapshot(config.portfolio.allowed_symbols)
+        )
+        service.logical_account_id = account_id
+        service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
 
     return refresh
 
@@ -156,13 +182,15 @@ def _build_broker_snapshot_refresher(
 def _build_status_client(
     config: MaestroConfig,
     live_order_client: LiveOrderClient,
+    *,
+    account_id: str | None = None,
 ) -> LiveOrderStatusClient:
     if isinstance(live_order_client, LiveOrderStatusClient):
         return live_order_client
-    if config.kis.provider == "kis":
-        if len(config.kis.effective_broker_products()) > 1:
-            return ProductRoutingKISLiveOrderClient(config)
-        kis_config = config.kis
+    kis_config = _kis_config_for_account(config, account_id)
+    if kis_config.provider == "kis":
+        if len(kis_config.effective_broker_products()) > 1:
+            return ProductRoutingKISLiveOrderClient(config, kis_config=kis_config)
         products = kis_config.effective_broker_products()
         if kis_config.broker_products:
             kis_config = kis_config.model_copy(
@@ -196,16 +224,19 @@ def _build_notification_client(
 def _build_cancel_client(
     config: MaestroConfig,
     live_order_client: LiveOrderClient,
+    *,
+    account_id: str | None = None,
 ) -> LiveOrderCancelClient | None:
     if isinstance(live_order_client, LiveOrderCancelClient):
         return live_order_client
     if not live_order_client.__class__.__module__.startswith("maestro.execution.brokers.kis"):
         return None
-    if config.kis.provider != "kis":
+    kis_config = _kis_config_for_account(config, account_id)
+    if kis_config.provider != "kis":
         return None
-    if len(config.kis.effective_broker_products()) > 1:
+    if len(kis_config.effective_broker_products()) > 1:
         return None
-    candidate = build_kis_rest_live_order_client(config.kis, config.universe.instruments)
+    candidate = build_kis_rest_live_order_client(kis_config, config.universe.instruments)
     if isinstance(candidate, LiveOrderCancelClient):
         return candidate
     return None
@@ -216,17 +247,20 @@ class ProductRoutingKISLiveOrderClient(
     LiveOrderStatusClient,
     LiveOrderPreSubmitValidator,
 ):
-    def __init__(self, config: MaestroConfig) -> None:
+    def __init__(self, config: MaestroConfig, *, kis_config=None) -> None:
         self.config = config
+        self.kis_config = kis_config or config.kis
         self.instruments = {
             instrument.symbol: instrument for instrument in config.universe.instruments
         }
         self.clients = {
             product: build_kis_rest_live_order_client(
-                config.kis.model_copy(update={"broker_product": product, "broker_products": []}),
+                self.kis_config.model_copy(
+                    update={"broker_product": product, "broker_products": []}
+                ),
                 _instruments_for_product(config.universe.instruments, product),
             )
-            for product in config.kis.effective_broker_products()
+            for product in self.kis_config.effective_broker_products()
         }
         self.submitted_products: dict[str, BrokerProduct] = {}
 
@@ -272,3 +306,7 @@ def _instruments_for_product(
     product: BrokerProduct,
 ) -> list[TradableInstrument]:
     return [instrument for instrument in instruments if instrument.broker_product == product]
+
+
+def _kis_config_for_account(config: MaestroConfig, account_id: str | None = None):
+    return BrokerAccountRouter(config).kis_config(account_id)

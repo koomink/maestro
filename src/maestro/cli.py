@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 import yaml
 
+from maestro.config.app_fragment_composition import app_fragment_recommendation_failures
 from maestro.config.env import load_project_dotenv
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config_with_identity
@@ -86,18 +87,31 @@ def _broker_snapshot_refresher(
     store: StateStore,
     audit: AuditLogger,
 ):
-    if not maestro_config.kis.enabled:
+    kis_accounts = _kis_readonly_accounts(maestro_config)
+    if not kis_accounts:
         return None
 
     def refresh() -> None:
-        KISReadOnlyService(
-            maestro_config.kis,
-            store,
-            audit,
-            instruments=maestro_config.universe.instruments,
-        ).fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+        for logical_account_id, kis_config in kis_accounts:
+            KISReadOnlyService(
+                kis_config,
+                store,
+                audit,
+                instruments=maestro_config.universe.instruments,
+                logical_account_id=logical_account_id,
+            ).fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
 
     return refresh
+
+
+def _kis_readonly_accounts(maestro_config: MaestroConfig):
+    if maestro_config.kis.enabled:
+        return [(None, maestro_config.kis)]
+    return [
+        (account.id, account.to_kis_config())
+        for account in maestro_config.accounts
+        if account.enabled and account.broker == "kis"
+    ]
 
 
 def _profile_datahub_providers(maestro_config: MaestroConfig) -> str:
@@ -122,6 +136,33 @@ def run_once(config: Path | None = CONFIG_OPTION) -> None:
         f"cash={summary.cash:.2f}"
     )
     _send_run_once_success_notification(maestro_config, summary)
+
+
+@app.command("run-signal")
+def run_signal(config: Path | None = CONFIG_OPTION) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    summary = MaestroOrchestrator(maestro_config, config_identity=identity).run_signal()
+    typer.echo(
+        f"signal_run_id={summary.signal_run_id} "
+        f"strategies={summary.loaded_strategies} "
+        f"action_required={str(summary.action_required).lower()} "
+        f"orders_preview={summary.orders_preview_count}"
+    )
+
+
+@app.command("approve-signal")
+def approve_signal(
+    config: Path | None = CONFIG_OPTION,
+    signal_run_id: str = typer.Option(..., "--signal-run-id"),
+) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    summary = MaestroOrchestrator(maestro_config, config_identity=identity).approve_signal(
+        signal_run_id,
+    )
+    typer.echo(
+        f"signal_run_id={summary.signal_run_id} run_id={summary.run_id} "
+        f"orders={summary.orders_created} approval_status={summary.approval_status}"
+    )
 
 
 def _send_run_once_success_notification(maestro_config: MaestroConfig, summary) -> None:
@@ -264,6 +305,13 @@ def profile_validate(
             "target_stage_mismatch:"
             f"current={maestro_config.profile_stage.value}:target={target_stage.value}"
         )
+    if target_stage in {
+        ProfileStage.LIVE_APPROVAL_DISABLED,
+        ProfileStage.LIVE_APPROVAL_DRY_RUN,
+        ProfileStage.KIS_PAPER_TRADING,
+        ProfileStage.PRODUCTION_ARMED,
+    }:
+        failures.extend(app_fragment_recommendation_failures(maestro_config))
     if target_stage == ProfileStage.PRODUCTION_ARMED:
         store = _state_store(maestro_config, identity)
         report = HealthService(maestro_config, store).run()
@@ -832,22 +880,41 @@ def kis_sync(config: Path | None = CONFIG_OPTION) -> None:
         raise typer.BadParameter("kis-sync requires mode=live_readonly or live_approval")
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
+    kis_accounts = _kis_readonly_accounts(maestro_config)
+    if not kis_accounts:
+        raise typer.BadParameter("kis-sync requires at least one enabled KIS account")
+    synced = []
     try:
-        service = KISReadOnlyService(
-            maestro_config.kis,
-            store,
-            audit,
-            instruments=maestro_config.universe.instruments,
-        )
-        snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+        for logical_account_id, kis_config in kis_accounts:
+            service = KISReadOnlyService(
+                kis_config,
+                store,
+                audit,
+                instruments=maestro_config.universe.instruments,
+                logical_account_id=logical_account_id,
+            )
+            snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+            synced.append((logical_account_id, snapshot))
     except ValueError as exc:
         raise typer.BadParameter(f"kis-sync failed: {exc}") from exc
-    typer.echo(
-        f"account_id={snapshot.account.account_id} cash={snapshot.account.cash:.2f} "
-        f"buying_power={snapshot.account.buying_power:.2f} "
-        f"positions={len(snapshot.account.positions)} "
-        f"total_value={snapshot.account.total_value:.2f}"
-    )
+    if len(synced) == 1 and synced[0][0] is None:
+        snapshot = synced[0][1]
+        typer.echo(
+            f"account_id={snapshot.account.account_id} cash={snapshot.account.cash:.2f} "
+            f"buying_power={snapshot.account.buying_power:.2f} "
+            f"positions={len(snapshot.account.positions)} "
+            f"total_value={snapshot.account.total_value:.2f}"
+        )
+        return
+    for logical_account_id, snapshot in synced:
+        typer.echo(
+            f"account_id={logical_account_id} broker_account_id={snapshot.account.account_id} "
+            f"cash={snapshot.account.cash:.2f} "
+            f"buying_power={snapshot.account.buying_power:.2f} "
+            f"positions={len(snapshot.account.positions)} "
+            f"total_value={snapshot.account.total_value:.2f}"
+        )
+    typer.echo(f"accounts_synced={len(synced)}")
 
 
 @app.command("kis-account")
@@ -1202,9 +1269,9 @@ def _personal_operator_config(output: Path) -> dict:
             "provider": "kis",
             "broker_product": "kis_overseas_stock",
             "account_id": None,
-            "account_id_env": "KIS_ACCOUNT_ID",
-            "app_key_env": "KIS_APP_KEY",
-            "app_secret_env": "KIS_APP_SECRET",
+            "account_id_env": "KIS_MOCK_ACCOUNT_ID",
+            "app_key_env": "KIS_MOCK_APP_KEY",
+            "app_secret_env": "KIS_MOCK_APP_SECRET",
             "access_token_env": "KIS_ACCESS_TOKEN",
             "approval_key_env": "KIS_APPROVAL_KEY",
             "token_cache_path": str(state_dir / "kis_access_token.json"),
