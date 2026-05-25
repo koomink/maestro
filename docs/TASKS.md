@@ -120,7 +120,7 @@
 - [x] `ruff format --check .`
 - [x] `pytest -q`
 - [x] `maestro run-once --config configs/paper.yaml`
-- [x] `maestro run-once --config configs/examples/paper_csv.yaml`
+- [x] `maestro run-once --config configs/paper.yaml`
 - [x] `maestro status --config configs/paper.yaml`
 
 ## Completed Milestone: v0.3 External Research Data Providers
@@ -290,6 +290,8 @@
 - [x] Add stale data halt for live approval and stale-data warning for paper
 - [x] Add missing, stale, and failed reconciliation halt
 - [x] Auto-record broker reconciliation inside KIS-backed `live_approval run-once`
+- [x] Add logical multi-account broker routing with `strategy.account_id`,
+      KIS real/paper account configs, and Toss fail-closed placeholder support
       before approval/order gates when reconciliation is required
 - [x] Add daily loss limit config skeleton that fails closed until broker PnL normalization exists
 - [x] Add daily order count and notional limits
@@ -324,7 +326,7 @@
 - [x] Normalize overseas buying power
 - [x] Normalize overseas fills and unfilled orders
 - [x] Add broker reconciliation for US-listed stock/ETF canonical symbols
-- [x] Add `configs/examples/live_readonly_multi_asset_kis.yaml` as the KR+US read-only
+- [x] Add KR+US read-only KIS fixture coverage
   template with env var names only
 - [x] Keep read-only mode free of order submission, cancel, amend, buy, and sell paths
 - [x] Keep normal tests fake-client/fixture based with no KIS network calls
@@ -482,21 +484,26 @@
 
 ### Future Maestro Config Composition
 
-- [ ] Trigger this work once two or three external Virtuoso apps require
+- [x] Trigger this work once two or three external Virtuoso apps require
       operator rehearsal or production-like dry-runs at the same time
 - [ ] Keep current full YAML configs supported for explicit audits, examples,
       tests, and single-app operator workflows
-- [ ] Add a config composition or render path that can combine a Maestro
-      operator profile, a Virtuoso app fragment, and an operator-local overlay
-- [ ] Define app fragments for strategy entrypoint, strategy config defaults,
-      DataHub needs, and `signal_to_allocation` policy only
-- [ ] Keep broker, approval, execution, risk, state, audit, and promotion gates
+- [x] Add config composition for Maestro operator profiles and Virtuoso app
+      fragments, starting with the Ataraxia v1 fragment
+- [x] Define app fragments for strategy entrypoint, strategy config defaults,
+      DataHub symbol-map hints, allowed sleeve membership, and recommendations
+- [x] Keep broker, approval, execution, risk, state, audit, and promotion gates
       owned by Maestro/operator profile or local overlay, not by app fragments
-- [ ] Render composed configs into a normal validated `MaestroConfig`
-- [ ] Ensure rendered configs work with `profile-diff`, `profile-validate`,
-      health checks, audit review, and all existing CLI commands
-- [ ] Add tests for merge precedence, forbidden app-fragment keys, secret
-      redaction, and deterministic rendered YAML output
+- [x] Render composed configs into a normal validated `MaestroConfig`
+- [x] Ensure composed configs work with `profile-diff`, `profile-validate`,
+      health checks, audit review, and existing CLI commands through normal
+      config loading
+- [x] Add tests for merge precedence, forbidden app-fragment keys, identity
+      fingerprinting, and recommendation drift checks
+- [ ] Add a first-class operator-local overlay file format if repeated private
+      overlays appear outside normal config copies
+- [ ] Add deterministic rendered YAML output and secret redaction if a
+      `render-config` CLI becomes necessary for audits
 
 ### v1.0 Private Approval-gated Production Beta
 
@@ -674,6 +681,42 @@
 - [x] Add fixture/fake-client tests for strategy attribution and stale data
       labeling once implemented
 - [x] Document current operator usage and limitations in README/TRD
+
+## Symphony Signal-to-Approval Workflow
+
+- [x] Rename/replace operator profiles with `symphony_readonly`,
+      `symphony_signal`, and `symphony_approval`
+- [x] Keep `symphony_readonly` broker/account read-only with no strategy
+      execution, no order generation, and no approval creation
+- [x] Add an initial signal CLI/workflow that runs enabled Virtuoso apps and
+      persists a signal package
+- [x] Extend the signal CLI/workflow so it refreshes broker truth, runs enabled
+      Virtuoso apps, and persists an immutable signal package
+- [x] Add initial `signal_run_id` generation, storage, strategy results,
+      target/risk preview, order preview, and no-op/action-required status
+- [x] Add stricter DataHub evidence checks
+- [x] Add signal expiry, config identity checks, and account mapping validation
+- [x] Add shared `strategy_account_map_path` support so signal and approval use
+      one account routing file
+- [x] Add broker snapshot references to signal packages
+- [x] Add an initial approval CLI/workflow that requires `signal_run_id` and does
+      not re-run Virtuoso strategies
+- [x] Re-check data freshness, reconciliation, quote drift,
+      safety state, live order recovery state, and order limits before approval
+      or broker submit
+- [x] Re-check broker snapshot ref freshness before approval
+- [x] Include `signal_run_id` in approval payloads, order payloads, live order
+      requests/results, lifecycle events, and audit logs
+- [x] Include `signal_run_id` in reconciliation events
+- [x] Include `signal_run_id` in dashboard read models
+- [x] Add dashboard and Telegram views that show latest readonly state, latest
+      signal package, no-op reason, and actionable `signal_run_id`
+- [x] Add tests for no-signal no-op, stale/expired signal rejection, config
+      mismatch rejection, account mapping mismatch rejection, and approval from
+      a saved signal package
+- [x] Add systemd wiring and a locked signal-to-approval wrapper for
+      `symphony_readonly`, `symphony_signal`, and conditional
+      `symphony_approval`
 
 ## Completed / Historical Notes
 

@@ -10,10 +10,16 @@ complete.
 - Broker read-only: `configs/live_readonly.yaml`
 - Approval-gated live: `configs/live_approval.yaml`
 
-The root `configs/` directory is reserved for these operator-facing mode
-skeletons. Concrete recipes such as CSV paper, Yahoo paper, deterministic mock
-KIS read-only, US ETF live approval, KIS multi-asset read-only, and Ataraxia KIS
-mock-investment rehearsal live under `configs/examples/`.
+The Symphony operator deployment splits operation into `symphony_readonly`,
+`symphony_signal`, and `symphony_approval`. The signal phase produces
+`signal_run_id`; the approval phase consumes that saved signal without
+re-running strategies. `run-once` remains available as a legacy single-pipeline
+entrypoint for paper and older operator flows.
+
+The root `configs/` directory is reserved for operator-facing mode skeletons.
+Production-candidate profiles live under `configs/operator/`. Historical
+reference configs used by tests live under `tests/fixtures/configs/` and are not
+operator entrypoints.
 
 Personal operator live approval configs are generated with `maestro
 init-personal`.
@@ -50,16 +56,25 @@ maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 ```
 
 Then follow `docs/personal_operator_mvp.md` before enabling any live submission.
-For the Ataraxia domestic ETF KIS mock-investment broker-submit pilot, copy
-`configs/examples/live_approval_ataraxia_kis_paper_trading.yaml` to an operator-local path and
-follow `docs/ataraxia_kis_paper_pilot.md`.
+For the Symphony operator flow, copy all three operator configs to an
+operator-local config set, for example `/root/maestro-operator/`. Copy the
+shared `strategy_accounts.yaml` file beside them; `symphony_signal.yaml` and
+`symphony_approval.yaml` both load it through `strategy_account_map_path`. Use
+`symphony_readonly.yaml` for account refresh, `symphony_signal.yaml` for
+Virtuoso signal generation, and `symphony_approval.yaml` for approval-gated
+dry-run execution. Keep the copied files on the same `state.sqlite_path`,
+`state.identity_group`, and `audit.jsonl_path`, then wire systemd through
+`MAESTRO_READONLY_CONFIG`, `MAESTRO_SIGNAL_CONFIG`, and
+`MAESTRO_APPROVAL_CONFIG`. Copying only `symphony_approval.yaml` is not enough
+for the three-phase workflow because approval must consume the signal package
+from the same shared state DB.
 
 ## Health Check
 
 Run local health checks before and after scheduled jobs:
 
 ```bash
-maestro health --config configs/examples/live_readonly_multi_asset_kis.yaml
+maestro health --config configs/live_readonly.yaml
 ```
 
 `health` does not call live KIS endpoints. It checks config loading, SQLite

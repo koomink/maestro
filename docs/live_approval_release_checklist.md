@@ -6,6 +6,12 @@ Maestro still has no market orders, no direct buy/sell/cancel CLI, no dashboard
 write controls, and no high-risk Telegram resume, clear-halt, live enablement,
 direct trading, or risk-change controls.
 
+The planned Symphony operator workflow will separate `symphony_readonly`,
+`symphony_signal`, and `symphony_approval`. In that workflow, approval consumes
+a persisted `signal_run_id` and does not re-run strategies. Until that workflow
+is implemented, this checklist applies to the existing `live_approval run-once`
+pipeline.
+
 Maestro owns DataHub, execution, approval, broker adapters, state, audit, and
 the read-only dashboard. Yahoo/yfinance, FRED, RSS feeds, KIS Open API, and
 Telegram Bot API are external systems reached through Maestro adapters.
@@ -85,8 +91,12 @@ For the complete operator-local promotion runbook, see
 
 Set these in the operator environment, not in YAML and not in source control:
 
-- `KIS_APP_KEY`
-- `KIS_APP_SECRET`
+- `KIS_MOCK_APP_KEY`
+- `KIS_MOCK_APP_SECRET`
+- `KIS_ISA_ACCOUNT_ID`, `KIS_ISA_APP_KEY`, and `KIS_ISA_APP_SECRET` for ISA
+  account routing when enabled.
+- `KIS_BROKERAGE_ACCOUNT_ID`, `KIS_BROKERAGE_APP_KEY`, and
+  `KIS_BROKERAGE_APP_SECRET` for brokerage account routing when enabled.
 - `KIS_ACCESS_TOKEN` only when using a real externally issued token
 - `KIS_APPROVAL_KEY` only when using a real externally issued WebSocket
   approval key
@@ -104,7 +114,7 @@ no-audit/no-state rule.
 ## KIS Read-Only Sync
 
 1. Start from a read-only config such as `configs/live_readonly.yaml` for the
-   operator KIS skeleton, or `configs/examples/live_readonly_mock.yaml` for the
+   operator KIS skeleton, or a test fixture config for the
    deterministic mock KIS path.
 2. Run `maestro kis-sync --config <readonly-config>`.
 3. Run `maestro kis-account --config <readonly-config>`.
@@ -122,7 +132,7 @@ Do not adopt the snapshot if it contains positions outside both
 `portfolio.allowed_symbols` and approved `universe.instruments`, violates
 `universe.policy`, or includes holdings the strategy is not meant to manage.
 
-`configs/examples/live_readonly_multi_asset_kis.yaml` documents the intended KR+US
+The KR+US read-only KIS fixture documents the intended KR+US
 multi-product read-only shape. KIS read-only uses domestic and overseas account
 endpoints for broker snapshots and reconciliation only; strategy market and
 research data must still come through Maestro DataHub. Live approval uses

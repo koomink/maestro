@@ -1,0 +1,16 @@
+[Unit]
+Description=Maestro Symphony read-only account refresh
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG}
+ExecStartPost=/root/projects/Symphony/Maestro/.venv/bin/maestro reconcile --config ${MAESTRO_READONLY_CONFIG}
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal

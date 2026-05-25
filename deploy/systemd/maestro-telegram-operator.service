@@ -1,5 +1,5 @@
 [Unit]
-Description=Maestro read-only Dashboard
+Description=Maestro Telegram Operator UI
 Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
@@ -9,11 +9,9 @@ Type=simple
 User=root
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --host 127.0.0.1 --port 8503
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro telegram-operator --config ${MAESTRO_READONLY_CONFIG} --timeout-seconds 10
 Restart=always
 RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=20
 StandardOutput=journal
 StandardError=journal
 

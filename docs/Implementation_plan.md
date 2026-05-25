@@ -56,7 +56,7 @@ M12: Tests and documentation
 Implemented scope:
 
 - `CSVDataProvider` for simple OHLCV CSV files.
-- `configs/examples/paper_csv.yaml` and `data/sample_prices.csv`.
+- `configs/paper.yaml`, fixture configs, and `data/sample_prices.csv`.
 - Provider selection through `datahub.provider`.
 - SQLite read APIs for portfolio snapshots, strategy runs, orders, and system events.
 - CLI `maestro status --config ...`.
@@ -75,7 +75,7 @@ Implemented scope:
 
 - Approval request and decision schemas.
 - ApprovalManager gate before paper fills.
-- `configs/examples/paper_approval_console.yaml`.
+- Paper approval fixture config.
 - SQLite `approvals` table and read APIs.
 - JSONL audit event for approval decisions.
 - Telegram approval formatter and no-network notifier stub.

@@ -257,7 +257,7 @@ Completed scope:
 - Overseas buying power normalization
 - Overseas fills and unfilled orders normalization
 - Broker reconciliation for canonical US stock/ETF symbols
-- `configs/examples/live_readonly_multi_asset_kis.yaml` as the KR+US read-only template
+- KR+US read-only KIS fixture coverage
   with env var names only
 - Fake-client and fixture tests only for normal test runs
 
@@ -503,10 +503,12 @@ Completed scope:
   orders, send Telegram messages, or run strategies.
 - `docs/personal_operator_mvp.md` documents the single-user operating loop,
   first minimum-size order procedure, and recovery boundary.
-- `configs/examples/live_approval_ataraxia_kis_paper_trading.yaml` documents a dry-run-first,
-  Telegram-approved Ataraxia broker-submit rehearsal for KRW domestic ETFs
-  through KIS mock-investment mode, `kis_domestic_stock`, and
-  `buy_only_contribution`.
+- `configs/operator/symphony_readonly.yaml`,
+  `configs/operator/symphony_signal.yaml`, and
+  `configs/operator/symphony_approval.yaml` define the phase-specific Symphony
+  operator flow: account refresh, Virtuoso signal generation, then approval
+  execution from a saved `signal_run_id`. Signal and approval share
+  `configs/operator/strategy_accounts.yaml` for strategy-to-account routing.
 - `docs/ataraxia_kis_paper_pilot.md` documents the four scheduled-cycle
   Ataraxia KIS mock-investment broker-submit pilot and its stop conditions.
 
@@ -522,19 +524,23 @@ Completed scope:
 - Treat the current deployment model as a hybrid operator architecture:
   one-shot CLI jobs plus long-running Telegram/dashboard services sharing
   SQLite state and JSONL audit logs.
-- Require one operator config for all services and timers in a deployment:
-  `run-once`, `kis-sync`, `reconcile`, `health`, `telegram-operator`, and the
-  dashboard must point at the same operator-local YAML, state DB, and audit log.
-- Let all CLI services resolve that shared operator config from
-  `MAESTRO_CONFIG`, with `--config` kept as an explicit override.
+- Require one operator config, or one phase-specific Symphony config set, for
+  all services and timers in a deployment. Every phase must point at the same
+  state DB, `state.identity_group`, and audit log.
+- Let single-profile services resolve their shared config from `MAESTRO_CONFIG`.
+  Let Symphony services resolve `MAESTRO_READONLY_CONFIG`,
+  `MAESTRO_SIGNAL_CONFIG`, and `MAESTRO_APPROVAL_CONFIG`, with `--config` kept
+  as an explicit override.
 - Add a StateStore writer lock for shared SQLite writes, with `run-once` holding
   the lock across the full run.
 - Record config path and config fingerprint in heartbeat/audit/state metadata.
 - Reject the same state DB being opened with a different config identity.
 - Surface mode, config path, config fingerprint, state path, and audit path in
   operator status views.
-- Update systemd units and timers so examples use the same operator config
-  instead of Telegram-specific or example-only configs.
+- Update systemd units and timers so examples use the same operator config or
+  config set instead of Telegram-specific or example-only configs.
+- Add Symphony systemd timers and a signal-to-approval wrapper that invokes
+  approval only when `run-signal` emits `action_required=true`.
 - Keep paper-to-live promotion based on broker snapshot adoption, not paper DB
   promotion.
 
@@ -632,6 +638,26 @@ Completed scope:
 The refactor is intentionally compatibility-first. Existing CLI behavior, state
 schemas, strategy SDK contracts, and documented public import paths remain
 unchanged.
+
+## Completed — Symphony Signal-to-Approval Workflow
+
+Completed scope:
+
+- Replace account-specific operator profiles with three Symphony-level profiles:
+  `symphony_readonly`, `symphony_signal`, and `symphony_approval`.
+- Keep `symphony_readonly` strictly broker/account read-only for dashboard and
+  Telegram refreshes.
+- Add a scheduled signal phase that refreshes broker truth, runs Virtuoso apps,
+  persists immutable signal packages, and emits `signal_run_id` only when
+  trading action is needed.
+- Add an approval phase that consumes `signal_run_id`, does not re-run
+  strategies, re-checks freshness/safety/reconciliation/limits, and then uses
+  the existing approval-gated live order lifecycle.
+- Include `signal_run_id` in strategy, target, risk, approval, order, live
+  lifecycle, reconciliation, dashboard, and audit payloads.
+- Fail closed when a signal package is expired, stale, generated under a
+  different state-affecting config identity, or no longer matches active account
+  mappings.
 
 ## Deferred / Explicitly Out of Scope for Now
 

@@ -400,6 +400,11 @@ Future requirement:
 - Live trading should initially be `live_approval`, not `live_auto`.
 - Only limit orders should be allowed initially.
 - All broker state should be reconciled against internal state.
+- The target multi-account operator workflow should separate broker observation,
+  strategy signal generation, and approval-gated execution. `live_readonly`
+  remains pure broker read-only. Strategy signal generation should persist an
+  immutable `signal_run_id`, and approval should execute that saved signal
+  without re-running strategy apps.
 
 ## 9. Non-Functional Requirements
 

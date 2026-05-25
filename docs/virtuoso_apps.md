@@ -102,6 +102,14 @@ configs that use OpenRouter or agent-level overrides must set the corresponding
 env vars, for example `OPENROUTER_API_KEY` for `openrouter`,
 `OPENAI_API_KEY` for `openai`, and `ANTHROPIC_API_KEY` for `anthropic`.
 
+Development-stage LLM strategies should not be bound to a real Symphony account.
+Keep them in paper/dev configs until the wrapper contract and DataHub evidence
+are stable. When the app becomes an operator candidate, add the strategy to the
+Symphony signal and approval configs, then bind it once in the shared
+`strategy_accounts.yaml` file. The first binding should normally be a mock or
+paper-trading account such as `kis_mock`; real account mapping is a separate
+promotion decision.
+
 One `maestro run-once` equals one full app research cycle. Scheduling remains
 outside the app: use a shared operator-local config for `kis-sync`, `reconcile`,
 `health`, `live-preflight`, `run-once`, Telegram operator services, dashboard,

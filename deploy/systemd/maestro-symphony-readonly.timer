@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Maestro Symphony read-only refresh periodically
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=maestro-symphony-readonly.service
+
+[Install]
+WantedBy=timers.target

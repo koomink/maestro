@@ -379,18 +379,10 @@ datahub:
       stale_after_seconds: 86400
 ```
 
-`configs/examples/live_approval_kis_multi_asset.yaml` uses this multi-provider
-shape for KR+US live approval. It keeps only `yahoo_market` active for
-`price`, `ohlcv`, and `technical_indicators`; no mock or CSV fallback is
-configured for the live-approval real-data path. KIS remains outside DataHub and
-is used only for broker account, execution, and reconciliation boundaries.
-
-`configs/examples/paper_research_multi_provider.yaml` is a reference template for
-strategy research provider composition. It registers Yahoo market/fundamental
-data, FRED macro, GDELT/RSS news, rule-based sentiment, and a disabled
-NewsAPI provider that operators can enable after configuring `NEWSAPI_API_KEY`
-and checking their plan/quota. The template does not make FRED, news, or
-sentiment calls unless a strategy issues matching `DataRequest` objects.
+Historical multi-provider research and multi-asset KIS config shapes are kept as
+test fixtures under `tests/fixtures/configs/`. Operator-facing configs should
+live under `configs/` or `configs/operator/`. KIS remains outside DataHub and is
+used only for broker account, execution, and reconciliation boundaries.
 
 The Yahoo/yfinance-style provider is implemented for `price`, `ohlcv`,
 `fundamental`, and `financial_statements`. A separate technical indicator

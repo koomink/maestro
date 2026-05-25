@@ -7,14 +7,18 @@ controls, or Telegram admin controls.
 
 ## Operator Config Discipline
 
-Use one operator-local config for every process in a deployment. `run-once`,
-`kis-sync`, `reconcile`, `health`, `ops-alerts`, `telegram-operator`, dashboard,
-and systemd timers should all point at the same YAML file, state DB path, and
-audit log path. Do not run the Telegram operator from a separate Telegram-only
-config when it is expected to represent the live operator state.
-Set `MAESTRO_CONFIG` in the operator environment or systemd environment file so
-routine commands can omit `--config`; use an explicit `--config` only for
-isolated tests or manual overrides.
+Use one operator-local config for single-profile deployments. For the Symphony
+three-phase workflow, use one operator-local config set:
+`symphony_readonly.yaml`, `symphony_signal.yaml`, and
+`symphony_approval.yaml`. These files may differ in mode, strategy execution,
+approval settings, and order posture, but must point at the same state DB path,
+`state.identity_group`, and audit log path.
+
+Do not run the Telegram operator from a separate Telegram-only config when it is
+expected to represent the live operator state. Set `MAESTRO_CONFIG` for
+single-profile deployments, or set `MAESTRO_READONLY_CONFIG`,
+`MAESTRO_SIGNAL_CONFIG`, and `MAESTRO_APPROVAL_CONFIG` for the Symphony config
+set. Use explicit `--config` only for isolated tests or manual overrides.
 
 This is necessary because Maestro is currently a hybrid operator architecture:
 one-shot CLI jobs and long-running Telegram/dashboard services coordinate
@@ -22,7 +26,7 @@ through SQLite and JSONL, not through a single in-memory daemon. SQLite has
 timeout, `busy_timeout`, WAL settings, a StateStore writer lock, and a config
 identity drift check. If a command reports a state DB config identity mismatch,
 stop scheduled services and verify every unit points at the intended operator
-config before continuing.
+config set before continuing.
 
 ## Time Display
 
@@ -95,6 +99,65 @@ maestro ops-alerts --config <config>
 hash chain, failed reconciliation, stale broker state, or active safety halt.
 `ops-alerts` sends warn/fail health checks to configured Telegram approval
 chats.
+
+## Symphony Workflow
+
+The multi-account operator workflow uses three configs:
+
+1. `symphony_readonly`
+   - Run on dashboard/Telegram refresh paths.
+   - Refresh all broker accounts and display broker truth.
+   - Run no Virtuoso strategies and create no approvals.
+2. `symphony_signal`
+   - Run on a schedule, initially daily at 09:10 KST.
+   - Run Virtuoso strategies after refreshing broker truth.
+   - Persist a `signal_run_id` and expose `action_required`; skip approval when
+     `action_required=false`.
+   - Submit no broker orders.
+3. `symphony_approval`
+   - Accept the `signal_run_id`.
+   - Load the saved signal package and do not re-run strategies.
+   - Re-check freshness, reconciliation, safety state, limits, and approval
+     before any broker submit.
+
+The systemd wiring for this workflow is:
+
+- `maestro-symphony-readonly.timer`: periodic `kis-sync` and reconciliation
+  using `MAESTRO_READONLY_CONFIG`.
+- `maestro-symphony-signal.timer`: weekday 09:10 signal run using
+  `scripts/operator/symphony_signal_then_approval.sh`.
+- The wrapper calls `approve-signal` only when `action_required=true`, and
+  temporarily stops `maestro-telegram-operator.service` during approval polling.
+
+Do not treat `live_readonly` as a strategy execution mode; signal generation is
+a separate operator phase. `run-once` remains a legacy single-pipeline entrypoint
+for paper and older workflows.
+
+Strategy-to-account routing for `symphony_signal` and `symphony_approval` is
+centralized in `strategy_account_map_path`, normally
+`/root/maestro-operator/strategy_accounts.yaml` in deployment. Change mappings
+there, then validate both phase configs before the next scheduled signal run.
+The mapping file participates in config fingerprint checks, so approval rejects
+a signal package if the mapping changes between signal generation and approval.
+Do not add development-only strategies to this mapping. Promote a new Virtuoso
+app by first testing it in paper/dev configs, then adding it as a disabled
+Symphony candidate, then mapping it to `kis_mock` for rehearsal, and only later
+mapping it to a real account after evidence review.
+
+Use this promotion ladder for strategy phase controls:
+
+1. `readonly: true`, `signal: false`, `order_posture: disabled`: visible in
+   operator views only.
+2. `readonly: true`, `signal: true`, `order_posture: disabled`: signal and
+   order preview can be audited, but no Telegram approval request is created.
+3. `readonly: true`, `signal: true`, `order_posture: dry_run`: Telegram approval
+   UX is exercised, and approved orders are dry-run events only.
+4. `readonly: true`, `signal: true`, `order_posture: armed`: approved orders can
+   reach broker submit only when the global config is also armed.
+
+Development-stage strategies such as Snowball or TradingAgents should use
+`account_id: dev_sandbox` with `order_posture: dry_run` when the operator wants
+approval rehearsal without touching KIS mock or real broker accounts.
 
 ## KIS Read-only Reconciliation
 

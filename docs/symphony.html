@@ -525,19 +525,19 @@
             <td><span class="status">paper</span></td>
             <td>Maestro 내부 PaperExecutionEngine으로 시뮬레이션합니다.</td>
             <td>실제 브로커 주문을 보낼 수 없고, live order posture를 armed로 둘 수 없습니다.</td>
-            <td><code>configs/paper.yaml</code>, <code>configs/examples/paper_yahoo_us_etf.yaml</code></td>
+            <td><code>configs/paper.yaml</code></td>
           </tr>
           <tr>
             <td><span class="status warn">live_readonly</span></td>
             <td>KIS 계좌 스냅샷, 포지션, buying power, 주문/체결 조회를 읽기 전용으로 가져옵니다.</td>
             <td>전략을 실행하지 않고, approval과 execution은 disabled 상태여야 합니다.</td>
-            <td><code>configs/live_readonly.yaml</code>, <code>configs/examples/live_readonly_multi_asset_kis.yaml</code></td>
+            <td><code>configs/live_readonly.yaml</code>, <code>configs/operator/symphony_readonly.yaml</code></td>
           </tr>
           <tr>
             <td><span class="status stop">live_approval</span></td>
             <td>전략 제안이 승인 게이트를 통과한 뒤 live order lifecycle로 들어갑니다.</td>
             <td>Telegram/approval 필수, KIS enabled 필수, limit order only, safety gates 필수.</td>
-            <td><code>configs/live_approval.yaml</code>, <code>configs/examples/live_approval_kis_multi_asset.yaml</code></td>
+            <td><code>configs/live_approval.yaml</code>, <code>configs/operator/symphony_signal.yaml</code>, <code>configs/operator/symphony_approval.yaml</code></td>
           </tr>
         </tbody>
       </table>
@@ -641,6 +641,15 @@
         <code>live_readonly</code>는 계좌를 읽기만 하는 관찰 모드이고,
         <code>live_approval + order_posture=disabled</code>는 전략과 approval 구조는 켜되
         최종 주문 제출만 차단한 리허설 상태입니다.
+      </div>
+
+      <div class="callout" style="margin-top: 16px;">
+        <strong>다음 운영 구조:</strong>
+        목표 workflow는 <code>symphony_readonly</code>로 계좌 상태를 읽고,
+        <code>symphony_signal</code>로 Virtuoso 전략을 실행해 immutable
+        <code>signal_run_id</code>를 만들며, <code>symphony_approval</code>이
+        그 signal을 재사용해 approval과 주문 lifecycle을 진행하는 구조입니다.
+        approval 단계에서는 전략을 다시 실행하지 않습니다.
       </div>
 
       <div class="codeblock" style="margin-top: 16px;">Example reading

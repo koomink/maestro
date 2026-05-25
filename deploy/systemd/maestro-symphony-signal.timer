@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Maestro Symphony signal workflow on trading days
+
+[Timer]
+OnCalendar=Mon..Fri 09:10:00
+Persistent=true
+Unit=maestro-symphony-signal.service
+
+[Install]
+WantedBy=timers.target

@@ -10,9 +10,9 @@ CLI commands, dashboard write controls, or Telegram live enablement.
 
 ## Operator Config
 
-Create an operator-local config outside source control from
-`configs/examples/live_approval_ataraxia_kis_paper_trading.yaml`. Do not run scheduled jobs
-directly from the source-controlled example.
+Create an operator-local config outside source control from the current
+Symphony approval profile or the KIS paper-trading fixture. Do not run scheduled
+jobs directly from a source-controlled template.
 
 Keep these values for the initial dry-run stages:
 
@@ -49,7 +49,7 @@ Keep `execution.live_order_limits.max_order_notional`,
 levels.
 
 Secrets belong only in environment variables or an operator-local env file:
-`KIS_ACCOUNT_ID`, `KIS_APP_KEY`, `KIS_APP_SECRET`, optional
+`KIS_MOCK_ACCOUNT_ID`, `KIS_MOCK_APP_KEY`, `KIS_MOCK_APP_SECRET`, optional
 `KIS_ACCESS_TOKEN`, optional `KIS_APPROVAL_KEY`, `TELEGRAM_BOT_TOKEN`,
 `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS`, and
 `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS`.
@@ -59,8 +59,8 @@ Secrets belong only in environment variables or an operator-local env file:
 1. Verify the baseline Maestro paper run:
 
 ```bash
-maestro run-once --config configs/examples/paper_ataraxia_yahoo.yaml
-maestro status --config configs/examples/paper_ataraxia_yahoo.yaml
+maestro run-once --config configs/paper.yaml
+maestro status --config configs/paper.yaml
 ```
 
 Confirm the paper state and audit log are expected. Keep Ataraxia installed in

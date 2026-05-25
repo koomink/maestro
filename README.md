@@ -132,6 +132,30 @@ external market, macro, news, sentiment, Telegram, or broker APIs directly.
 
 Korea Investment Securities current price lookup may be used as broker-side quote/reference data for execution validation or reconciliation, but KIS is not the primary strategy or research data source.
 
+### Broker Account Routing
+
+Maestro now supports top-level `accounts` for broker routing. The core rule is
+`strategies[*].account_id`: each enabled Virtuoso app maps to exactly one broker
+account, while many strategies may share the same account. Legacy single-account
+`kis:` configs still load and are migrated internally to `default_kis`.
+Operator profiles may set `strategy_account_map_path` so multiple phase configs
+share one mapping file instead of duplicating `account_id` under every strategy.
+Strategies that are still under development, such as a TradingAgents wrapper,
+should stay out of the Symphony operator mapping until they become explicit
+operator candidates. Candidate strategies should first route to a mock or
+paper-trading account such as `kis_mock`; real-account routing is a later
+promotion step after signal quality, DataHub evidence, and approval rehearsals
+are acceptable.
+For development strategies that need Telegram approval UX without touching any
+broker account, route them to `dev_sandbox` and use `order_posture: dry_run`.
+`order_posture: disabled` means no Telegram approval request is created;
+`dry_run` means approval is requested but broker submit is skipped.
+
+KIS accounts can use `environment: real` or `environment: paper_trading`. Toss
+accounts are config-visible placeholders for now; submit/read-only broker
+operations fail closed until an official Toss Securities trading OpenAPI is
+available.
+
 ## Project Status
 
 Maestro package metadata is still `0.1.1` until an explicit release/versioning
@@ -152,6 +176,16 @@ long-running operator services such as `telegram-operator` and the FastAPI/React
 dashboard, all reading the configured SQLite state and JSONL audit paths. It is
 not yet a single always-on Maestro daemon with one in-memory runtime.
 
+The Symphony operator workflow is a three-step profile set:
+`symphony_readonly`, `symphony_signal`, and `symphony_approval`. Read-only
+refreshes broker/account truth for dashboard and Telegram views. Signal runs
+Virtuoso apps, persists a signal package with broker snapshot references, and
+exposes `action_required`. Approval consumes that saved `signal_run_id` without
+re-running strategies, rejects stale broker snapshot refs, expired signals,
+config fingerprint mismatches, strategy-account mapping drift, and missing/stale
+DataHub evidence, then performs safety, approval, and broker execution gates. See
+[docs/signal_approval_handoff.md](docs/signal_approval_handoff.md).
+
 Use these terms consistently:
 
 - `mode`: the safety contract enforced by config validation:
@@ -163,16 +197,20 @@ Use these terms consistently:
   `kis_paper_trading`, or `production_armed`. You may set it explicitly in
   operator-local YAML, but Maestro rejects values that conflict with the rest
   of the config.
-- `operator config`: the one operator-local YAML file used by all Maestro
-  commands and services for a running deployment.
+- `signal_run_id`: immutable handoff ID from the scheduled signal phase into
+  the approval/execution phase. It is not a replacement for approval IDs or
+  broker order IDs.
+- `operator config`: the operator-local YAML for a single-profile deployment.
+  The Symphony workflow uses an operator-local config set whose files share one
+  state/audit identity.
 
-For real operator deployments, `run-once`, `kis-sync`, `reconcile`, `health`,
-`telegram-operator`, dashboard, and systemd timers must use the same operator
-config, state DB path, and audit path. Separate Telegram-only configs are only
+For real operator deployments, all long-running services and scheduled jobs
+must use the intended operator config or config set, state DB path, and audit
+path. The Symphony systemd wiring uses `MAESTRO_READONLY_CONFIG`,
+`MAESTRO_SIGNAL_CONFIG`, and `MAESTRO_APPROVAL_CONFIG`; older single-profile
+deployments can keep `MAESTRO_CONFIG`. Separate Telegram-only configs are only
 for isolated tests or examples; they must not be treated as the live operator
-state. Commands still accept `--config`, but operator services should normally
-set `MAESTRO_CONFIG` once and let every CLI process use that same path by
-default. SQLite currently uses connection timeout, `busy_timeout`, and WAL mode
+state. SQLite currently uses connection timeout, `busy_timeout`, and WAL mode
 for CLI/dashboard coexistence. Maestro also records the operator config path,
 full config fingerprint, state-affecting fingerprint, and runtime fingerprint
 in state metadata. The same state DB may be reused after runtime-only changes
@@ -196,10 +234,10 @@ maestro profile-diff --left <current.yaml> --right <candidate.yaml>
 maestro profile-validate --config <candidate.yaml> --target-stage production_armed
 ```
 
-The root `configs/` directory intentionally contains only these operator-facing
-mode skeletons. Concrete recipes such as CSV paper, Yahoo paper, deterministic
-mock KIS read-only, US ETF live approval, multi-provider research, multi-asset
-KIS read-only, and Ataraxia KIS rehearsal configs live under `configs/examples/`.
+The root `configs/` directory intentionally contains only operator-facing mode
+skeletons and the `configs/operator/` production-candidate profiles. Historical
+reference configs used by tests live under `tests/fixtures/configs/`; they are
+not operator entrypoints.
 
 For a single-user operator workflow, start with
 [docs/personal_operator_mvp.md](docs/personal_operator_mvp.md):
@@ -293,8 +331,8 @@ Implemented foundations beyond the core v0.1 scope:
   `personal-check`
 - Safe live approval example config:
   [configs/live_approval.yaml](configs/live_approval.yaml)
-- Ataraxia domestic KIS mock-investment broker-submit example config:
-  [configs/examples/live_approval_ataraxia_kis_paper_trading.yaml](configs/examples/live_approval_ataraxia_kis_paper_trading.yaml)
+- Operator KIS profiles:
+  [configs/operator/](configs/operator/)
 - v0.6 release checklist:
   [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 
@@ -452,20 +490,18 @@ the safe-by-default operator template and follow
 [docs/live_approval_release_checklist.md](docs/live_approval_release_checklist.md)
 before enabling live order submission.
 
-Use
-[configs/examples/live_approval_ataraxia_kis_paper_trading.yaml](configs/examples/live_approval_ataraxia_kis_paper_trading.yaml)
-as the Ataraxia/KRW domestic ETF rehearsal template. It targets the real KIS
-mock-investment OpenAPI path with `kis.paper_trading: true`, is dry-run by
-default through `execution.order_posture: dry_run`, keeps broker submit skipped,
-requires Telegram approval, uses the
-`kis_domestic_stock` product only, and routes contribution orders through
-`order_generation_mode: buy_only_contribution` for KRW symbols such as
-`TIGER_NASDAQ100_LEVERAGE` and `KODEX_US_DIVIDEND_DOWJONES`. Copy it to an
-operator-local path outside the repo before use; the source-controlled example
-is not an operating config. For a KIS mock-investment broker-submit pilot, switch
-only the operator-local config to `execution.order_posture: armed` after
-read-only reconciliation, Telegram
-approval rehearsal, live dry-run review, and `beta-preflight` readiness.
+Use [configs/operator/symphony_signal.yaml](configs/operator/symphony_signal.yaml)
+to run the Virtuoso apps and persist a `signal_run_id`, then use
+[configs/operator/symphony_approval.yaml](configs/operator/symphony_approval.yaml)
+to consume that saved signal package for Telegram approval and dry-run order
+lifecycle review. `symphony_signal` keeps order submission disabled;
+`symphony_approval` is dry-run by default. For a broker-submit pilot, change
+only an operator-local copy after read-only reconciliation, Telegram approval
+rehearsal, live dry-run review, and `beta-preflight` readiness.
+For scheduled operation, install the Symphony systemd templates under
+[deploy/systemd](deploy/systemd) and use
+[scripts/operator/symphony_signal_then_approval.sh](scripts/operator/symphony_signal_then_approval.sh)
+to run approval only when `run-signal` emits `action_required=true`.
 Install Ataraxia into the Maestro virtualenv with
 `uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/Ataraxia`
 for operator rehearsals; do not rely on `PYTHONPATH` or an editable install.
@@ -528,16 +564,9 @@ For multiple providers, use `datahub.providers` with lower `priority` values
 preferred first. Strategy plugins still request data through Maestro DataHub and
 do not call yfinance directly.
 
-`configs/examples/live_approval_kis_multi_asset.yaml` uses the multi-provider
-shape for KR+US live approval, but its active strategy market-data provider is
-still Yahoo/yfinance only. KIS remains a broker/account/execution adapter and is
-not a strategy market-data fallback.
-
-`configs/examples/paper_research_multi_provider.yaml` is a copy-and-customize research
-template for Yahoo, FRED, GDELT/RSS, rule-based sentiment, and opt-in NewsAPI.
-The current sample allocation and Ataraxia strategies request `price` only, so
-macro, news, sentiment, fundamentals, and financial statements are called only
-by strategies that explicitly request those DataHub data types.
+Historical multi-provider research and multi-asset KIS configs are kept as test
+fixtures under `tests/fixtures/configs/`; active operator-facing configs stay in
+`configs/` and `configs/operator/`.
 
 Example LLM-agent requests:
 
@@ -778,49 +807,17 @@ Then run:
 maestro run-once --config configs/paper.yaml
 ```
 
-To run the same pipeline using CSV-backed sample prices:
-
-```bash
-maestro run-once --config configs/examples/paper_csv.yaml
-```
-
 To inspect current state from SQLite:
 
 ```bash
 maestro status --config configs/paper.yaml
 ```
 
-To run real-data US stock/ETF paper mode:
-
-```bash
-uv sync --extra yahoo
-maestro run-once --config configs/examples/paper_yahoo_us_etf.yaml
-maestro status --config configs/examples/paper_yahoo_us_etf.yaml
-```
-
-`configs/examples/paper_yahoo_us_etf.yaml` uses canonical USD symbols
-`CASH_USD`, `VOO`, `QQQ`, and `SGOV` in the sample allocation, with AAPL and
-MSFT included in the static example US universe. Yahoo/yfinance supplies external
-market data through Maestro DataHub. The fixed symbol list is intentionally small
-for a runnable paper example; production live flows should use policy-based
-candidate validation before adding new tradable symbols. Execution remains
-simulated inside
-`PaperExecutionEngine`; this path does not call KIS, does not submit live
-orders, and does not enable live trading.
-
-To run the paper pipeline with the approval gate enabled:
-
-```bash
-maestro run-once --config configs/examples/paper_approval_console.yaml
-maestro approvals --config configs/examples/paper_approval_console.yaml
-```
-
-By default, `configs/examples/paper_approval_console.yaml` uses the no-network `console`
-approval stub and records the configured decision. For the v0.4 Telegram MVP,
-start from `configs/examples/paper_approval_telegram.yaml`, set
+Paper approval and real-data paper variants are covered by test fixtures rather
+than operator-facing example configs. For the Telegram approval MVP, set
 `TELEGRAM_BOT_TOKEN`, `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS`, and
-`MAESTRO_TELEGRAM_WHITELISTED_USER_IDS` in the Maestro operator environment,
-and keep `mode: paper`. Per-config `telegram_allowed_chat_ids` and
+`MAESTRO_TELEGRAM_WHITELISTED_USER_IDS` in the Maestro operator environment.
+Per-config `telegram_allowed_chat_ids` and
 `whitelisted_user_ids` remain optional overrides for rehearsals.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
 polling for inline approve/reject button callbacks. Manual typed
@@ -911,18 +908,23 @@ The matching pytest smokes are skipped by default and run only when
 operator-local configs.
 
 `configs/live_readonly.yaml` is a cash-only KIS read-only skeleton that expects
-operator environment variables. Use `configs/examples/live_readonly_mock.yaml`
-for deterministic no-network read-only rehearsals.
-`configs/examples/live_readonly_multi_asset_kis.yaml` documents the real KIS
-KR+US multi-asset read-only shape with env var names only. It uses
-`kis.broker_products` to query domestic and overseas account adapters, merge the
-broker snapshot, and reconcile against Maestro canonical symbols. This is an
-account/execution boundary only; strategy market and research data must still
-come through Maestro DataHub. It uses these environment variable names:
+operator environment variables. Operator profiles under `configs/operator/` are
+phase-specific Symphony entry points: `symphony_readonly`, `symphony_signal`,
+and `symphony_approval`. They share `state.identity_group: symphony` and
+`var/symphony_state.db` so dashboard refreshes, signal generation, and approval
+execution see the same broker and signal state. Multi-product KIS configs use
+explicit `accounts` and `strategy_account_map_path`; the shared mapping file
+currently routes `ataraxia -> kis_isa` and `snowball_us -> kis_brokerage`.
+Change a strategy's account in the shared mapping file instead of editing
+`symphony_signal.yaml` and `symphony_approval.yaml` separately. Common
+environment variable names:
 
-- `KIS_ACCOUNT_ID`: KIS account number and product code
-- `KIS_APP_KEY`: KIS app key
-- `KIS_APP_SECRET`: KIS app secret
+- `KIS_MOCK_ACCOUNT_ID`, `KIS_MOCK_APP_KEY`, `KIS_MOCK_APP_SECRET`: KIS
+  mock-investment account credentials.
+- `KIS_ISA_ACCOUNT_ID`, `KIS_ISA_APP_KEY`, `KIS_ISA_APP_SECRET`: KIS ISA
+  account credentials.
+- `KIS_BROKERAGE_ACCOUNT_ID`, `KIS_BROKERAGE_APP_KEY`,
+  `KIS_BROKERAGE_APP_SECRET`: KIS brokerage account credentials.
 - `KIS_ACCESS_TOKEN`: optional pre-issued access token; leave unset unless it is
   a real current token
 - `KIS_APPROVAL_KEY`: optional pre-issued WebSocket approval key; leave unset
@@ -1001,7 +1003,7 @@ To install dashboard dependencies and open the read-only dashboard:
 
 ```bash
 uv sync --extra dashboard
-maestro dashboard --config configs/examples/live_readonly_multi_asset_kis.yaml
+maestro dashboard --config configs/live_readonly.yaml
 ```
 
 The dashboard is read-only and served by one FastAPI process with a built

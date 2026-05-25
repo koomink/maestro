@@ -9,12 +9,21 @@ Create an owner-readable environment file outside the repo, for example
 `/etc/maestro/maestro.env`:
 
 ```ini
-KIS_ACCOUNT_ID=...
-KIS_APP_KEY=...
-KIS_APP_SECRET=...
+KIS_MOCK_ACCOUNT_ID=...
+KIS_MOCK_APP_KEY=...
+KIS_MOCK_APP_SECRET=...
+KIS_ISA_ACCOUNT_ID=
+KIS_ISA_APP_KEY=
+KIS_ISA_APP_SECRET=
+KIS_BROKERAGE_ACCOUNT_ID=
+KIS_BROKERAGE_APP_KEY=
+KIS_BROKERAGE_APP_SECRET=
 KIS_ACCESS_TOKEN=
 KIS_APPROVAL_KEY=
 MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml
+MAESTRO_READONLY_CONFIG=/root/maestro-operator/symphony_readonly.yaml
+MAESTRO_SIGNAL_CONFIG=/root/maestro-operator/symphony_signal.yaml
+MAESTRO_APPROVAL_CONFIG=/root/maestro-operator/symphony_approval.yaml
 ```
 
 Do not commit this file. Do not paste secret values into tickets, docs, audit
@@ -22,13 +31,17 @@ logs, or dashboard rows.
 
 ## Operator Config
 
-Create one operator-local config outside the git checkout, for example
-`/root/maestro-operator/maestro_personal.yaml`, and use that same file for
-health checks, sync timers, Telegram operator, dashboard, and manual rehearsals.
-This keeps mode, state DB, audit log, approval settings, and KIS settings
-aligned across the hybrid operator architecture.
-The examples below rely on `MAESTRO_CONFIG` from the environment file so every
-unit resolves the same operator config by default.
+Single-profile deployments can use one operator-local config outside the git
+checkout, for example `/root/maestro-operator/maestro_personal.yaml`, and point
+`MAESTRO_CONFIG` at that file.
+
+The Symphony multi-account deployment uses an operator-local config set instead:
+`symphony_readonly.yaml`, `symphony_signal.yaml`, and
+`symphony_approval.yaml`, plus the shared `strategy_accounts.yaml` mapping used
+by signal and approval. These files intentionally have different modes and
+execution posture, but must share the same state DB, `state.identity_group`, and
+audit log. The examples below use `MAESTRO_READONLY_CONFIG`,
+`MAESTRO_SIGNAL_CONFIG`, and `MAESTRO_APPROVAL_CONFIG` for that config set.
 
 Do not run Telegram from a separate Telegram-only config when it is expected to
 represent the live operator state. Repo example configs are copy-and-customize
@@ -72,7 +85,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --timeout-seconds 10
+ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config ${MAESTRO_READONLY_CONFIG} --timeout-seconds 10
 Restart=always
 RestartSec=5
 
@@ -86,10 +99,11 @@ environment. Per-config `telegram_allowed_chat_ids` and `whitelisted_user_ids`
 are optional overrides. This service handles
 read-only Telegram commands and the limited `/pause` and `/kill_switch`
 confirmations. Approval request polling still happens inside `maestro run-once`
-when an approval-gated run is active.
+or `maestro approve-signal` when an approval-gated run is active.
 Telegram Bot API polling allows only one active `getUpdates` consumer per bot
-token, so stop this service during approval-gated `run-once` or
-`live-smoke --check live-dry-run` rehearsals when they use the same bot.
+token, so stop this service during approval-gated `run-once`,
+`approve-signal`, or `live-smoke --check live-dry-run` rehearsals when they use
+the same bot. The Symphony signal wrapper handles this stop/start boundary.
 
 Register the slash command menu once after bot setup or command changes:
 
@@ -113,7 +127,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --host 127.0.0.1 --port 8503
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --host 127.0.0.1 --port 8503
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -162,9 +176,87 @@ Unit=maestro-heartbeat.service
 WantedBy=timers.target
 ```
 
-## Example Scheduled Run-once Timer
+## Example Symphony Read-only Refresh Timer
 
-For the current polling-based Telegram approval flow, stop
+Install `deploy/systemd/maestro-symphony-readonly.service` and
+`deploy/systemd/maestro-symphony-readonly.timer` to refresh all configured KIS
+accounts and run reconciliation against the shared Symphony state.
+
+```ini
+[Unit]
+Description=Maestro Symphony read-only account refresh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG}
+ExecStartPost=/root/projects/Symphony/Maestro/.venv/bin/maestro reconcile --config ${MAESTRO_READONLY_CONFIG}
+TimeoutStartSec=300
+```
+
+```ini
+[Unit]
+Description=Run Maestro Symphony read-only refresh periodically
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=maestro-symphony-readonly.service
+
+[Install]
+WantedBy=timers.target
+```
+
+## Example Symphony Signal and Conditional Approval Timer
+
+Install `deploy/systemd/maestro-symphony-signal.service` and
+`deploy/systemd/maestro-symphony-signal.timer`. The service calls
+`scripts/operator/symphony_signal_then_approval.sh`, which obtains a file lock,
+runs `maestro run-signal --config ${MAESTRO_SIGNAL_CONFIG}`, parses
+`signal_run_id` and `action_required`, and only calls `maestro approve-signal`
+when `action_required=true`.
+
+The wrapper stops `maestro-telegram-operator.service` while approval polling is
+active and restarts it on exit. If signal output cannot be parsed, the wrapper
+fails closed and does not call approval.
+
+```ini
+[Unit]
+Description=Maestro Symphony signal then conditional approval
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/scripts/operator/symphony_signal_then_approval.sh
+TimeoutStartSec=1200
+```
+
+```ini
+[Unit]
+Description=Run Maestro Symphony signal workflow on trading days
+
+[Timer]
+OnCalendar=Mon..Fri 09:10:00
+Persistent=true
+Unit=maestro-symphony-signal.service
+
+[Install]
+WantedBy=timers.target
+```
+
+## Legacy Scheduled Run-once Timer
+
+The `maestro-run-once.*` templates are now legacy single-pipeline examples. Use
+the Symphony read-only and signal timers above for the three-phase
+`symphony_readonly` -> `symphony_signal` -> `symphony_approval` workflow.
+
+For the polling-based Telegram approval flow, stop
 `maestro-telegram-operator.service` while `run-once` is active so only one
 process consumes Telegram `getUpdates` for the shared bot token. The service
 below restarts the Telegram operator when `run-once` exits.
@@ -216,7 +308,8 @@ Reload systemd after installing unit files:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now maestro-heartbeat.timer
-sudo systemctl enable --now maestro-run-once.timer
+sudo systemctl enable --now maestro-symphony-readonly.timer
+sudo systemctl enable --now maestro-symphony-signal.timer
 ```
 
 Keep service output in journald or a controlled log sink. Confirm structured

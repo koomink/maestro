@@ -1,21 +1,15 @@
 [Unit]
-Description=Maestro read-only Dashboard
+Description=Maestro Symphony signal then conditional approval
 Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=oneshot
 User=root
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --host 127.0.0.1 --port 8503
-Restart=always
-RestartSec=5
-KillSignal=SIGINT
-TimeoutStopSec=20
+ExecStart=/root/projects/Symphony/Maestro/scripts/operator/symphony_signal_then_approval.sh
+TimeoutStartSec=1200
 StandardOutput=journal
 StandardError=journal
-
-[Install]
-WantedBy=multi-user.target

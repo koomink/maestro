@@ -205,6 +205,17 @@ Some future modules may be created as stubs in v0.1 but not fully implemented.
 
 `execution/brokers/` owns broker/account/execution integrations. Broker adapters, including KIS, should expose account state, buying power, positions, order submission/status, fills, reconciliation, and optional `broker_quote` data used only for execution validation or reconciliation.
 
+Broker routing is account-aware. Top-level `accounts` declare stable logical
+account IDs, and `strategies[*].account_id` maps each enabled Virtuoso app to
+one account. Many strategies may share one account. Legacy single-account
+`kis:` config is preserved by deriving `default_kis`. KIS real and KIS
+paper-trading accounts are operationally routed through the existing KIS
+clients; Toss accounts are configuration-visible but fail closed for broker
+operations until an official trading OpenAPI is available.
+Operator phase configs can set `strategy_account_map_path` so signal and
+approval share one strategy-to-account mapping file. The loader applies that
+mapping before validation, and config identity includes the mapping file bytes.
+
 The v0.2 provider planning contract is documented in [datahub.md](datahub.md).
 Future DataHub providers should route by canonical symbol, asset type, data type,
 timeframe/lookback, and run mode, then return normalized `DataBundle` payloads.
@@ -239,14 +250,15 @@ related recovery commands) coexist with long-running operator services
 (`telegram-operator` and the FastAPI/React dashboard). These processes coordinate
 through the configured SQLite state DB and JSONL audit log.
 
-Every process in one deployment should use the same operator-local config,
-state DB, and audit log. `mode` is the validated safety contract
+Every process in one deployment should use the intended operator-local config
+or config set, state DB, and audit log. `mode` is the validated safety contract
 (`paper`, `live_readonly`, or `live_approval`); a `profile` is the broader
 operator recipe made from mode plus strategy, data, KIS, approval, execution,
-reconciliation, monitoring, state, and audit settings. The operator config is
-the single YAML file that carries that profile for a deployment. CLI commands
-accept `--config`, but scheduled/operator services should normally resolve this
-shared path from `MAESTRO_CONFIG`.
+reconciliation, monitoring, state, and audit settings. Single-profile
+deployments carry that profile in one YAML file resolved from `MAESTRO_CONFIG`.
+The Symphony workflow uses three phase-specific YAML files resolved from
+`MAESTRO_READONLY_CONFIG`, `MAESTRO_SIGNAL_CONFIG`, and
+`MAESTRO_APPROVAL_CONFIG`; they must share one state/audit identity.
 
 SQLite currently uses connection timeout, `busy_timeout`, and WAL mode for
 basic multi-process coexistence. StateStore also serializes writes with a
@@ -270,6 +282,53 @@ first real-account submission.
 Daemonization is deferred until Maestro needs a central scheduler/job queue,
 coordinated approval/status polling, or live-order recovery that cannot be
 reliably handled by one-shot jobs plus explicit locks.
+
+### 3.1.2 Target Signal-to-Approval Operator Workflow
+
+The operator workflow separates Symphony operation into three profiles.
+`run-signal`, `approve-signal`, the three-profile config split, broker snapshot
+refs in signal packages, and stale broker-ref rejection during approval are
+implemented. Approval also rejects expired signal packages, config runtime
+fingerprint mismatches, and strategy-account mapping drift. Signal packages
+also carry DataHub evidence, and approval re-runs the live execution gates over
+the saved evidence before requesting approval. The approval path also rejects
+material broker snapshot drift from the signal baseline and carries
+`signal_run_id` into broker reconciliation events.
+
+- `symphony_readonly`: refresh broker/account truth for dashboard and Telegram
+  views. It runs no Virtuoso strategies and generates no orders or approvals.
+- `symphony_signal`: refresh broker/account truth, run Virtuoso apps, persist an
+  immutable signal package, and expose `action_required`; the scheduler invokes
+  approval only when `action_required=true`. It submits no broker orders.
+- `symphony_approval`: consume a required `signal_run_id`, load the saved signal
+  package, and execute approval/order workflow without re-running Virtuoso
+  strategies.
+
+This is a lifecycle split, not a loosening of `live_readonly`. `live_readonly`
+continues to mean broker read-only with no strategy execution. The signal phase
+is a separate workflow because strategy-generated recommendations are
+part of the trading lifecycle even when no broker submit occurs.
+
+Systemd remains the production wiring layer. `maestro-symphony-readonly.timer`
+refreshes broker truth and reconciliation periodically, while
+`maestro-symphony-signal.timer` runs
+`scripts/operator/symphony_signal_then_approval.sh` on the trading-day schedule.
+That wrapper obtains a file lock, skips approval when `action_required=false`,
+and stops the long-running Telegram operator while `approve-signal` polls for
+approval.
+
+`signal_run_id` handoff must be immutable and auditable. The saved signal
+package should include the config identity, generated timestamp, account
+mapping, broker snapshot references, DataHub evidence, strategy results,
+account-scoped targets, risk preview, and optional order preview. Approval must
+fail closed if the signal is expired, missing, mutated, generated by a different
+state-affecting config, based on stale broker/data evidence, or no longer
+compatible with current account mappings.
+
+The approval phase is execution of a stored decision, not a second strategy
+judgment. It may re-check broker truth, prices, reconciliation, safety state,
+limits, and kill-switch state, but it must not call Virtuoso `run()` again for
+the same `signal_run_id`.
 
 ### 3.2 Future Integrations
 
