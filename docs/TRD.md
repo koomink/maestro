@@ -471,6 +471,12 @@ the same `signal_run_id`.
   reconciliation, optional broker reconciliation, optional notifications, KIS
   live order/status clients when `kis.provider="kis"`, and injected fake clients
   for tests.
+- KIS REST clients share a small base for broker-agnostic plumbing:
+  credentials/auth wiring, common headers, GET/POST error handling, pagination,
+  real-vs-demo TR_ID selection, and canonical symbol helpers. Product adapters
+  remain separate because KIS domestic and overseas APIs use different endpoint
+  families, request fields, TR_IDs, quote exchange codes, price formats, cash
+  currencies, and response fields.
 - `LiveOrderNotificationClient` is implemented for Telegram lifecycle
   notifications through the existing Bot API client boundary. It sends lifecycle,
   fill-status, halt, and failure messages only; it does not add buttons,
@@ -1197,13 +1203,25 @@ Components:
 
 - `auth.py`: OAuth token and approval key management
 - `client.py`: read-only client protocol
-- `rest_client.py`: read-only REST client wrapper
-- future `orders.py`: order submission, cancel, amend after v0.5
-- `rest_client.py`: balance, buying power, positions, order/fill inquiry, unfilled orders, and broker-side quote/reference lookup for execution validation or reconciliation
+- `base.py`: shared REST plumbing for auth, headers, GET/POST, pagination, and
+  symbol mapping
+- `rest_client.py`: broker-product factory for domestic and overseas adapters
+- `domestic_readonly.py` / `overseas_readonly.py`: product-specific balance,
+  buying power, positions, order/fill inquiry, unfilled orders, and broker-side
+  quote/reference lookup
+- `domestic_live_order.py` / `overseas_live_order.py`: product-specific limit
+  order submission, status, and verified cancellation paths
 - `websocket.py`: real-time price/fill notification later
 - `errors.py`: error code handling
 
 The KIS adapter is a broker adapter, not a research data provider. It should mainly handle authentication, balances, positions, buying power, fills, and reconciliation. KIS current price lookup can produce `broker_quote` data for broker-side checks, but strategy plugins should receive research and market data through DataHub providers.
+
+KIS accounts are credential/account boundaries. Domestic versus overseas routing
+is decided by the target instrument's `broker_product`: KRX instruments use
+`kis_domestic_stock`, while US-listed instruments use `kis_overseas_stock`.
+Brokerage accounts that can trade both markets should enable both products, but
+the product-specific adapters must still construct the KIS request for the
+target market.
 
 Live trading safety:
 

@@ -2,11 +2,10 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, OrderStatus
 from maestro.core.instruments import TradableInstrument
-from maestro.execution.brokers.kis.auth import KISAuthManager, KISToken
+from maestro.execution.brokers.kis.base import KISRestBaseClient
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.models import (
     KISAccountSnapshot,
@@ -23,28 +22,12 @@ from maestro.execution.brokers.kis.parsers import (
     _overseas_order_summary,
     _overseas_position,
     _quote_exchange_code,
-    _tr_cont,
 )
-from maestro.execution.brokers.kis.transport import UrlLibKISTransport
 
 
-class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
-    def __init__(
-        self,
-        config: KISConfig,
-        *,
-        transport: UrlLibKISTransport | None = None,
-        auth_manager: KISAuthManager | None = None,
-        instruments: list[TradableInstrument] | None = None,
-    ) -> None:
-        self.config = config
-        self.transport = transport or UrlLibKISTransport()
-        self.auth_manager = auth_manager or KISAuthManager(config, self.transport)
-        self.credentials = self.auth_manager.get_credentials()
-        self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
-        self._broker_symbol_to_canonical = {
-            instrument.broker_symbol: instrument.symbol for instrument in instruments or []
-        }
+class KISRestOverseasStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
+    request_error_context = "KIS overseas read-only request"
+    pagination_error_context = "KIS overseas read-only pagination"
 
     def get_account_snapshot(self) -> KISAccountSnapshot:
         positions, cash_balance = self._fetch_balance()
@@ -269,52 +252,16 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
         *,
         max_pages: int = 10,
     ) -> list[dict[str, Any]]:
-        pages: list[dict[str, Any]] = []
-        next_params = dict(params)
-        tr_cont = ""
-        for _ in range(max_pages):
-            payload = self._get(path, tr_id, next_params, tr_cont=tr_cont)
-            pages.append(payload)
-            if _tr_cont(payload) not in {"M", "F"}:
-                return pages
-            next_params["CTX_AREA_FK200"] = str(payload.get("ctx_area_fk200") or "")
-            next_params["CTX_AREA_NK200"] = str(payload.get("ctx_area_nk200") or "")
-            tr_cont = "N"
-        raise ValueError(f"KIS overseas read-only pagination exceeded {max_pages} pages: {path}")
-
-    def _get(
-        self,
-        path: str,
-        tr_id: str,
-        params: dict[str, str],
-        *,
-        tr_cont: str = "",
-    ) -> dict[str, Any]:
-        token = self.auth_manager.get_access_token()
-        payload = self.transport.request(
-            "GET",
-            f"{self.config.resolved_base_url()}{path}",
-            headers=self._headers(tr_id, token, tr_cont=tr_cont),
-            params=params,
-            timeout_seconds=self.config.timeout_seconds,
+        return super()._get_pages(
+            path,
+            tr_id,
+            params,
+            fk_key="CTX_AREA_FK200",
+            nk_key="CTX_AREA_NK200",
+            response_fk_key="ctx_area_fk200",
+            response_nk_key="ctx_area_nk200",
+            max_pages=max_pages,
         )
-        if payload.get("rt_cd") not in ("0", None):
-            msg_cd = payload.get("msg_cd", "unknown")
-            msg1 = payload.get("msg1", "KIS request failed")
-            raise ValueError(f"KIS overseas read-only request failed: {msg_cd} {msg1}")
-        return payload
-
-    def _headers(self, tr_id: str, token: KISToken, *, tr_cont: str = "") -> dict[str, str]:
-        return {
-            "Content-Type": "application/json; charset=utf-8",
-            "Accept": "text/plain",
-            "authorization": f"Bearer {token.access_token}",
-            "appkey": self.credentials.app_key,
-            "appsecret": self.credentials.app_secret,
-            "tr_id": tr_id,
-            "custtype": "P",
-            "tr_cont": tr_cont,
-        }
 
     def _buying_power_symbol(self, symbol: str | None) -> tuple[str, str]:
         if symbol is not None:
@@ -338,12 +285,6 @@ class KISRestOverseasStockReadOnlyClient(KISReadOnlyClient):
         if instrument.exchange_code is None:
             raise ValueError(f"KIS overseas read-only requires exchange_code for symbol: {symbol}")
         return instrument
-
-    def _canonical_symbol(self, broker_symbol: str) -> str:
-        return self._broker_symbol_to_canonical.get(broker_symbol, broker_symbol)
-
-    def _tr_id(self, *, real: str, demo: str) -> str:
-        return demo if self.config.paper_trading else real
 
 
 def _default_order_date_range() -> tuple[str, str]:

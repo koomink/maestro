@@ -75,7 +75,7 @@ accounts:
     app_key_env: KIS_BROKERAGE_APP_KEY
     app_secret_env: KIS_BROKERAGE_APP_SECRET
     token_cache_path: var/kis_brokerage_access_token.json
-    broker_products: [kis_overseas_stock]
+    broker_products: [kis_domestic_stock, kis_overseas_stock]
 
 strategy_account_map_path: strategy_accounts.yaml
 
@@ -96,6 +96,12 @@ strategies:
     entrypoint: candidate_strategy.plugin:CandidateStrategyPlugin
     weight: 1.0
 ```
+
+KIS account entries define the credential/account boundary. The actual KIS REST
+API family is selected per instrument through `broker_product`: KRX-listed
+stocks and ETFs use `kis_domestic_stock`, while US-listed stocks and ETFs use
+`kis_overseas_stock`. Maestro keeps separate product-specific adapters for those
+market differences while sharing common KIS REST plumbing underneath them.
 
 Shared mapping file. The legacy `strategy_id: account_id` form remains valid,
 but operator workflows should prefer the object form so phase visibility and

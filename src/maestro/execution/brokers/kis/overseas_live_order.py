@@ -1,5 +1,3 @@
-from typing import Any
-
 from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
 from maestro.execution.brokers.kis.models import KISBuyingPower, KISOrderSummary
@@ -38,6 +36,8 @@ class KISRestOverseasStockLiveOrderClient(
     LiveOrderCancelClient,
     LiveOrderPreSubmitValidator,
 ):
+    post_error_context = "KIS overseas live order request"
+
     def validate_pre_submit_order(self, request: LiveOrderRequest) -> None:
         if request.side != OrderSide.BUY:
             return
@@ -131,21 +131,6 @@ class KISRestOverseasStockLiveOrderClient(
             message=_optional_str(payload.get("msg1")),
             raw=payload,
         )
-
-    def _post(self, path: str, tr_id: str, json_body: dict[str, str]) -> dict[str, Any]:
-        token = self.auth_manager.get_access_token()
-        payload = self.transport.request(
-            "POST",
-            f"{self.config.resolved_base_url()}{path}",
-            headers=self._headers(tr_id, token),
-            json_body=json_body,
-            timeout_seconds=self.config.timeout_seconds,
-        )
-        if payload.get("rt_cd") not in ("0", None):
-            msg_cd = payload.get("msg_cd", "unknown")
-            msg1 = payload.get("msg1", "KIS overseas live order request failed")
-            raise ValueError(f"KIS overseas live order request failed: {msg_cd} {msg1}")
-        return payload
 
     def _order_tr_id(self, side: OrderSide, exchange_code: str) -> str:
         if exchange_code not in {"NASD", "NYSE", "AMEX"}:

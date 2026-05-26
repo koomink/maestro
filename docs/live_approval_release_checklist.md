@@ -137,6 +137,12 @@ multi-product read-only shape. KIS read-only uses domestic and overseas account
 endpoints for broker snapshots and reconciliation only; strategy market and
 research data must still come through Maestro DataHub. Live approval uses
 verified limit-order submit/status payloads behind the safety gates.
+The domestic and overseas adapters share common REST plumbing, but endpoint
+paths, request bodies, TR_IDs, cash currency, quote exchange-code mapping, and
+response parsing remain product-specific. For a brokerage account that trades
+both KRX and US-listed instruments, enable both `kis_domestic_stock` and
+`kis_overseas_stock` and verify that each tradable instrument declares the
+correct `broker_product`.
 
 ## Broker Reconciliation Pass
 
