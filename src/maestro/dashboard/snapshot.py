@@ -257,6 +257,10 @@ def build_dashboard_snapshot(
             "portfolio_history": portfolio_history,
             "broker_history": broker_history,
         },
+        "execution_sleeves": _execution_sleeve_summary(
+            config,
+            strategy_book_performance,
+        ),
         "virtuoso_apps": _virtuoso_apps(
             config,
             strategy_runs,
@@ -440,9 +444,7 @@ def _operator_metrics(
     risk_decisions: list[dict[str, Any]],
     run_index: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    daily_notional_value = (
-        f"{_money(daily_usage['notional'])} / {_money(daily_usage['max_daily_live_notional'])}"
-    )
+    daily_notional_value = _daily_notional_usage_label(daily_usage)
     latest_lifecycle = live_order_lifecycle["latest"] or {}
     return [
         _metric("Overall", str(operator_home["status"]).upper(), operator_home["status"]),
@@ -462,7 +464,7 @@ def _operator_metrics(
         _metric(
             "Daily Live Notional",
             daily_notional_value,
-            _limit_tone(daily_usage["notional"], daily_usage["max_daily_live_notional"]),
+            _daily_notional_usage_tone(daily_usage),
         ),
         _metric(
             "Live Order Issues",
@@ -478,6 +480,34 @@ def _operator_metrics(
         _metric("Risk Decisions", len(risk_decisions)),
         _metric("Indexed Runs", len(run_index)),
     ]
+
+
+def _daily_notional_usage_label(daily_usage: dict[str, Any]) -> str:
+    values = daily_usage.get("notional_by_currency")
+    limits = daily_usage.get("max_daily_live_notional_by_currency")
+    if isinstance(values, dict) and isinstance(limits, dict) and limits:
+        parts = []
+        for currency, limit in sorted(limits.items()):
+            value = float(values.get(currency, 0.0))
+            parts.append(f"{_money(value, currency)} / {_money(limit, currency)}")
+        return ", ".join(parts)
+    return f"{_money(daily_usage['notional'])} / {_money(daily_usage['max_daily_live_notional'])}"
+
+
+def _daily_notional_usage_tone(daily_usage: dict[str, Any]) -> str:
+    values = daily_usage.get("notional_by_currency")
+    limits = daily_usage.get("max_daily_live_notional_by_currency")
+    if isinstance(values, dict) and isinstance(limits, dict) and limits:
+        tones = [
+            _limit_tone(float(values.get(currency, 0.0)), float(limit))
+            for currency, limit in limits.items()
+        ]
+        if "danger" in tones:
+            return "danger"
+        if "warning" in tones:
+            return "warning"
+        return "success"
+    return _limit_tone(daily_usage["notional"], daily_usage["max_daily_live_notional"])
 
 
 def _investment_metrics(
@@ -665,6 +695,7 @@ def _virtuoso_apps(
                 "strategy_id": strategy_id,
                 "concept": _virtuoso_concept_rows(strategy_id, strategy_configs.get(strategy_id)),
                 "operation": _virtuoso_operation_rows(
+                    config,
                     strategy_configs.get(strategy_id),
                     _strategy_rows(strategy_runs, strategy_id),
                     _strategy_rows(strategy_book_performance, strategy_id),
@@ -938,6 +969,7 @@ def _virtuoso_concept_rows(strategy_id: str, strategy_config: Any | None) -> lis
 
 
 def _virtuoso_operation_rows(
+    config: Any,
     strategy_config: Any | None,
     runs: list[dict[str, Any]],
     performance: list[dict[str, Any]],
@@ -978,6 +1010,27 @@ def _virtuoso_operation_rows(
             "status": "ok" if getattr(strategy_config, "order_posture", None) else "missing",
         },
         {
+            "item": "Execution sleeve",
+            "value": _display_value(getattr(strategy_config, "execution_sleeve", None)),
+            "status": "ok" if getattr(strategy_config, "execution_sleeve", None) else "missing",
+        },
+        {
+            "item": "Order mode",
+            "value": _display_value(_strategy_order_generation_mode(config, strategy_config)),
+            "status": (
+                "ok" if _strategy_order_generation_mode(config, strategy_config) else "missing"
+            ),
+        },
+        {
+            "item": "Sleeve target",
+            "value": _display_value(_strategy_execution_sleeve_target(config, strategy_config)),
+            "status": (
+                "ok"
+                if _strategy_execution_sleeve_target(config, strategy_config) is not None
+                else "missing"
+            ),
+        },
+        {
             "item": "Latest run",
             "value": _display_value(latest_run.get("created_at")),
             "status": _validation_label(latest_run.get("validation_ok")),
@@ -993,6 +1046,92 @@ def _virtuoso_operation_rows(
             "status": "ok" if latest_performance else "missing",
         },
     ]
+
+
+def _execution_sleeve_summary(
+    config: Any,
+    strategy_book_performance: list[dict[str, Any]],
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    latest_values = _latest_strategy_values(strategy_book_performance)
+    strategies = [strategy for strategy in getattr(config, "strategies", []) if strategy.enabled]
+    account_totals: dict[str, float] = {}
+    for strategy in strategies:
+        account_id = getattr(strategy, "account_id", None)
+        execution_sleeve = getattr(strategy, "execution_sleeve", None)
+        if not account_id or not execution_sleeve:
+            continue
+        account_totals[account_id] = account_totals.get(account_id, 0.0) + latest_values.get(
+            strategy.id, 0.0
+        )
+    for strategy in strategies:
+        account_id = getattr(strategy, "account_id", None)
+        execution_sleeve = getattr(strategy, "execution_sleeve", None)
+        if not account_id or not execution_sleeve:
+            continue
+        sleeve = config.execution_sleeves.sleeve(account_id, execution_sleeve)
+        if sleeve is None:
+            continue
+        current_value = latest_values.get(strategy.id)
+        account_total = account_totals.get(account_id, 0.0)
+        current_weight = current_value / account_total if current_value and account_total else None
+        drift = current_weight - sleeve.target_weight if current_weight is not None else None
+        rows.append(
+            {
+                "account_id": account_id,
+                "execution_sleeve": execution_sleeve,
+                "strategy_id": strategy.id,
+                "currency_sleeve": sleeve.currency_sleeve,
+                "target_weight": sleeve.target_weight,
+                "current_weight": current_weight,
+                "drift": drift,
+                "current_value": current_value,
+                "allocated_cash": None,
+                "order_generation_mode": sleeve.order_generation_mode,
+                "readonly_enabled": getattr(strategy, "readonly_enabled", None),
+                "signal_enabled": getattr(strategy, "signal_enabled", None),
+                "order_posture": getattr(strategy, "order_posture", None),
+            }
+        )
+    return {
+        "rows": rows,
+        "metrics": [
+            _metric("Execution Sleeves", len(rows)),
+            _metric("Accounts", len({row["account_id"] for row in rows})),
+        ],
+    }
+
+
+def _latest_strategy_values(strategy_book_performance: list[dict[str, Any]]) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for row in strategy_book_performance:
+        strategy_id = row.get("strategy_id")
+        if not strategy_id or strategy_id in values:
+            continue
+        value = _float_value(row.get("book_value"))
+        if value is not None:
+            values[str(strategy_id)] = value
+    return values
+
+
+def _strategy_order_generation_mode(config: Any, strategy_config: Any | None) -> Any:
+    if strategy_config is None:
+        return None
+    method = getattr(config, "effective_strategy_order_generation_mode", None)
+    if callable(method):
+        return method(strategy_config)
+    execution = getattr(config, "execution", None)
+    return getattr(execution, "order_generation_mode", None)
+
+
+def _strategy_execution_sleeve_target(config: Any, strategy_config: Any | None) -> Any:
+    if strategy_config is None:
+        return None
+    sleeve = config.execution_sleeves.sleeve(
+        getattr(strategy_config, "account_id", None),
+        getattr(strategy_config, "execution_sleeve", None),
+    )
+    return getattr(sleeve, "target_weight", None)
 
 
 def _strategy_return_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:

@@ -6,6 +6,7 @@ from maestro.config.base import StrictConfigModel
 from maestro.core.enums import Currency, OrderType
 
 OrderPosture = Literal["disabled", "dry_run", "armed"]
+OrderGenerationMode = Literal["target_rebalance", "buy_only_contribution"]
 
 
 class ContributionConfig(StrictConfigModel):
@@ -72,16 +73,149 @@ class BrokerValidationConfig(StrictConfigModel):
 
 class LiveOrderLimitsConfig(StrictConfigModel):
     max_order_notional: float = Field(default=0.0, ge=0.0)
+    max_order_notional_by_currency: dict[Currency, float] = Field(default_factory=dict)
     max_daily_notional: float = Field(default=0.0, ge=0.0)
+    max_daily_notional_by_currency: dict[Currency, float] = Field(default_factory=dict)
     max_daily_order_count: int = Field(default=0, ge=0)
     daily_loss_limit: float | None = Field(default=None, gt=0.0)
+    daily_loss_limit_by_currency: dict[Currency, float] = Field(default_factory=dict)
     fee_buffer_pct: float = Field(default=0.0, ge=0.0)
+
+    @field_validator(
+        "max_order_notional_by_currency",
+        "max_daily_notional_by_currency",
+    )
+    @classmethod
+    def validate_nonnegative_currency_limits(
+        cls,
+        value: dict[Currency, float],
+    ) -> dict[Currency, float]:
+        invalid = [currency.value for currency, limit in value.items() if limit < 0]
+        if invalid:
+            raise ValueError("currency-specific notional limits must be non-negative")
+        return value
+
+    @field_validator("daily_loss_limit_by_currency")
+    @classmethod
+    def validate_positive_daily_loss_limits(
+        cls,
+        value: dict[Currency, float],
+    ) -> dict[Currency, float]:
+        invalid = [currency.value for currency, limit in value.items() if limit <= 0]
+        if invalid:
+            raise ValueError("currency-specific daily loss limits must be positive")
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_mixed_scalar_and_currency_limits(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        pairs = [
+            ("max_order_notional", "max_order_notional_by_currency", 0.0),
+            ("max_daily_notional", "max_daily_notional_by_currency", 0.0),
+            ("daily_loss_limit", "daily_loss_limit_by_currency", None),
+        ]
+        for scalar_key, currency_key, empty_value in pairs:
+            if scalar_key not in data or currency_key not in data:
+                continue
+            if not data.get(currency_key):
+                continue
+            scalar_value = data.get(scalar_key)
+            if scalar_value in {empty_value, None}:
+                continue
+            raise ValueError(
+                f"execution.live_order_limits cannot mix {scalar_key} "
+                f"with {currency_key}"
+            )
+        return data
+
+    def max_order_notional_for(self, currency: Currency | str | None) -> float | None:
+        return _limit_for_currency(
+            self.max_order_notional_by_currency,
+            self.max_order_notional,
+            currency,
+        )
+
+    def max_daily_notional_for(self, currency: Currency | str | None) -> float | None:
+        return _limit_for_currency(
+            self.max_daily_notional_by_currency,
+            self.max_daily_notional,
+            currency,
+        )
+
+    def daily_loss_limit_for(self, currency: Currency | str | None) -> float | None:
+        if self.daily_loss_limit_by_currency:
+            normalized = _normalize_currency(currency)
+            if normalized is None:
+                return None
+            return self.daily_loss_limit_by_currency.get(normalized)
+        return self.daily_loss_limit
+
+    def has_daily_loss_limit(self) -> bool:
+        return self.daily_loss_limit is not None or bool(self.daily_loss_limit_by_currency)
+
+
+def _limit_for_currency(
+    currency_limits: dict[Currency, float],
+    scalar_limit: float,
+    currency: Currency | str | None,
+) -> float | None:
+    if currency_limits:
+        normalized = _normalize_currency(currency)
+        if normalized is None:
+            return None
+        return currency_limits.get(normalized)
+    return scalar_limit
+
+
+def _normalize_currency(currency: Currency | str | None) -> Currency | None:
+    if currency is None:
+        return None
+    if isinstance(currency, Currency):
+        return currency
+    return Currency(str(currency))
+
+
+
+class ExecutionSleeveConfig(StrictConfigModel):
+    currency_sleeve: str
+    target_weight: float = Field(gt=0.0, le=1.0)
+    order_generation_mode: OrderGenerationMode
+    contribution: ContributionConfig | None = None
+
+    @model_validator(mode="after")
+    def validate_order_mode(self) -> "ExecutionSleeveConfig":
+        if self.order_generation_mode == "buy_only_contribution":
+            if self.contribution is None or not self.contribution.enabled:
+                raise ValueError(
+                    "execution_sleeves buy_only_contribution requires "
+                    "contribution.enabled=true"
+                )
+        return self
+
+
+class ExecutionSleevesConfig(StrictConfigModel):
+    accounts: dict[str, dict[str, ExecutionSleeveConfig]] = Field(default_factory=dict)
+
+    def account_sleeves(self, account_id: str | None) -> dict[str, ExecutionSleeveConfig]:
+        if account_id is None:
+            return {}
+        return self.accounts.get(account_id, {})
+
+    def sleeve(self, account_id: str | None, sleeve_id: str | None) -> ExecutionSleeveConfig | None:
+        if account_id is None or sleeve_id is None:
+            return None
+        return self.accounts.get(account_id, {}).get(sleeve_id)
+
+    def has_sleeves(self) -> bool:
+        return bool(self.accounts)
 
 
 class ExecutionConfig(StrictConfigModel):
     proposal_engine: str = "paper"
     order_posture: OrderPosture = "disabled"
-    order_generation_mode: Literal["target_rebalance", "buy_only_contribution"] = "target_rebalance"
+    order_generation_mode: OrderGenerationMode = "target_rebalance"
     contribution: ContributionConfig = Field(default_factory=ContributionConfig)
     market_session: MarketSessionConfig = Field(default_factory=MarketSessionConfig)
     broker_validation: BrokerValidationConfig = Field(default_factory=BrokerValidationConfig)
@@ -285,6 +419,9 @@ __all__ = [
     "BrokerValidationConfig",
     "ContributionConfig",
     "ExecutionConfig",
+    "ExecutionSleeveConfig",
+    "ExecutionSleevesConfig",
+    "OrderGenerationMode",
     "LiveOrderLimitsConfig",
     "MarketSessionConfig",
     "OrderPosture",

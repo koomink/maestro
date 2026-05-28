@@ -602,6 +602,12 @@ def telegram_operator(
     config: Path | None = CONFIG_OPTION,
     once: bool = typer.Option(False, "--once"),
     timeout_seconds: int = typer.Option(10, "--timeout-seconds"),
+    signal_config: Path | None = typer.Option(
+        None,
+        "--signal-config",
+        envvar="MAESTRO_SIGNAL_CONFIG",
+        help="Signal config used for Telegram strategy signal generation commands.",
+    ),
 ) -> None:
     maestro_config, identity = _load_operator_config(config)
     if maestro_config.approval.provider != "telegram":
@@ -629,6 +635,7 @@ def telegram_operator(
             token_env=maestro_config.approval.telegram_bot_token_env,
             timeout_seconds=max(float(timeout_seconds) + 5.0, 10.0),
         ),
+        signal_config_path=signal_config,
     )
 
     offset = None
@@ -647,14 +654,25 @@ def telegram_operator(
 
 
 @app.command("telegram-set-commands")
-def telegram_set_commands(config: Path | None = CONFIG_OPTION) -> None:
+def telegram_set_commands(
+    config: Path | None = CONFIG_OPTION,
+    signal_config: Path | None = typer.Option(
+        None,
+        "--signal-config",
+        envvar="MAESTRO_SIGNAL_CONFIG",
+        help="Signal config used to add strategy signal generation commands.",
+    ),
+) -> None:
     maestro_config, _identity = _load_operator_config(config)
     if maestro_config.approval.provider != "telegram":
         raise typer.BadParameter("telegram-set-commands requires approval.provider=telegram")
     if not os.getenv(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_set_commands status=fail message=missing_bot_token")
         raise typer.Exit(1)
-    commands = telegram_bot_commands()
+    signal_maestro_config = None
+    if signal_config is not None:
+        signal_maestro_config, _signal_identity = load_config_with_identity(signal_config)
+    commands = telegram_bot_commands(signal_maestro_config)
     TelegramBotAPIClient(
         token_env=maestro_config.approval.telegram_bot_token_env,
         timeout_seconds=10.0,
@@ -1421,10 +1439,10 @@ def _personal_operator_config(output: Path) -> dict:
             "order_posture": "dry_run",
             "require_reconciliation_pass": True,
             "live_order_limits": {
-                "max_order_notional": 100,
-                "max_daily_notional": 300,
+                "max_order_notional_by_currency": {"USD": 100},
+                "max_daily_notional_by_currency": {"USD": 300},
                 "max_daily_order_count": 1,
-                "daily_loss_limit": None,
+                "daily_loss_limit_by_currency": {},
                 "fee_buffer_pct": 0.002,
             },
             "allowed_order_type": "limit",

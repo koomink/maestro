@@ -1,5 +1,6 @@
 import json
 import traceback
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -9,6 +10,7 @@ from pydantic import BaseModel
 
 from maestro.approval.manager import ApprovalManager
 from maestro.approval.models import ApprovalDecision
+from maestro.config.execution import ExecutionConfig
 from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
@@ -24,6 +26,11 @@ from maestro.execution.broker_router import (
 )
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.execution_sleeves import (
+    AllocatedExecutionScope,
+    ExecutionScopeDraft,
+    allocate_cash_rebalanced_scope_states,
+)
 from maestro.execution.factory import build_execution_engine
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_orders import (
@@ -83,6 +90,20 @@ class SignalApprovalSummary(BaseModel):
     run_id: str
     orders_created: int
     approval_status: str
+
+
+@dataclass(frozen=True)
+class ScopedOrderTarget:
+    account_id: str | None
+    execution_sleeve: str | None
+    target: PortfolioTarget
+    execution_config: ExecutionConfig
+    state: PortfolioState
+    allocated_cash: float = 0.0
+    current_value: float = 0.0
+    current_weight: float = 0.0
+    target_weight: float = 1.0
+    drift: float = 0.0
 
 
 class MaestroOrchestrator:
@@ -170,28 +191,38 @@ class MaestroOrchestrator:
             signal_run_id,
             valid_results,
             self.risk_manager,
+            current_state,
+            prices,
         )
         if not risk_decision.approved:
             raise ValueError(f"Risk check failed: {risk_decision.violations}")
         order_generation_time = utc_now()
-        contribution_already_executed = self._contribution_already_executed(
-            order_generation_time
-        )
         prices = self._order_generation_prices(prices)
         orders = []
-        for account_id, order_target in order_targets:
-            account_orders = self.execution.propose_orders(
-                current_state,
-                order_target,
+        for order_scope in order_targets:
+            scoped_execution = build_execution_engine(
+                order_scope.execution_config,
+                instruments=self.config.universe.instruments,
+                currency_sleeves=self.config.portfolio.currency_sleeves,
+            )
+            account_orders = scoped_execution.propose_orders(
+                order_scope.state,
+                order_scope.target,
                 prices,
                 as_of=order_generation_time,
-                contribution_already_executed=contribution_already_executed,
+                contribution_already_executed=self._contribution_already_executed(
+                    order_generation_time,
+                    order_scope.execution_config,
+                    execution_sleeve=order_scope.execution_sleeve,
+                    account_id=order_scope.account_id,
+                ),
             )
             orders.extend(
                 self._stamp_orders_with_account_id(
                     account_orders,
-                    order_target.source_strategy_ids,
-                    account_id=account_id,
+                    order_scope.target.source_strategy_ids,
+                    account_id=order_scope.account_id,
+                    execution_sleeve=order_scope.execution_sleeve,
                     signal_preview=True,
                 )
             )
@@ -448,6 +479,8 @@ class MaestroOrchestrator:
                 run_id,
                 valid_results,
                 risk_manager,
+                current_state,
+                prices,
             )
             if not risk_decision.approved:
                 raise ValueError(f"Risk check failed: {risk_decision.violations}")
@@ -475,24 +508,32 @@ class MaestroOrchestrator:
                 )
 
             order_generation_time = utc_now()
-            contribution_already_executed = self._contribution_already_executed(
-                order_generation_time
-            )
             prices = self._order_generation_prices(prices)
             orders = []
-            for account_id, order_target in order_targets:
-                account_orders = self.execution.propose_orders(
-                    current_state,
-                    order_target,
+            for order_scope in order_targets:
+                scoped_execution = build_execution_engine(
+                    order_scope.execution_config,
+                    instruments=self.config.universe.instruments,
+                    currency_sleeves=self.config.portfolio.currency_sleeves,
+                )
+                account_orders = scoped_execution.propose_orders(
+                    order_scope.state,
+                    order_scope.target,
                     prices,
                     as_of=order_generation_time,
-                    contribution_already_executed=contribution_already_executed,
+                    contribution_already_executed=self._contribution_already_executed(
+                        order_generation_time,
+                        order_scope.execution_config,
+                        execution_sleeve=order_scope.execution_sleeve,
+                        account_id=order_scope.account_id,
+                    ),
                 )
                 orders.extend(
                     self._stamp_orders_with_account_id(
                         account_orders,
-                        order_target.source_strategy_ids,
-                        account_id=account_id,
+                        order_scope.target.source_strategy_ids,
+                        account_id=order_scope.account_id,
+                        execution_sleeve=order_scope.execution_sleeve,
                     )
                 )
             approval_orders = self._orders_requiring_approval(orders)
@@ -777,18 +818,35 @@ class MaestroOrchestrator:
             config=loaded.config.config,
         )
 
-    def _contribution_already_executed(self, as_of) -> bool:
-        if self.config.execution.order_generation_mode != "buy_only_contribution":
+    def _contribution_already_executed(
+        self,
+        as_of,
+        execution_config: ExecutionConfig | None = None,
+        *,
+        execution_sleeve: str | None = None,
+        account_id: str | None = None,
+    ) -> bool:
+        config = execution_config or self.config.execution
+        if config.order_generation_mode != "buy_only_contribution":
             return False
-        month_key = self.execution.contribution_month_key(as_of)
+        engine = build_execution_engine(
+            config,
+            instruments=self.config.universe.instruments,
+            currency_sleeves=self.config.portfolio.currency_sleeves,
+        )
+        month_key = engine.contribution_month_key(as_of)
         if self.config.mode == RunMode.LIVE_APPROVAL:
             return self.state_store.monthly_live_contribution_order_exists(
                 month_key,
-                self.config.execution.contribution.sleeve,
+                config.contribution.sleeve,
+                execution_sleeve=execution_sleeve,
+                account_id=account_id,
             )
         return self.state_store.monthly_contribution_order_exists(
             month_key,
-            self.config.execution.contribution.sleeve,
+            config.contribution.sleeve,
+            execution_sleeve=execution_sleeve,
+            account_id=account_id,
         )
 
     def _evaluate_dynamic_universe(
@@ -1266,11 +1324,15 @@ class MaestroOrchestrator:
             reasons = ", ".join(str(block.get("reason")) for block in live_blocks)
             raise ValueError(f"Signal approval blocked by live execution gate: {reasons}")
 
-    def _strategy_account_mappings(self) -> list[dict[str, str]]:
+    def _strategy_account_mappings(self) -> list[dict[str, Any]]:
         return [
             {
                 "strategy_id": loaded.config.id,
                 "account_id": self.account_router.account_id_for_strategy(loaded.config),
+                "execution_sleeve": loaded.config.execution_sleeve,
+                "order_generation_mode": self.config.effective_strategy_order_generation_mode(
+                    loaded.config
+                ),
             }
             for loaded in self.registry.strategies
             if loaded.config.enabled
@@ -1284,6 +1346,10 @@ class MaestroOrchestrator:
                 "readonly_enabled": strategy.readonly_enabled,
                 "signal_enabled": strategy.signal_enabled,
                 "order_posture": self._effective_strategy_order_posture(strategy.id),
+                "execution_sleeve": strategy.execution_sleeve,
+                "order_generation_mode": self.config.effective_strategy_order_generation_mode(
+                    strategy
+                ),
             }
             for strategy in self.config.strategies
             if strategy.enabled
@@ -1573,7 +1639,96 @@ class MaestroOrchestrator:
         run_id: str,
         valid_results: list[TargetAllocationResult],
         risk_manager: RiskManager,
-    ) -> tuple[PortfolioTarget, RiskDecision, list[tuple[str | None, PortfolioTarget]]]:
+        current_state: PortfolioState,
+        prices: dict[str, float],
+    ) -> tuple[PortfolioTarget, RiskDecision, list[ScopedOrderTarget]]:
+        if not self.config.execution_sleeves.has_sleeves():
+            return self._build_legacy_account_scoped_targets(
+                run_id,
+                valid_results,
+                risk_manager,
+                current_state,
+            )
+
+        scope_results = self._results_by_execution_scope(valid_results)
+        if not scope_results:
+            return self._build_legacy_account_scoped_targets(
+                run_id,
+                valid_results,
+                risk_manager,
+                current_state,
+            )
+
+        drafts_by_account: dict[str | None, list[ExecutionScopeDraft]] = {}
+        risk_decisions: list[RiskDecision] = []
+        execution_configs: dict[tuple[str | None, str | None], ExecutionConfig] = {}
+        for (account_id, execution_sleeve), results in scope_results.items():
+            strategy_configs = [self._strategy_config(result.strategy_id) for result in results]
+            manager = PortfolioManager(strategy_configs)
+            scope_target = self._target_with_configured_cash(
+                manager.build_target(results),
+                results,
+            )
+            scope_risk = risk_manager.check(scope_target)
+            self._save_account_risk_decision(
+                run_id,
+                scope_risk,
+                scope_target.source_strategy_ids,
+                account_id=account_id,
+            )
+            risk_decisions.append(scope_risk)
+            sleeve = self.config.execution_sleeves.sleeve(account_id, execution_sleeve)
+            if sleeve is None:
+                raise ValueError(
+                    f"Unknown execution_sleeve for account_id={account_id}: {execution_sleeve}"
+                )
+            drafts_by_account.setdefault(account_id, []).append(
+                ExecutionScopeDraft(
+                    account_id=account_id,
+                    execution_sleeve=execution_sleeve,
+                    currency_sleeve=sleeve.currency_sleeve,
+                    target_weight=sleeve.target_weight,
+                    target=scope_risk.target,
+                )
+            )
+            execution_configs[(account_id, execution_sleeve)] = (
+                self.config.effective_execution_config_for_strategy(strategy_configs[0])
+            )
+
+        order_targets: list[ScopedOrderTarget] = []
+        for account_id, drafts in drafts_by_account.items():
+            allocated_scopes = allocate_cash_rebalanced_scope_states(
+                current_state=current_state,
+                scopes=drafts,
+                prices=prices,
+            )
+            for allocated in allocated_scopes:
+                order_targets.append(
+                    self._scoped_order_target_from_allocated(
+                        allocated,
+                        execution_configs[(account_id, allocated.execution_sleeve)],
+                    )
+                )
+
+        aggregate_target = self.portfolio_manager.build_target(valid_results)
+        aggregate_risk = RiskDecision(
+            approved=all(decision.approved for decision in risk_decisions),
+            target=aggregate_target,
+            violations=[
+                violation
+                for decision in risk_decisions
+                for violation in decision.violations
+            ],
+        )
+        return aggregate_target, aggregate_risk, order_targets
+
+    def _build_legacy_account_scoped_targets(
+        self,
+        run_id: str,
+        valid_results: list[TargetAllocationResult],
+        risk_manager: RiskManager,
+        current_state: PortfolioState,
+    ) -> tuple[PortfolioTarget, RiskDecision, list[ScopedOrderTarget]]:
         account_results = self._results_by_account(valid_results)
         if len(account_results) <= 1:
             target = self._target_with_configured_cash(
@@ -1583,9 +1738,17 @@ class MaestroOrchestrator:
             risk_decision = risk_manager.check(target)
             self._save_account_risk_decision(run_id, risk_decision, target.source_strategy_ids)
             account_id = next(iter(account_results), None)
-            return target, risk_decision, [(account_id, risk_decision.target)]
+            return target, risk_decision, [
+                ScopedOrderTarget(
+                    account_id=account_id,
+                    execution_sleeve=None,
+                    target=risk_decision.target,
+                    execution_config=self.config.execution,
+                    state=current_state,
+                )
+            ]
 
-        order_targets: list[tuple[str | None, PortfolioTarget]] = []
+        order_targets: list[ScopedOrderTarget] = []
         risk_decisions = []
         for account_id, results in account_results.items():
             strategy_configs = [
@@ -1606,7 +1769,15 @@ class MaestroOrchestrator:
                 account_id=account_id,
             )
             risk_decisions.append(account_risk)
-            order_targets.append((account_id, account_risk.target))
+            order_targets.append(
+                ScopedOrderTarget(
+                    account_id=account_id,
+                    execution_sleeve=None,
+                    target=account_risk.target,
+                    execution_config=self.config.execution,
+                    state=current_state,
+                )
+            )
 
         aggregate_target = self.portfolio_manager.build_target(valid_results)
         aggregate_risk = RiskDecision(
@@ -1620,6 +1791,24 @@ class MaestroOrchestrator:
         )
         return aggregate_target, aggregate_risk, order_targets
 
+    def _scoped_order_target_from_allocated(
+        self,
+        allocated: AllocatedExecutionScope,
+        execution_config: ExecutionConfig,
+    ) -> ScopedOrderTarget:
+        return ScopedOrderTarget(
+            account_id=allocated.account_id,
+            execution_sleeve=allocated.execution_sleeve,
+            target=allocated.target,
+            execution_config=execution_config,
+            state=allocated.state,
+            allocated_cash=allocated.allocated_cash,
+            current_value=allocated.current_value,
+            current_weight=allocated.current_weight,
+            target_weight=allocated.target_weight,
+            drift=allocated.drift,
+        )
+
     def _results_by_account(
         self,
         valid_results: list[TargetAllocationResult],
@@ -1631,6 +1820,27 @@ class MaestroOrchestrator:
         if not results_by_account:
             results_by_account[PAPER_DEFAULT_ACCOUNT_ID] = []
         return results_by_account
+
+    def _results_by_execution_scope(
+        self,
+        valid_results: list[TargetAllocationResult],
+    ) -> dict[tuple[str | None, str | None], list[TargetAllocationResult]]:
+        results_by_scope: dict[tuple[str | None, str | None], list[TargetAllocationResult]] = {}
+        for result in valid_results:
+            strategy = self._strategy_config(result.strategy_id)
+            account_id = self.account_router.account_id_for_strategy(strategy)
+            key = (account_id, strategy.execution_sleeve)
+            results_by_scope.setdefault(key, []).append(result)
+        return results_by_scope
+
+    def _strategy_config(self, strategy_id: str):
+        for loaded in self.registry.strategies:
+            if loaded.config.id == strategy_id:
+                return loaded.config
+        for strategy in self.config.strategies:
+            if strategy.id == strategy_id:
+                return strategy
+        raise ValueError(f"Unknown strategy id: {strategy_id}")
 
     def _save_account_risk_decision(
         self,
@@ -1688,6 +1898,7 @@ class MaestroOrchestrator:
         source_strategy_ids: list[str],
         *,
         account_id: str | None = None,
+        execution_sleeve: str | None = None,
         signal_preview: bool = False,
     ) -> list[OrderIntent]:
         account_ids = {
@@ -1720,6 +1931,7 @@ class MaestroOrchestrator:
                         "account_id": order.account_id or resolved_account_id,
                         "source_strategy_ids": list(source_strategy_ids),
                         "order_posture": resolved_order_posture,
+                        "execution_sleeve": execution_sleeve,
                     },
                 }
             )

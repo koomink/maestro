@@ -3,8 +3,10 @@ from pathlib import Path
 
 import yaml
 
+from maestro.config.execution import ExecutionConfig
 from maestro.config.loader import load_config
 from maestro.core.enums import BrokerProduct, Currency, OrderSide
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_order_factory import ProductRoutingKISLiveOrderClient
 from maestro.execution.order_builder import OrderBuilder
@@ -86,6 +88,99 @@ def test_order_builder_creates_independent_currency_sleeve_orders():
     assert overseas.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
     assert overseas.notional == 5_000.0
 
+
+def test_order_builder_sells_sleeve_positions_missing_from_target():
+    config = load_config("tests/fixtures/configs/live_approval_kis_multi_asset.yaml")
+    state = PortfolioState(
+        cash=0,
+        cash_by_currency={"USD": 1_000.0},
+        positions={"AAPL": 10},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime.now(UTC),
+        allocations={},
+        allocation_sleeves={"USD": {"VOO": 1.0}},
+    )
+
+    orders = OrderBuilder(
+        instruments=config.universe.instruments,
+        currency_sleeves=config.portfolio.currency_sleeves,
+    ).build_orders(state, target, {"AAPL": 100.0, "VOO": 200.0})
+
+    by_symbol = {order.symbol: order for order in orders}
+    assert by_symbol["AAPL"].side == OrderSide.SELL
+    assert by_symbol["AAPL"].quantity == 10
+    assert by_symbol["AAPL"].notional == 1_000.0
+    assert by_symbol["AAPL"].sleeve == "USD"
+    assert by_symbol["VOO"].side == OrderSide.BUY
+    assert by_symbol["VOO"].quantity == 5
+    assert by_symbol["VOO"].notional == 1_000.0
+
+
+def test_order_builder_scales_sleeve_buys_to_cash_after_fee_buffer():
+    builder = OrderBuilder(
+        config=ExecutionConfig(
+            order_posture="armed",
+            live_order_limits={"fee_buffer_pct": 0.002},
+        ),
+        instruments=[
+            _us_instrument("AAPL"),
+            _us_instrument("VOO"),
+            _us_instrument("QQQ"),
+        ],
+        currency_sleeves={
+            "USD": {"cash_symbol": "CASH_USD", "symbols": ["AAPL", "VOO", "QQQ"]}
+        },
+    )
+    state = PortfolioState(
+        cash=0,
+        cash_by_currency={"USD": 1_000.0},
+        positions={"AAPL": 10},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime.now(UTC),
+        allocations={},
+        allocation_sleeves={"USD": {"VOO": 0.5, "QQQ": 0.5}},
+    )
+
+    orders = builder.build_orders(state, target, {"AAPL": 100.0, "VOO": 1.0, "QQQ": 1.0})
+
+    by_symbol = {order.symbol: order for order in orders}
+    assert by_symbol["AAPL"].side == OrderSide.SELL
+    assert by_symbol["AAPL"].quantity == 10
+    assert by_symbol["AAPL"].notional == 1_000.0
+    buy_orders = [order for order in orders if order.side == OrderSide.BUY]
+    assert {order.symbol: order.notional for order in buy_orders} == {"VOO": 499.0, "QQQ": 499.0}
+    assert sum(order.notional for order in buy_orders) == 998.0
+    for order in buy_orders:
+        assert order.metadata["cash_scaled"] is True
+        assert order.metadata["cash_available"] == 998.0
+        assert order.metadata["buy_notional_before_scaling"] == 2_000.0
+        assert order.metadata["buy_notional_after_scaling"] == 998.0
+        assert order.metadata["fee_buffer_pct"] == 0.002
+
+
+def test_order_builder_drops_scaled_sleeve_buy_below_minimum():
+    builder = OrderBuilder(
+        config=ExecutionConfig(order_posture="armed"),
+        instruments=[_us_instrument("AAPL"), _us_instrument("VOO")],
+        currency_sleeves={"USD": {"cash_symbol": "CASH_USD", "symbols": ["AAPL", "VOO"]}},
+    )
+    state = PortfolioState(
+        cash=0,
+        cash_by_currency={"USD": 50.0},
+        positions={"AAPL": 10},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime.now(UTC),
+        allocations={},
+        allocation_sleeves={"USD": {"VOO": 1.0}},
+    )
+
+    orders = builder.build_orders(state, target, {"AAPL": 100.0, "VOO": 100.0})
+
+    assert [order.symbol for order in orders] == ["AAPL"]
+    assert orders[0].side == OrderSide.SELL
 
 def test_paper_execution_updates_cash_by_order_currency():
     config = load_config("tests/fixtures/configs/live_approval_kis_multi_asset.yaml")
@@ -189,3 +284,20 @@ def test_kis_multi_product_readonly_service_filters_instruments_by_product(tmp_p
 
     assert overseas_symbols == {"CASH_USD", "AAPL", "VOO"}
     assert domestic_symbols == {"CASH_KRW", "SAMSUNG", "KODEX200"}
+
+
+def _us_instrument(symbol: str) -> TradableInstrument:
+    return TradableInstrument(
+        symbol=symbol,
+        asset_type="etf",
+        region="US",
+        currency="USD",
+        broker="kis",
+        broker_product="kis_overseas_stock",
+        broker_symbol=symbol,
+        exchange_code="NASD",
+        quantity_step=1,
+        price_tick=0.01,
+        min_order_quantity=1,
+        min_order_notional=1,
+    )

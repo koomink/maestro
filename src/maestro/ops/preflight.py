@@ -19,7 +19,7 @@ def private_beta_failures(config: MaestroConfig, report: HealthReport) -> list[s
         failures.append("broker_quote_validation_not_required")
     if not config.execution.broker_validation.require_risk_validation:
         failures.append("broker_risk_validation_not_required")
-    if config.execution.live_order_limits.daily_loss_limit is None:
+    if not config.execution.live_order_limits.has_daily_loss_limit():
         failures.append("daily_loss_limit_missing")
     if config.monitoring.heartbeat_max_age_seconds <= 0:
         failures.append("heartbeat_monitoring_missing")

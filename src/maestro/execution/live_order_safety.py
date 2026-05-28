@@ -113,9 +113,21 @@ class LiveOrderSafetyService:
         if self.config.allowed_order_type != OrderType.LIMIT:
             raise ValueError("Configured live order type must be limit")
         limits = self.config.live_order_limits
-        if request.notional > limits.max_order_notional:
+        order_limit_currency = (
+            self._request_currency(request) if limits.max_order_notional_by_currency else None
+        )
+        max_order_notional = limits.max_order_notional_for(order_limit_currency)
+        if max_order_notional is None:
+            raise ValueError("Live order currency is missing a per-order cap")
+        if request.notional > max_order_notional:
             raise ValueError("Live order notional exceeds per-order cap")
-        if self._daily_live_notional() + request.notional > limits.max_daily_notional:
+        daily_limit_currency = (
+            self._request_currency(request) if limits.max_daily_notional_by_currency else None
+        )
+        max_daily_notional = limits.max_daily_notional_for(daily_limit_currency)
+        if max_daily_notional is None:
+            raise ValueError("Live order currency is missing a daily cap")
+        if self._daily_live_notional(daily_limit_currency) + request.notional > max_daily_notional:
             raise ValueError("Live order notional exceeds daily cap")
         if limits.max_daily_order_count > 0:
             if self._daily_live_order_count() + 1 > limits.max_daily_order_count:
@@ -182,16 +194,38 @@ class LiveOrderSafetyService:
             payload,
         )
 
-    def _daily_live_notional(self) -> float:
+    def _daily_live_notional(self, currency: Currency | None = None) -> float:
         today = _live_order_date()
         total = 0.0
         for row in self.state_store.list_system_events_by_type(
             SystemEventType.LIVE_ORDER_RESULT, limit=1000
         ):
             payload = row["payload"]
-            if payload.get("submitted_date") == today:
+            if payload.get("submitted_date") != today:
+                continue
+            if currency is None or self._payload_currency(payload) == currency:
                 total += float(payload.get("notional", 0.0))
         return total
+
+    def _request_currency(self, request: LiveOrderRequest) -> Currency:
+        if request.currency is not None:
+            return request.currency
+        instrument = self.instruments.get(request.symbol)
+        if instrument is not None:
+            return instrument.currency
+        if self.base_currency is not None:
+            return self.base_currency
+        raise ValueError("Live order currency is required for currency-specific limits")
+
+    def _payload_currency(self, payload: dict) -> Currency:
+        request = payload.get("request")
+        if isinstance(request, dict) and request.get("currency"):
+            return Currency(str(request["currency"]))
+        if payload.get("currency"):
+            return Currency(str(payload["currency"]))
+        if self.base_currency is not None:
+            return self.base_currency
+        return Currency.KRW
 
     def _daily_live_order_count(self) -> int:
         today = _live_order_date()

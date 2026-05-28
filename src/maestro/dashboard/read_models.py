@@ -1438,19 +1438,38 @@ def build_daily_live_order_usage(config: MaestroConfig, store: StateStore) -> di
     today = utc_now().date().isoformat()
     count = 0
     notional = 0.0
+    notional_by_currency: dict[str, float] = {}
     for row in store.list_system_events_by_type("live_order_result", limit=1000):
         payload = row.get("payload", {})
         if payload.get("submitted_date") != today:
             continue
         count += 1
-        notional += float(payload.get("notional", 0.0))
+        row_notional = float(payload.get("notional", 0.0))
+        notional += row_notional
+        currency = _live_order_result_currency(payload, config.portfolio.base_currency)
+        notional_by_currency[currency] = notional_by_currency.get(currency, 0.0) + row_notional
+    limits = config.execution.live_order_limits
     return {
         "date": today,
         "order_count": count,
-        "max_daily_live_order_count": config.execution.live_order_limits.max_daily_order_count,
+        "max_daily_live_order_count": limits.max_daily_order_count,
         "notional": notional,
-        "max_daily_live_notional": config.execution.live_order_limits.max_daily_notional,
+        "notional_by_currency": notional_by_currency,
+        "max_daily_live_notional": limits.max_daily_notional,
+        "max_daily_live_notional_by_currency": {
+            currency.value: value
+            for currency, value in limits.max_daily_notional_by_currency.items()
+        },
     }
+
+
+def _live_order_result_currency(payload: dict[str, Any], default: str) -> str:
+    request = payload.get("request")
+    if isinstance(request, dict) and request.get("currency"):
+        return str(request["currency"])
+    if payload.get("currency"):
+        return str(payload["currency"])
+    return default
 
 
 def build_system_events_table(store: StateStore, limit: int = 20) -> list[dict[str, Any]]:
@@ -1591,12 +1610,47 @@ def _daily_live_usage_status(daily_live_usage: dict[str, Any]) -> dict[str, Any]
             daily_live_usage.get("max_daily_live_order_count"),
             "Daily live order count",
         ),
-        "notional": _limit_status(
+        "notional": _currency_limit_status(
+            daily_live_usage.get("notional_by_currency"),
+            daily_live_usage.get("max_daily_live_notional_by_currency"),
             daily_live_usage.get("notional"),
             daily_live_usage.get("max_daily_live_notional"),
             "Daily live notional",
         ),
     }
+
+
+def _currency_limit_status(
+    values_by_currency: object,
+    limits_by_currency: object,
+    fallback_value: object,
+    fallback_limit: object,
+    label: str,
+) -> dict[str, Any]:
+    if (
+        isinstance(values_by_currency, dict)
+        and isinstance(limits_by_currency, dict)
+        and limits_by_currency
+    ):
+        statuses = {
+            str(currency): _limit_status(
+                values_by_currency.get(currency, 0.0),
+                limit,
+                f"{label} {currency}",
+            )
+            for currency, limit in limits_by_currency.items()
+        }
+        status_values = {item["status"] for item in statuses.values()}
+        if "exceeded" in status_values:
+            status = "exceeded"
+        elif "warning" in status_values:
+            status = "warning"
+        elif "ok" in status_values:
+            status = "ok"
+        else:
+            status = "not_configured"
+        return {"status": status, "by_currency": statuses}
+    return _limit_status(fallback_value, fallback_limit, label)
 
 
 def _limit_status(value: object, limit: object, label: str) -> dict[str, Any]:

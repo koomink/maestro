@@ -176,6 +176,50 @@ def test_target_rebalance_orders_are_rounded_to_instrument_contract():
     assert orders[0].notional == 987.6
 
 
+def test_target_rebalance_scales_non_sleeve_buys_to_cash_after_fee_buffer():
+    builder = OrderBuilder(
+        config=ExecutionConfig(
+            order_posture="armed",
+            live_order_limits={"fee_buffer_pct": 0.1},
+        ),
+        instruments=[
+            TradableInstrument(
+                symbol="VOO",
+                asset_type="etf",
+                region="US",
+                currency="USD",
+                broker="kis",
+                broker_product="kis_overseas_stock",
+                broker_symbol="VOO",
+                exchange_code="AMEX",
+                quantity_step=1,
+                price_tick=0.01,
+                min_order_quantity=1,
+                min_order_notional=1,
+            )
+        ],
+    )
+    state = PortfolioState(cash=100, positions={"AAPL": 10})
+    target = PortfolioTarget(
+        timestamp=_dt(2026, 5, 15),
+        allocations={"VOO": 1.0},
+        source_strategy_ids=["s"],
+    )
+
+    orders = builder.build_orders(state, target, prices={"AAPL": 100.0, "VOO": 1.0})
+
+    assert len(orders) == 1
+    assert orders[0].symbol == "VOO"
+    assert orders[0].side == OrderSide.BUY
+    assert orders[0].quantity == 90
+    assert orders[0].notional == 90.0
+    assert orders[0].metadata["cash_scaled"] is True
+    assert orders[0].metadata["cash_available"] == 90.0
+    assert orders[0].metadata["buy_notional_before_scaling"] == 1_100.0
+    assert orders[0].metadata["buy_notional_after_scaling"] == 90.0
+    assert orders[0].metadata["fee_buffer_pct"] == 0.1
+
+
 def test_live_contribution_duplicate_ignores_rejected_order_intent(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
     order_payload = {

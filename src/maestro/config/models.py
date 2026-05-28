@@ -10,6 +10,7 @@ from maestro.config.execution import (
     BrokerValidationConfig,
     ContributionConfig,
     ExecutionConfig,
+    ExecutionSleevesConfig,
     LiveOrderLimitsConfig,
     MarketSessionConfig,
 )
@@ -42,12 +43,16 @@ class MaestroConfig(StrictConfigModel):
     profile_stage: ProfileStage | None = Field(default=None, exclude=True)
     app_fragment_paths: list[str] = Field(default_factory=list)
     app_fragment_recommendations: dict[str, Any] = Field(default_factory=dict, exclude=True)
+    app_fragment_strategy_recommendations: dict[str, Any] = Field(
+        default_factory=dict, exclude=True
+    )
     strategy_account_map_path: str | None = None
     portfolio: PortfolioConfig
     strategies: list[StrategyPluginConfig]
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     datahub: DataHubConfig = Field(default_factory=DataHubConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    execution_sleeves: ExecutionSleevesConfig = Field(default_factory=ExecutionSleevesConfig)
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     state: StateConfig
@@ -133,6 +138,7 @@ class MaestroConfig(StrictConfigModel):
     def validate_mode_contract(self) -> "MaestroConfig":
         self._derive_legacy_accounts()
         self._validate_account_mappings()
+        self._validate_execution_sleeves()
         if self.mode == RunMode.PAPER and self.portfolio.initial_cash is None:
             raise ValueError("paper mode requires portfolio.initial_cash")
         if self.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
@@ -250,6 +256,61 @@ class MaestroConfig(StrictConfigModel):
             return "dry_run"
         return posture
 
+
+    def _validate_execution_sleeves(self) -> None:
+        if not self.execution_sleeves.has_sleeves():
+            return
+        active_sleeves_by_account: dict[str, set[str]] = {}
+        for strategy in self.strategies:
+            if not strategy.enabled or not strategy.signal_enabled:
+                continue
+            if not strategy.account_id:
+                continue
+            if not strategy.execution_sleeve:
+                raise ValueError(
+                    f"strategy {strategy.id} requires execution_sleeve when "
+                    "execution_sleeves are configured"
+                )
+            account_sleeves = self.execution_sleeves.account_sleeves(strategy.account_id)
+            if strategy.execution_sleeve not in account_sleeves:
+                raise ValueError(
+                    f"strategy {strategy.id} references unknown execution_sleeve "
+                    f"{strategy.execution_sleeve} for account_id {strategy.account_id}"
+                )
+            active_sleeves_by_account.setdefault(strategy.account_id, set()).add(
+                strategy.execution_sleeve
+            )
+        for account_id, sleeve_ids in active_sleeves_by_account.items():
+            total = sum(
+                self.execution_sleeves.accounts[account_id][sleeve_id].target_weight
+                for sleeve_id in sleeve_ids
+            )
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(
+                    "execution_sleeves target_weight for active sleeves must sum to 1.0 "
+                    f"for account_id {account_id}: {total}"
+                )
+
+    def execution_sleeve_for_strategy(
+        self, strategy: StrategyPluginConfig
+    ):
+        return self.execution_sleeves.sleeve(strategy.account_id, strategy.execution_sleeve)
+
+    def effective_execution_config_for_strategy(
+        self, strategy: StrategyPluginConfig
+    ) -> ExecutionConfig:
+        sleeve = self.execution_sleeve_for_strategy(strategy)
+        if sleeve is None:
+            return self.execution
+        values = self.execution.model_dump(mode="python")
+        values["order_generation_mode"] = sleeve.order_generation_mode
+        if sleeve.contribution is not None:
+            values["contribution"] = sleeve.contribution.model_dump(mode="python")
+        return ExecutionConfig.model_validate(values)
+
+    def effective_strategy_order_generation_mode(self, strategy: StrategyPluginConfig) -> str:
+        return self.effective_execution_config_for_strategy(strategy).order_generation_mode
+
     def _has_enabled_account(self) -> bool:
         return any(account.enabled for account in self.accounts) or self.kis.enabled
 
@@ -284,6 +345,7 @@ __all__ = [
     "DataHubConfig",
     "DataHubProviderConfig",
     "ExecutionConfig",
+    "ExecutionSleevesConfig",
     "KISConfig",
     "LiveOrderLimitsConfig",
     "MaestroConfig",

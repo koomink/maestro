@@ -1,7 +1,37 @@
+execution_sleeves:
+  accounts:
+    kis_mock:
+      ataraxia_isa:
+        currency_sleeve: KRW
+        target_weight: 1.0
+        order_generation_mode: buy_only_contribution
+        contribution:
+          enabled: true
+          currency: KRW
+          sleeve: KRW
+          monthly_budget: 3000000
+          min_monthly_budget: 2000000
+          max_monthly_budget: 4000000
+          buy_day: 15
+          non_trading_day_policy: next_trading_day
+          target_policy: buy_only_toward_target
+
+    dev_sandbox:
+      snowball_us:
+        currency_sleeve: USD
+        target_weight: 1.0
+        order_generation_mode: target_rebalance
+
+      trading_agents:
+        currency_sleeve: USD
+        target_weight: 1.0
+        order_generation_mode: target_rebalance
+
 strategies:
   ataraxia:
     enabled: true
     account_id: kis_mock
+    execution_sleeve: ataraxia_isa
     readonly: true
     signal: true
     order_posture: dry_run
@@ -9,6 +39,7 @@ strategies:
   snowball_us:
     enabled: true
     account_id: dev_sandbox
+    execution_sleeve: snowball_us
     readonly: true
     signal: true
     order_posture: dry_run
@@ -16,6 +47,7 @@ strategies:
   trading_agents:
     enabled: false
     account_id: dev_sandbox
+    execution_sleeve: trading_agents
     readonly: true
     signal: false
     order_posture: disabled

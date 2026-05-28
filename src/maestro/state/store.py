@@ -305,7 +305,14 @@ class StateStore:
     def list_orders(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("orders", limit)
 
-    def monthly_contribution_order_exists(self, month_key: str, sleeve: str) -> bool:
+    def monthly_contribution_order_exists(
+        self,
+        month_key: str,
+        sleeve: str,
+        *,
+        execution_sleeve: str | None = None,
+        account_id: str | None = None,
+    ) -> bool:
         with self._connect() as conn:
             rows = conn.execute("SELECT payload FROM orders ORDER BY id DESC").fetchall()
         for row in rows:
@@ -315,12 +322,29 @@ class StateStore:
                 metadata.get("order_generation_mode") == "buy_only_contribution"
                 and metadata.get("contribution_month") == month_key
                 and metadata.get("contribution_sleeve") == sleeve
+                and _metadata_matches_scope(
+                    metadata,
+                    execution_sleeve=execution_sleeve,
+                    account_id=account_id,
+                )
             ):
                 return True
         return False
 
-    def monthly_live_contribution_order_exists(self, month_key: str, sleeve: str) -> bool:
-        contribution_order_ids = self._monthly_contribution_order_ids(month_key, sleeve)
+    def monthly_live_contribution_order_exists(
+        self,
+        month_key: str,
+        sleeve: str,
+        *,
+        execution_sleeve: str | None = None,
+        account_id: str | None = None,
+    ) -> bool:
+        contribution_order_ids = self._monthly_contribution_order_ids(
+            month_key,
+            sleeve,
+            execution_sleeve=execution_sleeve,
+            account_id=account_id,
+        )
         if not contribution_order_ids:
             return False
         lifecycle_rows = self.list_system_events_by_type("live_order_lifecycle", limit=1000)
@@ -334,7 +358,14 @@ class StateStore:
                 return True
         return False
 
-    def _monthly_contribution_order_ids(self, month_key: str, sleeve: str) -> set[str]:
+    def _monthly_contribution_order_ids(
+        self,
+        month_key: str,
+        sleeve: str,
+        *,
+        execution_sleeve: str | None = None,
+        account_id: str | None = None,
+    ) -> set[str]:
         with self._connect() as conn:
             rows = conn.execute("SELECT order_id, payload FROM orders ORDER BY id DESC").fetchall()
         order_ids = set()
@@ -345,6 +376,11 @@ class StateStore:
                 metadata.get("order_generation_mode") == "buy_only_contribution"
                 and metadata.get("contribution_month") == month_key
                 and metadata.get("contribution_sleeve") == sleeve
+                and _metadata_matches_scope(
+                    metadata,
+                    execution_sleeve=execution_sleeve,
+                    account_id=account_id,
+                )
             ):
                 order_ids.add(str(payload.get("order_id") or order_id))
         return order_ids
@@ -514,3 +550,16 @@ def _same_state_config_identity(existing: dict[str, str], current: dict[str, str
     if existing_state_fingerprint is None:
         return existing.get("fingerprint") == current.get("fingerprint")
     return existing_state_fingerprint == current.get("state_fingerprint")
+
+
+def _metadata_matches_scope(
+    metadata: dict,
+    *,
+    execution_sleeve: str | None,
+    account_id: str | None,
+) -> bool:
+    if execution_sleeve is not None and metadata.get("execution_sleeve") != execution_sleeve:
+        return False
+    if account_id is not None and metadata.get("account_id") != account_id:
+        return False
+    return True

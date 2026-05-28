@@ -110,7 +110,19 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
             "live_order_dry_run": config.execution.live_order_dry_run,
             "allowed_order_type": config.execution.allowed_order_type.value,
             "max_live_order_notional": config.execution.live_order_limits.max_order_notional,
+            "max_live_order_notional_by_currency": {
+                currency.value: value
+                for currency, value in (
+                    config.execution.live_order_limits.max_order_notional_by_currency.items()
+                )
+            },
             "max_daily_live_notional": config.execution.live_order_limits.max_daily_notional,
+            "max_daily_live_notional_by_currency": {
+                currency.value: value
+                for currency, value in (
+                    config.execution.live_order_limits.max_daily_notional_by_currency.items()
+                )
+            },
             "max_daily_live_order_count": (
                 config.execution.live_order_limits.max_daily_order_count
             ),
@@ -123,6 +135,12 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
                 config.execution.broker_validation.require_risk_validation
             ),
             "daily_loss_limit": config.execution.live_order_limits.daily_loss_limit,
+            "daily_loss_limit_by_currency": {
+                currency.value: value
+                for currency, value in (
+                    config.execution.live_order_limits.daily_loss_limit_by_currency.items()
+                )
+            },
             "heartbeat_max_age_seconds": config.monitoring.heartbeat_max_age_seconds,
             "scheduled_run_max_age_seconds": config.monitoring.scheduled_run_max_age_seconds,
         },

@@ -2,9 +2,11 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from maestro.config.loader import load_config
 from maestro.config.models import MaestroConfig
 from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
+from maestro.dashboard.actions import generate_strategy_signal
 from maestro.dashboard.read_models import (
     build_approvals_table,
     build_broker_account_summary,
@@ -47,11 +49,13 @@ class TelegramOperatorCommandRouter:
         store: StateStore,
         audit: AuditLogger,
         client: TelegramBotClient,
+        signal_config_path: str | Path | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.audit = audit
         self.client = client
+        self.signal_config_path = Path(signal_config_path) if signal_config_path else None
 
     def process_update(self, update: Mapping[str, Any]) -> bool:
         callback = update.get("callback_query")
@@ -76,6 +80,11 @@ class TelegramOperatorCommandRouter:
         if not self._user_allowed(user_id):
             self._send(chat_id, "Unauthorized Telegram user.")
             self._record(command, chat_id, user_id, username, "denied_user")
+            return True
+
+        if command.startswith("/signal_"):
+            self._generate_strategy_signal(chat_id, command)
+            self._record(command, chat_id, user_id, username, "handled")
             return True
 
         handler = {
@@ -264,6 +273,46 @@ class TelegramOperatorCommandRouter:
         if signal.get("approval_run_id"):
             lines.append(f"approval_run_id: {signal['approval_run_id']}")
         self._send(chat_id, "\n".join(lines))
+
+
+    def _generate_strategy_signal(self, chat_id: int, command: str) -> None:
+        if self.signal_config_path is None:
+            self._send(chat_id, "Signal generation requires telegram-operator --signal-config.")
+            return
+        try:
+            signal_config = load_config(self.signal_config_path)
+            strategy_id = _strategy_id_for_signal_command(command, signal_config)
+            if strategy_id is None:
+                raise ValueError(f"Unknown signal command: {command}")
+            result = generate_strategy_signal(self.signal_config_path, strategy_id)
+        except ValueError as exc:
+            self._send(
+                chat_id,
+                "\n".join(
+                    [
+                        "Signal generation failed",
+                        f"command: {command}",
+                        f"message: {exc}",
+                    ]
+                ),
+            )
+            return
+        loaded = ",".join(result.get("loaded_strategies") or []) or "none"
+        self._send(
+            chat_id,
+            "\n".join(
+                [
+                    "Signal generated",
+                    f"strategy_id: {result['strategy_id']}",
+                    f"signal_run_id: {result['signal_run_id']}",
+                    f"loaded_strategies: {loaded}",
+                    f"action_required: {str(result['action_required']).lower()}",
+                    f"orders_preview_count: {result['orders_preview_count']}",
+                    "approval_created: false",
+                    "broker_submit: false",
+                ]
+            ),
+        )
 
     def _account(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
@@ -789,11 +838,75 @@ def _operator_time(value: object, config: MaestroConfig) -> str:
     return format_operator_time(value, operator_timezone(config))
 
 
-def telegram_bot_commands() -> list[dict[str, str]]:
-    return [
+def telegram_bot_commands(signal_config: MaestroConfig | None = None) -> list[dict[str, str]]:
+    commands = [
         {"command": command, "description": description}
         for command, description in TELEGRAM_OPERATOR_COMMANDS
     ]
+    if signal_config is None:
+        return commands
+    seen = {command["command"] for command in commands}
+    for strategy in signal_config.strategies:
+        if not strategy.enabled or not strategy.signal_enabled:
+            continue
+        command = _primary_signal_command(strategy.id)
+        if command in seen:
+            continue
+        seen.add(command)
+        commands.append(
+            {
+                "command": command,
+                "description": f"Generate {_strategy_display_name(strategy.id)} signal",
+            }
+        )
+    return commands
+
+
+def _strategy_id_for_signal_command(command: str, config: MaestroConfig) -> str | None:
+    command_name = command.removeprefix("/")
+    matches = {
+        name: strategy.id
+        for strategy in config.strategies
+        for name in _signal_command_names(strategy.id)
+    }
+    return matches.get(command_name)
+
+
+def _signal_command_names(strategy_id: str) -> list[str]:
+    slug = _telegram_command_slug(strategy_id)
+    names = [_primary_signal_command(strategy_id)]
+    canonical = f"signal_{slug}"
+    if canonical not in names:
+        names.append(canonical)
+    return names
+
+
+def _primary_signal_command(strategy_id: str) -> str:
+    slug = _telegram_command_slug(strategy_id)
+    if slug.endswith("_us"):
+        slug = slug.removesuffix("_us")
+    return f"signal_{slug}"
+
+
+def _telegram_command_slug(value: str) -> str:
+    slug = []
+    previous_underscore = False
+    for char in value.lower():
+        allowed = ("a" <= char <= "z") or ("0" <= char <= "9") or char == "_"
+        next_char = char if allowed else "_"
+        if next_char == "_":
+            if previous_underscore:
+                continue
+            previous_underscore = True
+        else:
+            previous_underscore = False
+        slug.append(next_char)
+    return "".join(slug).strip("_")
+
+
+def _strategy_display_name(strategy_id: str) -> str:
+    slug = _telegram_command_slug(strategy_id).removesuffix("_us")
+    return " ".join(part.capitalize() for part in slug.split("_") if part)
 
 
 __all__ = ["TelegramOperatorCommandRouter", "telegram_bot_commands"]

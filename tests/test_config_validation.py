@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from maestro.config.identity import config_identity
 from maestro.config.loader import load_config
 from maestro.config.models import StrategyPluginConfig
-from maestro.core.enums import BrokerProduct, ProfileStage
+from maestro.core.enums import BrokerProduct, Currency, ProfileStage
 from maestro.datahub.base import build_data_provider
 from maestro.datahub.router import DataHubRouter
 from maestro.sdk import DataRequest
@@ -278,6 +278,62 @@ def test_execution_nested_blocks_load_canonical_schema(tmp_path):
     assert config.execution.live_order_limits.max_daily_order_count == 3
     assert config.execution.live_order_limits.daily_loss_limit == 50
     assert config.execution.live_order_limits.fee_buffer_pct == 0.01
+
+
+
+def test_live_order_limits_accept_currency_specific_caps(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["live_order_limits"] = {
+        "max_order_notional_by_currency": {"KRW": 1_000_000, "USD": 1_000},
+        "max_daily_notional_by_currency": {"KRW": 10_000_000, "USD": 10_000},
+        "max_daily_order_count": 3,
+        "daily_loss_limit_by_currency": {"KRW": 100_000, "USD": 100},
+        "fee_buffer_pct": 0.01,
+    }
+    config_path = tmp_path / "currency_live_order_limits.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    limits = config.execution.live_order_limits
+    assert limits.max_order_notional_by_currency == {
+        Currency.KRW: 1_000_000.0,
+        Currency.USD: 1_000.0,
+    }
+    assert limits.max_daily_notional_by_currency == {
+        Currency.KRW: 10_000_000.0,
+        Currency.USD: 10_000.0,
+    }
+    assert limits.daily_loss_limit_by_currency == {
+        Currency.KRW: 100_000.0,
+        Currency.USD: 100.0,
+    }
+
+
+
+def test_live_order_limits_reject_invalid_currency_specific_caps(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["live_order_limits"] = {
+        "max_order_notional_by_currency": {"KRW": -1},
+        "max_daily_notional_by_currency": {"KRW": 10_000_000},
+        "daily_loss_limit_by_currency": {"KRW": 100_000},
+    }
+    config_path = tmp_path / "negative_currency_live_order_limits.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValueError, match="currency-specific notional limits"):
+        load_config(config_path)
+
+    raw["execution"]["live_order_limits"] = {
+        "max_order_notional_by_currency": {"KRW": 1_000_000},
+        "max_daily_notional_by_currency": {"KRW": 10_000_000},
+        "daily_loss_limit_by_currency": {"KRW": 0},
+    }
+    config_path = tmp_path / "zero_currency_daily_loss_limit.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValueError, match="currency-specific daily loss limits"):
+        load_config(config_path)
 
 
 def test_execution_proposal_engine_alias_loads_canonical_schema(tmp_path):
@@ -1013,6 +1069,193 @@ def test_shared_strategy_account_map_applies_phase_controls(tmp_path):
         ("snowball_us", True, "dev_sandbox", True, True, "dry_run"),
         ("trading_agents", True, "dev_sandbox", True, False, "disabled"),
     ]
+
+
+def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "execution_sleeves": {
+                    "accounts": {
+                        "kis_isa": {
+                            "ataraxia_isa": {
+                                "currency_sleeve": "KRW",
+                                "target_weight": 1.0,
+                                "order_generation_mode": "buy_only_contribution",
+                                "contribution": {
+                                    "enabled": True,
+                                    "currency": "KRW",
+                                    "sleeve": "KRW",
+                                    "monthly_budget": 3_000_000,
+                                    "min_monthly_budget": 2_000_000,
+                                    "max_monthly_budget": 4_000_000,
+                                    "buy_day": 15,
+                                },
+                            }
+                        },
+                        "dev_sandbox": {
+                            "snowball_us": {
+                                "currency_sleeve": "USD",
+                                "target_weight": 1.0,
+                                "order_generation_mode": "target_rebalance",
+                            }
+                        },
+                    }
+                },
+                "strategies": {
+                    "ataraxia": {
+                        "account_id": "kis_isa",
+                        "execution_sleeve": "ataraxia_isa",
+                        "readonly": True,
+                        "signal": True,
+                        "order_posture": "dry_run",
+                    },
+                    "snowball_us": {
+                        "account_id": "dev_sandbox",
+                        "execution_sleeve": "snowball_us",
+                        "readonly": True,
+                        "signal": True,
+                        "order_posture": "dry_run",
+                    },
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "readonly": True,
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert [
+        (strategy.id, strategy.account_id, strategy.execution_sleeve)
+        for strategy in config.strategies
+    ] == [
+        ("ataraxia", "kis_isa", "ataraxia_isa"),
+        ("snowball_us", "dev_sandbox", "snowball_us"),
+        ("trading_agents", "dev_sandbox", None),
+    ]
+    assert (
+        config.execution_sleeves.accounts["kis_isa"]["ataraxia_isa"].order_generation_mode
+        == "buy_only_contribution"
+    )
+    assert (
+        config.effective_strategy_order_generation_mode(config.strategies[0])
+        == "buy_only_contribution"
+    )
+    assert (
+        config.effective_strategy_order_generation_mode(config.strategies[1])
+        == "target_rebalance"
+    )
+
+
+def test_execution_sleeves_reject_missing_strategy_sleeve(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "execution_sleeves": {
+                    "accounts": {
+                        "kis_isa": {
+                            "ataraxia_isa": {
+                                "currency_sleeve": "KRW",
+                                "target_weight": 1.0,
+                                "order_generation_mode": "target_rebalance",
+                            }
+                        }
+                    }
+                },
+                "strategies": {
+                    "ataraxia": {
+                        "account_id": "kis_isa",
+                        "execution_sleeve": "missing",
+                        "signal": True,
+                    },
+                    "snowball_us": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                    },
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="unknown execution_sleeve"):
+        load_config(config_path)
+
+
+def test_execution_sleeves_reject_account_weight_mismatch(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "execution_sleeves": {
+                    "accounts": {
+                        "dev_sandbox": {
+                            "ataraxia_book": {
+                                "currency_sleeve": "KRW",
+                                "target_weight": 0.7,
+                                "order_generation_mode": "target_rebalance",
+                            },
+                            "snowball_book": {
+                                "currency_sleeve": "USD",
+                                "target_weight": 0.2,
+                                "order_generation_mode": "target_rebalance",
+                            },
+                        }
+                    }
+                },
+                "strategies": {
+                    "ataraxia": {
+                        "account_id": "dev_sandbox",
+                        "execution_sleeve": "ataraxia_book",
+                        "signal": True,
+                    },
+                    "snowball_us": {
+                        "account_id": "dev_sandbox",
+                        "execution_sleeve": "snowball_book",
+                        "signal": True,
+                    },
+                    "trading_agents": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="execution_sleeves target_weight"):
+        load_config(config_path)
 
 
 def test_shared_strategy_account_map_overrides_strategy_enabled(tmp_path):

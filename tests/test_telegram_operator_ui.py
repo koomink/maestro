@@ -7,14 +7,140 @@ from typer.testing import CliRunner
 from maestro.cli import app
 from maestro.config.loader import load_config
 from maestro.core.enums import SafetyState
+from maestro.dashboard.actions import build_signal_freshness
 from maestro.integrations.telegram.handlers import (
     TelegramOperatorCommandRouter,
     telegram_bot_commands,
 )
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.safety.controls import SafetyControlService
+from maestro.sdk import (
+    BaseStrategyPlugin,
+    DataBundle,
+    DataRequest,
+    StrategyContext,
+    StrategyManifest,
+    TargetAllocationResult,
+)
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
+
+
+class _TelegramStaticStrategy(BaseStrategyPlugin):
+    strategy_id = "base"
+
+    def manifest(self) -> StrategyManifest:
+        return StrategyManifest(
+            strategy_id=self.strategy_id,
+            name=self.strategy_id,
+            version="0.1.0",
+            description="Telegram operator signal test strategy.",
+            supported_modes=["paper", "live_approval"],
+            supported_asset_types=["cash", "etf"],
+            result_type="target_allocation",
+            requires_data=["price"],
+            can_run_live=True,
+        )
+
+    def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
+        return [
+            DataRequest(
+                symbol=symbol,
+                asset_type="cash" if symbol == "CASH" else "etf",
+                data_type="price",
+            )
+            for symbol in context.config.get("allocations", {"CASH": 1.0})
+        ]
+
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
+        return TargetAllocationResult(
+            strategy_id=self.strategy_id,
+            strategy_version=self.manifest().version,
+            timestamp=context.timestamp,
+            allocations=context.config.get("allocations", {"CASH": 1.0}),
+            confidence=1.0,
+            time_horizon="telegram-test",
+            rationale="Telegram operator signal test allocation.",
+        )
+
+
+class AtaraxiaTelegramSignalStrategy(_TelegramStaticStrategy):
+    strategy_id = "ataraxia"
+
+
+class SnowballTelegramSignalStrategy(_TelegramStaticStrategy):
+    strategy_id = "snowball_us"
+
+
+
+
+def test_telegram_operator_signal_command_generates_strategy_signal_for_dashboard(tmp_path):
+    readonly_config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_signal_config_path(tmp_path)
+    config = load_config(readonly_config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+        signal_config_path=signal_config_path,
+    )
+
+    assert router.process_update(message_update("/signal_ataraxia"))
+
+    text = client.sent_messages[-1]["text"]
+    assert text.startswith("Signal generated")
+    assert "strategy_id: ataraxia" in text
+    assert "signal_run_id:" in text
+    assert "loaded_strategies: ataraxia" in text
+    assert "orders_preview_count:" in text
+    signal_run_id = text.split("signal_run_id: ", 1)[1].splitlines()[0]
+    signal = store.load_signal_package(signal_run_id)
+    assert signal is not None
+    assert signal["loaded_strategies"] == ["ataraxia"]
+    counts = store.status()["counts"]
+    assert counts["approvals"] == 0
+    assert counts["orders"] == 0
+    freshness = build_signal_freshness(
+        store,
+        max_age_seconds=config.approval.signal_max_age_seconds,
+    )
+    assert freshness["strategies"][0]["strategy_id"] == "ataraxia"
+    assert freshness["strategies"][0]["latest_signal_run_id"] == signal_run_id
+
+
+def test_telegram_operator_signal_command_rejects_signal_disabled_strategy(tmp_path):
+    readonly_config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_signal_config_path(tmp_path)
+    raw = yaml.safe_load(signal_config_path.read_text())
+    raw["strategies"].append(
+        {
+            **raw["strategies"][0],
+            "id": "trading_agents",
+            "signal_enabled": False,
+            "entrypoint": "missing.strategy:MissingStrategy",
+        }
+    )
+    signal_config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(readonly_config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+        signal_config_path=signal_config_path,
+    )
+
+    assert router.process_update(message_update("/signal_trading_agents"))
+
+    assert "Signal generation failed" in client.sent_messages[-1]["text"]
+    assert "Strategy is not signal-enabled: trading_agents" in client.sent_messages[-1]["text"]
 
 
 def test_telegram_operator_read_commands_send_state_responses(tmp_path):
@@ -556,6 +682,58 @@ def test_telegram_set_commands_cli_registers_bot_commands(
     assert fake_clients[0].registered_commands == telegram_bot_commands()
 
 
+def test_telegram_operator_cli_passes_signal_config_to_router(tmp_path, monkeypatch):
+    config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_signal_config_path(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
+        return FakeTelegramClient()
+
+    class FakeRouter:
+        def __init__(self, *, signal_config_path=None, **kwargs):
+            captured["signal_config_path"] = signal_config_path
+
+        def poll_once(self, *, offset=None, timeout_seconds=0):
+            captured["timeout_seconds"] = timeout_seconds
+            return offset
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+    monkeypatch.setattr("maestro.cli.TelegramOperatorCommandRouter", FakeRouter)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "telegram-operator",
+            "--config",
+            str(config_path),
+            "--signal-config",
+            str(signal_config_path),
+            "--once",
+            "--timeout-seconds",
+            "0",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["signal_config_path"] == signal_config_path
+    assert captured["timeout_seconds"] == 0
+
+
+def test_telegram_bot_commands_include_signal_generation_commands(tmp_path):
+    signal_config = load_config(_telegram_signal_config_path(tmp_path))
+
+    commands = telegram_bot_commands(signal_config)
+
+    assert {"command": "signal_ataraxia", "description": "Generate Ataraxia signal"} in commands
+    assert {"command": "signal_snowball", "description": "Generate Snowball signal"} in commands
+    assert {
+        "command": "signal_snowball_us",
+        "description": "Generate Snowball signal",
+    } not in commands
+
+
 def test_telegram_operator_cli_rejects_placeholder_chat_ids(tmp_path):
     config_path = _telegram_config_path(tmp_path)
     raw = yaml.safe_load(config_path.read_text())
@@ -691,6 +869,32 @@ def _telegram_config_path(tmp_path) -> Path:
         "whitelisted_user_ids": [100],
     }
     config_path = tmp_path / "telegram_operator.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
+
+
+def _telegram_signal_config_path(tmp_path) -> Path:
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": False,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+    }
+    raw["strategies"][0]["id"] = "ataraxia"
+    raw["strategies"][0]["entrypoint"] = f"{__name__}:AtaraxiaTelegramSignalStrategy"
+    raw["strategies"].append(
+        {
+            **raw["strategies"][0],
+            "id": "snowball_us",
+            "entrypoint": f"{__name__}:SnowballTelegramSignalStrategy",
+            "config": {"allocations": {"CASH": 0.4, "MOCK_ETF_A": 0.1, "MOCK_ETF_B": 0.5}},
+        }
+    )
+    config_path = tmp_path / "telegram_signal.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
 

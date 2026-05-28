@@ -21,6 +21,7 @@ class StrategyPluginConfig(StrictConfigModel):
     id: str
     enabled: bool = True
     account_id: str | None = None
+    execution_sleeve: str | None = None
     readonly_enabled: bool = True
     signal_enabled: bool = True
     order_posture: Literal["disabled", "dry_run", "armed"] | None = None

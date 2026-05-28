@@ -102,6 +102,8 @@ def _apply_strategy_account_map(
         if mapped_account_id:
             strategy_values["account_id"] = mapped_account_id
         if isinstance(mapped_config, dict):
+            if "execution_sleeve" in mapped_config:
+                strategy_values["execution_sleeve"] = mapped_config["execution_sleeve"]
             if "enabled" in mapped_config:
                 strategy_values["enabled"] = bool(mapped_config["enabled"])
             if "readonly" in mapped_config:
@@ -119,6 +121,13 @@ def _apply_strategy_account_map(
 
     values = dict(raw)
     values["strategies"] = mapped_strategies
+    if "execution_sleeves" in mapping_raw:
+        if (
+            "execution_sleeves" in values
+            and values["execution_sleeves"] != mapping_raw["execution_sleeves"]
+        ):
+            raise ValueError("strategy_account_map_path execution_sleeves conflicts with config")
+        values["execution_sleeves"] = mapping_raw["execution_sleeves"]
     return values
 
 

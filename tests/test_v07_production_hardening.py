@@ -12,6 +12,7 @@ from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, Currency, OrderSide, OrderStatus
 from maestro.core.ids import new_run_id
 from maestro.core.instruments import TradableInstrument
+from maestro.execution.base import OrderIntent
 from maestro.execution.live_orders import (
     BrokerOrderId,
     BrokerReconciliationRunner,
@@ -25,6 +26,7 @@ from maestro.execution.live_orders import (
 )
 from maestro.execution.reconciliation import ReconciliationResult
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.sdk import DataBundle, DataRequest
 from maestro.state.models import PortfolioState
@@ -104,6 +106,72 @@ def test_daily_notional_limit_blocks_live_approval(tmp_path):
     assert summary.orders_created == 0
     event = orchestrator.state_store.list_system_events_by_type("live_order_limit_halt")[0]
     assert event["payload"]["reason"] == "daily_notional_exceeded"
+
+
+
+def test_currency_daily_notional_limit_blocks_only_exceeded_currency(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000, "USD": 10_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000, "USD": 1_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    store = StateStore(str(tmp_path / "currency_daily_state.db"), initial_cash=10_000.0)
+    store.save_system_event(
+        "run_existing_usd",
+        "live_order_result",
+        {
+            "submitted_date": date.today().isoformat(),
+            "notional": 200.0,
+            "request": {"currency": "USD"},
+        },
+    )
+    service = LiveExecutionGateService(
+        config,
+        store,
+        AuditLogger(str(tmp_path / "currency_daily_audit.jsonl")),
+    )
+    orders = [
+        _order("krw_order", "KRW_ETF", Currency.KRW, 9_000_000.0),
+        _order("usd_order", "USD_ETF", Currency.USD, 900.0),
+    ]
+
+    blocks = service.evaluate("run_currency_daily", orders, [])
+
+    assert [block["reason"] for block in blocks] == ["daily_notional_exceeded"]
+    assert blocks[0]["currency"] == "USD"
+    assert blocks[0]["existing_notional"] == 200.0
+    assert blocks[0]["proposed_notional"] == 900.0
+    assert blocks[0]["max_daily_live_notional"] == 1_000.0
+
+
+def test_currency_max_order_limit_blocks_exceeded_order_currency(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 1_000_000, "USD": 10_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000, "USD": 10_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "currency_max_order_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "currency_max_order_audit.jsonl")),
+    )
+
+    blocks = service.evaluate(
+        "run_currency_max_order",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_500_000.0)],
+        [],
+    )
+
+    assert [block["reason"] for block in blocks] == ["max_order_notional_exceeded"]
+    assert blocks[0]["currency"] == "KRW"
+    assert blocks[0]["order_notional"] == 1_500_000.0
+    assert blocks[0]["max_live_order_notional"] == 1_000_000.0
 
 
 def test_daily_order_count_limit_blocks_live_approval(tmp_path):
@@ -316,6 +384,43 @@ def test_broker_risk_validation_allows_concentrated_broker_truth(tmp_path):
 
     assert summary.orders_created == 2
     assert orchestrator.state_store.list_system_events_by_type("broker_risk_halt") == []
+
+
+
+def test_daily_loss_limit_by_currency_blocks_exceeded_currency(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000, "USD": 10_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000, "USD": 10_000},
+            "daily_loss_limit_by_currency": {"KRW": 1_000_000, "USD": 100},
+            "max_daily_order_count": 10,
+        },
+    )
+    store = StateStore(str(tmp_path / "currency_loss_state.db"), initial_cash=10_000.0)
+    _save_broker_snapshot_with_quotes(
+        store,
+        {"KRW_ETF": 1_000.0, "USD_ETF": 100.0},
+        account_overrides={"daily_pnl_by_currency": {"KRW": -50_000.0, "USD": -150.0}},
+    )
+    service = LiveExecutionGateService(
+        config,
+        store,
+        AuditLogger(str(tmp_path / "currency_loss_audit.jsonl")),
+    )
+
+    blocks = service.evaluate(
+        "run_currency_loss",
+        [_order("usd_order", "USD_ETF", Currency.USD, 900.0)],
+        [],
+    )
+
+    assert [block["reason"] for block in blocks] == ["broker_risk_failed"]
+    issue = blocks[0]["issues"][0]
+    assert issue["reason"] == "daily_loss_limit_exceeded"
+    assert issue["currency"] == "USD"
+    assert issue["broker_pnl"] == -150.0
+    assert issue["daily_loss_limit"] == 100.0
 
 
 def test_daily_loss_limit_blocks_from_normalized_broker_pnl(tmp_path):
@@ -635,6 +740,92 @@ class FakeBrokerReconciliation(BrokerReconciliationRunner):
             value_difference=0.0,
             broker_account_id="MOCK",
         )
+
+
+
+def _currency_limit_config(
+    tmp_path,
+    *,
+    live_order_limits: dict[str, Any],
+):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["mode"] = "live_approval"
+    raw["state"]["sqlite_path"] = str(tmp_path / "currency_limits_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "currency_limits_audit.jsonl")
+    raw["portfolio"]["allocation_mode"] = "currency_sleeves"
+    raw["portfolio"]["cash_by_currency"] = {"KRW": 10_000_000, "USD": 10_000}
+    raw["portfolio"].pop("initial_cash", None)
+    raw["portfolio"]["currency_sleeves"] = {
+        "KRW": {"cash_symbol": "CASH_KRW", "symbols": ["KRW_ETF"]},
+        "USD": {"cash_symbol": "CASH_USD", "symbols": ["USD_ETF"]},
+    }
+    raw["portfolio"].pop("allowed_symbols", None)
+    raw["universe"] = {
+        "instruments": [
+            {
+                "symbol": "KRW_ETF",
+                "asset_type": "etf",
+                "region": "KR",
+                "currency": "KRW",
+                "broker": "kis",
+                "broker_product": "kis_domestic_stock",
+                "broker_symbol": "KRWETF",
+                "exchange_code": "KRX",
+                "quantity_step": 1,
+                "price_tick": 1,
+                "min_order_quantity": 1,
+                "min_order_notional": 1,
+            },
+            {
+                "symbol": "USD_ETF",
+                "asset_type": "etf",
+                "region": "US",
+                "currency": "USD",
+                "broker": "kis",
+                "broker_product": "kis_overseas_stock",
+                "broker_symbol": "USDETF",
+                "exchange_code": "NASD",
+                "quantity_step": 1,
+                "price_tick": 0.01,
+                "min_order_quantity": 1,
+                "min_order_notional": 1,
+            },
+        ]
+    }
+    raw["strategies"] = []
+    raw["accounts"] = [{"id": "test_sandbox", "broker": "sandbox", "enabled": True}]
+    raw["kis"] = {
+        "enabled": True,
+        "provider": "mock",
+        "account_id": "MOCK",
+        "broker_products": ["kis_domestic_stock", "kis_overseas_stock"],
+    }
+    raw["execution"] = {
+        "proposal_engine": "paper",
+        "require_reconciliation_pass": False,
+        "live_order_limits": live_order_limits,
+    }
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "console",
+        "require_approval": True,
+        "default_decision": "approved",
+    }
+    config_path = tmp_path / "currency_limits.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return load_config(config_path)
+
+
+def _order(order_id: str, symbol: str, currency: Currency, notional: float) -> OrderIntent:
+    return OrderIntent(
+        order_id=order_id,
+        symbol=symbol,
+        side=OrderSide.BUY,
+        quantity=1,
+        price=notional,
+        notional=notional,
+        currency=currency,
+    )
 
 
 def _live_orchestrator(

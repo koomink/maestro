@@ -36,9 +36,9 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
     if config.execution.allowed_order_type != OrderType.LIMIT:
         failures.append("non_limit_order_type")
     limits = config.execution.live_order_limits
-    if limits.max_order_notional <= 0:
+    if not limits.max_order_notional_by_currency and limits.max_order_notional <= 0:
         failures.append("missing_per_order_notional_cap")
-    if limits.max_daily_notional <= 0:
+    if not limits.max_daily_notional_by_currency and limits.max_daily_notional <= 0:
         failures.append("missing_daily_notional_cap")
     if limits.max_daily_order_count <= 0:
         warnings.append("unbounded_daily_order_count")

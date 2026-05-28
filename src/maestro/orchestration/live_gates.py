@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderSide, RunMode
+from maestro.core.enums import Currency, OrderSide, RunMode
 from maestro.execution.base import OrderIntent
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.events import SystemEventType, save_audited_system_event
@@ -211,25 +211,60 @@ class LiveExecutionGateService:
 
     def _daily_limit_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
         today = self._now().date().isoformat()
-        existing_notional = 0.0
         existing_count = 0
+        existing_notional_by_currency: dict[Currency, float] = {}
         for row in self.state_store.list_system_events_by_type(
             SystemEventType.LIVE_ORDER_RESULT, limit=1000
         ):
             payload = row["payload"]
-            if payload.get("submitted_date") == today:
-                existing_count += 1
-                existing_notional += float(payload.get("notional", 0.0))
-        proposed_notional = sum(order.notional for order in orders)
-        proposed_count = len(orders)
+            if payload.get("submitted_date") != today:
+                continue
+            existing_count += 1
+            currency = self._event_currency(payload)
+            existing_notional_by_currency[currency] = existing_notional_by_currency.get(
+                currency, 0.0
+            ) + float(payload.get("notional", 0.0))
+
+        proposed_notional_by_currency: dict[Currency, float] = {}
         limits = self.config.execution.live_order_limits
-        if existing_notional + proposed_notional > limits.max_daily_notional:
-            return {
-                "reason": "daily_notional_exceeded",
-                "existing_notional": existing_notional,
-                "proposed_notional": proposed_notional,
-                "max_daily_live_notional": limits.max_daily_notional,
-            }
+        for order in orders:
+            currency = self._order_currency(order)
+            max_order_notional = limits.max_order_notional_for(currency)
+            if max_order_notional is None:
+                return {
+                    "reason": "max_order_notional_limit_missing",
+                    "currency": currency.value,
+                    "symbol": order.symbol,
+                }
+            if order.notional > max_order_notional:
+                return {
+                    "reason": "max_order_notional_exceeded",
+                    "currency": currency.value,
+                    "symbol": order.symbol,
+                    "order_notional": order.notional,
+                    "max_live_order_notional": max_order_notional,
+                }
+            proposed_notional_by_currency[currency] = proposed_notional_by_currency.get(
+                currency, 0.0
+            ) + order.notional
+
+        for currency, proposed_notional in proposed_notional_by_currency.items():
+            max_daily_notional = limits.max_daily_notional_for(currency)
+            if max_daily_notional is None:
+                return {
+                    "reason": "daily_notional_limit_missing",
+                    "currency": currency.value,
+                }
+            existing_notional = existing_notional_by_currency.get(currency, 0.0)
+            if existing_notional + proposed_notional > max_daily_notional:
+                return {
+                    "reason": "daily_notional_exceeded",
+                    "currency": currency.value,
+                    "existing_notional": existing_notional,
+                    "proposed_notional": proposed_notional,
+                    "max_daily_live_notional": max_daily_notional,
+                }
+        proposed_count = len(orders)
         max_count = limits.max_daily_order_count
         if max_count > 0 and existing_count + proposed_count > max_count:
             return {
@@ -239,6 +274,25 @@ class LiveExecutionGateService:
                 "max_daily_live_order_count": max_count,
             }
         return None
+
+    def _order_currency(self, order: OrderIntent) -> Currency:
+        if order.currency is not None:
+            return order.currency
+        instruments = {
+            instrument.symbol: instrument for instrument in self.config.universe.instruments
+        }
+        instrument = instruments.get(order.symbol)
+        if instrument is not None:
+            return instrument.currency
+        return Currency(self.config.portfolio.base_currency)
+
+    def _event_currency(self, payload: dict[str, Any]) -> Currency:
+        request = payload.get("request")
+        if isinstance(request, dict) and request.get("currency"):
+            return Currency(str(request["currency"]))
+        if payload.get("currency"):
+            return Currency(str(payload["currency"]))
+        return Currency(self.config.portfolio.base_currency)
 
     def _instrument_validation_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
         instruments = {
@@ -302,7 +356,7 @@ class LiveExecutionGateService:
         execution = self.config.execution
         broker_validation = execution.broker_validation
         limits = execution.live_order_limits
-        if not broker_validation.require_risk_validation and limits.daily_loss_limit is None:
+        if not broker_validation.require_risk_validation and not limits.has_daily_loss_limit():
             return None
         latest = self.state_store.load_latest_broker_account_snapshot()
         if latest is None:
@@ -315,9 +369,7 @@ class LiveExecutionGateService:
             issues.extend(self._broker_reconciliation_risk_issues(latest))
             issues.extend(self._pending_broker_order_issues(snapshot))
             issues.extend(self._cash_and_exposure_risk_issues(orders, snapshot))
-        daily_loss_issue = self._daily_loss_risk_issue(snapshot)
-        if daily_loss_issue is not None:
-            issues.append(daily_loss_issue)
+        issues.extend(self._daily_loss_risk_issues(snapshot))
         if not issues:
             return None
         return {
@@ -430,25 +482,68 @@ class LiveExecutionGateService:
             return issues
         return issues
 
-    def _daily_loss_risk_issue(self, snapshot: dict[str, Any]) -> dict[str, Any] | None:
-        daily_loss_limit = self.config.execution.live_order_limits.daily_loss_limit
+    def _daily_loss_risk_issues(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+        limits = self.config.execution.live_order_limits
+        if limits.daily_loss_limit_by_currency:
+            pnl_by_currency = _normalized_broker_pnl_by_currency(snapshot)
+            if not pnl_by_currency:
+                return [
+                    {
+                        "reason": "broker_pnl_unavailable",
+                        "daily_loss_limit_by_currency": {
+                            currency.value: limit
+                            for currency, limit in limits.daily_loss_limit_by_currency.items()
+                        },
+                    }
+                ]
+            issues = []
+            for currency, (pnl_value, pnl_source) in pnl_by_currency.items():
+                daily_loss_limit = limits.daily_loss_limit_for(currency)
+                if daily_loss_limit is None:
+                    if pnl_value < 0:
+                        issues.append(
+                            {
+                                "reason": "daily_loss_limit_missing",
+                                "currency": currency.value,
+                                "broker_pnl": pnl_value,
+                                "pnl_source": pnl_source,
+                            }
+                        )
+                    continue
+                if pnl_value <= -daily_loss_limit:
+                    issues.append(
+                        {
+                            "reason": "daily_loss_limit_exceeded",
+                            "currency": currency.value,
+                            "broker_pnl": pnl_value,
+                            "pnl_source": pnl_source,
+                            "daily_loss_limit": daily_loss_limit,
+                        }
+                    )
+            return issues
+
+        daily_loss_limit = limits.daily_loss_limit
         if daily_loss_limit is None:
-            return None
+            return []
         normalized_pnl = _normalized_broker_pnl(snapshot)
         if normalized_pnl is None:
-            return {
-                "reason": "broker_pnl_unavailable",
-                "daily_loss_limit": daily_loss_limit,
-            }
+            return [
+                {
+                    "reason": "broker_pnl_unavailable",
+                    "daily_loss_limit": daily_loss_limit,
+                }
+            ]
         pnl_value, pnl_source = normalized_pnl
         if pnl_value <= -daily_loss_limit:
-            return {
-                "reason": "daily_loss_limit_exceeded",
-                "broker_pnl": pnl_value,
-                "pnl_source": pnl_source,
-                "daily_loss_limit": daily_loss_limit,
-            }
-        return None
+            return [
+                {
+                    "reason": "daily_loss_limit_exceeded",
+                    "broker_pnl": pnl_value,
+                    "pnl_source": pnl_source,
+                    "daily_loss_limit": daily_loss_limit,
+                }
+            ]
+        return []
 
     def _record_event(
         self,
@@ -494,6 +589,62 @@ def _broker_position_prices(
             continue
         prices[symbol] = _float_or_default(position.get("current_price"), 0.0)
     return prices
+
+
+def _normalized_broker_pnl_by_currency(
+    snapshot: dict[str, Any],
+) -> dict[Currency, tuple[float, str]]:
+    account = snapshot.get("account", {})
+    for key in ("daily_pnl_by_currency", "today_pnl_by_currency", "realized_pnl_by_currency"):
+        raw = account.get(key) or snapshot.get(key)
+        if isinstance(raw, dict) and raw:
+            return {
+                Currency(str(currency)): (float(value), f"account.{key}")
+                for currency, value in raw.items()
+                if value is not None
+            }
+    position_pnls: dict[Currency, float] = {}
+    for position in account.get("positions", []):
+        if position.get("unrealized_pnl") is None:
+            continue
+        currency = position.get("currency")
+        if currency is None:
+            continue
+        normalized = Currency(str(currency))
+        position_pnls[normalized] = position_pnls.get(normalized, 0.0) + float(
+            position["unrealized_pnl"]
+        )
+    if position_pnls:
+        return {
+            currency: (value, "account.positions.unrealized_pnl")
+            for currency, value in position_pnls.items()
+        }
+    scalar = _normalized_broker_pnl(snapshot)
+    if scalar is None:
+        return {}
+    inferred_currency = _infer_single_broker_currency(account)
+    if inferred_currency is None:
+        return {}
+    return {inferred_currency: scalar}
+
+
+def _infer_single_broker_currency(account: dict[str, Any]) -> Currency | None:
+    cash_by_currency = account.get("cash_by_currency")
+    if isinstance(cash_by_currency, dict) and len(cash_by_currency) == 1:
+        return Currency(str(next(iter(cash_by_currency.keys()))))
+    cash_balance = account.get("cash_balance")
+    if isinstance(cash_balance, dict) and cash_balance.get("currency"):
+        return Currency(str(cash_balance["currency"]))
+    positions = account.get("positions")
+    if isinstance(positions, list):
+        currencies = {
+            str(position.get("currency"))
+            for position in positions
+            if position.get("currency")
+        }
+        if len(currencies) == 1:
+            return Currency(next(iter(currencies)))
+    return None
 
 
 def _normalized_broker_pnl(snapshot: dict[str, Any]) -> tuple[float, str] | None:

@@ -311,10 +311,16 @@ execution:
   order_posture: dry_run
   require_reconciliation_pass: true
   live_order_limits:
-    max_order_notional: 1000000
-    max_daily_notional: 3000000
+    max_order_notional_by_currency:
+      KRW: 1000000
+      USD: 1000
+    max_daily_notional_by_currency:
+      KRW: 10000000
+      USD: 10000
     max_daily_order_count: 5
-    daily_loss_limit: 100000
+    daily_loss_limit_by_currency:
+      KRW: 100000
+      USD: 100
     fee_buffer_pct: 0.002
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30

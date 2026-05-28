@@ -53,10 +53,15 @@ def apply_app_fragments(
         raise ValueError("app_fragment_paths must be a list of strings")
     if "app_fragment_recommendations" in raw:
         raise ValueError("app_fragment_recommendations is internal and must not be configured")
+    if "app_fragment_strategy_recommendations" in raw:
+        raise ValueError(
+            "app_fragment_strategy_recommendations is internal and must not be configured"
+        )
 
     values = dict(raw)
     fingerprint_parts: list[bytes] = []
     recommendations: dict[str, Any] = {}
+    strategy_recommendations: dict[str, Any] = {}
     for path_value in path_values:
         fragment_path = _resolve_fragment_path(path_value, config_path)
         fragment_bytes = fragment_path.read_bytes()
@@ -65,11 +70,19 @@ def apply_app_fragments(
             raise ValueError(f"app fragment must be a YAML mapping: {fragment_path}")
         _validate_app_fragment(fragment, fragment_path)
         values = _merge_app_fragment(values, fragment, fragment_path)
+        fragment_recommendations = deepcopy(fragment.get("recommendations", {}))
         recommendations = _merge_nested_dicts(
             recommendations,
-            deepcopy(fragment.get("recommendations", {})),
+            fragment_recommendations,
             label=f"app fragment recommendations in {fragment_path}",
         )
+        fragment_strategy = fragment.get("strategy")
+        if isinstance(fragment_strategy, dict) and isinstance(fragment_strategy.get("id"), str):
+            strategy_recommendations[fragment_strategy["id"]] = _merge_nested_dicts(
+                strategy_recommendations.get(fragment_strategy["id"], {}),
+                fragment_recommendations,
+                label=f"app fragment strategy recommendations in {fragment_path}",
+            )
         fingerprint_parts.extend(
             [
                 b"app_fragment_path",
@@ -79,16 +92,42 @@ def apply_app_fragments(
         )
     if recommendations:
         values["app_fragment_recommendations"] = recommendations
+    if strategy_recommendations:
+        values["app_fragment_strategy_recommendations"] = strategy_recommendations
     return values, fingerprint_parts
 
 
 def app_fragment_recommendation_failures(config: Any) -> list[str]:
     recommendations = getattr(config, "app_fragment_recommendations", {}) or {}
-    if not recommendations:
+    strategy_recommendations = (
+        getattr(config, "app_fragment_strategy_recommendations", {}) or {}
+    )
+    if not recommendations and not strategy_recommendations:
         return []
     payload = config.model_dump(mode="json")
     failures: list[str] = []
+    strategy_paths = set()
+    for strategy_id, recs in strategy_recommendations.items():
+        strategy = _strategy_by_id(config, strategy_id)
+        if strategy is None:
+            continue
+        for path, expected in _flatten_recommendations(recs):
+            strategy_paths.add(tuple(path))
+            if tuple(path) == ("execution", "order_generation_mode") and hasattr(
+                config, "effective_strategy_order_generation_mode"
+            ):
+                actual = config.effective_strategy_order_generation_mode(strategy)
+            else:
+                actual = _nested_get(payload, path)
+            if actual != expected:
+                failures.append(
+                    "app_fragment_recommendation_mismatch:"
+                    f"{strategy_id}:{'.'.join(path)}:"
+                    f"recommended={expected}:actual={actual}"
+                )
     for path, expected in _flatten_recommendations(recommendations):
+        if tuple(path) in strategy_paths:
+            continue
         actual = _nested_get(payload, path)
         if actual != expected:
             failures.append(
@@ -96,6 +135,13 @@ def app_fragment_recommendation_failures(config: Any) -> list[str]:
                 f"{'.'.join(path)}:recommended={expected}:actual={actual}"
             )
     return failures
+
+
+def _strategy_by_id(config: Any, strategy_id: str) -> Any | None:
+    for strategy in getattr(config, "strategies", []):
+        if getattr(strategy, "id", None) == strategy_id:
+            return strategy
+    return None
 
 
 def _resolve_fragment_path(path_value: str, config_path: Path) -> Path:

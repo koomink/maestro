@@ -96,7 +96,10 @@ class OrderBuilder:
                     broker_product=instrument.broker_product if instrument else None,
                 )
             )
-        return orders
+        return self._scale_buy_orders_to_cash(
+            orders,
+            self._cash_available(current_state),
+        )
 
     def _build_sleeve_orders(
         self,
@@ -121,14 +124,27 @@ class OrderBuilder:
                 currency=sleeve_name,
                 prices=prices,
             )
-            for symbol, target_weight in allocations.items():
+            rebalance_symbols = list(
+                dict.fromkeys(
+                    [
+                        *allocations.keys(),
+                        *(
+                            symbol
+                            for symbol in symbols
+                            if current_state.positions.get(symbol, 0.0)
+                        ),
+                    ]
+                )
+            )
+            sleeve_orders: list[OrderIntent] = []
+            for symbol in rebalance_symbols:
                 if is_cash_symbol(symbol):
                     continue
                 if symbol not in prices:
                     raise MissingPriceError(f"Missing prices for symbols: {symbol}")
                 current_qty = current_state.positions.get(symbol, 0.0)
                 current_value = current_qty * prices[symbol]
-                target_value = total_value * target_weight
+                target_value = total_value * allocations.get(symbol, 0.0)
                 delta_value = target_value - current_value
                 if abs(delta_value) < 0.01:
                     continue
@@ -138,7 +154,7 @@ class OrderBuilder:
                 if quantity <= 0:
                     continue
                 notional = quantity * prices[symbol]
-                orders.append(
+                sleeve_orders.append(
                     OrderIntent(
                         order_id=new_order_id(),
                         symbol=symbol,
@@ -151,7 +167,79 @@ class OrderBuilder:
                         broker_product=instrument.broker_product if instrument else None,
                     )
                 )
+            orders.extend(
+                self._scale_buy_orders_to_cash(
+                    sleeve_orders,
+                    self._cash_available(current_state, sleeve_name),
+                )
+            )
         return orders
+
+    def _cash_available(
+        self,
+        current_state: PortfolioState,
+        currency_sleeve: str | None = None,
+    ) -> float:
+        if current_state.cash_by_currency:
+            if currency_sleeve is not None:
+                cash = current_state.cash_by_currency.get(currency_sleeve, 0.0)
+            else:
+                cash = sum(current_state.cash_by_currency.values())
+        else:
+            cash = current_state.cash
+        fee_multiplier = max(0.0, 1.0 - self.config.live_order_limits.fee_buffer_pct)
+        return max(0.0, cash) * fee_multiplier
+
+    def _scale_buy_orders_to_cash(
+        self,
+        orders: list[OrderIntent],
+        cash_available: float,
+    ) -> list[OrderIntent]:
+        buy_notional = sum(order.notional for order in orders if order.side == OrderSide.BUY)
+        if buy_notional <= cash_available + 1e-9:
+            return orders
+        if buy_notional <= 0:
+            return orders
+
+        scale = max(0.0, cash_available) / buy_notional
+        scaled_orders: list[OrderIntent] = []
+        scaled_buy_orders: list[OrderIntent] = []
+        for order in orders:
+            if order.side != OrderSide.BUY:
+                scaled_orders.append(order)
+                continue
+            scaled = self._scaled_buy_order(order, scale)
+            if scaled is None:
+                continue
+            scaled_orders.append(scaled)
+            scaled_buy_orders.append(scaled)
+
+        buy_notional_after = sum(order.notional for order in scaled_buy_orders)
+        metadata = {
+            "cash_scaled": True,
+            "cash_available": cash_available,
+            "buy_notional_before_scaling": buy_notional,
+            "buy_notional_after_scaling": buy_notional_after,
+            "fee_buffer_pct": self.config.live_order_limits.fee_buffer_pct,
+        }
+        return [
+            order.model_copy(update={"metadata": {**order.metadata, **metadata}})
+            if order.side == OrderSide.BUY
+            else order
+            for order in scaled_orders
+        ]
+
+    def _scaled_buy_order(self, order: OrderIntent, scale: float) -> OrderIntent | None:
+        if order.price <= 0:
+            return None
+        quantity = self._order_quantity(symbol=order.symbol, raw_quantity=order.quantity * scale)
+        instrument = self.instruments.get(order.symbol)
+        min_quantity = instrument.min_order_quantity if instrument else 0.0
+        notional = quantity * order.price
+        min_notional = instrument.min_order_notional if instrument else 0.0
+        if quantity <= 0 or quantity < min_quantity or notional < min_notional:
+            return None
+        return order.model_copy(update={"quantity": quantity, "notional": notional})
 
     def _order_quantity(self, symbol: str, raw_quantity: float) -> float:
         instrument = self.instruments.get(symbol)
