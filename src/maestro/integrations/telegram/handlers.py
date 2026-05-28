@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from maestro.config.loader import load_config
+from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
@@ -19,8 +19,13 @@ from maestro.dashboard.read_models import (
 )
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.funding_requests import (
+    format_contribution_funding_request,
+    funding_request_reply_markup,
+)
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.store import StateStore
@@ -50,12 +55,14 @@ class TelegramOperatorCommandRouter:
         audit: AuditLogger,
         client: TelegramBotClient,
         signal_config_path: str | Path | None = None,
+        approval_config_path: str | Path | None = None,
     ) -> None:
         self.config = config
         self.store = store
         self.audit = audit
         self.client = client
         self.signal_config_path = Path(signal_config_path) if signal_config_path else None
+        self.approval_config_path = Path(approval_config_path) if approval_config_path else None
 
     def process_update(self, update: Mapping[str, Any]) -> bool:
         callback = update.get("callback_query")
@@ -163,6 +170,14 @@ class TelegramOperatorCommandRouter:
             self._edit_callback_message(callback, "Telegram command canceled.")
             self._record("/cancel", chat_id, user_id, username, "canceled")
             return True
+        if action.startswith("funding:"):
+            return self._process_funding_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
         if action not in {"confirm:pause", "confirm:kill-switch"}:
             self._answer(callback, "This command is no longer active.")
             self._record(command, chat_id, user_id, username, "stale_callback")
@@ -180,6 +195,171 @@ class TelegramOperatorCommandRouter:
         self._edit_callback_message(callback, text)
         self._record(command, chat_id, user_id, username, "confirmed")
         return True
+
+
+    def _process_funding_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[0] != "funding" or parts[1] not in {"complete", "cancel"}:
+            self._answer(callback, "This funding request is no longer active.")
+            self._record("/funding", chat_id, user_id, username, "stale_callback")
+            return True
+        transition, request_id = parts[1], parts[2]
+        request = self._load_pending_funding_request(request_id)
+        if request is None:
+            self._answer(callback, "This funding request is no longer active.")
+            self._record("/funding", chat_id, user_id, username, "stale_callback")
+            return True
+        if transition == "cancel":
+            self._save_funding_ack(request_id, "canceled", user_id, username)
+            self._answer(callback, "Funding request canceled.")
+            self._edit_callback_message(callback, "Funding request canceled.")
+            self._record("/funding_cancel", chat_id, user_id, username, "canceled")
+            return True
+        self._answer(callback, "Funding request confirmed.")
+        try:
+            text = self._confirm_funding_request(
+                request,
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            text = "\n".join(
+                [
+                    "Funding confirmation failed",
+                    f"request_id: {request_id}",
+                    f"message: {exc}",
+                ]
+            )
+            self._record("/funding_complete", chat_id, user_id, username, "failed")
+        else:
+            self._record("/funding_complete", chat_id, user_id, username, "confirmed")
+        self._edit_callback_message(callback, text)
+        return True
+
+    def _confirm_funding_request(
+        self,
+        request: dict[str, Any],
+        *,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> str:
+        if self.signal_config_path is None:
+            raise ValueError("Funding confirmation requires telegram-operator --signal-config")
+        try:
+            self._refresh_portfolio_from_broker_snapshot()
+        except (RuntimeError, TimeoutError, ValueError):
+            if self.config.kis.enabled:
+                raise
+        signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
+        strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
+        if not strategy_ids:
+            raise ValueError("Funding request is missing strategy_ids")
+        signal_summary = MaestroOrchestrator(
+            signal_config,
+            config_identity=signal_identity,
+        ).run_signal(strategy_ids=strategy_ids)
+        self._save_funding_ack(
+            str(request["request_id"]),
+            "confirmed",
+            user_id,
+            username,
+            new_signal_run_id=signal_summary.signal_run_id,
+        )
+        lines = [
+            "Funding confirmed",
+            f"request_id: {request['request_id']}",
+            f"new_signal_run_id: {signal_summary.signal_run_id}",
+            f"orders_preview_count: {signal_summary.orders_preview_count}",
+        ]
+        if signal_summary.action_required:
+            if self.approval_config_path is None:
+                lines.append("approval_status: not_created_missing_approval_config")
+                return "\n".join(lines)
+            approval_config, approval_identity = load_config_with_identity(
+                self.approval_config_path
+            )
+            approval_summary = MaestroOrchestrator(
+                approval_config,
+                telegram_client=self.client,
+                config_identity=approval_identity,
+            ).approve_signal(signal_summary.signal_run_id)
+            lines.extend(
+                [
+                    f"approval_run_id: {approval_summary.run_id}",
+                    f"approval_status: {approval_summary.approval_status}",
+                    f"orders_created: {approval_summary.orders_created}",
+                ]
+            )
+            return "\n".join(lines)
+        signal = self.store.load_signal_package(signal_summary.signal_run_id) or {}
+        funding_requests = signal.get("funding_requests") or []
+        if funding_requests:
+            lines.append("approval_status: funding_still_required")
+            for funding_request in funding_requests:
+                self._send_funding_request(chat_id, funding_request)
+        else:
+            lines.append("approval_status: not_required")
+        return "\n".join(lines)
+
+    def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> None:
+        request_id = str(request.get("request_id") or "")
+        self._send(
+            chat_id,
+            format_contribution_funding_request(request),
+            reply_markup=funding_request_reply_markup(request_id),
+        )
+
+    def _load_pending_funding_request(self, request_id: str) -> dict[str, Any] | None:
+        acked = {
+            str(row["payload"].get("request_id"))
+            for row in self.store.list_system_events_by_type(
+                "contribution_funding_request_ack",
+                limit=1000,
+            )
+        }
+        if request_id in acked:
+            return None
+        for row in self.store.list_system_events_by_type(
+            "contribution_funding_request",
+            limit=1000,
+        ):
+            payload = row.get("payload") or {}
+            if payload.get("request_id") == request_id and payload.get("status") == "pending":
+                return payload
+        return None
+
+    def _save_funding_ack(
+        self,
+        request_id: str,
+        status: str,
+        user_id: int,
+        username: str | None,
+        *,
+        new_signal_run_id: str | None = None,
+    ) -> None:
+        payload = {
+            "request_id": request_id,
+            "status": status,
+            "decided_by": username or str(user_id),
+        }
+        if new_signal_run_id is not None:
+            payload["new_signal_run_id"] = new_signal_run_id
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "contribution_funding_request_ack",
+            payload,
+        )
 
     def _help(self, chat_id: int) -> None:
         self._send(

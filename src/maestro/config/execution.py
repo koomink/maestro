@@ -9,6 +9,12 @@ OrderPosture = Literal["disabled", "dry_run", "armed"]
 OrderGenerationMode = Literal["target_rebalance", "buy_only_contribution"]
 
 
+class ContributionFundingRequestConfig(StrictConfigModel):
+    enabled: bool = False
+    provider: Literal["telegram"] = "telegram"
+    amount_policy: Literal["min_monthly_budget_shortfall"] = "min_monthly_budget_shortfall"
+
+
 class ContributionConfig(StrictConfigModel):
     enabled: bool = False
     currency: Currency = Currency.KRW
@@ -19,6 +25,9 @@ class ContributionConfig(StrictConfigModel):
     buy_day: int = Field(default=1, ge=1, le=31)
     non_trading_day_policy: Literal["next_trading_day"] = "next_trading_day"
     target_policy: Literal["buy_only_toward_target"] = "buy_only_toward_target"
+    funding_request: ContributionFundingRequestConfig = Field(
+        default_factory=ContributionFundingRequestConfig
+    )
 
     @model_validator(mode="after")
     def validate_budget_range(self) -> "ContributionConfig":
@@ -192,6 +201,12 @@ class ExecutionSleeveConfig(StrictConfigModel):
                     "execution_sleeves buy_only_contribution requires "
                     "contribution.enabled=true"
                 )
+        if (
+            self.order_generation_mode != "buy_only_contribution"
+            and self.contribution is not None
+            and self.contribution.funding_request.enabled
+        ):
+            raise ValueError("funding_request requires buy_only_contribution")
         return self
 
 
@@ -276,6 +291,11 @@ class ExecutionConfig(StrictConfigModel):
             raise ValueError(
                 "execution.contribution.enabled must be true for buy_only_contribution"
             )
+        if (
+            self.order_generation_mode != "buy_only_contribution"
+            and self.contribution.funding_request.enabled
+        ):
+            raise ValueError("funding_request requires buy_only_contribution")
         return self
 
     @field_validator("allowed_order_type")

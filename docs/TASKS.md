@@ -584,6 +584,7 @@
       of promoting paper SQLite state
 
 ### Telegram Operator UI
+- [x] Add explicit opt-in Telegram funding requests for buy-only contribution sleeves when cash is below `min_monthly_budget`, with separate order approval after funding confirmation
 
 - [x] Add Telegram command router with whitelist enforcement
 - [x] Add `/help`

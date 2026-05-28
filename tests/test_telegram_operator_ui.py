@@ -64,6 +64,30 @@ class _TelegramStaticStrategy(BaseStrategyPlugin):
         )
 
 
+class BuyOnlyFundingTelegramStrategy(_TelegramStaticStrategy):
+    strategy_id = "ataraxia"
+
+    def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
+        del context
+        return [
+            DataRequest(symbol="MOCK_ETF_A", asset_type="etf", data_type="price"),
+            DataRequest(symbol="MOCK_ETF_B", asset_type="etf", data_type="price"),
+        ]
+
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
+        del data_bundle
+        return TargetAllocationResult(
+            strategy_id=context.strategy_id,
+            strategy_version=self.manifest().version,
+            timestamp=context.timestamp,
+            allocations={},
+            allocation_sleeves={"KRW": {"MOCK_ETF_A": 0.6, "MOCK_ETF_B": 0.4}},
+            confidence=1.0,
+            time_horizon="telegram-test",
+            rationale="Telegram funding retry target.",
+        )
+
+
 class AtaraxiaTelegramSignalStrategy(_TelegramStaticStrategy):
     strategy_id = "ataraxia"
 
@@ -141,6 +165,91 @@ def test_telegram_operator_signal_command_rejects_signal_disabled_strategy(tmp_p
 
     assert "Signal generation failed" in client.sent_messages[-1]["text"]
     assert "Strategy is not signal-enabled: trading_agents" in client.sent_messages[-1]["text"]
+
+
+def test_telegram_operator_funding_complete_regenerates_signal_and_creates_approval(tmp_path):
+    readonly_config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_buy_only_config_path(
+        tmp_path,
+        filename="funding_signal.yaml",
+        provider="telegram",
+        require_approval=False,
+    )
+    approval_config_path = _telegram_buy_only_config_path(
+        tmp_path,
+        filename="funding_approval.yaml",
+        provider="console",
+        require_approval=True,
+    )
+    config = load_config(readonly_config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "signal_old",
+        "contribution_funding_request",
+        {
+            "request_id": "fund_req_1",
+            "source_signal_run_id": "signal_old",
+            "strategy_ids": ["ataraxia"],
+            "account_id": "paper_cash",
+            "execution_sleeve": "krw_contribution",
+            "currency": "KRW",
+            "available_cash": 1_000_000.0,
+            "min_monthly_budget": 2_000_000.0,
+            "required_shortfall": 1_000_000.0,
+            "month_key": "2026-05",
+            "status": "pending",
+        },
+    )
+    store.save_portfolio_snapshot(
+        "manual_deposit",
+        PortfolioState(cash=3_000_000, cash_by_currency={"KRW": 3_000_000}, positions={}),
+    )
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+        signal_config_path=signal_config_path,
+        approval_config_path=approval_config_path,
+    )
+
+    assert router.process_update(callback_update("operator:funding:complete:fund_req_1"))
+
+    assert client.answered_callbacks[-1]["text"] == "Funding request confirmed."
+    assert "Funding confirmed" in client.edited_messages[-1]["text"]
+    assert "new_signal_run_id:" in client.edited_messages[-1]["text"]
+    assert "approval_status: approved" in client.edited_messages[-1]["text"]
+    ack_events = store.list_system_events_by_type("contribution_funding_request_ack", limit=10)
+    assert ack_events[0]["payload"]["request_id"] == "fund_req_1"
+    assert ack_events[0]["payload"]["status"] == "confirmed"
+    assert store.status()["counts"]["approvals"] == 1
+    assert store.status()["counts"]["orders"] == 2
+
+
+def test_telegram_operator_funding_callback_rejects_unauthorized_user(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "signal_old",
+        "contribution_funding_request",
+        {"request_id": "fund_req_1", "status": "pending", "strategy_ids": ["ataraxia"]},
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(
+        callback_update("operator:funding:complete:fund_req_1", user_id=999)
+    )
+
+    assert client.answered_callbacks[-1]["text"] == "Unauthorized Telegram user."
+    assert store.list_system_events_by_type("contribution_funding_request_ack", limit=10) == []
 
 
 def test_telegram_operator_read_commands_send_state_responses(tmp_path):
@@ -895,6 +1004,85 @@ def _telegram_signal_config_path(tmp_path) -> Path:
         }
     )
     config_path = tmp_path / "telegram_signal.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
+
+
+def _telegram_buy_only_config_path(
+    tmp_path,
+    *,
+    filename: str,
+    provider: str,
+    require_approval: bool,
+) -> Path:
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["portfolio"]["initial_cash"] = 1_000_000
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"] = {
+        "enabled": True,
+        "provider": provider,
+        "require_approval": require_approval,
+        "default_decision": "approved",
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+        "telegram_poll_interval_seconds": 0.0,
+    }
+    raw["strategies"] = [
+        {
+            "id": "ataraxia",
+            "enabled": True,
+            "signal_enabled": True,
+            "weight": 1.0,
+            "account_id": "paper_cash",
+            "execution_sleeve": "krw_contribution",
+            "order_posture": "dry_run",
+            "entrypoint": f"{__name__}:BuyOnlyFundingTelegramStrategy",
+            "config": {},
+        }
+    ]
+    raw["execution"]["order_posture"] = "dry_run"
+    raw["execution"]["market_session"] = {
+        "required": False,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4, 5, 6],
+        "holidays": [],
+    }
+    raw["execution"]["live_order_limits"] = {"fee_buffer_pct": 0.0}
+    raw["accounts"] = [
+        {
+            "id": "paper_cash",
+            "broker": "sandbox",
+            "environment": "paper_trading",
+            "enabled": True,
+        }
+    ]
+    raw["execution_sleeves"] = {
+        "accounts": {
+            "paper_cash": {
+                "krw_contribution": {
+                    "currency_sleeve": "KRW",
+                    "target_weight": 1.0,
+                    "order_generation_mode": "buy_only_contribution",
+                    "contribution": {
+                        "enabled": True,
+                        "currency": "KRW",
+                        "sleeve": "KRW",
+                        "monthly_budget": 3_000_000,
+                        "min_monthly_budget": 2_000_000,
+                        "max_monthly_budget": 4_000_000,
+                        "buy_day": 1,
+                        "non_trading_day_policy": "next_trading_day",
+                        "target_policy": "buy_only_toward_target",
+                        "funding_request": {"enabled": True},
+                    },
+                }
+            }
+        }
+    }
+    config_path = tmp_path / filename
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
 

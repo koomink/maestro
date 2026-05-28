@@ -32,6 +32,10 @@ from maestro.execution.execution_sleeves import (
     allocate_cash_rebalanced_scope_states,
 )
 from maestro.execution.factory import build_execution_engine
+from maestro.execution.funding_requests import (
+    ContributionFundingRequest,
+    build_contribution_funding_request,
+)
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
@@ -199,24 +203,36 @@ class MaestroOrchestrator:
         order_generation_time = utc_now()
         prices = self._order_generation_prices(prices)
         orders = []
+        funding_requests: list[ContributionFundingRequest] = []
         for order_scope in order_targets:
             scoped_execution = build_execution_engine(
                 order_scope.execution_config,
                 instruments=self.config.universe.instruments,
                 currency_sleeves=self.config.portfolio.currency_sleeves,
             )
+            contribution_already_executed = self._contribution_already_executed(
+                order_generation_time,
+                order_scope.execution_config,
+                execution_sleeve=order_scope.execution_sleeve,
+                account_id=order_scope.account_id,
+            )
             account_orders = scoped_execution.propose_orders(
                 order_scope.state,
                 order_scope.target,
                 prices,
                 as_of=order_generation_time,
-                contribution_already_executed=self._contribution_already_executed(
-                    order_generation_time,
-                    order_scope.execution_config,
-                    execution_sleeve=order_scope.execution_sleeve,
-                    account_id=order_scope.account_id,
-                ),
+                contribution_already_executed=contribution_already_executed,
             )
+            if not account_orders:
+                funding_request = self._contribution_funding_request(
+                    signal_run_id,
+                    order_scope,
+                    scoped_execution,
+                    order_generation_time,
+                    contribution_already_executed=contribution_already_executed,
+                )
+                if funding_request is not None:
+                    funding_requests.append(funding_request)
             orders.extend(
                 self._stamp_orders_with_account_id(
                     account_orders,
@@ -227,7 +243,12 @@ class MaestroOrchestrator:
                 )
             )
         approval_orders = self._signal_orders_requiring_approval(orders)
-        status = "action_required" if approval_orders else "no_action"
+        if approval_orders:
+            status = "action_required"
+        elif funding_requests:
+            status = "funding_required"
+        else:
+            status = "no_action"
         payload = {
             "signal_run_id": signal_run_id,
             "status": status,
@@ -250,6 +271,8 @@ class MaestroOrchestrator:
             "risk_decision": risk_decision.model_dump(mode="json"),
             "orders_preview": [order.model_dump(mode="json") for order in orders],
             "orders_preview_count": len(orders),
+            "funding_requests": [request.model_dump(mode="json") for request in funding_requests],
+            "funding_requests_count": len(funding_requests),
             "action_required": bool(approval_orders),
         }
         payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(
@@ -259,6 +282,12 @@ class MaestroOrchestrator:
             payload["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
         self.state_store.save_signal_package(signal_run_id, payload)
         self.audit.log(signal_run_id, "signal_package", payload)
+        for request in funding_requests:
+            self._record_event(
+                signal_run_id,
+                "contribution_funding_request",
+                request.model_dump(mode="json"),
+            )
         self.state_store.save_system_event(
             signal_run_id,
             "signal_run_completed",
@@ -266,6 +295,7 @@ class MaestroOrchestrator:
                 "signal_run_id": signal_run_id,
                 "status": status,
                 "orders_preview_count": len(orders),
+                "funding_requests_count": len(funding_requests),
                 "action_required": bool(approval_orders),
             },
         )
@@ -1633,6 +1663,33 @@ class MaestroOrchestrator:
             }
             self._record_event(run_id, "live_order_dry_run", event)
         return [], self.state_store.load_latest_portfolio_state()
+
+
+    def _contribution_funding_request(
+        self,
+        signal_run_id: str,
+        order_scope: ScopedOrderTarget,
+        scoped_execution,
+        as_of,
+        *,
+        contribution_already_executed: bool,
+    ) -> ContributionFundingRequest | None:
+        config = order_scope.execution_config
+        if config.order_generation_mode != "buy_only_contribution":
+            return None
+        if contribution_already_executed or not scoped_execution.contribution_is_due(as_of):
+            return None
+        return build_contribution_funding_request(
+            source_signal_run_id=signal_run_id,
+            strategy_ids=order_scope.target.source_strategy_ids,
+            account_id=order_scope.account_id,
+            execution_sleeve=order_scope.execution_sleeve,
+            execution_config=config,
+            state=order_scope.state,
+            month_key=scoped_execution.contribution_month_key(as_of),
+            created_at=as_of,
+            expires_after_seconds=self.config.approval.signal_max_age_seconds,
+        )
 
     def _build_account_scoped_targets(
         self,

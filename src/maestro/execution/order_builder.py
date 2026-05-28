@@ -403,6 +403,12 @@ class OrderBuilder:
         local_date = self._local_date(as_of)
         return f"{local_date.year:04d}-{local_date.month:02d}"
 
+    def contribution_is_due(self, as_of: datetime | None = None) -> bool:
+        return self._is_contribution_due(as_of)
+
+    def contribution_available_cash(self, current_state: PortfolioState) -> float:
+        return self._contribution_spend(current_state)
+
     def _local_date(self, as_of: datetime | None) -> date:
         market_session = self.config.market_session
         timestamp = as_of or datetime.now(ZoneInfo(market_session.timezone))

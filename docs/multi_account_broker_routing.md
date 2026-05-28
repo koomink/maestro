@@ -161,6 +161,17 @@ Maestro enforces one `order_generation_mode` per `account_id + execution_sleeve`
 When multiple active execution sleeves share one account, their `target_weight`
 values must sum to `1.0`.
 
+
+For `buy_only_contribution` sleeves, `contribution.funding_request.enabled` is an
+explicit opt-in. When enabled and the monthly buy is due but available cash after
+the fee buffer is below `min_monthly_budget`, Maestro records a
+`contribution_funding_request` event and can send a Telegram operator request.
+The request asks the operator to add at least the minimum shortfall; it does not
+move money, submit orders, or replace the normal Telegram order approval. After
+the operator confirms that cash was added, Maestro refreshes broker/account
+state, generates a fresh signal, and any resulting orders still require the
+regular approval flow.
+
 Cash rebalance v1 only allocates available account cash across execution sleeves.
 It does not sell existing positions to force sleeve weights. If a sleeve is below
 its target account weight, new cash is allocated to the shortfall first; if no

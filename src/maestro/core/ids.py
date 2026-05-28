@@ -15,3 +15,7 @@ def new_approval_id() -> str:
 
 def new_signal_run_id() -> str:
     return f"signal_{uuid4().hex}"
+
+
+def new_funding_request_id() -> str:
+    return f"fund_{uuid4().hex}"

@@ -43,6 +43,12 @@ class PaperExecutionEngine:
     def contribution_month_key(self, as_of: datetime | None = None) -> str:
         return self.order_builder.contribution_month_key(as_of)
 
+    def contribution_is_due(self, as_of: datetime | None = None) -> bool:
+        return self.order_builder.contribution_is_due(as_of)
+
+    def contribution_available_cash(self, current_state: PortfolioState) -> float:
+        return self.order_builder.contribution_available_cash(current_state)
+
     def execute_orders(
         self,
         current_state: PortfolioState,

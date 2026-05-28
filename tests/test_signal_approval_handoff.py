@@ -5,7 +5,7 @@ import yaml
 from sample_static_allocation.strategy import SampleStaticAllocationStrategy
 from typer.testing import CliRunner
 
-from maestro.cli import app
+from maestro.cli import _send_signal_funding_request_notifications, app
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.core.clock import utc_now
 from maestro.core.ids import new_run_id
@@ -13,6 +13,14 @@ from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnly
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
+from maestro.sdk import (
+    BaseStrategyPlugin,
+    DataBundle,
+    DataRequest,
+    StrategyContext,
+    StrategyManifest,
+    TargetAllocationResult,
+)
 from maestro.state.store import StateStore
 
 
@@ -25,6 +33,41 @@ class SecondStaticAllocationStrategy(SampleStaticAllocationStrategy):
     def run(self, data_bundle, context):
         return super().run(data_bundle, context).model_copy(
             update={"strategy_id": context.strategy_id}
+        )
+
+
+class BuyOnlyFundingStrategy(BaseStrategyPlugin):
+    def manifest(self) -> StrategyManifest:
+        return StrategyManifest(
+            strategy_id="buy_only_funding",
+            name="Buy Only Funding",
+            version="0.1.0",
+            description="Funding request test strategy.",
+            supported_modes=["paper", "live_approval"],
+            supported_asset_types=["cash", "etf"],
+            result_type="target_allocation",
+            requires_data=["price"],
+            can_run_live=True,
+        )
+
+    def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
+        del context
+        return [
+            DataRequest(symbol="MOCK_ETF_A", asset_type="etf", data_type="price"),
+            DataRequest(symbol="MOCK_ETF_B", asset_type="etf", data_type="price"),
+        ]
+
+    def run(self, data_bundle: DataBundle, context: StrategyContext) -> TargetAllocationResult:
+        del data_bundle
+        return TargetAllocationResult(
+            strategy_id=context.strategy_id,
+            strategy_version="0.1.0",
+            timestamp=context.timestamp,
+            allocations={},
+            allocation_sleeves={"KRW": {"MOCK_ETF_A": 0.6, "MOCK_ETF_B": 0.4}},
+            confidence=1.0,
+            time_horizon="monthly",
+            rationale="Buy-only contribution funding request test target.",
         )
 
 
@@ -44,6 +87,76 @@ def test_run_signal_persists_immutable_signal_package_without_approval(tmp_path)
     assert signal["approval_consumed"] is False
     assert store.list_approvals() == []
     assert store.list_orders() == []
+
+
+def test_run_signal_persists_funding_request_when_buy_only_cash_is_below_minimum(tmp_path):
+    config = _buy_only_funding_config(tmp_path, funding_request_enabled=True)
+
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["buy_only_funding"])
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    signal = store.load_signal_package(summary.signal_run_id)
+    assert summary.action_required is False
+    assert summary.orders_preview_count == 0
+    assert signal["status"] == "funding_required"
+    assert signal["funding_requests_count"] == 1
+    request = signal["funding_requests"][0]
+    assert request["source_signal_run_id"] == summary.signal_run_id
+    assert request["strategy_ids"] == ["buy_only_funding"]
+    assert request["account_id"] == "paper_cash"
+    assert request["execution_sleeve"] == "krw_contribution"
+    assert request["currency"] == "KRW"
+    assert request["available_cash"] == 1_000_000
+    assert request["min_monthly_budget"] == 2_000_000
+    assert request["required_shortfall"] == 1_000_000
+
+    events = store.list_system_events_by_type("contribution_funding_request", limit=10)
+    assert len(events) == 1
+    assert events[0]["payload"]["request_id"] == request["request_id"]
+    assert events[0]["payload"]["status"] == "pending"
+
+
+def test_signal_funding_request_notification_sends_telegram_message(
+    monkeypatch,
+    tmp_path,
+):
+    config = _buy_only_funding_config(tmp_path, funding_request_enabled=True)
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["buy_only_funding"])
+    fake_clients: list[FakeTelegramClient] = []
+
+    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
+        assert token_env == "TELEGRAM_BOT_TOKEN"
+        assert timeout_seconds == 10.0
+        client = FakeTelegramClient()
+        fake_clients.append(client)
+        return client
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+
+    sent = _send_signal_funding_request_notifications(config, summary.signal_run_id)
+
+    assert sent == 1
+    assert fake_clients[0].sent_messages[0]["chat_id"] == 100
+    assert "Maestro funding request" in fake_clients[0].sent_messages[0]["text"]
+    assert "shortfall: 1,000,000 KRW" in fake_clients[0].sent_messages[0]["text"]
+    keyboard = fake_clients[0].sent_messages[0]["reply_markup"]["inline_keyboard"]
+    assert keyboard[0][0]["text"] == "입금 완료"
+
+
+def test_run_signal_keeps_no_action_when_funding_request_opt_in_is_disabled(tmp_path):
+    config = _buy_only_funding_config(tmp_path, funding_request_enabled=False)
+
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["buy_only_funding"])
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    signal = store.load_signal_package(summary.signal_run_id)
+    assert summary.action_required is False
+    assert signal["status"] == "no_action"
+    assert signal["funding_requests_count"] == 0
+    assert store.list_system_events_by_type("contribution_funding_request", limit=10) == []
 
 
 def test_approve_signal_uses_saved_package_without_rerunning_strategies(tmp_path):
@@ -501,6 +614,70 @@ def test_approve_signal_rechecks_safety_state(monkeypatch, tmp_path):
     blocked = orchestrator.state_store.list_system_events_by_type("safety_execution_blocked")
     assert blocked[0]["payload"]["state"] == "killed"
     assert blocked[0]["payload"]["phase"] == "approve_signal"
+
+
+def _buy_only_funding_config(tmp_path, *, funding_request_enabled: bool):
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_approval_console.yaml").read_text())
+    raw["portfolio"]["initial_cash"] = 1_000_000
+    raw["strategies"] = [
+        {
+            "id": "buy_only_funding",
+            "enabled": True,
+            "signal_enabled": True,
+            "weight": 1.0,
+            "account_id": "paper_cash",
+            "execution_sleeve": "krw_contribution",
+            "order_posture": "dry_run",
+            "entrypoint": f"{__name__}:BuyOnlyFundingStrategy",
+            "config": {},
+        }
+    ]
+    raw["accounts"] = [
+        {
+            "id": "paper_cash",
+            "broker": "sandbox",
+            "environment": "paper_trading",
+            "enabled": True,
+        }
+    ]
+    raw["execution_sleeves"] = {
+        "accounts": {
+            "paper_cash": {
+                "krw_contribution": {
+                    "currency_sleeve": "KRW",
+                    "target_weight": 1.0,
+                    "order_generation_mode": "buy_only_contribution",
+                    "contribution": {
+                        "enabled": True,
+                        "currency": "KRW",
+                        "sleeve": "KRW",
+                        "monthly_budget": 3_000_000,
+                        "min_monthly_budget": 2_000_000,
+                        "max_monthly_budget": 4_000_000,
+                        "buy_day": 1,
+                        "non_trading_day_policy": "next_trading_day",
+                        "target_policy": "buy_only_toward_target",
+                        "funding_request": {"enabled": funding_request_enabled},
+                    },
+                }
+            }
+        }
+    }
+    raw["execution"]["order_posture"] = "dry_run"
+    raw["execution"]["market_session"] = {
+        "required": False,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4, 5, 6],
+        "holidays": [],
+    }
+    raw["execution"]["live_order_limits"] = {"fee_buffer_pct": 0.0}
+    raw["state"]["sqlite_path"] = str(tmp_path / "funding_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "funding_audit.jsonl")
+    config_path = tmp_path / f"buy_only_funding_{funding_request_enabled}.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return load_config(config_path)
 
 
 def _paper_approval_config(tmp_path, decision):

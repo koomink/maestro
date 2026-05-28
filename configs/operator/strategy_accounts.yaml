@@ -15,6 +15,8 @@ execution_sleeves:
           buy_day: 15
           non_trading_day_policy: next_trading_day
           target_policy: buy_only_toward_target
+          funding_request:
+            enabled: true
 
     dev_sandbox:
       snowball_us:

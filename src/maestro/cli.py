@@ -18,6 +18,10 @@ from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.funding_requests import (
+    format_contribution_funding_request,
+    funding_request_reply_markup,
+)
 from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.integrations.telegram.bot import TelegramBotAPIClient
@@ -247,7 +251,20 @@ def _run_daily_signal_approval(
     _send_signal_summary_notification(signal_maestro_config, signal_summary)
 
     if not signal_summary.action_required:
-        typer.echo(f"symphony_daily status=no_action signal_run_id={signal_summary.signal_run_id}")
+        funding_sent = _send_signal_funding_request_notifications(
+            signal_maestro_config,
+            signal_summary.signal_run_id,
+        )
+        if funding_sent:
+            typer.echo(
+                f"symphony_daily status=funding_required "
+                f"signal_run_id={signal_summary.signal_run_id}"
+            )
+        else:
+            typer.echo(
+                f"symphony_daily status=no_action "
+                f"signal_run_id={signal_summary.signal_run_id}"
+            )
         return
 
     telegram_stopped = False
@@ -315,6 +332,46 @@ def _refresh_daily_readonly(
     )
     if not result.passed:
         raise typer.Exit(1)
+
+
+def _send_signal_funding_request_notifications(
+    maestro_config: MaestroConfig,
+    signal_run_id: str,
+) -> int:
+    if maestro_config.approval.provider != "telegram":
+        return 0
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return 0
+    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_funding_request=warn message=missing_bot_token")
+        return 0
+    store = StateStore(
+        maestro_config.state.sqlite_path,
+        maestro_config.portfolio.initial_cash,
+        maestro_config.portfolio.cash_by_currency,
+    )
+    signal = store.load_signal_package(signal_run_id) or {}
+    funding_requests = signal.get("funding_requests") or []
+    if not funding_requests:
+        return 0
+    try:
+        client = TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        for request in funding_requests:
+            request_id = str(request.get("request_id") or "")
+            message = format_contribution_funding_request(request)
+            markup = funding_request_reply_markup(request_id)
+            for chat_id in chat_ids:
+                client.send_message(chat_id, message, reply_markup=markup)
+    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+        typer.echo(f"telegram_funding_request=warn message={exc}")
+        return 0
+    sent = len(funding_requests) * len(chat_ids)
+    typer.echo(f"telegram_funding_request=sent messages={sent}")
+    return sent
 
 
 def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) -> None:
@@ -608,6 +665,12 @@ def telegram_operator(
         envvar="MAESTRO_SIGNAL_CONFIG",
         help="Signal config used for Telegram strategy signal generation commands.",
     ),
+    approval_config: Path | None = typer.Option(
+        None,
+        "--approval-config",
+        envvar="MAESTRO_APPROVAL_CONFIG",
+        help="Approval config used after funding confirmation regenerates actionable orders.",
+    ),
 ) -> None:
     maestro_config, identity = _load_operator_config(config)
     if maestro_config.approval.provider != "telegram":
@@ -636,6 +699,7 @@ def telegram_operator(
             timeout_seconds=max(float(timeout_seconds) + 5.0, 10.0),
         ),
         signal_config_path=signal_config,
+        approval_config_path=approval_config,
     )
 
     offset = None
