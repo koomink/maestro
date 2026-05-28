@@ -1062,11 +1062,21 @@ def dashboard(
     config: Path | None = CONFIG_OPTION,
     host: str = typer.Option("127.0.0.1", help="Dashboard bind host."),
     port: int = typer.Option(8503, help="Dashboard bind port."),
+    signal_config: Path | None = typer.Option(
+        None,
+        "--signal-config",
+        help="Signal config for Virtuoso generate-signal actions.",
+    ),
 ) -> None:
     resolved_config = _resolve_config(config)
     from maestro.dashboard.server import run_dashboard_server
 
-    run_dashboard_server(resolved_config, host=host, port=port)
+    run_dashboard_server(
+        resolved_config,
+        host=host,
+        port=port,
+        signal_config_path=signal_config,
+    )
 
 
 def _safety_service(config: Path | None) -> SafetyControlService:

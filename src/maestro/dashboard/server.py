@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 from maestro.config.loader import load_config_with_identity
+from maestro.dashboard.actions import generate_strategy_signal, refresh_dashboard_state
 from maestro.dashboard.snapshot import build_dashboard_run_detail, build_dashboard_snapshot
 from maestro.state.store import StateStore
 
@@ -12,7 +13,11 @@ WEB_DIR = Path(__file__).with_name("web")
 CONFIG_STATE_MISMATCH_PREFIX = "State DB config identity mismatch"
 
 
-def create_app(config_path: str | Path, web_dir: str | Path | None = None):
+def create_app(
+    config_path: str | Path,
+    web_dir: str | Path | None = None,
+    signal_config_path: str | Path | None = None,
+):
     try:
         from fastapi import FastAPI, HTTPException, Query
         from fastapi.responses import HTMLResponse
@@ -23,6 +28,7 @@ def create_app(config_path: str | Path, web_dir: str | Path | None = None):
         ) from exc
 
     resolved_config = Path(config_path)
+    resolved_signal_config = Path(signal_config_path) if signal_config_path else None
     static_root = Path(web_dir) if web_dir else WEB_DIR
     app = FastAPI(title="Symphony Dashboard", docs_url=None, redoc_url=None)
 
@@ -102,6 +108,31 @@ def create_app(config_path: str | Path, web_dir: str | Path | None = None):
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
         return detail
 
+    @app.post("/api/dashboard/refresh")
+    def refresh() -> dict[str, object]:
+        try:
+            return refresh_dashboard_state(resolved_config).as_payload()
+        except ValueError as exc:
+            raise config_state_mismatch_error(exc) from exc
+
+    @app.post("/api/dashboard/virtuoso/{strategy_id}/generate-signal")
+    def generate_signal(strategy_id: str) -> dict[str, object]:
+        if resolved_signal_config is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "status": "missing_signal_config",
+                    "message": "Dashboard signal generation requires --signal-config.",
+                },
+            )
+        try:
+            return generate_strategy_signal(resolved_signal_config, strategy_id)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"status": "signal_generation_failed", "message": str(exc)},
+            ) from exc
+
     @app.head("/{path:path}", response_class=HTMLResponse)
     @app.get("/{path:path}", response_class=HTMLResponse)
     def frontend(path: str = "") -> HTMLResponse:
@@ -117,6 +148,7 @@ def run_dashboard_server(
     config_path: str | Path,
     host: str = "127.0.0.1",
     port: int = 8503,
+    signal_config_path: str | Path | None = None,
 ) -> None:
     try:
         import uvicorn
@@ -124,7 +156,11 @@ def run_dashboard_server(
         raise ModuleNotFoundError(
             "Uvicorn is required for the dashboard. Install with `uv sync --extra dashboard`."
         ) from exc
-    uvicorn.run(create_app(config_path), host=host, port=port)
+    uvicorn.run(
+        create_app(config_path, signal_config_path=signal_config_path),
+        host=host,
+        port=port,
+    )
 
 
 def main() -> None:
@@ -132,8 +168,14 @@ def main() -> None:
     parser.add_argument("--config", default=None)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8503, type=int)
+    parser.add_argument("--signal-config", default=None)
     args = parser.parse_args()
-    run_dashboard_server(_resolve_config(args.config), host=args.host, port=args.port)
+    run_dashboard_server(
+        _resolve_config(args.config),
+        host=args.host,
+        port=args.port,
+        signal_config_path=args.signal_config,
+    )
 
 
 def _resolve_config(config_path: str | Path | None) -> Path:

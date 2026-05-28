@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
+from maestro.dashboard.actions import build_signal_freshness
 from maestro.dashboard.server import create_app
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state.store import StateStore
@@ -193,6 +194,135 @@ def test_dashboard_reports_config_state_mismatch_as_readable_409(tmp_path):
     assert "does not match" in payload["message"]
     assert payload["config_path"] == str(mismatch_path.resolve())
     assert payload["state_path"] == str((tmp_path / "state.db").resolve())
+
+
+def test_signal_freshness_uses_newest_signal_package_per_strategy():
+    class FakeStore:
+        def list_system_events_by_type(self, event_type, limit=10):
+            assert event_type == "signal_package"
+            return [
+                {
+                    "run_id": "older_signal",
+                    "created_at": "2000-01-01T00:00:00+00:00",
+                    "payload": {
+                        "status": "failed",
+                        "signal_run_id": "older_signal",
+                        "loaded_strategies": ["sample_static_allocation"],
+                    },
+                },
+                {
+                    "run_id": "newer_signal",
+                    "created_at": utc_now().isoformat(),
+                    "payload": {
+                        "status": "no_action",
+                        "signal_run_id": "newer_signal",
+                        "loaded_strategies": ["sample_static_allocation"],
+                    },
+                },
+            ][:limit]
+
+    freshness = build_signal_freshness(FakeStore(), max_age_seconds=300)
+
+    assert freshness["overall"] == "fresh"
+    assert len(freshness["strategies"]) == 1
+    strategy = freshness["strategies"][0]
+    assert strategy["strategy_id"] == "sample_static_allocation"
+    assert strategy["status"] == "fresh"
+    assert strategy["latest_signal_run_id"] == "newer_signal"
+    assert strategy["max_age_seconds"] == 300
+    assert 0 <= strategy["age_seconds"] <= 300
+
+
+def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch, tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    calls = []
+
+    class FakeSnapshot:
+        class Account:
+            account_id = "acct_fake"
+            cash = 12.0
+            buying_power = 12.0
+            positions = []
+            total_value = 12.0
+
+        account = Account()
+
+    def fake_fetch(self, symbols):
+        calls.append(list(symbols))
+        return FakeSnapshot()
+
+    monkeypatch.setattr(
+        "maestro.execution.brokers.kis.service.KISReadOnlyService.fetch_and_store_snapshot",
+        fake_fetch,
+    )
+    raw["mode"] = "live_readonly"
+    raw["state"]["sqlite_path"] = str(tmp_path / "readonly_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "readonly_audit.jsonl")
+    raw["portfolio"].pop("initial_cash", None)
+    raw["execution"]["order_posture"] = "disabled"
+    raw["accounts"] = [
+        {
+            "id": "kis_paper",
+            "broker": "kis",
+            "environment": "paper_trading",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK",
+        }
+    ]
+    raw["strategies"] = []
+    readonly_path = tmp_path / "readonly.yaml"
+    readonly_path.write_text(yaml.safe_dump(raw))
+    client = TestClient(create_app(readonly_path))
+
+    response = client.post("/api/dashboard/refresh")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["accounts_synced"] == 1
+    assert payload["signal_freshness"]["overall"] in {"missing", "fresh", "stale", "failed"}
+    assert calls == [["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]]
+
+
+def test_generate_signal_requires_signal_config(tmp_path):
+    config_path = _dashboard_config(tmp_path)
+    client = TestClient(create_app(config_path))
+
+    response = client.post("/api/dashboard/virtuoso/sample_static_allocation/generate-signal")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["status"] == "missing_signal_config"
+
+
+def test_generate_signal_persists_signal_without_approvals_or_orders(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "signal_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "signal_audit.jsonl")
+    config_path = tmp_path / "signal.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    client = TestClient(create_app(config_path, signal_config_path=config_path))
+
+    response = client.post("/api/dashboard/virtuoso/sample_static_allocation/generate-signal")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["strategy_id"] == "sample_static_allocation"
+    assert payload["loaded_strategies"] == ["sample_static_allocation"]
+    store = StateStore(
+        config.state.sqlite_path,
+        config.portfolio.initial_cash,
+        config.portfolio.cash_by_currency,
+    )
+    assert store.load_signal_package(payload["signal_run_id"])
+    assert [row["strategy_id"] for row in store.list_strategy_runs(limit=10)] == [
+        "sample_static_allocation"
+    ]
+    counts = store.status()["counts"]
+    assert counts["approvals"] == 0
+    assert counts["orders"] == 0
 
 
 def test_dashboard_snapshot_includes_feature_parity_read_models(tmp_path):
