@@ -364,6 +364,11 @@ p {
   gap: var(--space-lg);
 }
 
+.report-toolbar {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* ===================================================================
    Daily Brief — Data-centric marquee strip (replaces hero)
    =================================================================== */

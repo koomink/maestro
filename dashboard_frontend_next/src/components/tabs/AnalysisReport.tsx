@@ -6,7 +6,6 @@ import { ReadableTable } from "../data-display/ReadableTable";
 import { KeyValueRows } from "../data-display/KeyValueRows";
 import { Panel } from "../ui/Panel";
 import { SegmentedControl } from "../ui/SegmentedControl";
-import { SectionHeader } from "../layout/SectionHeader";
 
 const periods = ["7D", "30D", "90D", "All"] as const;
 type Period = (typeof periods)[number];
@@ -28,18 +27,14 @@ export function AnalysisReport({
 
   return (
     <section className="report-stack">
-      <SectionHeader
-        eyebrow="Analysis Report"
-        title="What changed, and what drove it?"
-        copy="A report-style view for total portfolio performance, currency sleeve behavior, and strategy contribution. Period controls are frontend-local for v1 and ready for a future backend period API."
-      >
+      <div className="report-toolbar" aria-label="Analysis report controls">
         <SegmentedControl
           label="Period"
           value={period}
           values={[...periods]}
           onChange={(value) => setPeriod(value as Period)}
         />
-      </SectionHeader>
+      </div>
 
       <section className="analysis-grid">
         <LineChart title="Total Portfolio Value" rows={totalPerformance} xKey="created_at" yKey="total_value" />

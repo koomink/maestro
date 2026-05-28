@@ -5,7 +5,6 @@ import { MetricGrid } from "../data-display/MetricGrid";
 import { LineChart } from "../data-display/LineChart";
 import { ReadableTable } from "../data-display/ReadableTable";
 import { Panel } from "../ui/Panel";
-import { SectionHeader } from "../layout/SectionHeader";
 
 type StrategyAction = { busy: boolean; message: string; strategyId: string; tone?: Tone };
 
@@ -49,12 +48,6 @@ export function VirtuosoReport({
 
   return (
     <section className="report-stack">
-      <SectionHeader
-        eyebrow="Virtuoso"
-        title="What did each app propose?"
-        copy="App-level activity, health, proposal signals, and book performance without embedding strategy-specific logic in Maestro."
-      />
-
       <nav className="sub-tab-list" aria-label="Virtuoso apps">
         <button
           className={showingOverview ? "sub-tab active" : "sub-tab"}
