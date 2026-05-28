@@ -420,7 +420,7 @@
       limit price
 - [x] Add order-count, notional-cap, and pending-order risk checks
 - [x] Normalize broker PnL enough to enforce
-      `execution.live_order_limits.daily_loss_limit`
+      `execution.live_order_limits.daily_loss_limit_by_currency`
 - [x] Account for fees, settlement, pending orders, and manual broker activity in
       live approval safety checks
 - [x] Add fake-client tests for risk fail-closed behavior
@@ -593,6 +593,9 @@
 - [x] Add `/portfolio` from Maestro state only
 - [x] Add `/apps` from configured strategies and latest strategy runs
 - [x] Add `/orders` and `/approvals`
+- [x] Add `/signal` latest signal package view
+- [x] Add proposal-only `/signal_<strategy>` Telegram commands backed by the
+      signal config and Dashboard-visible signal packages
 - [x] Add `/pause` with confirmation button
 - [x] Add `/kill_switch` with confirmation button
 - [x] Persist Telegram command audit/system events
@@ -700,6 +703,8 @@
       one account routing file
 - [x] Extend the shared strategy mapping with `readonly`, `signal`, and
       strategy-level `order_posture` controls
+- [x] Extend the shared strategy mapping with execution sleeves, per-sleeve
+      `order_generation_mode`, target weights, and cash rebalance boundaries
 - [x] Add brokerless `dev_sandbox` routing for development strategies that need
       signal/approval UX rehearsal without KIS or Toss broker access
 - [x] Reject mixed strategy order posture within one account in a Symphony run

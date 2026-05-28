@@ -111,8 +111,9 @@ changing `execution.order_posture` to `armed`.
 Only after `personal-check` reports `minimum_live_ready status=ok`:
 
 1. Keep `execution.allowed_order_type=limit`.
-2. Set the smallest practical `execution.live_order_limits.max_order_notional`,
-   `execution.live_order_limits.max_daily_notional`, and
+2. Set the smallest practical
+   `execution.live_order_limits.max_order_notional_by_currency`,
+   `execution.live_order_limits.max_daily_notional_by_currency`, and
    `execution.live_order_limits.max_daily_order_count`.
 3. Set `execution.order_posture=armed`.
 4. Run `maestro beta-preflight --config <operator-config>`.

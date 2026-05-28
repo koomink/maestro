@@ -85,7 +85,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config ${MAESTRO_READONLY_CONFIG} --timeout-seconds 10
+ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --timeout-seconds 10
 Restart=always
 RestartSec=5
 
@@ -108,7 +108,7 @@ the same bot. The Symphony signal wrapper handles this stop/start boundary.
 Register the slash command menu once after bot setup or command changes:
 
 ```bash
-MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml maestro telegram-set-commands
+maestro telegram-set-commands --config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG}
 ```
 
 ## Example Private Dashboard Service

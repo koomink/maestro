@@ -373,7 +373,7 @@ Completed scope:
   using the exact live order limit price before calling the broker order
   endpoint.
 - Normalize broker PnL enough to enforce
-  `execution.live_order_limits.daily_loss_limit` instead of failing closed when
+  `execution.live_order_limits.daily_loss_limit_by_currency` instead of failing closed when
   it is configured.
 - Account for fees, settlement, pending orders, and manual broker activity where
   they affect live approval safety.
@@ -559,7 +559,9 @@ coordination becomes too complex for the live workflow.
 Implemented scope:
 
 - Read-only Telegram operator commands: `/help`, `/status`, `/health`,
-  `/account`, `/portfolio`, `/apps`, `/orders`, and `/approvals`.
+  `/signal`, `/account`, `/portfolio`, `/apps`, `/orders`, and `/approvals`,
+  plus proposal-only `/signal_<strategy>` commands wired through the separate
+  signal config.
 - Back read-only responses with Maestro SQLite state and the latest stored
   broker snapshot only; Telegram commands must not call KIS live network
   endpoints directly.

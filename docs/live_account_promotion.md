@@ -46,8 +46,8 @@ or Telegram admin controls.
   actually describes an armed real-account profile.
 - Keep `execution.order_posture` at `disabled` or `dry_run` until read-only sync,
   reconciliation, Telegram smoke, and live dry-run all pass.
-- Use small `execution.live_order_limits.max_order_notional`,
-  `execution.live_order_limits.max_daily_notional`, and
+- Use small `execution.live_order_limits.max_order_notional_by_currency`,
+  `execution.live_order_limits.max_daily_notional_by_currency`, and
   `execution.live_order_limits.max_daily_order_count` values for the first order.
 - Enable market-session and broker-quote validation in the operator config once
   the required market calendar and broker snapshot flow are verified.

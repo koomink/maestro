@@ -515,10 +515,16 @@ execution:
   order_posture: disabled
   require_reconciliation_pass: true
   live_order_limits:
-    max_order_notional: 0
-    max_daily_notional: 0
+    max_order_notional_by_currency:
+      KRW: 0
+      USD: 0
+    max_daily_notional_by_currency:
+      KRW: 0
+      USD: 0
     max_daily_order_count: 0
-    daily_loss_limit: null
+    daily_loss_limit_by_currency:
+      KRW: 0
+      USD: 0
     fee_buffer_pct: 0
   allowed_order_type: limit
   order_status_poll_interval_seconds: 30
@@ -1254,6 +1260,8 @@ Implemented operator commands:
 - `/help`
 - `/status`
 - `/health`
+- `/signal`
+- `/signal_<strategy>` such as `/signal_ataraxia` and `/signal_snowball`
 - `/account`
 - `/portfolio`
 - `/apps`
@@ -1267,13 +1275,16 @@ stored SQLite state; `/account` refreshes the KIS read-only broker snapshot
 before replying so reported cash and positions reflect current broker truth.
 `/status` reports broker total value, broker cash, broker positions, and the
 snapshot timestamp instead of the internal dry-run portfolio cash.
+`/signal` shows the latest persisted signal package. `/signal_<strategy>` uses the
+separate signal config to run one selected strategy only, persists a proposal
+signal package, and does not create approval requests or submit broker orders.
 `/pause` and `/kill_switch` require a whitelisted user, confirmation button, and
 persisted audit/system event.
 Run the polling operator UI with:
 
 ```bash
-maestro telegram-set-commands --config <operator-live-approval-config>
-maestro telegram-operator --config <operator-live-approval-config>
+maestro telegram-set-commands --config <operator-readonly-config> --signal-config <operator-signal-config>
+maestro telegram-operator --config <operator-readonly-config> --signal-config <operator-signal-config>
 ```
 
 Excluded Telegram commands include `/resume`, `/clear-halt`, `/live-on`,

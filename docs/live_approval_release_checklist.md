@@ -73,8 +73,9 @@ For the complete operator-local promotion runbook, see
   or max buy quantity.
 - Set `execution.live_order_limits.fee_buffer_pct` to the operator's conservative
   commission/fee cushion before the first real order.
-- Set `execution.live_order_limits.daily_loss_limit` only after the operator has
-  verified which normalized broker PnL field the account snapshot provides.
+- Set `execution.live_order_limits.daily_loss_limit_by_currency` only after the
+  operator has verified which normalized broker PnL field and currency each
+  account snapshot provides.
 - Set `monitoring.heartbeat_max_age_seconds` and
   `monitoring.scheduled_run_max_age_seconds` in operator deployments that run on a
   schedule.
@@ -340,7 +341,7 @@ approval-gated `run_once` through `LiveOrderSafetyService` and the bounded
 - Halt when broker risk validation detects insufficient buying power, negative
   post-order cash, pending broker orders, or unreconciled broker snapshot/manual
   broker activity.
-- Halt when `execution.live_order_limits.daily_loss_limit` is exceeded or broker
+- Halt when `execution.live_order_limits.daily_loss_limit_by_currency` is exceeded or broker
   PnL is unavailable while the limit is configured.
 - Halt or fail when broker reconciliation fails after a fill update.
 - Do not retry blindly after any halt/failure.

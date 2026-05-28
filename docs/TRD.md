@@ -402,8 +402,9 @@ the same `signal_run_id`.
   no `live_auto` mode.
 - Live orders are disabled by default with:
   `execution.order_posture=disabled`, `require_reconciliation_pass=true`,
-  `live_order_limits.max_order_notional=0`,
-  `live_order_limits.max_daily_notional=0`, and `allowed_order_type=limit`.
+  `live_order_limits.max_order_notional_by_currency` set to zero values,
+  `live_order_limits.max_daily_notional_by_currency` set to zero values, and
+  `allowed_order_type=limit`.
 - `LiveOrderSafetyService` is the only internal live order submission boundary.
   It requires an approved approval decision, the latest `broker_reconciliation`
   event to pass, limit orders only, per-order and daily notional caps,
@@ -1196,9 +1197,13 @@ Requirements:
 - Keep the first implementation polling based; webhook handling remains
   deferred.
 - Put command parsing behind the Telegram adapter boundary.
-- Back `/help`, `/status`, `/health`, `/account`, `/portfolio`, `/apps`,
-  `/orders`, and `/approvals` responses with Maestro state/read models and the
-  latest stored broker snapshot.
+- Back `/help`, `/status`, `/health`, `/signal`, `/account`, `/portfolio`,
+  `/apps`, `/orders`, and `/approvals` responses with Maestro state/read models
+  and the latest stored broker snapshot.
+- Support `/signal_<strategy>` commands through a separate signal config. These
+  commands run one selected signal-enabled strategy, persist a signal package
+  visible to Dashboard freshness/read models, and do not create approvals or
+  submit broker orders.
 - Require confirmation callbacks for `/pause` and `/kill_switch`.
 - Persist Telegram command execution to audit/system events.
 - Do not allow Telegram commands to submit or cancel broker orders, call KIS

@@ -28,7 +28,8 @@ execution:
     require_quote_validation: true
     require_risk_validation: true
   live_order_limits:
-    daily_loss_limit: 100000
+    daily_loss_limit_by_currency:
+      KRW: 100000
 
 monitoring:
   heartbeat_max_age_seconds: 3600
@@ -43,8 +44,8 @@ kis:
 
 For the first KIS mock-investment broker-submit pilot only, set
 `execution.order_posture=armed`.
-Keep `execution.live_order_limits.max_order_notional`,
-`execution.live_order_limits.max_daily_notional`, and
+Keep `execution.live_order_limits.max_order_notional_by_currency`,
+`execution.live_order_limits.max_daily_notional_by_currency`, and
 `execution.live_order_limits.max_daily_order_count` at minimum-order rehearsal
 levels.
 

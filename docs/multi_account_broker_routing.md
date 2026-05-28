@@ -10,8 +10,9 @@ Maestro routes broker execution with `strategy.account_id`.
   `paper_default` account in payloads.
 - `live_approval` strategies with explicit `accounts` must declare
   `strategy.account_id`.
-- Operator configs may set `strategy_account_map_path` to load those
-  `account_id` values from one shared YAML file. The mapping file is included
+- Operator configs may set `strategy_account_map_path` to load shared
+  strategy routing from one YAML file: account binding, execution sleeve,
+  signal/readonly visibility, and order posture. The mapping file is included
   in config identity and runtime fingerprint checks.
 - Operator configs may set `app_fragment_paths` to import Virtuoso app-owned
   fragments before account mapping is applied. Fragment bytes are included in
@@ -27,7 +28,8 @@ line is strict:
   instruments, currency sleeve membership, DataHub symbol maps, and
   recommendations such as a preferred order generation mode.
 - Operator profile: broker accounts, approval, execution posture, risk,
-  monitoring, state, audit, real/paper routing, and safety gates.
+  monitoring, state, audit, real/paper routing, execution sleeves, and
+  safety gates.
 - Operator-local overlay: secrets, account IDs, promotion-specific posture,
   budgets, dates, and environment-specific paths.
 
@@ -104,29 +106,66 @@ stocks and ETFs use `kis_domestic_stock`, while US-listed stocks and ETFs use
 market differences while sharing common KIS REST plumbing underneath them.
 
 Shared mapping file. The legacy `strategy_id: account_id` form remains valid,
-but operator workflows should prefer the object form so phase visibility and
-order posture are explicit:
+but operator workflows should prefer the object form so phase visibility,
+execution sleeve, and order posture are explicit:
 
 ```yaml
+execution_sleeves:
+  accounts:
+    kis_mock:
+      ataraxia_isa:
+        currency_sleeve: KRW
+        target_weight: 1.0
+        order_generation_mode: buy_only_contribution
+        contribution:
+          enabled: true
+          currency: KRW
+          sleeve: KRW
+          monthly_budget: 3000000
+          buy_day: 15
+
+    dev_sandbox:
+      snowball_us:
+        currency_sleeve: USD
+        target_weight: 1.0
+        order_generation_mode: target_rebalance
+
 strategies:
   ataraxia:
     account_id: kis_mock
+    execution_sleeve: ataraxia_isa
     readonly: true
     signal: true
     order_posture: dry_run
 
   snowball_us:
     account_id: dev_sandbox
+    execution_sleeve: snowball_us
     readonly: true
     signal: true
     order_posture: dry_run
 
   trading_agents:
     account_id: dev_sandbox
+    execution_sleeve: trading_agents
     readonly: true
     signal: false
     order_posture: disabled
 ```
+
+Execution sleeves are virtual operator books inside a broker account. They sit
+above `portfolio.currency_sleeves`: a currency sleeve describes cash/symbol
+membership such as `KRW` or `USD`, while an execution sleeve owns strategy
+routing, target account weight, order generation mode, and contribution budget.
+Maestro enforces one `order_generation_mode` per `account_id + execution_sleeve`.
+When multiple active execution sleeves share one account, their `target_weight`
+values must sum to `1.0`.
+
+Cash rebalance v1 only allocates available account cash across execution sleeves.
+It does not sell existing positions to force sleeve weights. If a sleeve is below
+its target account weight, new cash is allocated to the shortfall first; if no
+sleeve is underweight, cash is split by target weights. Separate execution
+sleeves in the same account may not target the same tradable symbol in v1.
 
 Phase 1 operational support:
 
@@ -146,8 +185,9 @@ Current operator split:
   re-run strategies, and executes approval/order lifecycle after freshness and
   safety checks. It is intentionally `order_posture: dry_run` by default.
 
-The current strategy mapping routes `ataraxia -> kis_mock`,
-`snowball_us -> dev_sandbox`, and `trading_agents -> dev_sandbox` through
+The current strategy mapping routes `ataraxia -> kis_mock / ataraxia_isa`,
+`snowball_us -> dev_sandbox / snowball_us`, and
+`trading_agents -> dev_sandbox / trading_agents` through
 `configs/operator/strategy_accounts.yaml`.
 
 ## Strategy Promotion And Account Binding

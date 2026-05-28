@@ -120,10 +120,12 @@ The multi-account operator workflow uses three configs:
    - Re-check freshness, reconciliation, safety state, limits, and approval
      before any broker submit.
 
-Dashboard interaction should mirror the same separation. Global `Refresh` may
-run the read-only account refresh path and classify latest signal freshness, but
-it must not run Virtuoso apps. Per-app `Generate Signal` belongs in the
-Virtuoso tab and should use the signal config for one selected app only.
+Dashboard and Telegram interactions should mirror the same separation. Global
+Dashboard `Refresh` may run the read-only account refresh path and classify
+latest signal freshness, but it must not run Virtuoso apps. Per-app Dashboard
+`Generate Signal` and Telegram `/signal_<strategy>` commands use the signal
+config for one selected app only, persist Dashboard-visible signal packages, and
+do not create approval requests or submit broker orders.
 
 The systemd wiring for this workflow is:
 
