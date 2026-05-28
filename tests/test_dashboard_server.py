@@ -285,6 +285,46 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
     assert calls == [["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]]
 
 
+def test_dashboard_refresh_reports_action_errors_as_readable_409(monkeypatch, tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+
+    def fail_fetch(self, symbols):
+        raise ValueError("Missing KIS credential environment variables: ['KIS_MOCK_APP_KEY']")
+
+    monkeypatch.setattr(
+        "maestro.execution.brokers.kis.service.KISReadOnlyService.fetch_and_store_snapshot",
+        fail_fetch,
+    )
+    raw["mode"] = "live_readonly"
+    raw["state"]["sqlite_path"] = str(tmp_path / "readonly_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "readonly_audit.jsonl")
+    raw["portfolio"].pop("initial_cash", None)
+    raw["execution"]["order_posture"] = "disabled"
+    raw["accounts"] = [
+        {
+            "id": "kis_paper",
+            "broker": "kis",
+            "environment": "paper_trading",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK",
+        }
+    ]
+    raw["strategies"] = []
+    readonly_path = tmp_path / "readonly.yaml"
+    readonly_path.write_text(yaml.safe_dump(raw))
+    client = TestClient(create_app(readonly_path), raise_server_exceptions=False)
+
+    response = client.post("/api/dashboard/refresh")
+
+    assert response.status_code == 409
+    payload = response.json()["detail"]
+    assert payload["status"] == "dashboard_refresh_failed"
+    assert payload["read_only"] is True
+    assert "Failed to refresh account kis_paper" in payload["message"]
+    assert "Missing KIS credential" in payload["message"]
+
+
 def test_generate_signal_requires_signal_config(tmp_path):
     config_path = _dashboard_config(tmp_path)
     client = TestClient(create_app(config_path))

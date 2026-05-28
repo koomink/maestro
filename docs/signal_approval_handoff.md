@@ -30,6 +30,7 @@ account. Real account binding is a separate promotion decision.
 
 Strategy controls in the shared mapping determine which phase sees each app:
 
+- `enabled: true` admits the app into the operator-facing Symphony universe.
 - `readonly: true` exposes the app in dashboard/Telegram management views only.
   `live_readonly` still runs no strategy code.
 - `signal: true` lets `symphony_signal` execute the strategy and persist its
@@ -43,9 +44,9 @@ Strategy controls in the shared mapping determine which phase sees each app:
 Signal packages persist the effective phase controls and per-order posture so
 `symphony_approval` can apply them without re-running strategies.
 
-The current operator mapping routes `ataraxia -> kis_mock`,
-`snowball_us -> dev_sandbox`, and `trading_agents -> dev_sandbox`.
-`trading_agents` is `readonly: true` and `signal: false`, so it can appear in
+The current operator mapping enables `ataraxia -> kis_mock` and
+`snowball_us -> dev_sandbox`; `trading_agents -> dev_sandbox` is `enabled: false`,
+`readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
 
 ## Responsibilities

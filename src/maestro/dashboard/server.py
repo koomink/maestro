@@ -108,12 +108,24 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
         return detail
 
+    def dashboard_refresh_error(exc: ValueError) -> HTTPException:
+        if str(exc).startswith(CONFIG_STATE_MISMATCH_PREFIX):
+            return config_state_mismatch_error(exc)
+        return HTTPException(
+            status_code=409,
+            detail={
+                "status": "dashboard_refresh_failed",
+                "read_only": True,
+                "message": str(exc),
+            },
+        )
+
     @app.post("/api/dashboard/refresh")
     def refresh() -> dict[str, object]:
         try:
             return refresh_dashboard_state(resolved_config).as_payload()
         except ValueError as exc:
-            raise config_state_mismatch_error(exc) from exc
+            raise dashboard_refresh_error(exc) from exc
 
     @app.post("/api/dashboard/virtuoso/{strategy_id}/generate-signal")
     def generate_signal(strategy_id: str) -> dict[str, object]:

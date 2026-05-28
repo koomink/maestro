@@ -139,7 +139,7 @@ Maestro now supports top-level `accounts` for broker routing. The core rule is
 account, while many strategies may share the same account. Legacy single-account
 `kis:` configs still load and are migrated internally to `default_kis`.
 Operator profiles may set `strategy_account_map_path` so multiple phase configs
-share one mapping file instead of duplicating `account_id` under every strategy.
+share one mapping file instead of duplicating `enabled`, `account_id`, `readonly`, `signal`, and `order_posture` under every phase config.
 Strategies that are still under development can either stay out of the Symphony
 operator mapping or enter as explicit candidates with conservative phase
 controls. For development strategies that need signal generation and Telegram
@@ -915,9 +915,8 @@ and `symphony_approval`. They share `state.identity_group: symphony` and
 `var/symphony_state.db` so dashboard refreshes, signal generation, and approval
 execution see the same broker and signal state. Multi-product KIS configs use
 explicit `accounts` and `strategy_account_map_path`; the shared mapping file
-currently routes `ataraxia -> kis_mock`, `snowball_us -> dev_sandbox`, and
-`trading_agents -> dev_sandbox`. `trading_agents` is visible to operator views
-but has `signal: false`, so the signal phase does not import or run it.
+currently enables `ataraxia -> kis_mock` and `snowball_us -> dev_sandbox`, while
+`trading_agents -> dev_sandbox` remains `enabled: false` and `signal: false`, so the signal phase does not import or run it.
 Change a strategy's account in the shared mapping file instead of editing
 `symphony_signal.yaml` and `symphony_approval.yaml` separately. Common
 environment variable names:

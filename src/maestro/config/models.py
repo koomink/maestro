@@ -131,7 +131,6 @@ class MaestroConfig(StrictConfigModel):
 
     @model_validator(mode="after")
     def validate_mode_contract(self) -> "MaestroConfig":
-        enabled_strategies = [strategy.id for strategy in self.strategies if strategy.enabled]
         self._derive_legacy_accounts()
         self._validate_account_mappings()
         if self.mode == RunMode.PAPER and self.portfolio.initial_cash is None:
@@ -145,11 +144,6 @@ class MaestroConfig(StrictConfigModel):
         if self.kis.provider == "kis" and self.kis.token_cache_path is None:
             self.kis.token_cache_path = "var/kis_access_token.json"
         if self.mode == RunMode.LIVE_READONLY:
-            if enabled_strategies:
-                raise ValueError(
-                    "live_readonly mode does not run strategies; disable: "
-                    + ", ".join(enabled_strategies)
-                )
             if self.approval.enabled or self.approval.require_approval:
                 raise ValueError("live_readonly mode must not require approval")
             if self.execution.order_posture != "disabled":

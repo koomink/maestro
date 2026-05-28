@@ -305,8 +305,9 @@ material broker snapshot drift from the signal baseline and carries
   strategies.
 
 Strategy-level phase controls are loaded from the shared
-`strategy_account_map_path` file. `readonly` controls dashboard/Telegram
-visibility only, `signal` controls whether `symphony_signal` imports and runs
+`strategy_account_map_path` file. `enabled` is the operator-facing switch for
+whether the app is in the Symphony universe. `readonly` controls dashboard/Telegram
+visibility, `signal` controls whether `symphony_signal` imports and runs
 the app, and `order_posture` controls whether generated orders are excluded from
 approval, included as dry-run approvals, or allowed to become broker-submit
 candidates. The global `execution.order_posture` remains the ceiling: global

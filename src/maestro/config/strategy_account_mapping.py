@@ -102,6 +102,8 @@ def _apply_strategy_account_map(
         if mapped_account_id:
             strategy_values["account_id"] = mapped_account_id
         if isinstance(mapped_config, dict):
+            if "enabled" in mapped_config:
+                strategy_values["enabled"] = bool(mapped_config["enabled"])
             if "readonly" in mapped_config:
                 strategy_values["readonly_enabled"] = bool(mapped_config["readonly"])
             if "signal" in mapped_config:

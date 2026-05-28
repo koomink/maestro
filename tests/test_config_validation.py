@@ -474,12 +474,14 @@ def test_unknown_top_level_field_fails(tmp_path):
         load_config(config_path)
 
 
-def test_live_readonly_rejects_enabled_strategies(tmp_path):
+def test_live_readonly_allows_enabled_strategies_for_operator_views(tmp_path):
     raw = yaml.safe_load(Path("configs/live_readonly.yaml").read_text())
     raw["strategies"] = [
         {
             "id": "sample_static_allocation",
             "enabled": True,
+            "readonly_enabled": True,
+            "signal_enabled": False,
             "weight": 1.0,
             "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
         }
@@ -487,8 +489,11 @@ def test_live_readonly_rejects_enabled_strategies(tmp_path):
     config_path = tmp_path / "live_readonly_with_strategy.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
-    with pytest.raises(ValidationError, match="live_readonly mode does not run strategies"):
-        load_config(config_path)
+    config = load_config(config_path)
+
+    assert [(strategy.id, strategy.enabled) for strategy in config.strategies] == [
+        ("sample_static_allocation", True)
+    ]
 
 
 def test_live_readonly_rejects_approval_and_live_order_settings(tmp_path):
@@ -822,10 +827,13 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         None,
         None,
     ]
-    assert [(strategy.id, strategy.readonly_enabled) for strategy in readonly.strategies] == [
-        ("ataraxia", True),
-        ("snowball_us", True),
-        ("trading_agents", True),
+    assert [
+        (strategy.id, strategy.enabled, strategy.readonly_enabled)
+        for strategy in readonly.strategies
+    ] == [
+        ("ataraxia", True, True),
+        ("snowball_us", True, True),
+        ("trading_agents", False, True),
     ]
     assert signal.execution.order_posture == "disabled"
     assert approval.execution.order_posture == "dry_run"
@@ -993,6 +1001,7 @@ def test_shared_strategy_account_map_applies_phase_controls(tmp_path):
     assert [
         (
             strategy.id,
+            strategy.enabled,
             strategy.account_id,
             strategy.readonly_enabled,
             strategy.signal_enabled,
@@ -1000,9 +1009,58 @@ def test_shared_strategy_account_map_applies_phase_controls(tmp_path):
         )
         for strategy in config.strategies
     ] == [
-        ("ataraxia", "kis_isa", True, True, "dry_run"),
-        ("snowball_us", "dev_sandbox", True, True, "dry_run"),
-        ("trading_agents", "dev_sandbox", True, False, "disabled"),
+        ("ataraxia", True, "kis_isa", True, True, "dry_run"),
+        ("snowball_us", True, "dev_sandbox", True, True, "dry_run"),
+        ("trading_agents", True, "dev_sandbox", True, False, "disabled"),
+    ]
+
+
+def test_shared_strategy_account_map_overrides_strategy_enabled(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy["enabled"] = False
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "strategies": {
+                    "ataraxia": {
+                        "enabled": True,
+                        "account_id": "kis_isa",
+                        "readonly": True,
+                        "signal": True,
+                        "order_posture": "dry_run",
+                    },
+                    "snowball_us": {
+                        "enabled": True,
+                        "account_id": "dev_sandbox",
+                        "readonly": True,
+                        "signal": True,
+                        "order_posture": "dry_run",
+                    },
+                    "trading_agents": {
+                        "enabled": False,
+                        "account_id": "dev_sandbox",
+                        "readonly": True,
+                        "signal": False,
+                        "order_posture": "disabled",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert [(strategy.id, strategy.enabled) for strategy in config.strategies] == [
+        ("ataraxia", True),
+        ("snowball_us", True),
+        ("trading_agents", False),
     ]
 
 

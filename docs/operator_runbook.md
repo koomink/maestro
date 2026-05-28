@@ -141,8 +141,7 @@ for paper and older workflows.
 
 Strategy-to-account routing for `symphony_signal` and `symphony_approval` is
 centralized in `strategy_account_map_path`, normally
-`/root/maestro-operator/strategy_accounts.yaml` in deployment. Change mappings
-there, then validate both phase configs before the next scheduled signal run.
+`/root/maestro-operator/strategy_accounts.yaml` in deployment. Change `enabled`, account mappings, and phase controls there, then validate the phase configs before the next scheduled signal run.
 The mapping file participates in config fingerprint checks, so approval rejects
 a signal package if the mapping changes between signal generation and approval.
 Development-only strategies may remain outside this mapping. If the operator
@@ -154,18 +153,19 @@ a real account only after evidence review.
 
 Use this promotion ladder for strategy phase controls:
 
-1. `readonly: true`, `signal: false`, `order_posture: disabled`: visible in
+1. `enabled: false`, `readonly: true`, `signal: false`, `order_posture: disabled`: tracked as an operator candidate but not enabled.
+2. `enabled: true`, `readonly: true`, `signal: false`, `order_posture: disabled`: visible in
    operator views only.
-2. `readonly: true`, `signal: true`, `order_posture: disabled`: signal and
+3. `enabled: true`, `readonly: true`, `signal: true`, `order_posture: disabled`: signal and
    order preview can be audited, but no Telegram approval request is created.
-3. `readonly: true`, `signal: true`, `order_posture: dry_run`: Telegram approval
+4. `enabled: true`, `readonly: true`, `signal: true`, `order_posture: dry_run`: Telegram approval
    UX is exercised, and approved orders are dry-run events only.
-4. `readonly: true`, `signal: true`, `order_posture: armed`: approved orders can
+5. `enabled: true`, `readonly: true`, `signal: true`, `order_posture: armed`: approved orders can
    reach broker submit only when the global config is also armed.
 
-The current shared mapping uses `ataraxia -> kis_mock`,
-`snowball_us -> dev_sandbox`, and `trading_agents -> dev_sandbox`.
-`trading_agents` is `readonly: true` but `signal: false`, so it can appear in
+The current shared mapping enables `ataraxia -> kis_mock` and
+`snowball_us -> dev_sandbox`; `trading_agents -> dev_sandbox` is `enabled: false`,
+`readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
 
 ## KIS Read-only Reconciliation

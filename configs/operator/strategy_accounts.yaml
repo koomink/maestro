@@ -1,17 +1,20 @@
 strategies:
   ataraxia:
+    enabled: true
     account_id: kis_mock
     readonly: true
     signal: true
     order_posture: dry_run
 
   snowball_us:
+    enabled: true
     account_id: dev_sandbox
     readonly: true
     signal: true
     order_posture: dry_run
 
   trading_agents:
+    enabled: false
     account_id: dev_sandbox
     readonly: true
     signal: false

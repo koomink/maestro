@@ -40,14 +40,18 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
     accounts_synced = 0
     if config.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         for logical_account_id, kis_config in _kis_accounts(config):
-            service = KISReadOnlyService(
-                kis_config,
-                store,
-                audit,
-                instruments=config.universe.instruments,
-                logical_account_id=logical_account_id,
-            )
-            service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
+            account_label = logical_account_id or "default_kis"
+            try:
+                service = KISReadOnlyService(
+                    kis_config,
+                    store,
+                    audit,
+                    instruments=config.universe.instruments,
+                    logical_account_id=logical_account_id,
+                )
+                service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
+            except ValueError as exc:
+                raise ValueError(f"Failed to refresh account {account_label}: {exc}") from exc
             accounts_synced += 1
     return DashboardRefreshResult(
         status="ok",
