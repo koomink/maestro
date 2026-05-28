@@ -8,6 +8,33 @@ export type Metric = {
 
 export type Row = Record<string, unknown>;
 
+export type SignalFreshness = {
+  overall: "missing" | "fresh" | "stale" | "failed" | string;
+  strategies: Array<{
+    strategy_id: string;
+    status: "missing" | "fresh" | "stale" | "failed" | string;
+    latest_signal_run_id?: string | null;
+    latest_signal_at?: string | null;
+    age_seconds?: number | null;
+    max_age_seconds?: number | null;
+  }>;
+};
+
+export type DashboardRefreshResponse = {
+  status: string;
+  accounts_synced: number;
+  signal_freshness: SignalFreshness;
+};
+
+export type GenerateSignalResponse = {
+  status: string;
+  strategy_id: string;
+  signal_run_id?: string | null;
+  loaded_strategies: string[];
+  action_required: boolean;
+  orders_preview_count: number;
+};
+
 export type DashboardSnapshot = {
   title: string;
   read_only: boolean;
@@ -94,6 +121,7 @@ export type DashboardSnapshot = {
   virtuoso_apps: {
     metrics: Metric[];
     overview: Row[];
+    signal_freshness: SignalFreshness;
     strategies: Array<{
       strategy_id: string;
       concept: Row[];

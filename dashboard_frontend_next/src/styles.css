@@ -1,27 +1,71 @@
+/* ===================================================================
+   Symphony Maestro Dashboard — Design System Styles
+   Based on DESIGN.md warm-canvas editorial system
+   =================================================================== */
+
 :root {
   color-scheme: light;
+
+  /* Brand & accent — aligned with DESIGN.md */
   --primary: #cc785c;
   --primary-active: #a9583e;
+  --primary-disabled: #e6dfd8;
+
+  /* Surface palette */
   --canvas: #faf9f5;
   --surface-soft: #f5f0e8;
   --surface-card: #efe9de;
   --surface-strong: #e8e0d2;
   --surface-dark: #181715;
   --surface-dark-elevated: #252320;
+  --surface-dark-soft: #1f1e1b;
+
+  /* Text palette */
   --ink: #141413;
   --body: #3d3d3a;
+  --body-strong: #252523;
   --muted: #6c6a64;
   --muted-soft: #8e8b82;
+
+  /* Borders */
   --hairline: #e6dfd8;
   --hairline-soft: #ebe6df;
+
+  /* On-dark */
   --on-primary: #ffffff;
   --on-dark: #faf9f5;
   --on-dark-soft: #a09d96;
-  --success: #4f9f67;
-  --warning: #b98212;
+
+  /* Semantic — DESIGN.md aligned */
+  --success: #5db872;
+  --warning: #d4a017;
   --danger: #c64545;
-  --teal: #4f9f90;
+  --teal: #5db8a6;
+  --amber: #e8a55a;
+
+  /* Spacing tokens — DESIGN.md spacing */
+  --space-xxs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-xxl: 48px;
+  --space-section: 96px;
+
+  /* Radius tokens — DESIGN.md rounded */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 9999px;
+
+  /* Elevation */
   --shadow: 0 18px 60px rgba(24, 23, 21, 0.08);
+  --shadow-sm: 0 2px 8px rgba(24, 23, 21, 0.06);
+
+  /* Typography stacks — DESIGN.md aligned */
   --display-font: "Cormorant Garamond", "Tiempos Headline", Georgia, serif;
   --ui-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono-font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -42,7 +86,11 @@ body {
     linear-gradient(180deg, var(--canvas), var(--surface-soft));
   color: var(--body);
   font-family: var(--ui-font);
+  font-size: 16px;
+  line-height: 1.55;
   letter-spacing: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button,
@@ -62,9 +110,17 @@ p {
   margin-top: 0;
 }
 
+/* ===================================================================
+   App Shell
+   =================================================================== */
+
 .app-shell {
   min-height: 100vh;
 }
+
+/* ===================================================================
+   Top Bar
+   =================================================================== */
 
 .topbar {
   position: sticky;
@@ -77,7 +133,7 @@ p {
   min-height: 76px;
   border-bottom: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--canvas) 92%, transparent);
-  padding: 14px 28px;
+  padding: 14px var(--space-xl);
   backdrop-filter: blur(18px);
 }
 
@@ -85,7 +141,7 @@ p {
   display: flex;
   align-items: center;
   min-width: 0;
-  gap: 12px;
+  gap: var(--space-sm);
 }
 
 .brand-mark {
@@ -93,7 +149,7 @@ p {
   width: 34px;
   height: 34px;
   place-items: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-dark);
   color: var(--on-dark);
   font-family: var(--display-font);
@@ -123,29 +179,35 @@ p {
 .section-controls {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-xs);
 }
 
 .tab-list {
   justify-content: center;
   border: 1px solid var(--hairline);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-soft);
-  padding: 4px;
+  padding: var(--space-xxs);
 }
 
 .tab-button,
 .segmented button {
   min-height: 36px;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  padding: 8px 14px;
+  padding: var(--space-xs) 14px;
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.tab-button:hover,
+.segmented button:hover {
+  color: var(--ink);
 }
 
 .tab-button.active,
@@ -158,25 +220,48 @@ p {
   justify-content: flex-end;
 }
 
+.refresh-cluster {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: min(280px, 100%);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--canvas) 78%, var(--surface-soft));
+  padding: var(--space-xxs);
+}
+
+.refresh-cluster span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .segmented {
   display: inline-flex;
   border: 1px solid var(--hairline);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--canvas);
   padding: 3px;
 }
+
+/* ===================================================================
+   Buttons
+   =================================================================== */
 
 .button,
 .icon-button {
   border: 1px solid transparent;
   cursor: pointer;
   font-weight: 600;
+  transition: background 160ms ease, border-color 160ms ease;
 }
 
 .button {
   min-height: 40px;
-  border-radius: 8px;
-  padding: 10px 16px;
+  border-radius: var(--radius-md);
+  padding: 10px var(--space-md);
 }
 
 .button.primary {
@@ -194,6 +279,15 @@ p {
   color: var(--ink);
 }
 
+.button.secondary:hover {
+  border-color: var(--muted-soft);
+}
+
+.button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .button.wide {
   width: 100%;
 }
@@ -204,33 +298,42 @@ p {
   height: 36px;
   place-items: center;
   border-color: color-mix(in srgb, var(--on-dark-soft) 28%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: var(--surface-dark-elevated);
   color: var(--on-dark);
   line-height: 1;
 }
 
+/* ===================================================================
+   Page Layout
+   =================================================================== */
+
 .page {
   width: min(1320px, 100%);
   margin: 0 auto;
-  padding: 28px;
+  padding: var(--space-xl);
 }
+
+/* ===================================================================
+   Trust Strip
+   =================================================================== */
 
 .trust-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 8px;
-  margin-bottom: 24px;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-lg);
 }
 
 .mini-fact {
   display: grid;
   min-width: 0;
-  gap: 4px;
+  gap: var(--space-xxs);
   border: 1px solid var(--hairline);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--canvas) 74%, var(--surface-card));
-  padding: 10px 12px;
+  padding: 10px var(--space-sm);
+  transition: border-color 200ms ease;
 }
 
 .mini-fact span,
@@ -252,86 +355,35 @@ p {
   white-space: nowrap;
 }
 
+/* ===================================================================
+   Report Stack & Section Structure
+   =================================================================== */
+
 .report-stack {
   display: grid;
-  gap: 24px;
+  gap: var(--space-lg);
 }
 
-.hero-report {
+/* ===================================================================
+   Daily Brief — Data-centric marquee strip (replaces hero)
+   =================================================================== */
+
+.brief-marquee-strip {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 0.72fr);
-  gap: 24px;
+  grid-template-columns: minmax(0, 1fr) minmax(380px, 0.9fr);
+  gap: var(--space-lg);
   align-items: stretch;
-  min-height: 420px;
-}
-
-.hero-copy,
-.portfolio-marquee,
-.section-header,
-.panel,
-.chart-panel {
-  border-radius: 16px;
-}
-
-.hero-copy {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  border: 1px solid var(--hairline);
-  background: var(--canvas);
-  padding: clamp(30px, 5vw, 72px);
-}
-
-.hero-copy h1,
-.section-header h1,
-.dark-feature h2,
-.shell-card h1 {
-  color: var(--ink);
-  font-family: var(--display-font);
-  font-weight: 500;
-  letter-spacing: -0.02em;
-}
-
-.hero-copy h1 {
-  max-width: 760px;
-  margin: 10px 0 16px;
-  font-size: clamp(48px, 7vw, 88px);
-  line-height: 0.95;
-}
-
-.hero-copy p,
-.section-header p,
-.muted-copy {
-  color: var(--muted);
-  font-size: 16px;
-  line-height: 1.7;
-}
-
-.hero-copy p {
-  max-width: 660px;
-}
-
-.status-line {
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  border: 1px solid var(--hairline);
-  border-radius: 999px;
-  background: var(--surface-soft);
-  color: var(--ink);
-  padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 600;
 }
 
 .portfolio-marquee {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  border-radius: var(--radius-xl);
   background: var(--surface-dark);
   color: var(--on-dark);
   box-shadow: var(--shadow);
-  padding: clamp(24px, 4vw, 44px);
+  padding: var(--space-xl);
 }
 
 .portfolio-marquee > span {
@@ -347,13 +399,15 @@ p {
   color: var(--on-dark);
   font-family: var(--ui-font);
   font-size: clamp(34px, 5vw, 58px);
+  font-weight: 700;
   letter-spacing: -0.04em;
   line-height: 1;
 }
 
 .marquee-grid {
   display: grid;
-  gap: 8px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-xs);
 }
 
 .portfolio-marquee .mini-fact {
@@ -369,10 +423,66 @@ p {
   color: var(--on-dark);
 }
 
+/* Verdict card — new data panel alongside portfolio */
+.verdict-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-xl);
+  background: color-mix(in srgb, var(--canvas) 58%, var(--surface-card));
+  padding: var(--space-xl);
+}
+
+.verdict-status {
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--hairline-soft);
+  background: color-mix(in srgb, var(--canvas) 72%, var(--surface-soft));
+  padding: var(--space-md);
+}
+
+.verdict-status strong {
+  display: block;
+  color: var(--ink);
+  font-family: var(--display-font);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  margin-bottom: var(--space-xxs);
+}
+
+.verdict-status p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin-bottom: 0;
+}
+
+.verdict-card .metric-grid {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+}
+
+.verdict-card .metric {
+  min-height: 80px;
+  padding: var(--space-sm);
+}
+
+.verdict-card .metric strong {
+  font-size: 16px;
+}
+
+.verdict-card .button {
+  align-self: flex-start;
+}
+
+/* ===================================================================
+   Brief & Analysis Grids
+   =================================================================== */
+
 .brief-grid,
 .analysis-grid {
   display: grid;
-  gap: 24px;
+  gap: var(--space-lg);
 }
 
 .brief-grid {
@@ -391,18 +501,23 @@ p {
   align-items: start;
 }
 
+/* ===================================================================
+   Section Header
+   =================================================================== */
+
 .section-header {
   display: flex;
   align-items: end;
   justify-content: space-between;
-  gap: 24px;
+  gap: var(--space-lg);
   border: 1px solid var(--hairline);
+  border-radius: var(--radius-xl);
   background: var(--canvas);
-  padding: 40px;
+  padding: var(--space-xxl) var(--space-xl);
 }
 
 .section-header h1 {
-  margin: 10px 0 12px;
+  margin: 10px 0 var(--space-sm);
   font-size: clamp(38px, 5vw, 64px);
   line-height: 1;
 }
@@ -412,16 +527,37 @@ p {
   margin-bottom: 0;
 }
 
+/* ===================================================================
+   Panels & Cards
+   =================================================================== */
+
 .panel,
 .chart-panel {
   border: 1px solid var(--hairline);
+  border-radius: var(--radius-xl);
   background: color-mix(in srgb, var(--canvas) 58%, var(--surface-card));
-  padding: 24px;
+  padding: var(--space-lg);
+  transition: border-color 200ms ease;
+}
+
+.panel:hover,
+.chart-panel:hover {
+  border-color: var(--surface-strong);
+}
+
+/* Shared heading style for panels, section-header, dark-feature, shell-card */
+.section-header h1,
+.dark-feature h2,
+.shell-card h1 {
+  color: var(--ink);
+  font-family: var(--display-font);
+  font-weight: 500;
+  letter-spacing: -0.02em;
 }
 
 .panel h2,
 .chart-title h2 {
-  margin: 8px 0 18px;
+  margin: var(--space-xs) 0 18px;
   color: var(--ink);
   font-family: var(--display-font);
   font-size: 30px;
@@ -429,6 +565,17 @@ p {
   letter-spacing: -0.02em;
   line-height: 1.1;
 }
+
+.section-header p,
+.muted-copy {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+/* ===================================================================
+   Metric Grid
+   =================================================================== */
 
 .metric-grid {
   display: grid;
@@ -442,12 +589,18 @@ p {
 
 .metric {
   display: grid;
-  gap: 12px;
+  gap: var(--space-sm);
   min-height: 110px;
   border: 1px solid var(--hairline);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: var(--canvas);
-  padding: 16px;
+  padding: var(--space-md);
+  transition: border-color 200ms ease, box-shadow 200ms ease;
+}
+
+.metric:hover {
+  border-color: var(--surface-strong);
+  box-shadow: var(--shadow-sm);
 }
 
 .metric strong {
@@ -456,6 +609,10 @@ p {
   font-size: 22px;
   line-height: 1.12;
 }
+
+/* ===================================================================
+   Signals, Lists, Key-Values
+   =================================================================== */
 
 .signal-list,
 .readable-list,
@@ -468,9 +625,10 @@ p {
 .list-item,
 .key-values div {
   border: 1px solid var(--hairline-soft);
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--canvas) 72%, var(--surface-soft));
-  padding: 12px 14px;
+  padding: var(--space-sm) 14px;
+  transition: border-color 200ms ease;
 }
 
 .signal {
@@ -499,7 +657,7 @@ p {
 .key-values div {
   display: grid;
   grid-template-columns: 132px minmax(0, 1fr);
-  gap: 16px;
+  gap: var(--space-md);
 }
 
 .key-values dt,
@@ -510,8 +668,12 @@ p {
 
 .list-item {
   display: grid;
-  gap: 4px;
+  gap: var(--space-xxs);
 }
+
+/* ===================================================================
+   Readable Table
+   =================================================================== */
 
 .readable-table-wrap {
   overflow: auto;
@@ -527,7 +689,7 @@ p {
 .readable-table th,
 .readable-table td {
   border-bottom: 1px solid var(--hairline);
-  padding: 12px 10px;
+  padding: var(--space-sm) 10px;
   text-align: left;
   vertical-align: top;
 }
@@ -546,6 +708,18 @@ p {
   overflow-wrap: anywhere;
 }
 
+.readable-table tbody tr {
+  transition: background 120ms ease;
+}
+
+.readable-table tbody tr:hover {
+  background: color-mix(in srgb, var(--surface-soft) 50%, transparent);
+}
+
+/* ===================================================================
+   Charts — Enhanced SVG
+   =================================================================== */
+
 .chart-panel {
   overflow: hidden;
 }
@@ -554,11 +728,11 @@ p {
   display: flex;
   align-items: start;
   justify-content: space-between;
-  gap: 16px;
+  gap: var(--space-md);
 }
 
 .chart-title h2 {
-  margin-bottom: 6px;
+  margin-bottom: var(--space-sm);
 }
 
 .chart-title > span {
@@ -596,10 +770,142 @@ p {
   stroke-width: 3.5;
 }
 
+.chart-area {
+  opacity: 1;
+}
+
+.chart-dot {
+  fill: var(--primary);
+  stroke: var(--canvas);
+  stroke-width: 2.5;
+}
+
+.chart-dot-inner {
+  fill: var(--on-primary);
+}
+
+.chart-dot-start {
+  fill: var(--muted-soft);
+  stroke: var(--canvas);
+  stroke-width: 2;
+}
+
+.chart-label {
+  fill: var(--muted-soft);
+  font-family: var(--ui-font);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+/* ===================================================================
+   Virtuoso Layout
+   =================================================================== */
+
+
+.sub-tab-list {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  overflow-x: auto;
+  border-bottom: 1px solid var(--hairline);
+  padding-bottom: var(--space-xs);
+}
+
+.sub-tab {
+  min-height: 36px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-pill);
+  background: var(--canvas);
+  color: var(--muted);
+  cursor: pointer;
+  padding: var(--space-xs) 14px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.sub-tab:hover {
+  border-color: var(--surface-strong);
+  color: var(--ink);
+}
+
+.sub-tab.active {
+  border-color: var(--surface-dark);
+  background: var(--surface-dark);
+  color: var(--on-dark);
+}
+
+.app-action-feature {
+  display: grid;
+  gap: var(--space-lg);
+}
+
+.app-action-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-lg);
+}
+
+.app-action-header h2 {
+  margin-bottom: 0;
+}
+
+.signal-action-box {
+  display: grid;
+  gap: var(--space-xs);
+  justify-items: end;
+  max-width: 260px;
+}
+
+.signal-action-box span {
+  color: var(--on-dark-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: right;
+}
+
+.freshness-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  border: 1px solid color-mix(in srgb, var(--on-dark-soft) 24%, transparent);
+  border-radius: var(--radius-lg);
+  background: var(--surface-dark-elevated);
+  padding: var(--space-sm) var(--space-md);
+}
+
+.freshness-strip span {
+  color: var(--on-dark-soft);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.freshness-strip strong {
+  color: var(--on-dark);
+  font-size: 15px;
+}
+
+.freshness-strip small {
+  margin-left: auto;
+  color: var(--on-dark-soft);
+}
+
+.action-status {
+  margin: 0;
+  border: 1px solid color-mix(in srgb, var(--on-dark-soft) 24%, transparent);
+  border-radius: var(--radius-lg);
+  color: var(--on-dark);
+  padding: var(--space-sm) var(--space-md);
+  font-size: 13px;
+}
 .virtuoso-layout {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
-  gap: 24px;
+  gap: var(--space-lg);
   align-items: start;
 }
 
@@ -612,14 +918,19 @@ p {
 
 .app-card {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
   width: 100%;
   border: 1px solid var(--hairline);
   border-radius: 14px;
   background: var(--canvas);
   cursor: pointer;
-  padding: 16px;
+  padding: var(--space-md);
   text-align: left;
+  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
+}
+
+.app-card:hover {
+  border-color: var(--surface-strong);
 }
 
 .app-card.active {
@@ -648,18 +959,18 @@ p {
 
 .app-detail {
   display: grid;
-  gap: 24px;
+  gap: var(--space-lg);
 }
 
 .dark-feature {
-  border-radius: 16px;
+  border-radius: var(--radius-xl);
   background: var(--surface-dark);
   color: var(--on-dark);
-  padding: 32px;
+  padding: var(--space-xl);
 }
 
 .dark-feature h2 {
-  margin: 8px 0 24px;
+  margin: var(--space-xs) 0 var(--space-lg);
   color: var(--on-dark);
   font-size: clamp(38px, 5vw, 62px);
 }
@@ -677,6 +988,10 @@ p {
   color: var(--on-dark);
 }
 
+/* ===================================================================
+   Console Drawer
+   =================================================================== */
+
 .console-drawer {
   position: fixed;
   z-index: 40;
@@ -691,9 +1006,9 @@ p {
   border-left: 1px solid color-mix(in srgb, var(--on-dark-soft) 20%, transparent);
   background: var(--surface-dark);
   color: var(--on-dark);
-  padding: 24px;
+  padding: var(--space-lg);
   transform: translateX(102%);
-  transition: transform 180ms ease;
+  transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .console-drawer.open {
@@ -708,7 +1023,7 @@ p {
 }
 
 .console-header h2 {
-  margin: 6px 0 0;
+  margin: var(--space-sm) 0 0;
   color: var(--on-dark);
   font-family: var(--display-font);
   font-size: 34px;
@@ -728,7 +1043,7 @@ p {
 }
 
 .console-section h3 {
-  margin: 0 0 4px;
+  margin: 0 0 var(--space-xxs);
   color: var(--on-dark);
   font-size: 14px;
 }
@@ -751,9 +1066,13 @@ p {
   color: var(--on-dark);
 }
 
+/* ===================================================================
+   Form Fields
+   =================================================================== */
+
 .field {
   display: grid;
-  gap: 6px;
+  gap: var(--space-sm);
 }
 
 .field input,
@@ -761,39 +1080,86 @@ p {
   min-height: 40px;
   width: 100%;
   border: 1px solid color-mix(in srgb, var(--on-dark-soft) 26%, transparent);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background: var(--surface-dark-elevated);
   color: var(--on-dark);
-  padding: 10px 12px;
+  padding: 10px var(--space-sm);
+  transition: border-color 160ms ease;
 }
+
+.field input:focus,
+.field select:focus {
+  border-color: var(--primary);
+  outline: none;
+}
+
+/* ===================================================================
+   Tone Classes — with subtle background hints
+   =================================================================== */
 
 .tone-success {
   border-color: color-mix(in srgb, var(--success) 68%, var(--hairline));
+  background: color-mix(in srgb, var(--success) 4%, var(--canvas));
 }
 
 .tone-warning {
   border-color: color-mix(in srgb, var(--warning) 72%, var(--hairline));
+  background: color-mix(in srgb, var(--warning) 4%, var(--canvas));
 }
 
 .tone-danger {
   border-color: color-mix(in srgb, var(--danger) 72%, var(--hairline));
+  background: color-mix(in srgb, var(--danger) 4%, var(--canvas));
 }
 
 .tone-primary {
   border-color: color-mix(in srgb, var(--primary) 72%, var(--hairline));
 }
 
+.tone-neutral {
+  border-color: var(--hairline);
+}
+
+/* Dark surface tone overrides — don't apply light backgrounds on dark containers */
+.portfolio-marquee .tone-success,
+.dark-feature .tone-success,
+.console-section .tone-success {
+  background: color-mix(in srgb, var(--success) 10%, var(--surface-dark-elevated));
+}
+
+.portfolio-marquee .tone-warning,
+.dark-feature .tone-warning,
+.console-section .tone-warning {
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface-dark-elevated));
+}
+
+.portfolio-marquee .tone-danger,
+.dark-feature .tone-danger,
+.console-section .tone-danger {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-dark-elevated));
+}
+
+.portfolio-marquee .tone-neutral,
+.dark-feature .tone-neutral,
+.console-section .tone-neutral {
+  background: var(--surface-dark-elevated);
+}
+
+/* ===================================================================
+   Shell / Loading / Error
+   =================================================================== */
+
 .center-shell {
   display: grid;
   min-height: 100vh;
   place-items: center;
-  padding: 28px;
+  padding: var(--space-xl);
 }
 
 .shell-card {
   width: min(620px, 100%);
   border: 1px solid var(--hairline);
-  border-radius: 16px;
+  border-radius: var(--radius-xl);
   background: var(--canvas);
   padding: 42px;
 }
@@ -802,6 +1168,10 @@ p {
   margin: 10px 0;
   font-size: clamp(38px, 8vw, 64px);
 }
+
+/* ===================================================================
+   Responsive — Tablet (≤ 1180px)
+   =================================================================== */
 
 @media (max-width: 1180px) {
   .topbar {
@@ -815,7 +1185,7 @@ p {
     overflow-x: auto;
   }
 
-  .hero-report,
+  .brief-marquee-strip,
   .brief-grid,
   .analysis-grid,
   .analysis-grid.wide-first,
@@ -828,10 +1198,14 @@ p {
   }
 }
 
+/* ===================================================================
+   Responsive — Mobile (≤ 760px)
+   =================================================================== */
+
 @media (max-width: 760px) {
   .topbar,
   .page {
-    padding: 16px;
+    padding: var(--space-md);
   }
 
   .top-actions,
@@ -842,12 +1216,8 @@ p {
     flex-direction: column;
   }
 
-  .hero-report {
-    min-height: 0;
-  }
-
-  .hero-copy,
   .portfolio-marquee,
+  .verdict-card,
   .section-header,
   .panel,
   .chart-panel,
@@ -855,13 +1225,33 @@ p {
     padding: 22px;
   }
 
-  .hero-copy h1 {
-    font-size: 44px;
+  .marquee-grid {
+    grid-template-columns: 1fr;
   }
 
   .key-values div {
     grid-template-columns: 1fr;
-    gap: 4px;
+    gap: var(--space-xxs);
+  }
+
+
+  .app-action-header,
+  .freshness-strip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .signal-action-box {
+    justify-items: stretch;
+    max-width: none;
+  }
+
+  .signal-action-box span {
+    text-align: left;
+  }
+
+  .freshness-strip small {
+    margin-left: 0;
   }
 
   .console-drawer {
