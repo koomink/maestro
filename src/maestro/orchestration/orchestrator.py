@@ -135,20 +135,34 @@ class MaestroOrchestrator:
         with self.state_store.writer_lock("run_once"):
             return self._run_once_locked()
 
-    def run_signal(self) -> SignalRunSummary:
+    def run_signal(self, strategy_ids: list[str] | None = None) -> SignalRunSummary:
         with self.state_store.writer_lock("run_signal"):
-            return self._run_signal_locked()
+            return self._run_signal_locked(strategy_ids=strategy_ids)
 
     def approve_signal(self, signal_run_id: str) -> SignalApprovalSummary:
         with self.state_store.writer_lock("approve_signal"):
             return self._approve_signal_locked(signal_run_id)
 
-    def _run_signal_locked(self) -> SignalRunSummary:
+    def _run_signal_locked(
+        self, *, strategy_ids: list[str] | None = None
+    ) -> SignalRunSummary:
         signal_run_id = new_signal_run_id()
         current_state = self._load_run_portfolio_state(signal_run_id)
+        selected_strategy_ids = set(strategy_ids or [])
+        if selected_strategy_ids:
+            unknown = selected_strategy_ids - self.registry.strategy_ids
+            if unknown:
+                raise ValueError(
+                    "Unknown or disabled signal strategy id(s): "
+                    + ", ".join(sorted(unknown))
+                )
         broker_snapshot_refs = self._broker_snapshot_refs()
         valid_results, data_requests_by_strategy, data_quality_issues, prices = (
-            self._collect_strategy_results(signal_run_id, current_state)
+            self._collect_strategy_results(
+                signal_run_id,
+                current_state,
+                strategy_ids=selected_strategy_ids or None,
+            )
         )
         target, risk_decision, order_targets = self._build_account_scoped_targets(
             signal_run_id,
@@ -185,7 +199,7 @@ class MaestroOrchestrator:
             "status": status,
             "approval_consumed": False,
             "generated_at": utc_now().isoformat(),
-            "loaded_strategies": [strategy.config.id for strategy in self.registry.strategies],
+            "loaded_strategies": [result.strategy_id for result in valid_results],
             "strategy_account_mappings": self._strategy_account_mappings(),
             "strategy_phase_controls": self._strategy_phase_controls(),
             "data_requests": data_requests_by_strategy,
@@ -220,7 +234,7 @@ class MaestroOrchestrator:
         )
         return SignalRunSummary(
             signal_run_id=signal_run_id,
-            loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
+            loaded_strategies=[result.strategy_id for result in valid_results],
             action_required=bool(orders),
             orders_preview_count=len(orders),
         )
@@ -669,6 +683,8 @@ class MaestroOrchestrator:
         self,
         run_id: str,
         current_state: PortfolioState,
+        *,
+        strategy_ids: set[str] | None = None,
     ) -> tuple[
         list[TargetAllocationResult],
         dict[str, Any],
@@ -679,12 +695,15 @@ class MaestroOrchestrator:
         data_requests_by_strategy = {}
         data_quality_issues: list[dict[str, Any]] = []
         prices = self._initial_prices()
+        validator_strategy_ids = strategy_ids or self.registry.strategy_ids
         validator = SignalValidator.with_universe_boundaries(
             tradable_symbols=set(self.config.portfolio.allowed_symbols),
             research_only_symbols=set(self.config.universe.research_symbols),
-            strategy_ids=self.registry.strategy_ids,
+            strategy_ids=validator_strategy_ids,
         )
         for loaded in self.registry.strategies:
+            if strategy_ids and loaded.config.id not in strategy_ids:
+                continue
             context = self._strategy_context(run_id, loaded, current_state)
             requests = loaded.plugin.build_data_requests(context)
             strategy_data_requests = {

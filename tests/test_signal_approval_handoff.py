@@ -13,6 +13,19 @@ from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
+from sample_static_allocation.strategy import SampleStaticAllocationStrategy
+
+
+class SecondStaticAllocationStrategy(SampleStaticAllocationStrategy):
+    def manifest(self):
+        return super().manifest().model_copy(
+            update={"strategy_id": "second_static", "name": "Second Static Allocation"}
+        )
+
+    def run(self, data_bundle, context):
+        return super().run(data_bundle, context).model_copy(
+            update={"strategy_id": context.strategy_id}
+        )
 
 
 def test_run_signal_persists_immutable_signal_package_without_approval(tmp_path):
@@ -103,6 +116,29 @@ def test_signal_false_strategy_is_not_loaded(tmp_path):
     summary = MaestroOrchestrator(config).run_signal()
 
     assert summary.loaded_strategies == ["sample_static_allocation"]
+
+
+def test_run_signal_can_filter_to_one_strategy(tmp_path):
+    config = _paper_approval_config(tmp_path, "approved")
+    second_strategy = config.strategies[0].model_copy(
+        update={
+            "id": "second_static",
+            "entrypoint": f"{__name__}:SecondStaticAllocationStrategy",
+            "weight": 1.0,
+            "config": {"allocations": {"MOCK_ETF_B": 1.0}},
+        }
+    )
+    config.strategies.append(second_strategy)
+
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["second_static"])
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    signal = store.load_signal_package(summary.signal_run_id)
+    strategy_runs = store.list_strategy_runs(limit=10)
+    assert summary.loaded_strategies == ["second_static"]
+    assert signal["loaded_strategies"] == ["second_static"]
+    assert [row["strategy_id"] for row in strategy_runs] == ["second_static"]
+    assert signal["portfolio_target"]["source_strategy_ids"] == ["second_static"]
 
 
 def test_approve_signal_rejects_unknown_signal_run_id(tmp_path):
