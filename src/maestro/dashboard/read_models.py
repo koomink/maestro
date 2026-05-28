@@ -9,6 +9,7 @@ from maestro.core.time_display import (
     format_operator_time,
     operator_timezone,
 )
+from maestro.dashboard.actions import build_signal_freshness
 from maestro.monitoring.health import HealthService
 from maestro.state.events import (
     missing_system_event_required_fields,
@@ -144,6 +145,14 @@ def build_strategy_runs_table(store: StateStore, limit: int = 20) -> list[dict[s
             }
         )
     return rows
+
+
+def build_signal_freshness_card(
+    store: StateStore,
+    *,
+    max_age_seconds: int,
+) -> dict[str, Any]:
+    return build_signal_freshness(store, max_age_seconds=max_age_seconds)
 
 
 def _source_signal(payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:

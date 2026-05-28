@@ -371,6 +371,13 @@ def test_dashboard_snapshot_includes_feature_parity_read_models(tmp_path):
     assert performance_snapshot["quality"]["status"] in {"ok", "warning", "missing"}
     assert "broker_account_snapshots" in performance_snapshot["lineage"]["source_tables"]
     assert payload["virtuoso_apps"]["strategies"]
+    assert payload["virtuoso_apps"]["signal_freshness"]["overall"] in {
+        "missing",
+        "fresh",
+        "stale",
+        "failed",
+    }
+    assert isinstance(payload["virtuoso_apps"]["signal_freshness"]["strategies"], list)
     assert payload["audit_trail"]["run_index"]
     if payload["audit_trail"]["system_events"]:
         event_row = payload["audit_trail"]["system_events"][0]

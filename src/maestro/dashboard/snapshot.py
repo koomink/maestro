@@ -25,6 +25,7 @@ from maestro.dashboard.read_models import (
     build_risk_decisions_table,
     build_run_detail,
     build_run_index_table,
+    build_signal_freshness_card,
     build_strategy_attribution_table,
     build_strategy_book_performance_table,
     build_strategy_book_snapshots_table,
@@ -59,6 +60,10 @@ def build_dashboard_snapshot(
     daily_usage = operator_summary["daily_live_usage"]
     live_order_lifecycle = operator_summary["live_order_lifecycle"]
     latest_signal_package = build_latest_signal_package_card(store)
+    signal_freshness = build_signal_freshness_card(
+        store,
+        max_age_seconds=config.approval.signal_max_age_seconds,
+    )
 
     strategy_runs = build_strategy_runs_table(store)
     orders = build_orders_table(store)
@@ -255,6 +260,7 @@ def build_dashboard_snapshot(
             strategy_book_performance,
             strategy_attribution,
             strategy_book_snapshots,
+            signal_freshness,
         ),
         "audit_trail": {
             "metrics": [
@@ -607,6 +613,7 @@ def _virtuoso_apps(
     strategy_book_performance: list[dict[str, Any]],
     strategy_attribution: list[dict[str, Any]],
     strategy_book_snapshots: list[dict[str, Any]],
+    signal_freshness: dict[str, Any],
 ) -> dict[str, Any]:
     strategy_configs = {
         strategy.id: strategy
@@ -638,6 +645,7 @@ def _virtuoso_apps(
         for strategy_id in strategy_ids
     ]
     return {
+        "signal_freshness": signal_freshness,
         "metrics": [
             _metric("Configured Apps", len(strategy_configs)),
             _metric(
