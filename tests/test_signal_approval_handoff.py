@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from sample_static_allocation.strategy import SampleStaticAllocationStrategy
 from typer.testing import CliRunner
 
 from maestro.cli import app
@@ -13,7 +14,6 @@ from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
-from sample_static_allocation.strategy import SampleStaticAllocationStrategy
 
 
 class SecondStaticAllocationStrategy(SampleStaticAllocationStrategy):

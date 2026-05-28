@@ -140,14 +140,15 @@ account, while many strategies may share the same account. Legacy single-account
 `kis:` configs still load and are migrated internally to `default_kis`.
 Operator profiles may set `strategy_account_map_path` so multiple phase configs
 share one mapping file instead of duplicating `account_id` under every strategy.
-Strategies that are still under development, such as a TradingAgents wrapper,
-should stay out of the Symphony operator mapping until they become explicit
-operator candidates. Candidate strategies should first route to a mock or
-paper-trading account such as `kis_mock`; real-account routing is a later
-promotion step after signal quality, DataHub evidence, and approval rehearsals
-are acceptable.
-For development strategies that need Telegram approval UX without touching any
-broker account, route them to `dev_sandbox` and use `order_posture: dry_run`.
+Strategies that are still under development can either stay out of the Symphony
+operator mapping or enter as explicit candidates with conservative phase
+controls. For development strategies that need signal generation and Telegram
+approval UX without touching KIS mock, KIS real, or Toss broker APIs, route them
+to `dev_sandbox` and use `order_posture: dry_run`. Use `kis_mock` when the
+operator specifically wants KIS mock-investment account behavior, virtual cash,
+and later paper-trading broker submit rehearsals. Real-account routing is a
+separate promotion step after signal quality, DataHub evidence, and approval
+rehearsals are acceptable.
 `order_posture: disabled` means no Telegram approval request is created;
 `dry_run` means approval is requested but broker submit is skipped.
 
@@ -914,7 +915,9 @@ and `symphony_approval`. They share `state.identity_group: symphony` and
 `var/symphony_state.db` so dashboard refreshes, signal generation, and approval
 execution see the same broker and signal state. Multi-product KIS configs use
 explicit `accounts` and `strategy_account_map_path`; the shared mapping file
-currently routes `ataraxia -> kis_isa` and `snowball_us -> kis_brokerage`.
+currently routes `ataraxia -> kis_mock`, `snowball_us -> dev_sandbox`, and
+`trading_agents -> dev_sandbox`. `trading_agents` is visible to operator views
+but has `signal: false`, so the signal phase does not import or run it.
 Change a strategy's account in the shared mapping file instead of editing
 `symphony_signal.yaml` and `symphony_approval.yaml` separately. Common
 environment variable names:
@@ -1007,13 +1010,18 @@ maestro dashboard --config configs/live_readonly.yaml
 ```
 
 The dashboard is read-only and served by one FastAPI process with a built
-Vite/React frontend. It opens as a compact Command Center with System Verdict
-and Capital Summary, then organizes drill-down views as Overview, Operations,
-Portfolio, Virtuoso, Evidence, and Raw. The backend exposes only read-only JSON
+Vite/React frontend. It opens as an editorial operator dashboard with Daily Brief, Analysis
+Report, Virtuoso, and a toggleable Console drawer. The backend exposes only read-only JSON
 endpoints over persisted read models; it does not call live KIS endpoints and
 does not expose state-changing write controls. Frontend evidence search/status
 filters, display-currency toggle, theme selection, charts, run drill-down, and
 CSV downloads are browser-local UI actions.
+
+Dashboard operator actions keep read-only state refresh separate from
+proposal generation. Global `Refresh` should update broker/account snapshots and
+check latest signal freshness, while per-app `Generate Signal` controls live in
+the Virtuoso tab and must not approve or execute orders. See
+[`docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md`](docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md).
 
 If no CLI entrypoint exists yet during early development, use:
 
@@ -1220,6 +1228,11 @@ Dashboard should not initially allow:
 - Strategy enable/disable
 - Live mode activation
 - API key changes
+
+Dashboard includes explicit operator actions for read-only account refresh
+and per-app proposal-only signal generation. Those actions remain outside
+approval/execution paths: global refresh updates broker truth and signal
+freshness, and Virtuoso app tabs generate one app signal at a time.
 
 ## Telegram Philosophy
 

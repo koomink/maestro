@@ -304,6 +304,19 @@ material broker snapshot drift from the signal baseline and carries
   package, and execute approval/order workflow without re-running Virtuoso
   strategies.
 
+Strategy-level phase controls are loaded from the shared
+`strategy_account_map_path` file. `readonly` controls dashboard/Telegram
+visibility only, `signal` controls whether `symphony_signal` imports and runs
+the app, and `order_posture` controls whether generated orders are excluded from
+approval, included as dry-run approvals, or allowed to become broker-submit
+candidates. The global `execution.order_posture` remains the ceiling: global
+`disabled` disables all approvals/submits, global `dry_run` downgrades strategy
+`armed` orders, and only global `armed` allows strategy `armed` orders to reach
+broker submit. The brokerless `dev_sandbox` account supports development
+strategies that need signal and approval UX rehearsal without touching KIS or
+Toss broker APIs. A single account must not mix signal-enabled strategies with
+different effective order postures in one Symphony run.
+
 This is a lifecycle split, not a loosening of `live_readonly`. `live_readonly`
 continues to mean broker read-only with no strategy execution. The signal phase
 is a separate workflow because strategy-generated recommendations are
@@ -982,7 +995,7 @@ Standard cash instruments are derived from portfolio cash symbols when omitted.
 
 1. Create `cycle_id`.
 2. Load current portfolio state.
-3. Load enabled strategies.
+3. Load enabled, signal-enabled strategies.
 4. For each strategy:
    - Build `StrategyContext`.
    - Request data requests.
@@ -1011,7 +1024,8 @@ Inputs:
 
 Algorithm:
 
-1. Ignore disabled strategies.
+1. Ignore disabled strategies and, in the Symphony signal workflow,
+   signal-disabled strategies.
 2. Multiply each allocation by strategy weight.
 3. Sum symbol weights across strategies.
 4. Normalize if sum > 1.0.
@@ -1270,6 +1284,12 @@ Maestro has a daemon event model. Until then, the Dashboard must remain read-onl
 and must not become an approval, kill-switch, or configuration surface.
 
 Product interaction model:
+
+- Dashboard operator actions should keep global refresh and strategy signal
+  generation separate. Global `Refresh` may update read-only broker/account
+  snapshots and signal freshness status. The `Virtuoso` tab may expose per-app
+  `Generate Signal` controls that run one selected app only, persist
+  proposal-only signal artifacts, and never approve or execute orders.
 
 - The global header area should show a System Verdict and Capital Summary. It
   should not duplicate every broker/account metric that appears later in the

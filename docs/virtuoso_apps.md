@@ -104,11 +104,13 @@ env vars, for example `OPENROUTER_API_KEY` for `openrouter`,
 
 Development-stage LLM strategies should not be bound to a real Symphony account.
 Keep them in paper/dev configs until the wrapper contract and DataHub evidence
-are stable. When the app becomes an operator candidate, add the strategy to the
-Symphony signal and approval configs, then bind it once in the shared
-`strategy_accounts.yaml` file. The first binding should normally be a mock or
-paper-trading account such as `kis_mock`; real account mapping is a separate
-promotion decision.
+are stable, or add them as explicit Symphony candidates with conservative phase
+controls. A candidate that should be visible but not executed uses
+`readonly: true`, `signal: false`, and `order_posture: disabled`. A candidate
+that should rehearse signal generation and Telegram approval without touching a
+broker API uses `account_id: dev_sandbox` with `order_posture: dry_run`.
+Use `kis_mock` only when the rehearsal intentionally targets the KIS
+mock-investment account. Real account mapping is a separate promotion decision.
 
 One `maestro run-once` equals one full app research cycle. Scheduling remains
 outside the app: use a shared operator-local config for `kis-sync`, `reconcile`,

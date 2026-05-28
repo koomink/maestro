@@ -405,6 +405,14 @@ Future requirement:
   remains pure broker read-only. Strategy signal generation should persist an
   immutable `signal_run_id`, and approval should execute that saved signal
   without re-running strategy apps.
+- Strategy-level operator controls should decide whether a Virtuoso app appears
+  in read-only operator views, participates in signal generation, and produces
+  disabled, dry-run, or armed approval candidates. Global execution posture must
+  remain the ceiling: a strategy cannot submit live orders unless the global
+  config is also armed.
+- Development-stage strategies should have a brokerless `dev_sandbox` account
+  option for signal and approval UX rehearsal without touching KIS mock, KIS
+  real, or Toss broker APIs.
 
 ## 9. Non-Functional Requirements
 
@@ -414,6 +422,9 @@ Future requirement:
 - Live trading must be gated.
 - Unknown order status should halt new orders.
 - Reconciliation mismatch should halt new live orders.
+- Mixed strategy order posture within the same account should be rejected so one
+  account is not asked to handle dry-run and armed orders in the same Symphony
+  run.
 - Secrets must not be logged.
 
 ### 9.2 Maintainability

@@ -698,6 +698,11 @@
 - [x] Add signal expiry, config identity checks, and account mapping validation
 - [x] Add shared `strategy_account_map_path` support so signal and approval use
       one account routing file
+- [x] Extend the shared strategy mapping with `readonly`, `signal`, and
+      strategy-level `order_posture` controls
+- [x] Add brokerless `dev_sandbox` routing for development strategies that need
+      signal/approval UX rehearsal without KIS or Toss broker access
+- [x] Reject mixed strategy order posture within one account in a Symphony run
 - [x] Add broker snapshot references to signal packages
 - [x] Add an initial approval CLI/workflow that requires `signal_run_id` and does
       not re-run Virtuoso strategies
@@ -711,6 +716,11 @@
 - [x] Include `signal_run_id` in dashboard read models
 - [x] Add dashboard and Telegram views that show latest readonly state, latest
       signal package, no-op reason, and actionable `signal_run_id`
+- [x] Add Dashboard global refresh for read-only account snapshot sync plus
+      signal freshness classification, without running Virtuoso apps
+- [x] Add Virtuoso sub-tabs with Overview and one tab per app
+- [x] Add per-app Dashboard `Generate Signal` controls that run one selected
+      strategy only and never approve or execute orders
 - [x] Add tests for no-signal no-op, stale/expired signal rejection, config
       mismatch rejection, account mapping mismatch rejection, and approval from
       a saved signal package

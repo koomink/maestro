@@ -120,6 +120,11 @@ The multi-account operator workflow uses three configs:
    - Re-check freshness, reconciliation, safety state, limits, and approval
      before any broker submit.
 
+Dashboard interaction should mirror the same separation. Global `Refresh` may
+run the read-only account refresh path and classify latest signal freshness, but
+it must not run Virtuoso apps. Per-app `Generate Signal` belongs in the
+Virtuoso tab and should use the signal config for one selected app only.
+
 The systemd wiring for this workflow is:
 
 - `maestro-symphony-readonly.timer`: periodic `kis-sync` and reconciliation
@@ -139,10 +144,12 @@ centralized in `strategy_account_map_path`, normally
 there, then validate both phase configs before the next scheduled signal run.
 The mapping file participates in config fingerprint checks, so approval rejects
 a signal package if the mapping changes between signal generation and approval.
-Do not add development-only strategies to this mapping. Promote a new Virtuoso
-app by first testing it in paper/dev configs, then adding it as a disabled
-Symphony candidate, then mapping it to `kis_mock` for rehearsal, and only later
-mapping it to a real account after evidence review.
+Development-only strategies may remain outside this mapping. If the operator
+wants them visible in Symphony, add them as explicit candidates with conservative
+phase controls instead of routing them to a real account. Use `dev_sandbox` for
+signal/approval UX rehearsal without broker API access, use `kis_mock` only when
+the rehearsal intentionally targets the KIS mock-investment account, and map to
+a real account only after evidence review.
 
 Use this promotion ladder for strategy phase controls:
 
@@ -155,9 +162,10 @@ Use this promotion ladder for strategy phase controls:
 4. `readonly: true`, `signal: true`, `order_posture: armed`: approved orders can
    reach broker submit only when the global config is also armed.
 
-Development-stage strategies such as Snowball or TradingAgents should use
-`account_id: dev_sandbox` with `order_posture: dry_run` when the operator wants
-approval rehearsal without touching KIS mock or real broker accounts.
+The current shared mapping uses `ataraxia -> kis_mock`,
+`snowball_us -> dev_sandbox`, and `trading_agents -> dev_sandbox`.
+`trading_agents` is `readonly: true` but `signal: false`, so it can appear in
+operator views without being imported or executed by `symphony_signal`.
 
 ## KIS Read-only Reconciliation
 

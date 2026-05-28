@@ -23,9 +23,10 @@ mapping changes after a signal package was generated.
 Development-only Virtuoso apps should not be mapped here yet. A strategy such
 as TradingAgents can remain in paper/dev configs with no Symphony account
 binding. Once it becomes an operator candidate, add it to both signal and
-approval configs, then add exactly one shared mapping entry. The first rehearsal
-binding should normally be `kis_mock` or another paper-trading account, not a
-real account.
+approval configs, then add exactly one shared mapping entry. Use `dev_sandbox`
+when the operator wants signal/approval UX rehearsal without broker API access;
+use `kis_mock` when the rehearsal intentionally targets the KIS mock-investment
+account. Real account binding is a separate promotion decision.
 
 Strategy controls in the shared mapping determine which phase sees each app:
 
@@ -41,6 +42,11 @@ Strategy controls in the shared mapping determine which phase sees each app:
 
 Signal packages persist the effective phase controls and per-order posture so
 `symphony_approval` can apply them without re-running strategies.
+
+The current operator mapping routes `ataraxia -> kis_mock`,
+`snowball_us -> dev_sandbox`, and `trading_agents -> dev_sandbox`.
+`trading_agents` is `readonly: true` and `signal: false`, so it can appear in
+operator views without being imported or executed by `symphony_signal`.
 
 ## Responsibilities
 
