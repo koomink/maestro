@@ -414,9 +414,12 @@
         탭으로 나누어 설명합니다.
       </p>
       <div class="meta">
+        <span class="pill">Updated: 2026-05-28</span>
         <span class="pill">Symphony = ecosystem</span>
         <span class="pill">Maestro = portfolio OS</span>
         <span class="pill">Virtuoso apps = strategy plugins</span>
+        <span class="pill">app fragments = strategy-owned config</span>
+        <span class="pill">accounts = operator-owned broker boundary</span>
         <span class="pill">KIS = broker adapter</span>
         <span class="pill">signal_run_id = approval handoff</span>
       </div>
@@ -480,6 +483,43 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <section class="section">
+      <h2>현재 Operator Topology</h2>
+      <p class="lead">
+        최신 Symphony 운영 구조는 전체 YAML을 앱 repo가 복사해 들고 있는 방식에서 벗어나,
+        Maestro operator profile이 계좌, 승인, 실행, 상태를 소유하고 Virtuoso 앱은 fragment로
+        전략 고유 정보만 제공합니다.
+      </p>
+      <div class="grid cols-3">
+        <div class="card">
+          <span class="tag">symphony_readonly</span>
+          <h3>계좌 관찰 전용</h3>
+          <p><code>configs/operator/symphony_readonly.yaml</code>은 broker snapshots, reconciliation, dashboard/Telegram read commands의 shared truth를 갱신합니다. 전략 signal이나 주문 제출은 하지 않습니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag amber">symphony_signal</span>
+          <h3>전략 실행과 signal package</h3>
+          <p><code>configs/operator/symphony_signal.yaml</code>은 enabled Virtuoso apps를 실행해 <code>signal_package</code>, account mapping, broker snapshot refs, DataHub evidence, order preview를 저장합니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag red">symphony_approval</span>
+          <h3>저장된 signal 승인</h3>
+          <p><code>configs/operator/symphony_approval.yaml</code>은 전략을 다시 실행하지 않고 <code>signal_run_id</code>를 소비합니다. 만료, config drift, broker snapshot drift, safety/reconciliation failure는 fail-closed입니다.</p>
+        </div>
+      </div>
+      <table style="margin-top: 16px;">
+        <thead>
+          <tr><th>파일</th><th>소유 주체</th><th>포함하는 것</th><th>포함하지 않는 것</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>configs/operator/*.yaml</code></td><td>Maestro/operator</td><td>accounts, approval, execution, state/audit, risk, monitoring, profile stage</td><td>앱 내부 전략 알고리즘</td></tr>
+          <tr><td><code>configs/operator/strategy_accounts.yaml</code></td><td>Maestro/operator</td><td>strategy id to logical account, readonly/signal enablement, order posture</td><td>브로커 API secret 값</td></tr>
+          <tr><td><code>Virtuoso/*/configs/fragments/*.yaml</code></td><td>Virtuoso app</td><td>entrypoint, defaults, sleeve membership, instruments, symbol-map hints</td><td>Telegram, KIS credentials, live limits, state/audit paths</td></tr>
+          <tr><td><code>tests/fixtures/configs/*.yaml</code></td><td>Maestro tests</td><td>legacy/example profile coverage kept for regression tests</td><td>operator-facing runtime configs</td></tr>
+        </tbody>
+      </table>
     </section>
 
     <section class="section">
@@ -678,6 +718,16 @@
         approval phase를 호출합니다.
       </div>
 
+      <div class="codeblock" style="margin-top: 16px;">Current Symphony handoff
+
+systemd timer
+  → scripts/operator/symphony_signal_then_approval.sh
+  → maestro run-signal --config configs/operator/symphony_signal.yaml
+  → signal_package(signal_run_id)
+  → stop telegram operator while approval consumes shared bot polling
+  → maestro approve-signal --config configs/operator/symphony_approval.yaml --signal-run-id &lt;id&gt;
+  → restart telegram operator</div>
+
       <div class="codeblock" style="margin-top: 16px;">Example reading
 
 mode: live_approval
@@ -785,6 +835,17 @@ kis.paper_trading: true
           <p>KRX 상품은 <code>kis_domestic_stock</code>, US 상장 상품은 <code>kis_overseas_stock</code>을 사용합니다. Toss는 config-visible placeholder이며 broker operation은 fail-closed입니다.</p>
         </div>
       </div>
+
+      <table style="margin-top: 16px;">
+        <thead>
+          <tr><th>Logical account</th><th>Broker role</th><th>Current purpose</th><th>Failure behavior</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>kis_mock</code></td><td>KIS paper_trading domestic account</td><td>Ataraxia KRW sleeve dry-run and KIS mock-investment rehearsals</td><td>Unknown account, stale snapshot, or changed broker truth blocks approval.</td></tr>
+          <tr><td><code>dev_sandbox</code></td><td>Brokerless sandbox account</td><td>Snowball/TradingAgents development mapping without live broker operations</td><td><code>order_posture=armed</code> is rejected by config validation.</td></tr>
+          <tr><td>future KIS real accounts</td><td>KIS domestic/overseas real account configs</td><td>Production promotion after readonly, reconciliation, dry-run, and beta preflight</td><td>Preflight and safety gates must pass before broker submit.</td></tr>
+        </tbody>
+      </table>
     </section>
 
 
@@ -1132,6 +1193,19 @@ strategies:
   - id: my_virtuoso_app
     enabled: true
     weight: 1.0</div>
+
+      <div class="grid cols-2" style="margin-top: 16px;">
+        <div class="card">
+          <span class="tag green">Ataraxia fragment</span>
+          <h3>앱 repo가 제공하는 것</h3>
+          <p><code>Virtuoso/Ataraxia/configs/fragments/ataraxia.yaml</code>은 Ataraxia entrypoint, KRW sleeve, TIGER/KODEX instrument metadata, Yahoo symbol-map hints, buy-only contribution recommendation을 제공합니다.</p>
+        </div>
+        <div class="card">
+          <span class="tag red">Operator overlay</span>
+          <h3>Maestro가 결정하는 것</h3>
+          <p><code>monthly_budget</code>, <code>buy_day</code>, KIS account env vars, Telegram allowlists, live order limits, state/audit paths, and <code>order_posture</code> are operator-owned and stay out of app fragments.</p>
+        </div>
+      </div>
       <div class="callout warning" style="margin-top: 16px;">
         앱 fragment는 전략 entrypoint, strategy defaults, DataHub needs, signal_to_allocation policy 정도로 제한하는 것이 안전합니다.
         KIS 계좌, Telegram allowlist, 주문 한도, state/audit path는 operator-local config가 소유해야 합니다.
