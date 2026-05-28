@@ -1127,12 +1127,22 @@ def _latest_component_value(rows: list[dict[str, Any]], currency: str) -> float 
 
 
 def _freshness_rollup(rows: list[dict[str, Any]]) -> str:
-    statuses = {str(row.get("status")) for row in rows}
-    if statuses & {"failed", "missing"}:
-        return "danger"
-    if "stale" in statuses:
+    has_fresh = False
+    has_warning = False
+    for row in rows:
+        status = str(row.get("status") or "")
+        name = str(row.get("name") or "")
+        if status == "fresh":
+            has_fresh = True
+        elif status == "stale":
+            has_warning = True
+        elif status == "missing" and name == "scheduled_run":
+            has_warning = True
+        elif status in {"failed", "missing"}:
+            return "danger"
+    if has_warning:
         return "warning"
-    if "fresh" in statuses:
+    if has_fresh:
         return "success"
     return "neutral"
 

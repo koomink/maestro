@@ -1,4 +1,9 @@
-from maestro.dashboard.snapshot import _asset_summary_metrics, _money, _verdict_reason_rows
+from maestro.dashboard.snapshot import (
+    _asset_summary_metrics,
+    _freshness_rollup,
+    _money,
+    _verdict_reason_rows,
+)
 
 
 def test_asset_summary_metrics_label_native_and_converted_currencies():
@@ -68,3 +73,14 @@ def test_verdict_reason_rows_explain_status_sources():
     assert any(row["source"] == "Live orders" and row["status"] == "issues" for row in rows)
     assert any(row["source"] == "FX" and row["status"] == "stale" for row in rows)
     assert all(row["next_check"] for row in rows)
+
+
+def test_freshness_rollup_treats_missing_scheduled_run_as_warning():
+    rows = [
+        {"name": "broker_snapshot", "status": "fresh"},
+        {"name": "broker_reconciliation", "status": "fresh"},
+        {"name": "heartbeat", "status": "fresh"},
+        {"name": "scheduled_run", "status": "missing"},
+    ]
+
+    assert _freshness_rollup(rows) == "warning"
