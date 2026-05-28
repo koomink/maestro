@@ -369,6 +369,11 @@ p {
   justify-content: flex-end;
 }
 
+.broker-truth-stack {
+  display: grid;
+  gap: var(--space-md);
+}
+
 /* ===================================================================
    Daily Brief — Data-centric marquee strip (replaces hero)
    =================================================================== */

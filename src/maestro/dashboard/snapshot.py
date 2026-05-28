@@ -6,6 +6,7 @@ from maestro.core.time_display import add_operator_time_fields, operator_timezon
 from maestro.dashboard.read_models import (
     build_account_performance_table,
     build_approvals_table,
+    build_broker_account_overview,
     build_broker_position_exposure_table,
     build_broker_snapshot_history_table,
     build_broker_snapshots_table,
@@ -56,6 +57,7 @@ def build_dashboard_snapshot(
     health = operator_summary["health"]
     broker_snapshot = operator_summary["broker_snapshot"]
     broker_summary = operator_summary["broker_summary"]
+    broker_account_overview = build_broker_account_overview(config, store)
     reconciliation = operator_summary["reconciliation"]
     daily_usage = operator_summary["daily_live_usage"]
     live_order_lifecycle = operator_summary["live_order_lifecycle"]
@@ -222,6 +224,7 @@ def build_dashboard_snapshot(
                 account_performance_currency,
             ),
             "broker_summary": broker_summary,
+            "broker_account_overview": broker_account_overview,
             "broker_snapshot": broker_snapshot,
             "reconciliation": reconciliation,
             "account_performance": account_performance,

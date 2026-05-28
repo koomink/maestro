@@ -2,11 +2,14 @@ from pathlib import Path
 
 import yaml
 
+from maestro.config.broker import BrokerAccountConfig
 from maestro.config.loader import load_config
+from maestro.config.reconciliation_config import ReconciliationConfig
 from maestro.core.clock import utc_now
 from maestro.dashboard.read_models import (
     build_account_performance_table,
     build_approvals_table,
+    build_broker_account_overview,
     build_broker_account_summary,
     build_broker_position_exposure_table,
     build_broker_snapshot_history_table,
@@ -191,6 +194,72 @@ def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
     assert build_maestro_state_exposure_table(store)[0]["symbol"] == "CASH"
     assert build_portfolio_snapshot_history_table(store) == []
     assert build_broker_snapshot_history_table(store)[0]["account_id"] == "acct"
+
+
+
+def test_broker_account_overview_reports_configured_account_states(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    config = type(
+        "Config",
+        (),
+        {
+            "accounts": [
+                BrokerAccountConfig(id="kis_mock", broker="kis", enabled=True),
+                BrokerAccountConfig(id="kis_isa", broker="kis", enabled=True),
+                BrokerAccountConfig(id="dev_sandbox", broker="sandbox", enabled=True),
+                BrokerAccountConfig(id="disabled", broker="kis", enabled=False),
+            ],
+            "reconciliation": ReconciliationConfig(max_age_seconds=86400),
+        },
+    )()
+    store.save_broker_account_snapshot(
+        "run_old",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "broker_account_id": "OLD-BROKER",
+            "account": {
+                "account_id": "OLD-BROKER",
+                "currency": "KRW",
+                "cash": 100.0,
+                "total_value": 100.0,
+                "positions": [],
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_new",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "broker_account_id": "MOCK-BROKER",
+            "account": {
+                "account_id": "MOCK-BROKER",
+                "currency": "KRW",
+                "cash": 900.0,
+                "total_value": 1000.0,
+                "positions": [{"symbol": "AAA", "quantity": 1, "current_price": 100.0}],
+                "source": "kis_rest_readonly",
+            },
+        },
+    )
+
+    overview = build_broker_account_overview(config, store)
+
+    assert overview["summary"]["configured_accounts"] == 2
+    assert overview["summary"]["fresh_accounts"] == 1
+    assert overview["summary"]["missing_accounts"] == 1
+    assert overview["summary"]["attention_accounts"] == 1
+    assert overview["summary"]["total_value"] == 1000.0
+    assert overview["summary"]["currency"] == "KRW"
+    rows = {row["account_id"]: row for row in overview["accounts"]}
+    assert set(rows) == {"kis_mock", "kis_isa"}
+    assert rows["kis_mock"]["status"] == "fresh"
+    assert rows["kis_mock"]["broker_account_id"] == "MOCK-BROKER"
+    assert rows["kis_mock"]["cash"] == 900.0
+    assert rows["kis_mock"]["positions_count"] == 1
+    assert rows["kis_isa"]["status"] == "missing"
+    assert rows["kis_isa"]["broker_account_id"] is None
 
 
 def test_system_events_table_reports_required_field_status(tmp_path):

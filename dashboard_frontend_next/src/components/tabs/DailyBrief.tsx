@@ -1,4 +1,4 @@
-import type { DashboardSnapshot } from "../../types";
+import type { DashboardSnapshot, Row } from "../../types";
 import type { TrustSummary } from "../../utils/trust";
 import { firstValue } from "../../utils/data";
 import { formatValue } from "../../utils/format";
@@ -10,6 +10,18 @@ import { Signal } from "../data-display/Signal";
 import { KeyValueRows } from "../data-display/KeyValueRows";
 import { MiniFact } from "../ui/MiniFact";
 import { Panel } from "../ui/Panel";
+
+function brokerAccountRows(accounts: Row[]): Row[] {
+  return accounts.map((account) => ({
+    account_id: account.account_id,
+    broker_account_id: account.broker_account_id,
+    status: account.status,
+    total_value: account.total_value,
+    cash: account.cash,
+    positions_count: account.positions_count,
+    synced_at: account.created_at_display,
+  }));
+}
 
 export function DailyBrief({
   snapshot,
@@ -87,8 +99,11 @@ export function DailyBrief({
       </section>
 
       <section className="brief-grid align-start">
-        <Panel title="Broker Truth" eyebrow="Account">
-          <KeyValueRows row={investment.broker_summary} keys={["status", "account_id", "total_value", "cash", "positions", "fetched_at"]} />
+        <Panel title="Broker Truth" eyebrow="Accounts">
+          <div className="broker-truth-stack">
+            <MetricGrid metrics={investment.broker_account_overview.metrics} />
+            <ReadableTable rows={brokerAccountRows(investment.broker_account_overview.accounts)} limit={8} />
+          </div>
         </Panel>
         <Panel title="Reconciliation" eyebrow="State">
           <KeyValueRows row={investment.reconciliation} keys={["status", "passed", "created_at", "issue_count", "message"]} />

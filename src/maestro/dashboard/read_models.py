@@ -301,6 +301,163 @@ def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
     }
 
 
+def build_broker_account_overview(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
+    max_age_seconds = config.reconciliation.max_age_seconds
+    timezone = operator_timezone(config)
+    latest_by_account: dict[str, dict[str, Any]] = {}
+    for snapshot in store.list_broker_account_snapshots(limit=1000):
+        payload = _mapping(snapshot.get("payload"))
+        account = _mapping(payload.get("account"))
+        account_id = str(
+            payload.get("account_id")
+            or snapshot.get("account_id")
+            or account.get("account_id")
+            or ""
+        )
+        if not account_id or account_id in latest_by_account:
+            continue
+        latest_by_account[account_id] = snapshot
+
+    accounts = [
+        account
+        for account in config.accounts
+        if getattr(account, "enabled", False) and getattr(account, "broker", None) != "sandbox"
+    ]
+    rows = [
+        _broker_account_overview_row(
+            account,
+            latest_by_account.get(account.id),
+            max_age_seconds,
+            timezone,
+        )
+        for account in accounts
+    ]
+    fresh_count = sum(1 for row in rows if row["status"] == "fresh")
+    stale_count = sum(1 for row in rows if row["status"] == "stale")
+    missing_count = sum(1 for row in rows if row["status"] == "missing")
+    attention_count = stale_count + missing_count
+    totals_by_currency: dict[str, float] = {}
+    latest_sync_at = None
+    for row in rows:
+        total_value = _float_or_none(row.get("total_value"))
+        currency = row.get("currency")
+        if total_value is not None and currency:
+            current_total = totals_by_currency.get(str(currency), 0.0)
+            totals_by_currency[str(currency)] = current_total + total_value
+        created_at = row.get("created_at")
+        if created_at and (latest_sync_at is None or str(created_at) > str(latest_sync_at)):
+            latest_sync_at = created_at
+    currency = (
+        next(iter(totals_by_currency), None)
+        if len(totals_by_currency) == 1
+        else "mixed"
+        if totals_by_currency
+        else None
+    )
+    total_value = (
+        next(iter(totals_by_currency.values()), None)
+        if len(totals_by_currency) == 1
+        else None
+    )
+    summary = {
+        "configured_accounts": len(rows),
+        "fresh_accounts": fresh_count,
+        "stale_accounts": stale_count,
+        "missing_accounts": missing_count,
+        "attention_accounts": attention_count,
+        "total_value": total_value,
+        "currency": currency,
+        "totals_by_currency": totals_by_currency,
+        "latest_sync_at": latest_sync_at,
+        "latest_sync_at_display": (
+            format_operator_time(latest_sync_at, timezone) if latest_sync_at else None
+        ),
+    }
+    return {
+        "summary": summary,
+        "metrics": [
+            {
+                "label": "Accounts",
+                "value": f"{fresh_count}/{len(rows)} fresh",
+                "tone": "success" if attention_count == 0 else "warning",
+            },
+            {
+                "label": "Attention",
+                "value": attention_count,
+                "tone": "success" if attention_count == 0 else "warning",
+            },
+            {
+                "label": "Broker Value",
+                "value": total_value if total_value is not None else currency or "n/a",
+                "tone": "neutral",
+            },
+            {
+                "label": "Last Sync",
+                "value": summary["latest_sync_at_display"] or "n/a",
+                "tone": "neutral",
+            },
+        ],
+        "accounts": rows,
+    }
+
+
+def _broker_account_overview_row(
+    account_config: Any,
+    snapshot: dict[str, Any] | None,
+    max_age_seconds: int,
+    timezone: str,
+) -> dict[str, Any]:
+    if snapshot is None:
+        return {
+            "account_id": account_config.id,
+            "broker_account_id": None,
+            "broker": account_config.broker,
+            "environment": account_config.environment,
+            "status": "missing",
+            "tone": "warning",
+            "created_at": None,
+            "created_at_display": None,
+            "age_seconds": None,
+            "max_age_seconds": max_age_seconds,
+            "currency": None,
+            "total_value": None,
+            "cash": None,
+            "buying_power": None,
+            "positions_count": 0,
+            "source": None,
+            "run_id": None,
+        }
+    payload = _mapping(snapshot.get("payload"))
+    account = _mapping(payload.get("account"))
+    positions = _positions(account)
+    age_seconds = _age_seconds(snapshot.get("created_at"))
+    status = (
+        "stale"
+        if age_seconds is None or (max_age_seconds > 0 and age_seconds > max_age_seconds)
+        else "fresh"
+    )
+    return {
+        "account_id": account_config.id,
+        "broker_account_id": payload.get("broker_account_id") or account.get("account_id"),
+        "broker": account_config.broker,
+        "environment": account_config.environment,
+        "status": status,
+        "tone": "success" if status == "fresh" else "warning",
+        "created_at": snapshot.get("created_at"),
+        "created_at_display": format_operator_time(snapshot.get("created_at"), timezone),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "currency": account.get("currency")
+        or _mapping(account.get("cash_balance")).get("currency"),
+        "total_value": _account_total_value(account, positions),
+        "cash": _float_or_none(account.get("cash")),
+        "buying_power": _float_or_none(account.get("buying_power")),
+        "positions_count": len(positions),
+        "source": account.get("source") or payload.get("source"),
+        "run_id": snapshot.get("run_id"),
+    }
+
+
 def build_broker_position_exposure_table(
     store: StateStore,
     limit: int = 100,

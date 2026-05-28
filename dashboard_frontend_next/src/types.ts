@@ -81,6 +81,7 @@ export type DashboardSnapshot = {
   investment_console: {
     metrics: Metric[];
     broker_summary: Row;
+    broker_account_overview: { summary: Row; metrics: Metric[]; accounts: Row[] };
     broker_snapshot: Row;
     reconciliation: Row;
     account_performance: Row[];

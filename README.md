@@ -1019,7 +1019,10 @@ CSV downloads are browser-local UI actions.
 Dashboard operator actions keep read-only state refresh separate from
 proposal generation. Global `Refresh` should update broker/account snapshots and
 check latest signal freshness, while per-app `Generate Signal` controls live in
-the Virtuoso tab and must not approve or execute orders. See
+the Virtuoso tab and must not approve or execute orders. Daily Brief `Broker Truth`
+is a hybrid multi-account overview: it summarizes total broker value and account
+health, then lists each enabled real broker account as fresh/stale/missing; sandbox
+accounts are excluded from broker truth. See
 [`docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md`](docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md).
 
 If no CLI entrypoint exists yet during early development, use:
