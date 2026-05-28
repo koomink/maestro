@@ -67,6 +67,37 @@ def test_approve_signal_uses_saved_package_without_rerunning_strategies(tmp_path
     assert signal["approval_run_id"] == approval_summary.run_id
 
 
+def test_approve_signal_creates_strategy_grouped_approval_requests(tmp_path):
+    config = _paper_approval_config(tmp_path, "approved")
+    config.strategies[0].account_id = "account_a"
+    second_strategy = config.strategies[0].model_copy(
+        update={
+            "id": "second_static",
+            "entrypoint": f"{__name__}:SecondStaticAllocationStrategy",
+            "account_id": "account_b",
+            "weight": 1.0,
+            "config": {"allocations": {"MOCK_ETF_B": 1.0}},
+        }
+    )
+    config.strategies.append(second_strategy)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    approval_summary = MaestroOrchestrator(config).approve_signal(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    approvals = store.list_approvals(limit=10)
+    source_groups = sorted(
+        tuple(row["payload"]["request"]["source_strategy_ids"]) for row in approvals
+    )
+    assert approval_summary.orders_created == 3
+    assert approval_summary.approval_status == "approved"
+    assert len(approvals) == 2
+    assert source_groups == [
+        ("sample_static_allocation",),
+        ("second_static",),
+    ]
+
+
 def test_approve_signal_propagates_signal_run_id_to_live_order_events(monkeypatch, tmp_path):
     _mock_kis_snapshot_refresh(monkeypatch)
     config = _live_signal_config(tmp_path, "approved")
@@ -173,6 +204,88 @@ def test_run_signal_and_approve_signal_cli(tmp_path):
     assert "orders=2" in approval_result.output
 
 
+def test_daily_signal_approval_cli_sends_summary_and_approves_actionable_signal(
+    tmp_path,
+    monkeypatch,
+):
+    readonly_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="readonly.yaml",
+    )
+    signal_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="signal.yaml",
+        provider="telegram",
+        identity_group="daily_signal_approval",
+    )
+    approval_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="approval.yaml",
+        provider="console",
+        identity_group="daily_signal_approval",
+    )
+    fake_clients: list[FakeTelegramClient] = []
+
+    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> "FakeTelegramClient":
+        assert token_env == "TELEGRAM_BOT_TOKEN"
+        assert timeout_seconds == 10.0
+        client = FakeTelegramClient()
+        fake_clients.append(client)
+        return client
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "daily-signal-approval",
+            "--readonly-config",
+            str(readonly_path),
+            "--signal-config",
+            str(signal_path),
+            "--approval-config",
+            str(approval_path),
+            "--keep-telegram-operator",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "symphony_daily status=signal_completed" in result.output
+    assert "action_required=true" in result.output
+    assert "telegram_signal_summary=sent chats=1" in result.output
+    assert "symphony_daily status=approval_completed" in result.output
+    assert fake_clients
+    text = fake_clients[0].sent_messages[0]["text"]
+    assert "Maestro daily signal summary" in text
+    assert "action_required: true" in text
+
+
+def test_run_signal_uses_strategy_posture_when_signal_config_global_posture_disabled(
+    monkeypatch,
+    tmp_path,
+):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config_path = _live_signal_config_path(tmp_path, "approved")
+    raw = yaml.safe_load(config_path.read_text())
+    raw["execution"]["order_posture"] = "disabled"
+    raw["strategies"][0]["order_posture"] = "dry_run"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+
+    summary = MaestroOrchestrator(config).run_signal()
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    signal = store.load_signal_package(summary.signal_run_id)
+    orders_preview = signal["orders_preview"]
+    assert summary.action_required is True
+    assert signal["action_required"] is True
+    assert {order["metadata"]["order_posture"] for order in orders_preview} == {"dry_run"}
+
+
 def test_live_run_signal_refreshes_broker_truth_and_records_snapshot_refs(
     monkeypatch,
     tmp_path,
@@ -256,6 +369,41 @@ def test_approve_signal_rejects_expired_signal_package(monkeypatch, tmp_path):
 
     with pytest.raises(ValueError, match="expired signal package"):
         MaestroOrchestrator(config).approve_signal(signal_summary.signal_run_id)
+
+
+def test_approve_signal_allows_signal_and_approval_order_posture_difference(
+    monkeypatch,
+    tmp_path,
+):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    signal_config_path = _live_signal_config_path(tmp_path, "approved")
+    approval_config_path = _live_signal_config_path(
+        tmp_path,
+        "approved",
+        filename="approval_order_posture.yaml",
+    )
+    signal_raw = yaml.safe_load(signal_config_path.read_text())
+    signal_raw["execution"]["order_posture"] = "disabled"
+    signal_raw["strategies"][0]["order_posture"] = "dry_run"
+    signal_config_path.write_text(yaml.safe_dump(signal_raw))
+    approval_raw = yaml.safe_load(approval_config_path.read_text())
+    approval_raw["execution"]["order_posture"] = "dry_run"
+    approval_raw["strategies"][0]["order_posture"] = "dry_run"
+    approval_config_path.write_text(yaml.safe_dump(approval_raw))
+    signal_config, signal_identity = load_config_with_identity(signal_config_path)
+    approval_config, approval_identity = load_config_with_identity(approval_config_path)
+    signal_summary = MaestroOrchestrator(
+        signal_config,
+        config_identity=signal_identity,
+    ).run_signal()
+
+    approval_summary = MaestroOrchestrator(
+        approval_config,
+        config_identity=approval_identity,
+    ).approve_signal(signal_summary.signal_run_id)
+
+    assert approval_summary.orders_created == 2
+    assert approval_summary.approval_status == "approved"
 
 
 def test_approve_signal_rejects_config_runtime_mismatch(monkeypatch, tmp_path):
@@ -359,14 +507,39 @@ def _paper_approval_config(tmp_path, decision):
     return load_config(_paper_approval_config_path(tmp_path, decision))
 
 
-def _paper_approval_config_path(tmp_path, decision) -> Path:
+def _paper_approval_config_path(
+    tmp_path,
+    decision,
+    *,
+    filename: str = "signal_approval.yaml",
+    provider: str = "console",
+    identity_group: str | None = None,
+) -> Path:
     raw = yaml.safe_load(Path("tests/fixtures/configs/paper_approval_console.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    if identity_group is not None:
+        raw["state"]["identity_group"] = identity_group
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"]["provider"] = provider
     raw["approval"]["default_decision"] = decision
-    config_path = tmp_path / "signal_approval.yaml"
+    if provider == "telegram":
+        raw["approval"]["telegram_allowed_chat_ids"] = [100]
+        raw["approval"]["whitelisted_user_ids"] = [100]
+        raw["approval"]["telegram_poll_interval_seconds"] = 0
+    config_path = tmp_path / filename
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+class FakeTelegramClient:
+    def __init__(self) -> None:
+        self.sent_messages = []
+
+    def send_message(self, chat_id: int, text: str, reply_markup=None):
+        self.sent_messages.append(
+            {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+        )
+        return {"ok": True}
 
 
 def _live_signal_config(tmp_path, decision):

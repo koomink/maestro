@@ -129,10 +129,11 @@ The systemd wiring for this workflow is:
 
 - `maestro-symphony-readonly.timer`: periodic `kis-sync` and reconciliation
   using `MAESTRO_READONLY_CONFIG`.
-- `maestro-symphony-signal.timer`: weekday 09:10 signal run using
-  `scripts/operator/symphony_signal_then_approval.sh`.
-- The wrapper calls `approve-signal` only when `action_required=true`, and
-  temporarily stops `maestro-telegram-operator.service` during approval polling.
+- `maestro-symphony-signal.timer`: weekday 09:10 orchestration using
+  `maestro daily-signal-approval`.
+- The command sends a daily signal summary, creates approval requests only when
+  `action_required=true`, and temporarily stops
+  `maestro-telegram-operator.service` during approval polling.
 
 Do not treat `live_readonly` as a strategy execution mode; signal generation is
 a separate operator phase. `run-once` remains a legacy single-pipeline entrypoint

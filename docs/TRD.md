@@ -324,11 +324,11 @@ part of the trading lifecycle even when no broker submit occurs.
 
 Systemd remains the production wiring layer. `maestro-symphony-readonly.timer`
 refreshes broker truth and reconciliation periodically, while
-`maestro-symphony-signal.timer` runs
-`scripts/operator/symphony_signal_then_approval.sh` on the trading-day schedule.
-That wrapper obtains a file lock, skips approval when `action_required=false`,
-and stops the long-running Telegram operator while `approve-signal` polls for
-approval.
+`maestro-symphony-signal.timer` runs `maestro daily-signal-approval` on the
+trading-day schedule. That command obtains a file lock, refreshes read-only
+broker state when configured, sends the daily Telegram signal summary, skips
+approval when `action_required=false`, and stops the long-running Telegram
+operator while approval polling is active.
 
 `signal_run_id` handoff must be immutable and auditable. The saved signal
 package should include the config identity, generated timestamp, account

@@ -1,5 +1,7 @@
+import json
 import traceback
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -190,9 +192,10 @@ class MaestroOrchestrator:
                     account_orders,
                     order_target.source_strategy_ids,
                     account_id=account_id,
+                    signal_preview=True,
                 )
             )
-        approval_orders = self._orders_requiring_approval(orders)
+        approval_orders = self._signal_orders_requiring_approval(orders)
         status = "action_required" if approval_orders else "no_action"
         payload = {
             "signal_run_id": signal_run_id,
@@ -218,6 +221,9 @@ class MaestroOrchestrator:
             "orders_preview_count": len(orders),
             "action_required": bool(approval_orders),
         }
+        payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(
+            self.config
+        )
         if self.config_identity is not None:
             payload["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
         self.state_store.save_signal_package(signal_run_id, payload)
@@ -229,13 +235,13 @@ class MaestroOrchestrator:
                 "signal_run_id": signal_run_id,
                 "status": status,
                 "orders_preview_count": len(orders),
-                "action_required": bool(orders),
+                "action_required": bool(approval_orders),
             },
         )
         return SignalRunSummary(
             signal_run_id=signal_run_id,
             loaded_strategies=[result.strategy_id for result in valid_results],
-            action_required=bool(orders),
+            action_required=bool(approval_orders),
             orders_preview_count=len(orders),
         )
 
@@ -271,76 +277,86 @@ class MaestroOrchestrator:
         self._validate_signal_package_for_approval(package)
         self._validate_signal_approval_gates(run_id, approval_orders, package)
 
-        approval_request = None
-        approval_decision = None
-        approval_message = None
-        source_strategy_ids = (
-            package.get("portfolio_target", {}).get("source_strategy_ids", [])
-        )
         risk_violations = package.get("risk_decision", {}).get("violations", [])
-        if orders:
-            approval_request, approval_decision, approval_message = (
-                self.approval_manager.request_approval(
-                    run_id,
-                    approval_orders,
-                    risk_violations,
-                    source_strategy_ids,
-                )
-            )
         current_state = self.state_store.load_latest_portfolio_state()
-        if approval_request and approval_decision:
-            approval_payload = {
-                "signal_run_id": signal_run_id,
-                "request": approval_request.model_dump(mode="json"),
-                "decision": approval_decision.model_dump(mode="json"),
-                "message": approval_message,
-                "account_ids": sorted(
-                    {order.account_id for order in approval_orders if order.account_id}
-                ),
-            }
-            if len(approval_payload["account_ids"]) == 1:
-                approval_payload["account_id"] = approval_payload["account_ids"][0]
-            self.state_store.save_approval(
-                run_id,
-                approval_request.approval_id,
-                approval_payload,
-            )
-            self.audit.log(run_id, "approval_decision", approval_payload)
-            if approval_decision.status != "approved":
-                next_state = current_state
-                self.state_store.save_system_event(
-                    run_id,
-                    SystemEventType.EXECUTION_SKIPPED,
-                    {
-                        "signal_run_id": signal_run_id,
-                        "approval_status": approval_decision.status,
-                    },
+        next_state = current_state
+        approval_statuses: list[str] = []
+        approval_count = 0
+        for source_strategy_ids, group_orders in self._approval_order_groups(
+            approval_orders,
+            package,
+        ):
+            approval_request = None
+            approval_decision = None
+            approval_message = None
+            if group_orders:
+                approval_request, approval_decision, approval_message = (
+                    self.approval_manager.request_approval(
+                        run_id,
+                        group_orders,
+                        risk_violations,
+                        source_strategy_ids,
+                    )
                 )
-            elif self.config.mode == RunMode.LIVE_APPROVAL:
-                _, next_state = self._execute_live_approval_orders(
+            if approval_request and approval_decision:
+                approval_count += 1
+                approval_statuses.append(approval_decision.status)
+                approval_payload = {
+                    "signal_run_id": signal_run_id,
+                    "source_strategy_ids": list(source_strategy_ids),
+                    "request": approval_request.model_dump(mode="json"),
+                    "decision": approval_decision.model_dump(mode="json"),
+                    "message": approval_message,
+                    "account_ids": sorted(
+                        {order.account_id for order in group_orders if order.account_id}
+                    ),
+                }
+                if len(approval_payload["account_ids"]) == 1:
+                    approval_payload["account_id"] = approval_payload["account_ids"][0]
+                self.state_store.save_approval(
                     run_id,
-                    approval_orders,
                     approval_request.approval_id,
-                    approval_decision,
-                    signal_run_id=signal_run_id,
+                    approval_payload,
                 )
+                self.audit.log(run_id, "approval_decision", approval_payload)
+                if approval_decision.status != "approved":
+                    self.state_store.save_system_event(
+                        run_id,
+                        SystemEventType.EXECUTION_SKIPPED,
+                        {
+                            "signal_run_id": signal_run_id,
+                            "source_strategy_ids": list(source_strategy_ids),
+                            "approval_status": approval_decision.status,
+                        },
+                    )
+                elif self.config.mode == RunMode.LIVE_APPROVAL:
+                    _, next_state = self._execute_live_approval_orders(
+                        run_id,
+                        group_orders,
+                        approval_request.approval_id,
+                        approval_decision,
+                        signal_run_id=signal_run_id,
+                    )
+                else:
+                    _, next_state = self.execution.execute_orders(next_state, group_orders)
             else:
-                _, next_state = self.execution.execute_orders(current_state, approval_orders)
-        else:
-            if self.config.mode == RunMode.LIVE_APPROVAL:
-                raise ValueError("live_approval mode requires an approval decision")
-            next_state = self.execution.execute_orders(current_state, approval_orders)[1]
+                approval_statuses.append("not_required")
+                if self.config.mode == RunMode.LIVE_APPROVAL:
+                    raise ValueError("live_approval mode requires an approval decision")
+                _, next_state = self.execution.execute_orders(next_state, group_orders)
 
-        approval_status = approval_decision.status if approval_decision else "not_required"
-        for order in approval_orders:
-            order_payload = order.model_dump(mode="json")
-            order_payload["signal_run_id"] = signal_run_id
-            order_payload["approval_status"] = approval_status
-            if not (
-                self.config.mode == RunMode.LIVE_APPROVAL
-                and self._effective_order_posture(order) == "dry_run"
-            ):
-                self.state_store.save_order(run_id, order.order_id, order_payload)
+            approval_status = approval_decision.status if approval_decision else "not_required"
+            for order in group_orders:
+                order_payload = order.model_dump(mode="json")
+                order_payload["signal_run_id"] = signal_run_id
+                order_payload["approval_status"] = approval_status
+                if not (
+                    self.config.mode == RunMode.LIVE_APPROVAL
+                    and self._effective_order_posture(order) == "dry_run"
+                ):
+                    self.state_store.save_order(run_id, order.order_id, order_payload)
+
+        approval_status = _combined_approval_status(approval_statuses)
         self.state_store.save_portfolio_snapshot(run_id, next_state)
         self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
         self.state_store.save_system_event(
@@ -350,6 +366,8 @@ class MaestroOrchestrator:
                 "signal_run_id": signal_run_id,
                 "orders_created": len(approval_orders),
                 "approval_status": approval_status,
+                "approval_count": approval_count,
+                "approval_statuses": approval_statuses,
             },
         )
         return SignalApprovalSummary(
@@ -1086,6 +1104,26 @@ class MaestroOrchestrator:
             if account_id in refs_by_account
         ]
 
+    def _approval_order_groups(
+        self,
+        orders: list[OrderIntent],
+        package: dict[str, Any],
+    ) -> list[tuple[list[str], list[OrderIntent]]]:
+        fallback_source_strategy_ids = (
+            package.get("portfolio_target", {}).get("source_strategy_ids", [])
+        )
+        groups: dict[tuple[str, ...], list[OrderIntent]] = {}
+        for order in orders:
+            source_strategy_ids = order.metadata.get("source_strategy_ids")
+            if not source_strategy_ids:
+                source_strategy_ids = fallback_source_strategy_ids
+            key = tuple(str(strategy_id) for strategy_id in source_strategy_ids if strategy_id)
+            if not key:
+                key = ("unknown",)
+            groups.setdefault(key, []).append(order)
+        return [(list(key), group_orders) for key, group_orders in groups.items()]
+
+
     def _validate_signal_package_for_approval(self, package: dict[str, Any]) -> None:
         if self.config.mode != RunMode.LIVE_APPROVAL:
             return
@@ -1097,12 +1135,6 @@ class MaestroOrchestrator:
                 f"age_seconds={signal_age_seconds:.0f} "
                 f"max_age_seconds={self.config.approval.signal_max_age_seconds}"
             )
-        signal_fingerprint = package.get("config_runtime_fingerprint")
-        current_fingerprint = (
-            self.config_identity.runtime_fingerprint if self.config_identity is not None else None
-        )
-        if signal_fingerprint and current_fingerprint and signal_fingerprint != current_fingerprint:
-            raise ValueError("Signal package config runtime mismatch")
         signal_account_mappings = package.get("strategy_account_mappings")
         if signal_account_mappings is not None:
             current_mappings = self._strategy_account_mappings()
@@ -1111,6 +1143,24 @@ class MaestroOrchestrator:
                     "Signal package account mapping mismatch: "
                     f"signal={signal_account_mappings} current={current_mappings}"
                 )
+        signal_contract_fingerprint = package.get("config_signal_contract_fingerprint")
+        if signal_contract_fingerprint:
+            current_contract_fingerprint = _signal_contract_fingerprint(self.config)
+            if signal_contract_fingerprint != current_contract_fingerprint:
+                raise ValueError("Signal package config runtime mismatch")
+        else:
+            signal_fingerprint = package.get("config_runtime_fingerprint")
+            current_fingerprint = (
+                self.config_identity.runtime_fingerprint
+                if self.config_identity is not None
+                else None
+            )
+            if (
+                signal_fingerprint
+                and current_fingerprint
+                and signal_fingerprint != current_fingerprint
+            ):
+                raise ValueError("Signal package config runtime mismatch")
         if not package.get("datahub_evidence"):
             raise ValueError("Signal package missing DataHub evidence")
         expected_account_ids = set(self._live_account_ids())
@@ -1239,6 +1289,14 @@ class MaestroOrchestrator:
             if strategy.enabled
         ]
 
+    def _signal_orders_requiring_approval(self, orders: list[OrderIntent]) -> list[OrderIntent]:
+        return [
+            order
+            for order in orders
+            if str(order.metadata.get("order_posture") or self.config.execution.order_posture)
+            != "disabled"
+        ]
+
     def _orders_requiring_approval(self, orders: list[OrderIntent]) -> list[OrderIntent]:
         return [
             order
@@ -1258,6 +1316,15 @@ class MaestroOrchestrator:
         if self.config.execution.order_posture == "dry_run" and posture == "armed":
             return "dry_run"
         return posture
+
+    def _effective_signal_strategy_order_posture(self, strategy_id: str) -> str:
+        strategy = next(
+            (strategy for strategy in self.config.strategies if strategy.id == strategy_id),
+            None,
+        )
+        if strategy is not None and strategy.order_posture is not None:
+            return strategy.order_posture
+        return self._effective_strategy_order_posture(strategy_id)
 
     def _effective_strategy_order_posture(self, strategy_id: str) -> str:
         strategy = next(
@@ -1621,14 +1688,20 @@ class MaestroOrchestrator:
         source_strategy_ids: list[str],
         *,
         account_id: str | None = None,
+        signal_preview: bool = False,
     ) -> list[OrderIntent]:
         account_ids = {
             self._strategy_account_id(strategy_id)
             for strategy_id in source_strategy_ids
             if strategy_id
         }
+        posture_for_strategy = (
+            self._effective_signal_strategy_order_posture
+            if signal_preview
+            else self._effective_strategy_order_posture
+        )
         order_postures = {
-            self._effective_strategy_order_posture(strategy_id)
+            posture_for_strategy(strategy_id)
             for strategy_id in source_strategy_ids
             if strategy_id
         }
@@ -1652,6 +1725,27 @@ class MaestroOrchestrator:
             )
             for order in orders
         ]
+
+
+def _signal_contract_fingerprint(config: MaestroConfig) -> str:
+    payload = config.model_dump(mode="json")
+    payload.pop("approval", None)
+    execution = dict(payload.get("execution") or {})
+    execution.pop("order_posture", None)
+    execution.pop("live_order_enabled", None)
+    execution.pop("live_order_dry_run", None)
+    payload["execution"] = execution
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return sha256(encoded).hexdigest()
+
+
+def _combined_approval_status(statuses: list[str]) -> str:
+    if not statuses:
+        return "not_required"
+    unique_statuses = set(statuses)
+    if len(unique_statuses) == 1:
+        return statuses[0]
+    return "mixed"
 
 
 def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:

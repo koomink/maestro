@@ -1,5 +1,7 @@
+import fcntl
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -163,6 +165,192 @@ def approve_signal(
         f"signal_run_id={summary.signal_run_id} run_id={summary.run_id} "
         f"orders={summary.orders_created} approval_status={summary.approval_status}"
     )
+
+
+@app.command("daily-signal-approval")
+def daily_signal_approval(
+    readonly_config: Path | None = typer.Option(
+        None,
+        "--readonly-config",
+        envvar="MAESTRO_READONLY_CONFIG",
+        help="Read-only config used for broker snapshot and reconciliation refresh.",
+    ),
+    signal_config: Path | None = typer.Option(
+        None,
+        "--signal-config",
+        envvar="MAESTRO_SIGNAL_CONFIG",
+        help="Signal config used to generate the daily signal package.",
+    ),
+    approval_config: Path | None = typer.Option(
+        None,
+        "--approval-config",
+        envvar="MAESTRO_APPROVAL_CONFIG",
+        help="Approval config used to consume actionable signal packages.",
+    ),
+    stop_telegram_operator: bool = typer.Option(
+        True,
+        "--stop-telegram-operator/--keep-telegram-operator",
+        help="Stop the polling Telegram operator while approval polling is active.",
+    ),
+    telegram_operator_service: str = typer.Option(
+        "maestro-telegram-operator.service",
+        "--telegram-operator-service",
+        envvar="MAESTRO_TELEGRAM_OPERATOR_SERVICE",
+    ),
+    lock_path: Path = typer.Option(
+        Path("/tmp/maestro-symphony-signal.lock"),
+        "--lock-path",
+        envvar="MAESTRO_SIGNAL_LOCK_PATH",
+    ),
+) -> None:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            typer.echo(f"symphony_daily status=locked lock_path={lock_path}")
+            raise typer.Exit(75) from None
+        try:
+            _run_daily_signal_approval(
+                readonly_config=readonly_config,
+                signal_config=signal_config,
+                approval_config=approval_config,
+                stop_telegram_operator=stop_telegram_operator,
+                telegram_operator_service=telegram_operator_service,
+            )
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _run_daily_signal_approval(
+    *,
+    readonly_config: Path | None,
+    signal_config: Path | None,
+    approval_config: Path | None,
+    stop_telegram_operator: bool,
+    telegram_operator_service: str,
+) -> None:
+    readonly_maestro_config, readonly_identity = _load_operator_config(readonly_config)
+    _refresh_daily_readonly(readonly_maestro_config, readonly_identity)
+
+    signal_maestro_config, signal_identity = _load_operator_config(signal_config)
+    signal_summary = MaestroOrchestrator(
+        signal_maestro_config,
+        config_identity=signal_identity,
+    ).run_signal()
+    typer.echo(
+        f"symphony_daily status=signal_completed "
+        f"signal_run_id={signal_summary.signal_run_id} "
+        f"action_required={str(signal_summary.action_required).lower()} "
+        f"orders_preview={signal_summary.orders_preview_count}"
+    )
+    _send_signal_summary_notification(signal_maestro_config, signal_summary)
+
+    if not signal_summary.action_required:
+        typer.echo(f"symphony_daily status=no_action signal_run_id={signal_summary.signal_run_id}")
+        return
+
+    telegram_stopped = False
+    try:
+        if stop_telegram_operator:
+            _systemctl("stop", telegram_operator_service)
+            telegram_stopped = True
+        approval_maestro_config, approval_identity = _load_operator_config(approval_config)
+        approval_summary = MaestroOrchestrator(
+            approval_maestro_config,
+            config_identity=approval_identity,
+        ).approve_signal(signal_summary.signal_run_id)
+    finally:
+        if telegram_stopped:
+            try:
+                _systemctl("start", telegram_operator_service)
+            except subprocess.CalledProcessError as exc:
+                typer.echo(
+                    "symphony_daily status=warn "
+                    f"reason=telegram_operator_restart_failed service={telegram_operator_service} "
+                    f"returncode={exc.returncode}"
+                )
+    typer.echo(
+        f"symphony_daily status=approval_completed "
+        f"signal_run_id={approval_summary.signal_run_id} "
+        f"run_id={approval_summary.run_id} "
+        f"orders={approval_summary.orders_created} "
+        f"approval_status={approval_summary.approval_status}"
+    )
+
+
+def _refresh_daily_readonly(
+    maestro_config: MaestroConfig,
+    identity: ConfigIdentity,
+) -> None:
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        typer.echo(
+            f"symphony_daily readonly=skipped reason=mode mode={maestro_config.mode.value}"
+        )
+        return
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    kis_accounts = _kis_readonly_accounts(maestro_config)
+    if not kis_accounts:
+        typer.echo("symphony_daily readonly=skipped reason=no_kis_accounts")
+        return
+    for logical_account_id, kis_config in kis_accounts:
+        service = KISReadOnlyService(
+            kis_config,
+            store,
+            audit,
+            instruments=maestro_config.universe.instruments,
+            logical_account_id=logical_account_id,
+        )
+        service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+    result = BrokerReconciliationService(
+        maestro_config.reconciliation,
+        store,
+        audit,
+    ).reconcile_latest()
+    status = "passed" if result.passed else "failed"
+    typer.echo(
+        f"symphony_daily readonly=refreshed accounts_synced={len(kis_accounts)} "
+        f"reconciliation={status} issues={len(result.issues)}"
+    )
+    if not result.passed:
+        raise typer.Exit(1)
+
+
+def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) -> None:
+    if maestro_config.approval.provider != "telegram":
+        return
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return
+    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_signal_summary=warn message=missing_bot_token")
+        return
+    strategies = ", ".join(summary.loaded_strategies) if summary.loaded_strategies else "none"
+    message = "\n".join(
+        [
+            "Maestro daily signal summary",
+            f"signal_run_id: {summary.signal_run_id}",
+            f"strategies: {strategies}",
+            f"action_required: {str(summary.action_required).lower()}",
+            f"orders_preview: {summary.orders_preview_count}",
+        ]
+    )
+    try:
+        client = TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        for chat_id in chat_ids:
+            client.send_message(chat_id, message)
+    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+        typer.echo(f"telegram_signal_summary=warn message={exc}")
+        return
+    typer.echo(f"telegram_signal_summary=sent chats={len(chat_ids)}")
+
+
+def _systemctl(action: str, service: str) -> None:
+    subprocess.run(["systemctl", action, service], check=True)
 
 
 def _send_run_once_success_notification(maestro_config: MaestroConfig, summary) -> None:

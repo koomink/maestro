@@ -214,18 +214,20 @@ WantedBy=timers.target
 
 Install `deploy/systemd/maestro-symphony-signal.service` and
 `deploy/systemd/maestro-symphony-signal.timer`. The service calls
-`scripts/operator/symphony_signal_then_approval.sh`, which obtains a file lock,
-runs `maestro run-signal --config ${MAESTRO_SIGNAL_CONFIG}`, parses
-`signal_run_id` and `action_required`, and only calls `maestro approve-signal`
-when `action_required=true`.
+`maestro daily-signal-approval`, which obtains a file lock, refreshes read-only
+broker state when configured, runs `maestro run-signal` semantics through
+`${MAESTRO_SIGNAL_CONFIG}`, sends the daily Telegram signal summary, and only
+continues into approval when `action_required=true`.
 
-The wrapper stops `maestro-telegram-operator.service` while approval polling is
-active and restarts it on exit. If signal output cannot be parsed, the wrapper
-fails closed and does not call approval.
+During approval polling the command stops `maestro-telegram-operator.service`
+and restarts it on exit so the shared Telegram bot has one `getUpdates`
+consumer. The legacy `scripts/operator/symphony_signal_then_approval.sh` wrapper
+remains available for compatibility, but the systemd timer should use the CLI
+orchestrator.
 
 ```ini
 [Unit]
-Description=Maestro Symphony signal then conditional approval
+Description=Maestro Symphony daily signal approval orchestration
 After=network-online.target
 Wants=network-online.target
 
@@ -233,7 +235,7 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/scripts/operator/symphony_signal_then_approval.sh
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG}
 TimeoutStartSec=1200
 ```
 

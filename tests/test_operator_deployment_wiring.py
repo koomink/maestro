@@ -128,7 +128,7 @@ echo "should not run"
     assert "status=locked" in result.stdout
 
 
-def test_symphony_systemd_units_wire_operator_configs_and_wrapper():
+def test_symphony_systemd_units_wire_operator_configs_and_daily_cli():
     readonly_service = (SYSTEMD_DIR / "maestro-symphony-readonly.service").read_text()
     readonly_timer = (SYSTEMD_DIR / "maestro-symphony-readonly.timer").read_text()
     signal_service = (SYSTEMD_DIR / "maestro-symphony-signal.service").read_text()
@@ -140,7 +140,11 @@ def test_symphony_systemd_units_wire_operator_configs_and_wrapper():
     assert "kis-sync --config ${MAESTRO_READONLY_CONFIG}" in readonly_service
     assert "reconcile --config ${MAESTRO_READONLY_CONFIG}" in readonly_service
     assert "OnCalendar=*:0/15" in readonly_timer
-    assert "symphony_signal_then_approval.sh" in signal_service
+    assert "daily-signal-approval" in signal_service
+    assert "--readonly-config ${MAESTRO_READONLY_CONFIG}" in signal_service
+    assert "--signal-config ${MAESTRO_SIGNAL_CONFIG}" in signal_service
+    assert "--approval-config ${MAESTRO_APPROVAL_CONFIG}" in signal_service
+    assert "symphony_signal_then_approval.sh" not in signal_service
     assert "TimeoutStartSec=1200" in signal_service
     assert "OnCalendar=Mon..Fri 09:10:00" in signal_timer
     assert "telegram-operator --config ${MAESTRO_READONLY_CONFIG}" in telegram_service

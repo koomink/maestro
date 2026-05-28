@@ -134,12 +134,14 @@ maestro run-signal --config configs/operator/symphony_signal.yaml
 maestro approve-signal --config configs/operator/symphony_approval.yaml --signal-run-id <id>
 ```
 
-The deployment wrapper `scripts/operator/symphony_signal_then_approval.sh`
-automates the scheduled handoff: it locks the workflow, runs `run-signal`,
-parses `signal_run_id` and `action_required`, skips approval for no-action
-signals, and calls `approve-signal` only for actionable signals. During approval
-polling it stops `maestro-telegram-operator.service` and restarts it on exit so
-the shared Telegram bot has only one `getUpdates` consumer.
+`maestro daily-signal-approval` automates the scheduled handoff: it locks the
+workflow, refreshes read-only broker state when configured, runs the signal
+phase, sends the daily Telegram signal summary, skips approval for no-action
+signals, and creates approval requests only for actionable signals. During
+approval polling it stops `maestro-telegram-operator.service` and restarts it on
+exit so the shared Telegram bot has only one `getUpdates` consumer. The legacy
+`scripts/operator/symphony_signal_then_approval.sh` wrapper remains available for
+compatibility, but systemd should use the CLI orchestrator.
 
 The workflow must continue to evolve without weakening the current
 `live_approval` safety posture: no `live_auto`, no market orders, no direct

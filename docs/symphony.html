@@ -721,11 +721,15 @@
       <div class="codeblock" style="margin-top: 16px;">Current Symphony handoff
 
 systemd timer
-  → scripts/operator/symphony_signal_then_approval.sh
-  → maestro run-signal --config configs/operator/symphony_signal.yaml
+  → maestro daily-signal-approval
+      --readonly-config configs/operator/symphony_readonly.yaml
+      --signal-config configs/operator/symphony_signal.yaml
+      --approval-config configs/operator/symphony_approval.yaml
+  → read-only broker refresh and reconciliation
   → signal_package(signal_run_id)
-  → stop telegram operator while approval consumes shared bot polling
-  → maestro approve-signal --config configs/operator/symphony_approval.yaml --signal-run-id &lt;id&gt;
+  → Telegram daily signal summary
+  → if actionable: stop telegram operator while approval consumes shared bot polling
+  → per-strategy Telegram approval requests
   → restart telegram operator</div>
 
       <div class="codeblock" style="margin-top: 16px;">Example reading
@@ -1022,6 +1026,7 @@ kis.paper_trading: true
         아래 명령들은 같은 operator config, 같은 SQLite state, 같은 audit path를 바라보게 맞추는 것이 중요합니다.
       </p>
       <div class="codeblock">maestro run-once --config &lt;operator.yaml&gt;
+maestro daily-signal-approval --readonly-config configs/operator/symphony_readonly.yaml --signal-config configs/operator/symphony_signal.yaml --approval-config configs/operator/symphony_approval.yaml
 maestro run-signal --config configs/operator/symphony_signal.yaml
 maestro approve-signal --config configs/operator/symphony_approval.yaml --signal-run-id &lt;id&gt;
 maestro kis-sync --config &lt;operator.yaml&gt;

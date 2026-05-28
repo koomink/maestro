@@ -28,14 +28,14 @@
 - Modify: `src/maestro/cli.py`
 - Test: `tests/test_signal_approval_handoff.py`
 
-- [ ] Add `maestro daily-signal-approval`.
-- [ ] Resolve `--readonly-config`, `--signal-config`, and `--approval-config` from CLI options or `MAESTRO_*_CONFIG` env vars.
-- [ ] Run read-only KIS sync and reconciliation before signal generation.
-- [ ] Run `run_signal()` and echo `symphony_signal status=...` lines.
-- [ ] Send Telegram signal summary when Telegram config and token are available.
-- [ ] Call `approve_signal()` only when `action_required=true`.
-- [ ] Stop and restart `maestro-telegram-operator.service` around approval polling when requested.
-- [ ] Run focused CLI tests.
+- [x] Add `maestro daily-signal-approval`.
+- [x] Resolve `--readonly-config`, `--signal-config`, and `--approval-config` from CLI options or `MAESTRO_*_CONFIG` env vars.
+- [x] Run read-only KIS sync and reconciliation before signal generation.
+- [x] Run `run_signal()` and echo `symphony_daily status=...` lines.
+- [x] Send Telegram signal summary when Telegram config and token are available.
+- [x] Call `approve_signal()` only when `action_required=true`.
+- [x] Stop and restart `maestro-telegram-operator.service` around approval polling when requested.
+- [x] Run focused CLI tests.
 
 ### Task 3: Systemd and Docs
 
@@ -44,16 +44,16 @@
 - Modify: `docs/vps_systemd.md`
 - Test: `tests/test_operator_deployment_wiring.py`
 
-- [ ] Replace the preferred scheduled signal path with `maestro daily-signal-approval`.
-- [ ] Keep the legacy shell wrapper documented as compatibility only.
-- [ ] Update deployment wiring tests to assert the new CLI command.
-- [ ] Run `pytest tests/test_operator_deployment_wiring.py -q`.
+- [x] Replace the preferred scheduled signal path with `maestro daily-signal-approval`.
+- [x] Keep the legacy shell wrapper documented as compatibility only.
+- [x] Update deployment wiring tests to assert the new CLI command.
+- [x] Run `pytest tests/test_operator_deployment_wiring.py -q`.
 
 ### Task 4: Verification
 
 **Files:**
 - No new files.
 
-- [ ] Run `pytest tests/test_signal_approval_handoff.py tests/test_operator_deployment_wiring.py -q`.
-- [ ] Run `ruff check src/maestro/cli.py src/maestro/orchestration/orchestrator.py tests/test_signal_approval_handoff.py tests/test_operator_deployment_wiring.py`.
-- [ ] Review `git diff` to ensure changes only cover daily signal approval.
+- [x] Run `pytest tests/test_signal_approval_handoff.py tests/test_operator_deployment_wiring.py -q`.
+- [x] Run `ruff check src/maestro/cli.py src/maestro/orchestration/orchestrator.py tests/test_signal_approval_handoff.py tests/test_operator_deployment_wiring.py`.
+- [x] Review `git diff` to ensure changes only cover daily signal approval.

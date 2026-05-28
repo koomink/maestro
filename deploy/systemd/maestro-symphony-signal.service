@@ -1,5 +1,5 @@
 [Unit]
-Description=Maestro Symphony signal then conditional approval
+Description=Maestro Symphony daily signal approval orchestration
 Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
@@ -9,7 +9,7 @@ Type=oneshot
 User=root
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/scripts/operator/symphony_signal_then_approval.sh
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG}
 TimeoutStartSec=1200
 StandardOutput=journal
 StandardError=journal
