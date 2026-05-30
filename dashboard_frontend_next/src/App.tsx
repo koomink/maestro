@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import type { DashboardSnapshot, SignalFreshness, Tone } from "./types";
+import type { DashboardSnapshot, Tone } from "./types";
 import { fetchSnapshot, generateStrategySignal, loadSnapshot, refreshDashboardState } from "./api/snapshot";
 import { trustSummary } from "./utils/trust";
 import { buildDiagnosticContext } from "./utils/diagnostic";
+import { formatValue } from "./utils/format";
 import {
   TopBar,
   TrustStrip,
@@ -21,27 +22,8 @@ type Period = (typeof periods)[number];
 type ActionState = { busy: boolean; message: string; tone?: Tone };
 type StrategyActionState = ActionState & { strategyId: string };
 
-function statusTone(status: string | undefined): Tone {
-  if (status === "fresh") {
-    return "success";
-  }
-  if (status === "stale" || status === "missing") {
-    return "warning";
-  }
-  if (status === "failed") {
-    return "danger";
-  }
-  return "neutral";
-}
-
-function signalFreshnessCopy(signalFreshness: SignalFreshness): string {
-  const strategyCount = signalFreshness.strategies.length;
-  const suffix = strategyCount === 1 ? "1 strategy" : `${strategyCount} strategies`;
-  return `Signal freshness is ${signalFreshness.overall} across ${suffix}.`;
-}
-
-function accountSyncCopy(count: number): string {
-  return count === 1 ? "1 account snapshot synced" : `${count} account snapshots synced`;
+function lastUpdatedMessage(): string {
+  return "Last updated: " + formatValue(new Date().toISOString());
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -62,7 +44,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [refreshAction, setRefreshAction] = useState<ActionState>({
     busy: false,
-    message: "Account sync + signal freshness",
+    message: "Last updated: not yet refreshed",
     tone: "neutral",
   });
   const [signalAction, setSignalAction] = useState<StrategyActionState>({
@@ -89,16 +71,16 @@ export function App() {
   async function handleRefresh() {
     setRefreshAction({
       busy: true,
-      message: "Refreshing account snapshots and signal freshness...",
+      message: "Updating...",
       tone: "primary",
     });
     try {
-      const result = await refreshDashboardState();
+      await refreshDashboardState();
       setSnapshot(await fetchSnapshot(displayCurrency));
       setRefreshAction({
         busy: false,
-        message: `${accountSyncCopy(result.accounts_synced)}. ${signalFreshnessCopy(result.signal_freshness)}`,
-        tone: statusTone(result.signal_freshness.overall),
+        message: lastUpdatedMessage(),
+        tone: "success",
       });
     } catch (refreshError) {
       setRefreshAction({
