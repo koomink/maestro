@@ -12,7 +12,7 @@ execution_sleeves:
           monthly_budget: 3000000
           min_monthly_budget: 2000000
           max_monthly_budget: 4000000
-          buy_day: 15
+          buy_day: 25
           non_trading_day_policy: next_trading_day
           target_policy: buy_only_toward_target
           funding_request:

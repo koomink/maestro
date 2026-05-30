@@ -122,7 +122,7 @@ execution_sleeves:
           currency: KRW
           sleeve: KRW
           monthly_budget: 3000000
-          buy_day: 15
+          buy_day: 25
 
     dev_sandbox:
       snowball_us:
