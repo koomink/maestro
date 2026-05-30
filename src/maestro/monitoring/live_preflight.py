@@ -1,9 +1,9 @@
-import os
 from typing import Any
 
 from maestro.config.models import MaestroConfig
 from maestro.core.enums import BrokerProduct, OrderType
 from maestro.core.exceptions import PluginLoadError
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.plugins.loader import load_strategy
 
 _LLM_PROVIDER_ENV_VARS = {
@@ -121,7 +121,7 @@ def _extend_llm_env_findings(
                 if provider not in _LLM_PROVIDERS_WITHOUT_ENV:
                     failures.append(f"llm_provider_unknown:{strategy.id}:{provider}")
                 continue
-            if not os.getenv(env_var):
+            if not DEFAULT_CREDENTIAL_RESOLVER.present(env_var):
                 failures.append(f"llm_env_missing:{strategy.id}:{provider}:{env_var}")
 
 

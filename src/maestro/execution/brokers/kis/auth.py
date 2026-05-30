@@ -1,5 +1,4 @@
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -7,6 +6,7 @@ from typing import Any, Protocol
 
 from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER, CredentialResolver
 
 
 class KISTransport(Protocol):
@@ -57,9 +57,16 @@ class KISApprovalKey:
 
 
 class KISAuthManager:
-    def __init__(self, config: KISConfig, transport: KISTransport | None = None) -> None:
+    def __init__(
+        self,
+        config: KISConfig,
+        transport: KISTransport | None = None,
+        *,
+        credential_resolver: CredentialResolver | None = None,
+    ) -> None:
         self.config = config
         self.transport = transport
+        self.credential_resolver = credential_resolver or DEFAULT_CREDENTIAL_RESOLVER
 
     def validate_readonly_credentials(self) -> None:
         if self.config.provider == "mock":
@@ -67,7 +74,7 @@ class KISAuthManager:
         missing = [
             env_name
             for env_name in [self.config.app_key_env, self.config.app_secret_env]
-            if not os.getenv(env_name)
+            if not self.credential_resolver.present(env_name)
         ]
         if missing:
             raise ValueError(f"Missing KIS credential environment variables: {missing}")
@@ -82,8 +89,8 @@ class KISAuthManager:
 
     def get_credentials(self) -> KISCredentials:
         self.validate_readonly_credentials()
-        app_key = os.environ[self.config.app_key_env]
-        app_secret = os.environ[self.config.app_secret_env]
+        app_key = self.credential_resolver.require(self.config.app_key_env)
+        app_secret = self.credential_resolver.require(self.config.app_secret_env)
         account_id = self._account_id()
         if account_id is None:
             raise ValueError("KIS account_id is required for live_readonly provider")
@@ -96,7 +103,7 @@ class KISAuthManager:
     def get_access_token(self) -> KISToken:
         if self.config.provider == "mock":
             return KISToken(access_token="mock-token", expires_at=None, source="mock")
-        token_from_env = os.getenv(self.config.access_token_env)
+        token_from_env = self.credential_resolver.get(self.config.access_token_env)
         if token_from_env:
             return KISToken(access_token=token_from_env, expires_at=None, source="env")
 
@@ -116,7 +123,7 @@ class KISAuthManager:
     def get_websocket_approval_key(self) -> KISApprovalKey:
         if self.config.provider == "mock":
             return KISApprovalKey(approval_key="mock-approval-key", source="mock")
-        approval_key_from_env = os.getenv(self.config.approval_key_env)
+        approval_key_from_env = self.credential_resolver.get(self.config.approval_key_env)
         if approval_key_from_env:
             return KISApprovalKey(approval_key=approval_key_from_env, source="env")
         if self.transport is None:
@@ -211,7 +218,7 @@ class KISAuthManager:
         if self.config.account_id:
             return self.config.account_id
         if self.config.account_id_env:
-            return os.getenv(self.config.account_id_env)
+            return self.credential_resolver.get(self.config.account_id_env)
         return None
 
 

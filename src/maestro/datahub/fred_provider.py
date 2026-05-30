@@ -1,5 +1,4 @@
 import json
-import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -8,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 from maestro.core.clock import utc_now
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER, CredentialResolver
 from maestro.datahub.base import BaseDataProvider
 from maestro.datahub.errors import ProviderUnavailableError
 from maestro.sdk import DataBundle, DataRequest
@@ -76,19 +76,17 @@ class FREDDataProvider(BaseDataProvider):
         timeout_seconds: float = 10.0,
         stale_after_seconds: int | None = None,
         symbol_map: Mapping[str, str] | None = None,
+        credential_resolver: CredentialResolver | None = None,
     ) -> None:
         self.client = client or StdlibFREDClient()
         self.api_key_env = api_key_env or "FRED_API_KEY"
         self.timeout_seconds = timeout_seconds
         self.stale_after_seconds = stale_after_seconds
         self.symbol_map = dict(symbol_map or {})
+        self.credential_resolver = credential_resolver or DEFAULT_CREDENTIAL_RESOLVER
 
     def get_data(self, requests: list[DataRequest]) -> DataBundle:
-        api_key = os.getenv(self.api_key_env)
-        if not api_key:
-            raise ProviderUnavailableError(
-                f"FRED API key environment variable is not set: {self.api_key_env}"
-            )
+        api_key = self._api_key()
 
         generated_at = utc_now()
         data: dict[str, Any] = {}
@@ -126,6 +124,14 @@ class FREDDataProvider(BaseDataProvider):
         return DataBundle(
             requests=requests, data=data, generated_at=generated_at, source=self.source
         )
+
+    def _api_key(self) -> str:
+        api_key = self.credential_resolver.get(self.api_key_env)
+        if not api_key:
+            raise ProviderUnavailableError(
+                f"FRED API key environment variable is not set: {self.api_key_env}"
+            )
+        return api_key
 
     def _fetch_observations(self, symbol: str, series_id: str, api_key: str) -> Mapping[str, Any]:
         try:

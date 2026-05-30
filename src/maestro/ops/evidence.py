@@ -1,10 +1,10 @@
-import os
 from pathlib import Path
 from typing import Any
 
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.health_models import HealthReport
 from maestro.ops.preflight import private_beta_failures
@@ -102,7 +102,9 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
             "telegram_chats": len(config.approval.telegram_allowed_chat_ids),
             "telegram_whitelisted_users": len(config.approval.whitelisted_user_ids),
             "telegram_token_env": config.approval.telegram_bot_token_env,
-            "telegram_token_present": bool(os.getenv(config.approval.telegram_bot_token_env)),
+            "telegram_token_present": DEFAULT_CREDENTIAL_RESOLVER.present(
+                config.approval.telegram_bot_token_env
+            ),
         },
         "execution": {
             "order_posture": config.execution.order_posture,
@@ -154,7 +156,8 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
             "account_id": _mask_identifier(config.kis.account_id),
             "account_id_env": config.kis.account_id_env,
             "account_id_env_present": bool(
-                config.kis.account_id_env and os.getenv(config.kis.account_id_env)
+                config.kis.account_id_env
+                and DEFAULT_CREDENTIAL_RESOLVER.present(config.kis.account_id_env)
             ),
         },
         "portfolio": {
@@ -419,7 +422,7 @@ def _telegram_personal_status(config: MaestroConfig) -> str:
         return "fail"
     if not config.approval.telegram_allowed_chat_ids or not config.approval.whitelisted_user_ids:
         return "fail"
-    if not os.getenv(config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(config.approval.telegram_bot_token_env):
         return "fail"
     return "ok"
 

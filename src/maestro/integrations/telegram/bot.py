@@ -1,5 +1,4 @@
 import json
-import os
 import time
 import urllib.error
 import urllib.parse
@@ -9,6 +8,7 @@ from typing import Any, Protocol
 
 from maestro.approval.models import ApprovalDecision, ApprovalRequest
 from maestro.core.clock import utc_now
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER, CredentialResolver
 from maestro.execution.live_orders import (
     LiveOrderLifecycleNotification,
     LiveOrderNotificationClient,
@@ -59,8 +59,15 @@ class TelegramBotClient(Protocol):
 
 
 class TelegramBotAPIClient:
-    def __init__(self, *, token_env: str, timeout_seconds: float = 10.0) -> None:
-        token = os.getenv(token_env)
+    def __init__(
+        self,
+        *,
+        token_env: str,
+        timeout_seconds: float = 10.0,
+        credential_resolver: CredentialResolver | None = None,
+    ) -> None:
+        credentials = credential_resolver or DEFAULT_CREDENTIAL_RESOLVER
+        token = credentials.get(token_env)
         if not token:
             raise ValueError(f"Telegram bot token environment variable is not set: {token_env}")
         self.base_url = f"https://api.telegram.org/bot{token}"

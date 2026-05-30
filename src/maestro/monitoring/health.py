@@ -7,6 +7,7 @@ from typing import Any
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.monitoring.audit_logger import _event_hash
 from maestro.monitoring.health_models import (
     HealthCheck,
@@ -283,8 +284,8 @@ class HealthService:
         account_present = bool(self.config.kis.account_id)
         account_env = self.config.kis.account_id_env
         if account_env:
-            account_present = account_present or bool(os.getenv(account_env))
-        missing = [name for name in required if not os.getenv(name)]
+            account_present = account_present or DEFAULT_CREDENTIAL_RESOLVER.present(account_env)
+        missing = [name for name in required if not DEFAULT_CREDENTIAL_RESOLVER.present(name)]
         if not account_present:
             missing.append(account_env or "account_id")
         status = "warn" if missing else "ok"
@@ -299,7 +300,9 @@ class HealthService:
                     product.value for product in self.config.kis.effective_broker_products()
                 ),
                 "missing": ",".join(missing) if missing else "none",
-                "access_token_present": bool(os.getenv(self.config.kis.access_token_env)),
+                "access_token_present": DEFAULT_CREDENTIAL_RESOLVER.present(
+                    self.config.kis.access_token_env
+                ),
             },
         )
 

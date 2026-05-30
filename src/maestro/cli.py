@@ -16,6 +16,7 @@ from maestro.config.models import MaestroConfig
 from maestro.core.enums import ProfileStage, RunMode
 from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.funding_requests import (
@@ -343,7 +344,7 @@ def _send_signal_funding_request_notifications(
     chat_ids = maestro_config.approval.telegram_allowed_chat_ids
     if not chat_ids:
         return 0
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_funding_request=warn message=missing_bot_token")
         return 0
     store = StateStore(
@@ -380,7 +381,7 @@ def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) ->
     chat_ids = maestro_config.approval.telegram_allowed_chat_ids
     if not chat_ids:
         return
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_signal_summary=warn message=missing_bot_token")
         return
     strategies = ", ".join(summary.loaded_strategies) if summary.loaded_strategies else "none"
@@ -448,7 +449,7 @@ def _send_run_once_telegram_notification(
     chat_ids = maestro_config.approval.telegram_allowed_chat_ids
     if not chat_ids:
         return
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_notification=warn message=missing_bot_token")
         return
     try:
@@ -622,7 +623,7 @@ def ops_alerts(
         )
         return
 
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("ops_alerts status=fail message=missing_bot_token")
         raise typer.Exit(1)
     client = TelegramBotAPIClient(
@@ -684,7 +685,7 @@ def telegram_operator(
             "telegram-operator requires real Telegram chat/user IDs; replace placeholder "
             "123456789 in the operator-local config"
         )
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_operator status=fail message=missing_bot_token")
         raise typer.Exit(1)
 
@@ -730,7 +731,7 @@ def telegram_set_commands(
     maestro_config, _identity = _load_operator_config(config)
     if maestro_config.approval.provider != "telegram":
         raise typer.BadParameter("telegram-set-commands requires approval.provider=telegram")
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_set_commands status=fail message=missing_bot_token")
         raise typer.Exit(1)
     signal_maestro_config = None
@@ -989,7 +990,7 @@ def _run_telegram_approval_live_smoke(maestro_config, allow_mock: bool) -> None:
         )
         return
 
-    if not os.getenv(maestro_config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("check=telegram_approval status=fail message=missing_bot_token")
         raise typer.Exit(1)
 
@@ -1415,7 +1416,7 @@ def _configured_secret_values(maestro_config) -> list[str]:
         maestro_config.kis.approval_key_env,
         maestro_config.approval.telegram_bot_token_env,
     ):
-        value = os.getenv(env_name)
+        value = DEFAULT_CREDENTIAL_RESOLVER.get(env_name)
         if value:
             values.append(value)
     return values
@@ -1629,7 +1630,7 @@ def _telegram_personal_status(config: MaestroConfig) -> str:
         return "fail"
     if not config.approval.telegram_allowed_chat_ids or not config.approval.whitelisted_user_ids:
         return "fail"
-    if not os.getenv(config.approval.telegram_bot_token_env):
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(config.approval.telegram_bot_token_env):
         return "fail"
     return "ok"
 
