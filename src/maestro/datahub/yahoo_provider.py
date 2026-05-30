@@ -1,5 +1,6 @@
+from calendar import monthrange
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -24,6 +25,9 @@ class YahooHistoryClient(Protocol):
 
     def info(self, symbol: str, *, timeout_seconds: float) -> Mapping[str, Any]:
         """Return Yahoo/yfinance-style fundamental info for one provider symbol."""
+
+    def dividends(self, symbol: str, *, timeout_seconds: float) -> Any:
+        """Return Yahoo/yfinance-style dividend events for one provider symbol."""
 
     def financial_statement(
         self,
@@ -84,6 +88,24 @@ class YFinanceClient:
         if not isinstance(info, Mapping):
             raise ValueError(f"Malformed Yahoo info payload for {symbol}: expected mapping")
         return info
+
+    def dividends(self, symbol: str, *, timeout_seconds: float) -> Any:
+        del timeout_seconds
+        try:
+            import yfinance as yf
+        except ImportError as exc:
+            raise ProviderUnavailableError("yfinance package is not installed") from exc
+
+        try:
+            return yf.Ticker(symbol).dividends
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {symbol}"
+            ) from exc
 
     def financial_statement(
         self,
@@ -215,34 +237,49 @@ class YahooDataProvider(BaseDataProvider):
         provider_symbol: str,
         generated_at: datetime,
     ) -> dict[str, Any]:
-        try:
-            raw = self.client.info(provider_symbol, timeout_seconds=self.timeout_seconds)
-        except ProviderUnavailableError:
-            raise
-        except TimeoutError as exc:
-            raise ProviderUnavailableError(
-                f"Yahoo provider timed out for symbol: {request.symbol}"
-            ) from exc
-        except Exception as exc:
-            raise ProviderUnavailableError(
-                f"Yahoo provider is unavailable for symbol: {request.symbol}"
-            ) from exc
-        if not raw:
-            raise ValueError(f"No Yahoo fundamental data for symbol: {request.symbol}")
+        metric_keys = [
+            "trailing_pe",
+            "forward_pe",
+            "price_to_book",
+            "market_cap",
+            "dividend_yield",
+            "beta",
+            "enterprise_value",
+            "profit_margins",
+            "return_on_equity",
+            "revenue_growth",
+        ]
+        selected_fields = request.fields or metric_keys
+        historical_dividend_yield = None
+        if request.as_of is not None and "dividend_yield" in selected_fields:
+            historical_dividend_yield = self._historical_dividend_yield(
+                request,
+                provider_symbol,
+            )
+
+        raw: Mapping[str, Any] = {}
+        needs_info = historical_dividend_yield is None or any(
+            field != "dividend_yield" for field in selected_fields
+        )
+        if needs_info:
+            raw = self._info_payload(request, provider_symbol)
 
         metrics = {
             "trailing_pe": self._clean_value(raw.get("trailingPE")),
             "forward_pe": self._clean_value(raw.get("forwardPE")),
             "price_to_book": self._clean_value(raw.get("priceToBook")),
             "market_cap": self._clean_value(raw.get("marketCap")),
-            "dividend_yield": self._clean_value(raw.get("dividendYield")),
+            "dividend_yield": (
+                historical_dividend_yield
+                if historical_dividend_yield is not None
+                else self._clean_value(raw.get("dividendYield"))
+            ),
             "beta": self._clean_value(raw.get("beta")),
             "enterprise_value": self._clean_value(raw.get("enterpriseValue")),
             "profit_margins": self._clean_value(raw.get("profitMargins")),
             "return_on_equity": self._clean_value(raw.get("returnOnEquity")),
             "revenue_growth": self._clean_value(raw.get("revenueGrowth")),
         }
-        selected_fields = request.fields or list(metrics)
         filtered_metrics = {field: metrics[field] for field in selected_fields if field in metrics}
         raw_info = (
             {key: self._clean_value(value) for key, value in raw.items() if key in request.fields}
@@ -263,6 +300,167 @@ class YahooDataProvider(BaseDataProvider):
             "is_stale": False,
             "warnings": [],
         }
+
+    def _info_payload(self, request: DataRequest, provider_symbol: str) -> Mapping[str, Any]:
+        try:
+            raw = self.client.info(provider_symbol, timeout_seconds=self.timeout_seconds)
+        except ProviderUnavailableError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {request.symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {request.symbol}"
+            ) from exc
+        if not raw:
+            raise ValueError(f"No Yahoo fundamental data for symbol: {request.symbol}")
+        return raw
+
+    def _historical_dividend_yield(
+        self,
+        request: DataRequest,
+        provider_symbol: str,
+    ) -> float:
+        if request.as_of is None:
+            raise ValueError("as_of is required for historical dividend_yield")
+        cutoff = request.as_of.date()
+        start = self._shift_months(cutoff, 12)
+        events = self._dividend_events(request.symbol, provider_symbol)
+        trailing_dividend = sum(
+            amount for event_date, amount in events if start <= event_date < cutoff
+        )
+        if trailing_dividend <= 0:
+            raise ValueError(
+                f"No Yahoo dividend history for symbol: {request.symbol} "
+                f"between {start.isoformat()} and {cutoff.isoformat()}"
+            )
+        price = self._close_before(request, provider_symbol, cutoff)
+        return trailing_dividend / price
+
+    def _dividend_events(
+        self,
+        symbol: str,
+        provider_symbol: str,
+    ) -> list[tuple[date, float]]:
+        try:
+            raw = self.client.dividends(
+                provider_symbol,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except ProviderUnavailableError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {symbol}"
+            ) from exc
+        events = self._normalize_dividend_events(raw, symbol)
+        if not events:
+            raise ValueError(f"No Yahoo dividend history for symbol: {symbol}")
+        return events
+
+    def _normalize_dividend_events(self, raw: Any, symbol: str) -> list[tuple[date, float]]:
+        if raw is None:
+            return []
+        if hasattr(raw, "empty") and raw.empty:
+            return []
+        if isinstance(raw, Mapping):
+            return [
+                self._dividend_event(date_value, amount, symbol)
+                for date_value, amount in raw.items()
+            ]
+        if hasattr(raw, "items"):
+            return [
+                self._dividend_event(date_value, amount, symbol)
+                for date_value, amount in raw.items()
+            ]
+        if isinstance(raw, Sequence) and not isinstance(raw, str | bytes):
+            events = []
+            for item in raw:
+                if isinstance(item, Mapping):
+                    date_value = item.get("timestamp") or item.get("date") or item.get("Date")
+                    amount = self._read_dividend_amount(item)
+                    events.append(self._dividend_event(date_value, amount, symbol))
+                    continue
+                if (
+                    isinstance(item, Sequence)
+                    and not isinstance(item, str | bytes)
+                    and len(item) == 2
+                ):
+                    events.append(self._dividend_event(item[0], item[1], symbol))
+                    continue
+                raise ValueError(f"Malformed Yahoo dividend history for {symbol}")
+            return events
+        if isinstance(raw, Iterable) and not isinstance(raw, str | bytes | Mapping):
+            return self._normalize_dividend_events(list(raw), symbol)
+        raise ValueError(f"Malformed Yahoo dividend history for {symbol}")
+
+    def _read_dividend_amount(self, row: Mapping[str, Any]) -> Any:
+        for key in ("dividend", "Dividends", "value", "amount"):
+            if key in row:
+                return row[key]
+        raise ValueError("Malformed Yahoo dividend history: missing dividend amount")
+
+    def _dividend_event(self, date_value: Any, amount: Any, symbol: str) -> tuple[date, float]:
+        try:
+            event_date = self._parse_timestamp(date_value).date()
+            dividend = float(amount)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Malformed Yahoo dividend history for {symbol}") from exc
+        if dividend != dividend:
+            raise ValueError(f"Malformed Yahoo dividend history for {symbol}")
+        return event_date, dividend
+
+    def _close_before(
+        self,
+        request: DataRequest,
+        provider_symbol: str,
+        cutoff: date,
+    ) -> float:
+        try:
+            raw = self.client.history(
+                provider_symbol,
+                period="max",
+                interval="1d",
+                timeout_seconds=self.timeout_seconds,
+            )
+        except ProviderUnavailableError:
+            raise
+        except TimeoutError as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider timed out for symbol: {request.symbol}"
+            ) from exc
+        except Exception as exc:
+            raise ProviderUnavailableError(
+                f"Yahoo provider is unavailable for symbol: {request.symbol}"
+            ) from exc
+        rows = self._normalize_history_rows(raw)
+        closes = []
+        for row in rows:
+            try:
+                timestamp = self._parse_timestamp(row.get("timestamp"))
+                close = float(self._read_field(row, "close"))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Malformed Yahoo payload for {request.symbol}: {exc}") from exc
+            if timestamp.date() < cutoff:
+                closes.append((timestamp, close))
+        if not closes:
+            raise ValueError(
+                f"No Yahoo price history before {cutoff.isoformat()} for symbol: {request.symbol}"
+            )
+        return max(closes, key=lambda item: item[0])[1]
+
+    def _shift_months(self, value: date, months: int) -> date:
+        month_index = value.month - months - 1
+        year = value.year + month_index // 12
+        month = month_index % 12 + 1
+        day = min(value.day, monthrange(year, month)[1])
+        return date(year, month, day)
 
     def _financial_statement_payload(
         self,

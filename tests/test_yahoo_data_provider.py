@@ -15,11 +15,13 @@ class FakeYahooClient:
         error: Exception | None = None,
         info_payloads: dict[str, Any] | None = None,
         statement_payloads: dict[tuple[str, str], Any] | None = None,
+        dividends_payloads: dict[str, Any] | None = None,
     ) -> None:
         self.payloads = payloads
         self.error = error
         self.info_payloads = info_payloads or {}
         self.statement_payloads = statement_payloads or {}
+        self.dividends_payloads = dividends_payloads or {}
         self.calls: list[dict[str, Any]] = []
 
     def history(
@@ -72,6 +74,18 @@ class FakeYahooClient:
         if self.error is not None:
             raise self.error
         return self.statement_payloads.get((symbol, statement_type), {})
+
+    def dividends(self, symbol: str, *, timeout_seconds: float) -> Any:
+        self.calls.append(
+            {
+                "symbol": symbol,
+                "method": "dividends",
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if self.error is not None:
+            raise self.error
+        return self.dividends_payloads.get(symbol, [])
 
 
 def request(
@@ -310,6 +324,153 @@ def test_yahoo_provider_returns_fundamental_metrics_from_info_payload():
     assert payload["fundamental"]["metrics"]["trailing_pe"] == 28.5
     assert payload["source"] == "yahoo"
     assert client.calls == [{"symbol": "AAPL", "method": "info", "timeout_seconds": 4.0}]
+
+
+def test_yahoo_provider_returns_as_of_dividend_yield_from_dividend_history():
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                {
+                    "timestamp": "2026-04-30T00:00:00Z",
+                    "open": 109.0,
+                    "high": 109.0,
+                    "low": 108.0,
+                    "close": 110.0,
+                    "volume": 1000,
+                },
+                {
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "open": 999.0,
+                    "high": 1001.0,
+                    "low": 998.0,
+                    "close": 1000.0,
+                    "volume": 1000,
+                },
+            ]
+        },
+        dividends_payloads={
+            "SPY": [
+                {"timestamp": "2025-04-30T00:00:00Z", "dividend": 10.0},
+                {"timestamp": "2025-05-01T00:00:00Z", "dividend": 1.0},
+                {"timestamp": "2025-12-15T00:00:00Z", "dividend": 1.2},
+                {"timestamp": "2026-05-01T00:00:00Z", "dividend": 99.0},
+            ]
+        },
+    )
+    provider = YahooDataProvider(client=client, timeout_seconds=4.0)
+
+    bundle = provider.get_data(
+        [
+            DataRequest(
+                symbol="SPY",
+                asset_type="us_etf",
+                data_type="fundamental",
+                fields=["dividend_yield"],
+                as_of=datetime(2026, 5, 1, tzinfo=UTC),
+            )
+        ]
+    )
+
+    payload = bundle.data["SPY"]
+    assert payload["metrics"] == {"dividend_yield": 0.02}
+    assert payload["fundamental"]["metrics"] == {"dividend_yield": 0.02}
+    assert {call.get("method", "history") for call in client.calls} == {"dividends", "history"}
+
+
+def test_yahoo_provider_excludes_as_of_date_for_dividend_yield_price():
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                {
+                    "timestamp": "2026-04-30T00:00:00Z",
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 1000,
+                },
+                {
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "open": 50.0,
+                    "high": 50.0,
+                    "low": 50.0,
+                    "close": 50.0,
+                    "volume": 1000,
+                },
+            ]
+        },
+        dividends_payloads={
+            "SPY": [
+                {"timestamp": "2026-04-30T00:00:00Z", "dividend": 2.0},
+                {"timestamp": "2026-05-01T00:00:00Z", "dividend": 100.0},
+            ]
+        },
+    )
+    provider = YahooDataProvider(client=client)
+
+    payload = provider.get_data(
+        [
+            DataRequest(
+                symbol="SPY",
+                asset_type="us_etf",
+                data_type="fundamental",
+                fields=["dividend_yield"],
+                as_of=datetime(2026, 5, 1, tzinfo=UTC),
+            )
+        ]
+    ).data["SPY"]
+
+    assert payload["metrics"]["dividend_yield"] == 0.02
+
+
+def test_yahoo_provider_fails_as_of_dividend_yield_without_dividends():
+    client = FakeYahooClient({"SPY": yahoo_rows()}, dividends_payloads={"SPY": []})
+    provider = YahooDataProvider(client=client)
+
+    with pytest.raises(ValueError, match="dividend history"):
+        provider.get_data(
+            [
+                DataRequest(
+                    symbol="SPY",
+                    asset_type="us_etf",
+                    data_type="fundamental",
+                    fields=["dividend_yield"],
+                    as_of=datetime(2026, 5, 1, tzinfo=UTC),
+                )
+            ]
+        )
+
+
+def test_yahoo_provider_fails_as_of_dividend_yield_without_prior_price():
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                {
+                    "timestamp": "2026-05-01T00:00:00Z",
+                    "open": 100.0,
+                    "high": 100.0,
+                    "low": 100.0,
+                    "close": 100.0,
+                    "volume": 1000,
+                }
+            ]
+        },
+        dividends_payloads={"SPY": [{"timestamp": "2026-04-01T00:00:00Z", "dividend": 1.0}]},
+    )
+    provider = YahooDataProvider(client=client)
+
+    with pytest.raises(ValueError, match="price history"):
+        provider.get_data(
+            [
+                DataRequest(
+                    symbol="SPY",
+                    asset_type="us_etf",
+                    data_type="fundamental",
+                    fields=["dividend_yield"],
+                    as_of=datetime(2026, 5, 1, tzinfo=UTC),
+                )
+            ]
+        )
 
 
 def test_yahoo_provider_returns_financial_statement_rows():
