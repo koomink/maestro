@@ -324,7 +324,7 @@ def _target() -> PortfolioTarget:
         timestamp=_dt(2026, 5, 15),
         allocations={},
         allocation_sleeves={"KRW": {LEV: 0.60, DIV: 0.40}},
-        source_strategy_ids=["ataraxia"],
+        source_strategy_ids=["tranquillo"],
     )
 
 

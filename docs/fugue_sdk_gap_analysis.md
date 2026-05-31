@@ -1,18 +1,18 @@
-# TradingAgents to Maestro Virtuoso App: SDK Contract Gap Analysis
+# Fugue to Maestro Virtuoso App: SDK Contract Gap Analysis
 
 ## 1. Analysis Basis
 
-This document evaluates how `koomink/TradingAgents` could become a Maestro
+This document evaluates how `koomink/Fugue` could become a Maestro
 Virtuoso app.
 
-Analyzed TradingAgents version:
+Analyzed Fugue version:
 
-- Repository: `https://github.com/koomink/TradingAgents`
+- Repository: `https://github.com/koomink/Fugue`
 - Observed HEAD: `7e9e7b83c7fcc18d941300b253c6ed24d985788d`
 - Package version: `0.2.4`
-- Main package API: `TradingAgentsGraph(...).propagate(ticker, trade_date)`
+- Main package API: `FugueGraph(...).propagate(ticker, trade_date)`
 
-The core question is not whether TradingAgents can be wrapped at all. It can.
+The core question is not whether Fugue can be wrapped at all. It can.
 The practical question is whether it can run as a Maestro-compliant Virtuoso app,
 where Maestro owns data access, universe validation, risk, approval, execution,
 state, monitoring, and audit.
@@ -20,9 +20,9 @@ state, monitoring, and audit.
 Short answer: a thin paper-mode wrapper is realistic now, but a production-style
 Virtuoso app needs SDK and DataHub contract additions.
 
-## 2. TradingAgents Execution Model
+## 2. Fugue Execution Model
 
-TradingAgents analyzes one ticker on one trade date. It runs a LangGraph workflow
+Fugue analyzes one ticker on one trade date. It runs a LangGraph workflow
 with analyst, researcher, trader, risk, and portfolio-manager agents.
 
 ```text
@@ -51,10 +51,10 @@ Risk debate and portfolio manager
   - Executive summary, investment thesis, optional price target and horizon
 ```
 
-TradingAgents currently fetches data through its own LangChain tools and vendor
+Fugue currently fetches data through its own LangChain tools and vendor
 router. The important tool surface is:
 
-| TradingAgents tool | Current vendors | Purpose |
+| Fugue tool | Current vendors | Purpose |
 | --- | --- | --- |
 | `get_stock_data` | yfinance, Alpha Vantage | OHLCV price history |
 | `get_indicators` | yfinance plus stockstats, Alpha Vantage | MACD, RSI, Bollinger Bands, moving averages, ATR, VWMA |
@@ -131,7 +131,7 @@ Current `DataRequest` fields are:
 - `source_hint`
 - `fields`
 
-These richer fields support TradingAgents-style data and runtime-tool requests
+These richer fields support Fugue-style data and runtime-tool requests
 without requiring the app to import Maestro DataHub internals.
 
 Current `TargetAllocationResult` fields are:
@@ -147,7 +147,7 @@ Current `TargetAllocationResult` fields are:
 - `risk_flags`
 - `metadata`
 
-`TargetAllocationResult.metadata` can carry raw TradingAgents reports,
+`TargetAllocationResult.metadata` can carry raw Fugue reports,
 structured ratings, tool traces, model details, or intermediate artifact
 references alongside an executable allocation proposal.
 
@@ -158,12 +158,12 @@ the signal to `TargetAllocationResult` immediately after `run()`, then applies
 the existing validator, portfolio construction, risk, approval, and execution
 path.
 
-## 4. Expected Maestro to TradingAgents App Contract
+## 4. Expected Maestro to Fugue App Contract
 
-A minimal TradingAgents Virtuoso wrapper would look like this:
+A minimal Fugue Virtuoso wrapper would look like this:
 
 1. `manifest()`
-   - Declare `strategy_id="tradingagents"`.
+   - Declare `strategy_id="fugue"`.
    - Declare supported asset types such as US stocks and ETFs.
    - Declare data types such as `ohlcv`, `news`, `sentiment`, `fundamental`,
      `technical_indicators`, `financial_statements`, and
@@ -181,13 +181,13 @@ A minimal TradingAgents Virtuoso wrapper would look like this:
    - Request benchmark or macro research data separately from tradable data.
 
 4. `run_with_runtime(data_bundle, context, runtime)`
-   - Convert Maestro-provided data into the format TradingAgents tools expect,
-     or run TradingAgents with Maestro-backed runtime tools.
-   - Execute `TradingAgentsGraph.propagate(ticker, trade_date)`.
+   - Convert Maestro-provided data into the format Fugue tools expect,
+     or run Fugue with Maestro-backed runtime tools.
+   - Execute `FugueGraph.propagate(ticker, trade_date)`.
    - Return either a Maestro `TargetAllocationResult`, or a
      `StrategySignalResult` when the Maestro strategy config supplies
      `signal_to_allocation`.
-   - Include TradingAgents' rationale in `rationale`; once the SDK supports it,
+   - Include Fugue' rationale in `rationale`; once the SDK supports it,
      include full structured reports in metadata/artifacts.
 
 Example rating-to-weight mapping for a wrapper:
@@ -211,14 +211,14 @@ execution rules.
 
 ### 5.1 What Works With the Current SDK
 
-A fast MVP wrapper is realistic if the wrapper is allowed to let TradingAgents
+A fast MVP wrapper is realistic if the wrapper is allowed to let Fugue
 use its own data vendors and LLM APIs directly.
 
 That MVP can:
 
 - Run in paper mode.
 - Analyze one configured ticker per run.
-- Use TradingAgents' own yfinance, Alpha Vantage, and LLM provider settings.
+- Use Fugue' own yfinance, Alpha Vantage, and LLM provider settings.
 - Convert the final rating into a `TargetAllocationResult`.
 - Let Maestro handle portfolio combination, risk checks, order proposal, paper
   execution, state, and audit after the allocation is returned.
@@ -229,18 +229,18 @@ directly.
 
 ### 5.2 Data Contract Gaps
 
-| TradingAgents need | Current Maestro status | Gap |
+| Fugue need | Current Maestro status | Gap |
 | --- | --- | --- |
 | OHLCV prices | Supported through Yahoo/CSV providers | Low |
 | Technical indicators | `technical_indicators` provider derives RSI, MACD, SMA, EMA, and Bollinger values from OHLCV | Low |
 | Company fundamentals | Yahoo/yfinance provider returns key `Ticker.info` metrics through `fundamental` | Low |
 | Financial statements | Yahoo/yfinance provider returns balance sheet, income statement, and cashflow rows through `financial_statements` | Low |
-| Ticker-specific news | RSS exists, but filtering and source coverage are weaker than TradingAgents expects | Medium |
-| Global news | RSS exists, but no TradingAgents-equivalent tool contract | Medium |
+| Ticker-specific news | RSS exists, but filtering and source coverage are weaker than Fugue expects | Medium |
+| Global news | RSS exists, but no Fugue-equivalent tool contract | Medium |
 | Insider transactions | Not supported | High |
 | Sentiment | Rule-based provider only | Medium |
 
-The deeper issue is not just missing providers. TradingAgents' agents dynamically
+The deeper issue is not just missing providers. Fugue' agents dynamically
 call tools while reasoning. Maestro's current SDK asks the strategy to declare
 all `DataRequest` objects before `run()`. That can work for predictable data, but
 it does not match LangChain tool-calling where the LLM decides which indicators,
@@ -248,7 +248,7 @@ news lookbacks, or statement details to request during the graph execution.
 
 ### 5.3 Output Contract Gaps
 
-TradingAgents output:
+Fugue output:
 
 ```python
 PortfolioDecision(
@@ -264,7 +264,7 @@ Maestro output required today:
 
 ```python
 TargetAllocationResult(
-    strategy_id="tradingagents",
+    strategy_id="fugue",
     strategy_version="0.2.4",
     timestamp=...,
     allocations={"AAPL": 0.30, "CASH": 0.70},
@@ -276,11 +276,11 @@ TargetAllocationResult(
 
 This requires a conversion layer. Without a standard signal contract, every
 wrapper will invent its own rating-to-allocation policy and lose structured
-details from the TradingAgents decision.
+details from the Fugue decision.
 
 ### 5.4 Runtime and Operations Gaps
 
-TradingAgents is a long-running LLM workflow. It has checkpoint/resume support,
+Fugue is a long-running LLM workflow. It has checkpoint/resume support,
 memory logs, full-state JSON logs, model/provider settings, and optional
 callbacks.
 
@@ -302,7 +302,7 @@ the app package.
 ### 5.5 Dynamic Universe Gaps
 
 Maestro already has `CandidateInstrumentRequest`, research/tradable intent, and
-a dynamic universe service. That is the right direction for TradingAgents.
+a dynamic universe service. That is the right direction for Fugue.
 
 The remaining practical gaps are:
 
@@ -310,7 +310,7 @@ The remaining practical gaps are:
   inject real broker tradability and data freshness checkers in the default flow.
 - Operator-approved candidate sets are not yet part of a complete app-facing
   approval loop.
-- TradingAgents often needs research-only references such as benchmarks, macro
+- Fugue often needs research-only references such as benchmarks, macro
   series, and broad news topics; these must remain separate from tradable
   allocation symbols.
 
@@ -320,7 +320,7 @@ The remaining practical gaps are:
 
 SDK contract `1.1` adds `StrategyRuntime`, an SDK-level way for Virtuoso apps
 to obtain Maestro-backed runtime data during `run_with_runtime()`. For
-TradingAgents, the adapter maps this runtime access onto:
+Fugue, the adapter maps this runtime access onto:
 
 - `get_stock_data`
 - `get_indicators`
@@ -362,13 +362,13 @@ class StrategySignalResult(BaseModel):
     metadata: dict[str, Any] = {}
 ```
 
-For a paper POC, a TradingAgents wrapper can return `StrategySignalResult` and
+For a paper POC, a Fugue wrapper can return `StrategySignalResult` and
 let Maestro apply an explicit `single_symbol_action_map` policy from strategy
 config. Maestro persists the normalized `TargetAllocationResult` as `"result"`
 and keeps the original signal in `metadata["source_signal"]` and strategy-run
 `"source_signal"`.
 
-Remaining work for a fuller TradingAgents integration is outside this path:
+Remaining work for a fuller Fugue integration is outside this path:
 checkpoint/artifact storage and LLM telemetry.
 
 ### 6.3 Richer DataRequest
@@ -413,7 +413,7 @@ Expose SDK/runtime support for:
 - Token/cost/latency callbacks.
 - App health/status summaries.
 
-TradingAgents' `results_dir`, `data_cache_dir`, and `memory_log_path` should be
+Fugue' `results_dir`, `data_cache_dir`, and `memory_log_path` should be
 mapped to Maestro-controlled app storage rather than defaulting to hidden global
 paths.
 
@@ -428,7 +428,7 @@ Extend `StrategyManifest` or app config with:
 - Estimated runtime.
 - Whether direct external data vendor calls are allowed.
 
-This keeps TradingAgents' LLM-heavy behavior visible to operators before a run.
+This keeps Fugue' LLM-heavy behavior visible to operators before a run.
 
 ### 6.7 Dynamic Universe Completion
 
@@ -444,7 +444,7 @@ Finish the operational loop around dynamic candidates:
 
 ### Option A: Fast Paper Wrapper
 
-Keep TradingAgents mostly intact and let it call its own data vendors and LLM
+Keep Fugue mostly intact and let it call its own data vendors and LLM
 providers.
 
 Pros:
@@ -463,13 +463,13 @@ Use this only for paper experimentation.
 
 ### Option B: Maestro-Backed Tool Adapter
 
-Replace TradingAgents data tools with Maestro DataHub-backed tools while keeping
-the TradingAgents graph and agents mostly intact.
+Replace Fugue data tools with Maestro DataHub-backed tools while keeping
+the Fugue graph and agents mostly intact.
 
 Pros:
 
 - Preserves Maestro's ownership of data access and audit.
-- Keeps TradingAgents' main architecture.
+- Keeps Fugue' main architecture.
 - Makes provider failures and freshness checks visible to Maestro.
 
 Cons:
@@ -480,9 +480,9 @@ Cons:
 
 This is the recommended direction for a real Virtuoso app.
 
-### Option C: Deeper TradingAgents Fork
+### Option C: Deeper Fugue Fork
 
-Refactor TradingAgents so it natively speaks Maestro SDK contracts instead of
+Refactor Fugue so it natively speaks Maestro SDK contracts instead of
 using its original tool/data abstractions.
 
 Pros:
@@ -493,17 +493,17 @@ Pros:
 Cons:
 
 - Highest maintenance burden.
-- More divergence from upstream TradingAgents.
+- More divergence from upstream Fugue.
 
-Use this only if TradingAgents becomes a strategic first-class app.
+Use this only if Fugue becomes a strategic first-class app.
 
 ## 8. Recommended Work Order
 
 1. Build a paper-only wrapper proof of concept with an explicit
    rating-to-allocation policy.
-2. Add a structured signal/metadata contract so TradingAgents decisions are not
+2. Add a structured signal/metadata contract so Fugue decisions are not
    collapsed into weights too early.
-3. Add Maestro-backed runtime data tools for the TradingAgents tool surface.
+3. Add Maestro-backed runtime data tools for the Fugue tool surface.
    Done for the SDK 1.1 paper adapter path.
 4. Add an `insider_transactions` provider and broaden Yahoo/Alpha Vantage parity
    where needed.
@@ -513,26 +513,26 @@ Use this only if TradingAgents becomes a strategic first-class app.
 7. Complete dynamic universe checks for broker tradability, data freshness, and
    operator approval.
 8. Promote from paper to live-approval only after audit, replay, and approval
-   flows include the TradingAgents reports and signal conversion policy.
+   flows include the Fugue reports and signal conversion policy.
 
 ## 9. Conclusion
 
-The current Maestro SDK can host a thin TradingAgents wrapper for paper-mode
+The current Maestro SDK can host a thin Fugue wrapper for paper-mode
 experiments, but it is not yet sufficient for a production-style Virtuoso app.
 
 The biggest blocker is not merely that a few DataHub providers are missing. The
-larger contract mismatch is that TradingAgents is an interactive, LLM tool-calling
+larger contract mismatch is that Fugue is an interactive, LLM tool-calling
 research graph that produces structured directional decisions, while Maestro
 currently expects predeclared data requests and final target allocations.
 
 The right integration path is:
 
-1. Keep TradingAgents proposal-only.
+1. Keep Fugue proposal-only.
 2. Keep Maestro responsible for data access, universe validation, risk, approval,
    execution, state, monitoring, and audit.
 3. Continue SDK support beyond the existing runtime DataHub-backed tools,
    structured signal results, and richer data requests by adding app runtime
    services and explicit LLM permissions.
 
-With those additions, TradingAgents can become a realistic Virtuoso app without
+With those additions, Fugue can become a realistic Virtuoso app without
 breaking Maestro's core ownership boundaries.

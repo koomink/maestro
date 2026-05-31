@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 import yaml
 
-pytest.importorskip("ataraxia.strategy")
+pytest.importorskip("tranquillo.strategy")
 
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
@@ -28,7 +28,7 @@ from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
-def test_ataraxia_live_approval_reaches_telegram_approval_and_live_order_lifecycle(
+def test_tranquillo_live_approval_reaches_telegram_approval_and_live_order_lifecycle(
     tmp_path,
     monkeypatch,
 ):
@@ -47,7 +47,7 @@ def test_ataraxia_live_approval_reaches_telegram_approval_and_live_order_lifecyc
         broker_reconciliation_service=FakeBrokerReconciliation(),
         telegram_client=telegram_client,
     )
-    orchestrator.datahub = AtaraxiaFakeDataHub()
+    orchestrator.datahub = TranquilloFakeDataHub()
     orchestrator.state_store.save_portfolio_snapshot(
         "run_adopted_broker_baseline",
         PortfolioState(cash=10_000_000.0, cash_by_currency={"KRW": 10_000_000.0}, positions={}),
@@ -68,7 +68,7 @@ def test_ataraxia_live_approval_reaches_telegram_approval_and_live_order_lifecyc
     assert {request.sleeve for request in live_client.requests} == {"KRW"}
     approvals = orchestrator.state_store.list_approvals()
     assert approvals[0]["payload"]["decision"]["status"] == "approved"
-    assert approvals[0]["payload"]["request"]["source_strategy_ids"] == ["ataraxia"]
+    assert approvals[0]["payload"]["request"]["source_strategy_ids"] == ["tranquillo"]
     risk_decisions = orchestrator.state_store.list_risk_decisions()
     assert risk_decisions[0]["payload"]["approved"] is True
     assert "modifications" not in risk_decisions[0]["payload"]
@@ -79,7 +79,7 @@ def test_ataraxia_live_approval_reaches_telegram_approval_and_live_order_lifecyc
     assert any(row["payload"]["applied_fills"] for row in fills)
 
 
-class AtaraxiaFakeDataHub:
+class TranquilloFakeDataHub:
     prices = {
         "TIGER_NASDAQ100_LEVERAGE": 100_000.0,
         "KODEX_US_DIVIDEND_DOWJONES": 10_000.0,
@@ -208,7 +208,7 @@ class FakeBrokerReconciliation(BrokerReconciliationRunner):
 
 def _config_path(tmp_path) -> Path:
     raw = yaml.safe_load(
-        Path("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+        Path("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml").read_text()
     )
     raw["datahub"] = {"provider": "mock"}
     raw["execution"]["order_posture"] = "armed"
@@ -226,13 +226,13 @@ def _config_path(tmp_path) -> Path:
     raw["kis"]["provider"] = "mock"
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
-    config_path = tmp_path / "ataraxia_live_approval.yaml"
+    config_path = tmp_path / "tranquillo_live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
 
 
 def _save_broker_snapshot(store: StateStore) -> int:
-    current_prices = AtaraxiaFakeDataHub.prices
+    current_prices = TranquilloFakeDataHub.prices
     store.save_broker_account_snapshot(
         "run_broker_snapshot",
         "MOCK",

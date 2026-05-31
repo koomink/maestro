@@ -1,9 +1,8 @@
-mode: paper
+mode: live_approval
 
 portfolio:
   base_currency: KRW
   allocation_mode: currency_sleeves
-  initial_cash: 10000000
   cash_by_currency:
     KRW: 10000000
   currency_sleeves:
@@ -16,7 +15,6 @@ portfolio:
 universe:
   instruments:
     - symbol: TIGER_NASDAQ100_LEVERAGE
-      name: TIGER 미국나스닥100레버리지(합성)
       asset_type: domestic_etf
       region: KR
       currency: KRW
@@ -29,7 +27,6 @@ universe:
       min_order_quantity: 1
       min_order_notional: 1
     - symbol: KODEX_US_DIVIDEND_DOWJONES
-      name: KODEX 미국배당다우존스
       asset_type: domestic_etf
       region: KR
       currency: KRW
@@ -52,12 +49,18 @@ universe:
       - kis_domestic_stock
     allowed_exchange_codes:
       - KRX
+    denied_symbols: []
+    denied_asset_tags: []
+    max_new_symbols_per_run: 0
+    require_operator_approval_for_tradable: true
+    require_broker_tradability_check: true
+    require_data_freshness_check: true
 
 strategies:
-  - id: ataraxia
+  - id: tranquillo
     enabled: true
     weight: 1.0
-    entrypoint: "ataraxia.strategy:AtaraxiaStrategy"
+    entrypoint: "tranquillo.strategy:TranquilloStrategy"
     config:
       sleeve: KRW
       allocations:
@@ -71,11 +74,29 @@ datahub:
 execution:
   proposal_engine: paper
   order_generation_mode: buy_only_contribution
+  order_posture: dry_run
+  require_reconciliation_pass: true
+  live_order_limits:
+    max_order_notional: 1000000
+    max_daily_notional: 3000000
+    max_daily_order_count: 2
+    daily_loss_limit: 100000
+    fee_buffer_pct: 0.002
+  allowed_order_type: limit
+  order_status_poll_interval_seconds: 30
+  order_status_max_polls: 20
+  order_status_terminal_timeout_seconds: 1800
   market_session:
+    required: true
     timezone: Asia/Seoul
     open: "09:00"
     close: "15:30"
     weekdays: [0, 1, 2, 3, 4]
+    holidays: []
+  broker_validation:
+    require_quote_validation: true
+    max_quote_deviation_pct: 0.02
+    require_risk_validation: true
   contribution:
     enabled: true
     currency: KRW
@@ -88,15 +109,29 @@ execution:
     target_policy: buy_only_toward_target
 
 
+monitoring:
+  heartbeat_max_age_seconds: 3600
+  scheduled_run_max_age_seconds: 86400
+
 state:
-  sqlite_path: var/ataraxia_yahoo_paper_state.db
+  sqlite_path: var/tranquillo_kis_live_approval_state.db
 
 audit:
-  jsonl_path: var/ataraxia_yahoo_paper_audit.jsonl
+  jsonl_path: var/tranquillo_kis_live_approval_audit.jsonl
 
 approval:
-  enabled: false
-  provider: console
-  require_approval: false
-  default_decision: approved
+  enabled: true
+  provider: telegram
+  require_approval: true
+  default_decision: expired
   timeout_seconds: 300
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_poll_interval_seconds: 1.0
+
+kis:
+  enabled: true
+  provider: kis
+  broker_product: kis_domestic_stock
+  broker_products:
+    - kis_domestic_stock
+  paper_trading: true

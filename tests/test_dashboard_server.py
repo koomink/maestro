@@ -29,14 +29,14 @@ def _multi_strategy_multi_currency_config(tmp_path: Path) -> Path:
     raw["portfolio"]["allowed_symbols"] = ["CASH_KRW", "CASH_USD", "AAPL", "005930"]
     raw["strategies"] = [
         {
-            "id": "ataraxia_us",
+            "id": "tranquillo_us",
             "enabled": True,
             "weight": 0.6,
             "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
             "config": {"allocations": {"AAPL": 0.7, "CASH_USD": 0.3}},
         },
         {
-            "id": "snowball_kr",
+            "id": "crescendo_kr",
             "enabled": True,
             "weight": 0.4,
             "entrypoint": "sample_static_allocation.strategy:SampleStaticAllocationStrategy",
@@ -109,8 +109,8 @@ def _multi_strategy_multi_currency_config(tmp_path: Path) -> Path:
         },
     )
     for strategy_id, symbol, book_id, first_value, second_value in [
-        ("ataraxia_us", "AAPL", "ataraxia_us:USD", 1000.0, 1100.0),
-        ("snowball_kr", "005930", "snowball_kr:KRW", 1_000_000.0, 1_050_000.0),
+        ("tranquillo_us", "AAPL", "tranquillo_us:USD", 1000.0, 1100.0),
+        ("crescendo_kr", "005930", "crescendo_kr:KRW", 1_000_000.0, 1_050_000.0),
     ]:
         store.save_strategy_run(
             "run_multi_2",
@@ -446,9 +446,9 @@ def test_dashboard_snapshot_supports_multi_strategy_multi_currency_fixture(tmp_p
     sleeve_currencies = {row["currency"] for row in investment["currency_sleeve_performance"]}
     assert {"KRW", "USD"} <= sleeve_currencies
     strategy_ids = {row["strategy_id"] for row in investment["strategy_attribution"]}
-    assert {"ataraxia_us", "snowball_kr"} <= strategy_ids
+    assert {"tranquillo_us", "crescendo_kr"} <= strategy_ids
     virtuoso_ids = {strategy["strategy_id"] for strategy in payload["virtuoso_apps"]["strategies"]}
-    assert {"ataraxia_us", "snowball_kr"} <= virtuoso_ids
+    assert {"tranquillo_us", "crescendo_kr"} <= virtuoso_ids
 
 
 def test_dashboard_run_detail_endpoint_returns_audit_drilldown(tmp_path):

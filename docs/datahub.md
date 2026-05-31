@@ -213,7 +213,7 @@ external APIs directly.
 
 SDK contract 1.0 includes `CandidateInstrumentRequest`,
 `intended_use: research | tradable`, richer `DataRequest` fields for
-TradingAgents-style research requests, `TargetAllocationResult.metadata`, and
+Fugue-style research requests, `TargetAllocationResult.metadata`, and
 `StrategyManifest` capability fields such as `supports_dynamic_universe`,
 `max_candidate_symbols`, `allowed_data_types`, `requires_llm`,
 `supported_llm_providers`, and `estimated_runtime_seconds`.

@@ -21,7 +21,7 @@ The mapping file is part of config identity, so approval fails closed when the
 mapping changes after a signal package was generated.
 
 Development-only Virtuoso apps should not be mapped here yet. A strategy such
-as TradingAgents can remain in paper/dev configs with no Symphony account
+as Fugue can remain in paper/dev configs with no Symphony account
 binding. Once it becomes an operator candidate, add it to both signal and
 approval configs, then add exactly one shared mapping entry. Use `dev_sandbox`
 when the operator wants signal/approval UX rehearsal without broker API access;
@@ -44,8 +44,8 @@ Strategy controls in the shared mapping determine which phase sees each app:
 Signal packages persist the effective phase controls and per-order posture so
 `symphony_approval` can apply them without re-running strategies.
 
-The current operator mapping enables `ataraxia -> kis_mock` and
-`snowball_us -> dev_sandbox`; `trading_agents -> dev_sandbox` is `enabled: false`,
+The current operator mapping enables `tranquillo -> kis_mock` and
+`crescendo_us -> dev_sandbox`; `fugue -> dev_sandbox` is `enabled: false`,
 `readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
 

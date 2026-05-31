@@ -133,7 +133,7 @@ def _strategy_llm_providers(
     provider = strategy_config.get("llm_provider")
     if isinstance(provider, str) and provider.strip():
         providers.add(provider.strip().lower())
-    elif entrypoint == "tradingagents_virtuoso.strategy:TradingAgentsVirtuosoStrategy":
+    elif entrypoint == "fugue.strategy:FugueStrategy":
         providers.add("openai")
 
     agent_llms = strategy_config.get("agent_llms")

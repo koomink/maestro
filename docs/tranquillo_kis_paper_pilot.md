@@ -1,6 +1,6 @@
-# Ataraxia KIS Paper Submit Pilot
+# Tranquillo KIS Paper Submit Pilot
 
-This runbook promotes the Ataraxia KRW domestic ETF strategy from Maestro paper
+This runbook promotes the Tranquillo KRW domestic ETF strategy from Maestro paper
 mode to the KIS mock-investment approval-gated broker-submit path. It uses the
 real KIS OpenAPI VTS endpoint, not fake clients or mock market data. It is
 limited to `kis_domestic_stock`, `kis.paper_trading=true`, Telegram manual
@@ -64,7 +64,7 @@ maestro run-once --config configs/paper.yaml
 maestro status --config configs/paper.yaml
 ```
 
-Confirm the paper state and audit log are expected. Keep Ataraxia installed in
+Confirm the paper state and audit log are expected. Keep Tranquillo installed in
 the Maestro virtualenv as a non-editable package.
 
 2. Establish the KIS mock-investment read-only baseline using the real KIS VTS
@@ -103,7 +103,7 @@ maestro live-smoke --config <operator-config> --check live-dry-run
 
 Review `live_proposal_data_snapshot`, `live_order_dry_run`, and audit JSONL.
 Stop if the symbol, side, limit price, quantity, notional, or KIS broker product
-differs from the expected Ataraxia domestic ETF proposal.
+differs from the expected Tranquillo domestic ETF proposal.
 Dry-run events do not count as monthly contribution execution and must not block
 the later submit pilot in the same state database.
 

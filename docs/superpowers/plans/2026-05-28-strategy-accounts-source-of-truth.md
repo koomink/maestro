@@ -42,21 +42,21 @@ def test_shared_strategy_account_map_overrides_strategy_enabled(tmp_path):
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": {
+                    "tranquillo": {
                         "enabled": True,
                         "account_id": "kis_isa",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "snowball_us": {
+                    "crescendo_us": {
                         "enabled": True,
                         "account_id": "dev_sandbox",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "trading_agents": {
+                    "fugue": {
                         "enabled": False,
                         "account_id": "dev_sandbox",
                         "readonly": True,
@@ -72,9 +72,9 @@ def test_shared_strategy_account_map_overrides_strategy_enabled(tmp_path):
     config = load_config(config_path)
 
     assert [(strategy.id, strategy.enabled) for strategy in config.strategies] == [
-        ("ataraxia", True),
-        ("snowball_us", True),
-        ("trading_agents", False),
+        ("tranquillo", True),
+        ("crescendo_us", True),
+        ("fugue", False),
     ]
 ```
 
@@ -151,9 +151,9 @@ Run the focused test. Expected: PASS.
 Set:
 
 ```yaml
-ataraxia.enabled: true
-snowball_us.enabled: true
-trading_agents.enabled: false
+tranquillo.enabled: true
+crescendo_us.enabled: true
+fugue.enabled: false
 ```
 
 in both repo and live operator `strategy_accounts.yaml`.
@@ -177,7 +177,7 @@ systemctl restart maestro-dashboard.service
 python -c 'import json, urllib.request; data=json.load(urllib.request.urlopen("http://127.0.0.1:8503/api/dashboard/snapshot?display_currency=KRW")); print(data["virtuoso_apps"]["metrics"]); print(data["virtuoso_apps"]["overview"])'
 ```
 
-Expected: Enabled Apps is 2, Ataraxia and Snowball are enabled, TradingAgents remains disabled.
+Expected: Enabled Apps is 2, Tranquillo and Crescendo are enabled, Fugue remains disabled.
 
 ### Task 4: Final verification
 

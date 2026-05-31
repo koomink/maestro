@@ -1,7 +1,7 @@
 execution_sleeves:
   accounts:
     kis_mock:
-      ataraxia_isa:
+      tranquillo_isa:
         currency_sleeve: KRW
         target_weight: 1.0
         order_generation_mode: buy_only_contribution
@@ -19,37 +19,37 @@ execution_sleeves:
             enabled: true
 
     dev_sandbox:
-      snowball_us:
+      crescendo_us:
         currency_sleeve: USD
         target_weight: 1.0
         order_generation_mode: target_rebalance
 
-      trading_agents:
+      fugue:
         currency_sleeve: USD
         target_weight: 1.0
         order_generation_mode: target_rebalance
 
 strategies:
-  ataraxia:
+  tranquillo:
     enabled: true
     account_id: kis_mock
-    execution_sleeve: ataraxia_isa
+    execution_sleeve: tranquillo_isa
     readonly: true
     signal: true
     order_posture: dry_run
 
-  snowball_us:
+  crescendo_us:
     enabled: true
     account_id: dev_sandbox
-    execution_sleeve: snowball_us
+    execution_sleeve: crescendo_us
     readonly: true
     signal: true
     order_posture: dry_run
 
-  trading_agents:
+  fugue:
     enabled: false
     account_id: dev_sandbox
-    execution_sleeve: trading_agents
+    execution_sleeve: fugue
     readonly: true
     signal: false
     order_posture: disabled

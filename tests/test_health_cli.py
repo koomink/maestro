@@ -334,10 +334,10 @@ def test_health_fails_when_enabled_strategy_entrypoint_cannot_load(tmp_path):
     raw = yaml.safe_load(config_path.read_text())
     raw["strategies"] = [
         {
-            "id": "ataraxia",
+            "id": "tranquillo",
             "enabled": True,
             "weight": 1.0,
-            "entrypoint": "missing_ataraxia.strategy:AtaraxiaStrategy",
+            "entrypoint": "missing_tranquillo.strategy:TranquilloStrategy",
             "config": {},
         }
     ]
@@ -351,9 +351,9 @@ def test_health_fails_when_enabled_strategy_entrypoint_cannot_load(tmp_path):
     assert report.status == "fail"
     assert checks["strategy_plugins"].status == "fail"
     assert checks["strategy_plugins"].message == "load_failed"
-    assert "ataraxia" in checks["strategy_plugins"].details["failures"]
+    assert "tranquillo" in checks["strategy_plugins"].details["failures"]
     assert (
-        "strategy_plugin_load_failed:ataraxia"
+        "strategy_plugin_load_failed:tranquillo"
         in (checks["live_approval_preflight"].details["failures"])
     )
 
@@ -384,10 +384,10 @@ def test_live_preflight_cli_fails_when_enabled_strategy_entrypoint_cannot_load(t
     raw = yaml.safe_load(config_path.read_text())
     raw["strategies"] = [
         {
-            "id": "ataraxia",
+            "id": "tranquillo",
             "enabled": True,
             "weight": 1.0,
-            "entrypoint": "missing_ataraxia.strategy:AtaraxiaStrategy",
+            "entrypoint": "missing_tranquillo.strategy:TranquilloStrategy",
             "config": {},
         }
     ]
@@ -396,7 +396,7 @@ def test_live_preflight_cli_fails_when_enabled_strategy_entrypoint_cannot_load(t
     result = CliRunner().invoke(app, ["live-preflight", "--config", str(config_path)])
 
     assert result.exit_code == 1
-    assert "strategy_plugin_load_failed:ataraxia" in result.output
+    assert "strategy_plugin_load_failed:tranquillo" in result.output
 
 
 def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_path):
@@ -471,23 +471,23 @@ def test_profile_validate_cli_fails_wrong_target_stage(tmp_path):
 
 def test_profile_validate_cli_fails_app_fragment_recommendation_drift(tmp_path):
     raw = yaml.safe_load(
-        Path("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+        Path("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml").read_text()
     )
-    raw["app_fragment_paths"] = ["ataraxia_fragment.yaml"]
-    raw["state"]["sqlite_path"] = str(tmp_path / "ataraxia_state.db")
-    raw["audit"]["jsonl_path"] = str(tmp_path / "ataraxia_audit.jsonl")
+    raw["app_fragment_paths"] = ["tranquillo_fragment.yaml"]
+    raw["state"]["sqlite_path"] = str(tmp_path / "tranquillo_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "tranquillo_audit.jsonl")
     raw["execution"]["order_generation_mode"] = "target_rebalance"
-    config_path = tmp_path / "ataraxia_operator.yaml"
-    fragment_path = tmp_path / "ataraxia_fragment.yaml"
+    config_path = tmp_path / "tranquillo_operator.yaml"
+    fragment_path = tmp_path / "tranquillo_fragment.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     fragment_path.write_text(
         yaml.safe_dump(
             {
                 "fragment_version": 1,
                 "strategy": {
-                    "id": "ataraxia",
+                    "id": "tranquillo",
                     "weight": 1.0,
-                    "entrypoint": "ataraxia.strategy:AtaraxiaStrategy",
+                    "entrypoint": "tranquillo.strategy:TranquilloStrategy",
                 },
                 "recommendations": {
                     "execution": {"order_generation_mode": "buy_only_contribution"}
@@ -605,15 +605,15 @@ def test_health_live_approval_preflight_fails_unsafe_config(tmp_path):
     assert "order_posture_disabled" in checks["live_approval_preflight"].details["warnings"]
 
 
-def test_live_approval_preflight_fails_missing_tradingagents_llm_env(
+def test_live_approval_preflight_fails_missing_fugue_llm_env(
     monkeypatch,
     tmp_path,
 ):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    _install_fake_tradingagents_plugin(monkeypatch, tmp_path)
+    _install_fake_fugue_plugin(monkeypatch, tmp_path)
     config_path = _live_approval_config(tmp_path)
     raw = yaml.safe_load(config_path.read_text())
-    _add_tradingagents_strategy(
+    _add_fugue_strategy(
         raw,
         {
             "llm_provider": "openrouter",
@@ -630,7 +630,7 @@ def test_live_approval_preflight_fails_missing_tradingagents_llm_env(
 
     assert checks["live_approval_preflight"].status == "fail"
     assert (
-        "llm_env_missing:tradingagents:openrouter:OPENROUTER_API_KEY"
+        "llm_env_missing:fugue:openrouter:OPENROUTER_API_KEY"
         in checks["live_approval_preflight"].details["failures"]
     )
 
@@ -641,10 +641,10 @@ def test_live_approval_preflight_accepts_agent_level_llm_env(
 ):
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
-    _install_fake_tradingagents_plugin(monkeypatch, tmp_path)
+    _install_fake_fugue_plugin(monkeypatch, tmp_path)
     config_path = _live_approval_config(tmp_path)
     raw = yaml.safe_load(config_path.read_text())
-    _add_tradingagents_strategy(
+    _add_fugue_strategy(
         raw,
         {
             "llm_provider": "openrouter",
@@ -791,13 +791,13 @@ def _live_approval_config(
     return config_path
 
 
-def _add_tradingagents_strategy(raw: dict, strategy_config: dict) -> None:
+def _add_fugue_strategy(raw: dict, strategy_config: dict) -> None:
     raw["strategies"] = [
         {
-            "id": "tradingagents",
+            "id": "fugue",
             "enabled": True,
             "weight": 1.0,
-            "entrypoint": ("tradingagents_virtuoso.strategy:TradingAgentsVirtuosoStrategy"),
+            "entrypoint": ("fugue.strategy:FugueStrategy"),
             "signal_to_allocation": {
                 "type": "single_symbol_action_map",
                 "cash_symbol": "CASH_USD",
@@ -817,8 +817,8 @@ def _add_tradingagents_strategy(raw: dict, strategy_config: dict) -> None:
     ]
 
 
-def _install_fake_tradingagents_plugin(monkeypatch, tmp_path: Path) -> None:
-    package_dir = tmp_path / "tradingagents_virtuoso"
+def _install_fake_fugue_plugin(monkeypatch, tmp_path: Path) -> None:
+    package_dir = tmp_path / "fugue"
     package_dir.mkdir()
     (package_dir / "__init__.py").write_text("")
     (package_dir / "strategy.py").write_text(
@@ -836,12 +836,12 @@ from maestro.sdk import (
 )
 
 
-class TradingAgentsVirtuosoStrategy(BaseStrategyPlugin):
+class FugueStrategy(BaseStrategyPlugin):
     def manifest(self) -> StrategyManifest:
         return StrategyManifest(
             sdk_contract_version="1.1",
-            strategy_id="tradingagents",
-            name="TradingAgents Test Strategy",
+            strategy_id="fugue",
+            name="Fugue Test Strategy",
             version="0.1.0",
             supported_modes=[StrategyMode.LIVE_APPROVAL],
             supported_asset_types=[AssetType.STOCK],

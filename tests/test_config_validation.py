@@ -35,7 +35,7 @@ LEGACY_EXECUTION_CONFIG_KEYS = {
 }
 
 ATARAXIA_LIVE_APPROVAL_CONFIG = Path(
-    "tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml"
+    "tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml"
 )
 
 
@@ -621,7 +621,7 @@ def test_profile_stage_derives_from_existing_profiles(tmp_path):
         == ProfileStage.LIVE_APPROVAL_DRY_RUN
     )
     assert (
-        load_config("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").profile_stage
+        load_config("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml").profile_stage
         == ProfileStage.KIS_PAPER_TRADING
     )
 
@@ -672,22 +672,22 @@ def test_config_identity_splits_state_and_runtime_fingerprints(tmp_path):
     assert state_identity.state_fingerprint != first_identity.state_fingerprint
 
 
-def test_app_fragment_composes_ataraxia_defaults(tmp_path):
-    fragment_path = tmp_path / "ataraxia.yaml"
-    fragment_path.write_text(yaml.safe_dump(_ataraxia_fragment()), encoding="utf-8")
+def test_app_fragment_composes_tranquillo_defaults(tmp_path):
+    fragment_path = tmp_path / "tranquillo.yaml"
+    fragment_path.write_text(yaml.safe_dump(_tranquillo_fragment()), encoding="utf-8")
     raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
-    raw["app_fragment_paths"] = ["ataraxia.yaml"]
-    raw["strategies"] = [{"id": "ataraxia", "enabled": True, "weight": 1.0}]
+    raw["app_fragment_paths"] = ["tranquillo.yaml"]
+    raw["strategies"] = [{"id": "tranquillo", "enabled": True, "weight": 1.0}]
     raw["portfolio"].pop("currency_sleeves", None)
     raw["universe"]["instruments"] = []
     raw["datahub"].pop("symbol_map", None)
-    config_path = tmp_path / "composed_ataraxia.yaml"
+    config_path = tmp_path / "composed_tranquillo.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     config = load_config(config_path)
 
-    assert config.app_fragment_paths == ["ataraxia.yaml"]
-    assert config.strategies[0].entrypoint == "ataraxia.strategy:AtaraxiaStrategy"
+    assert config.app_fragment_paths == ["tranquillo.yaml"]
+    assert config.strategies[0].entrypoint == "tranquillo.strategy:TranquilloStrategy"
     assert config.strategies[0].config["allocations"] == {
         "TIGER_NASDAQ100_LEVERAGE": 0.60,
         "KODEX_US_DIVIDEND_DOWJONES": 0.40,
@@ -704,7 +704,7 @@ def test_app_fragment_composes_ataraxia_defaults(tmp_path):
 
 
 def test_app_fragment_rejects_operator_owned_keys(tmp_path):
-    fragment = _ataraxia_fragment()
+    fragment = _tranquillo_fragment()
     fragment["execution"] = {"order_generation_mode": "buy_only_contribution"}
     fragment_path = tmp_path / "bad_fragment.yaml"
     fragment_path.write_text(yaml.safe_dump(fragment), encoding="utf-8")
@@ -718,10 +718,10 @@ def test_app_fragment_rejects_operator_owned_keys(tmp_path):
 
 
 def test_app_fragment_rejects_conflicting_duplicate_instrument(tmp_path):
-    fragment_path = tmp_path / "ataraxia.yaml"
-    fragment_path.write_text(yaml.safe_dump(_ataraxia_fragment()), encoding="utf-8")
+    fragment_path = tmp_path / "tranquillo.yaml"
+    fragment_path.write_text(yaml.safe_dump(_tranquillo_fragment()), encoding="utf-8")
     raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
-    raw["app_fragment_paths"] = ["ataraxia.yaml"]
+    raw["app_fragment_paths"] = ["tranquillo.yaml"]
     raw["universe"]["instruments"][0]["broker_symbol"] = "999999"
     config_path = tmp_path / "conflicting_instrument.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
@@ -731,13 +731,13 @@ def test_app_fragment_rejects_conflicting_duplicate_instrument(tmp_path):
 
 
 def test_app_fragment_allows_operator_strategy_config_overrides(tmp_path):
-    fragment_path = tmp_path / "ataraxia.yaml"
-    fragment_path.write_text(yaml.safe_dump(_ataraxia_fragment()), encoding="utf-8")
+    fragment_path = tmp_path / "tranquillo.yaml"
+    fragment_path.write_text(yaml.safe_dump(_tranquillo_fragment()), encoding="utf-8")
     raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
-    raw["app_fragment_paths"] = ["ataraxia.yaml"]
+    raw["app_fragment_paths"] = ["tranquillo.yaml"]
     raw["strategies"] = [
         {
-            "id": "ataraxia",
+            "id": "tranquillo",
             "enabled": True,
             "weight": 1.0,
             "config": {
@@ -753,7 +753,7 @@ def test_app_fragment_allows_operator_strategy_config_overrides(tmp_path):
 
     config = load_config(config_path)
 
-    assert config.strategies[0].entrypoint == "ataraxia.strategy:AtaraxiaStrategy"
+    assert config.strategies[0].entrypoint == "tranquillo.strategy:TranquilloStrategy"
     assert config.strategies[0].config == {
         "sleeve": "KRW",
         "allocations": {
@@ -764,12 +764,12 @@ def test_app_fragment_allows_operator_strategy_config_overrides(tmp_path):
 
 
 def test_app_fragment_identity_changes_when_fragment_changes(tmp_path):
-    fragment_path = tmp_path / "ataraxia.yaml"
-    fragment = _ataraxia_fragment()
+    fragment_path = tmp_path / "tranquillo.yaml"
+    fragment = _tranquillo_fragment()
     fragment_path.write_text(yaml.safe_dump(fragment), encoding="utf-8")
     raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
-    raw["app_fragment_paths"] = ["ataraxia.yaml"]
-    config_path = tmp_path / "composed_ataraxia.yaml"
+    raw["app_fragment_paths"] = ["tranquillo.yaml"]
+    config_path = tmp_path / "composed_tranquillo.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
 
     before_identity = config_identity(config_path)
@@ -887,9 +887,9 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         (strategy.id, strategy.enabled, strategy.readonly_enabled)
         for strategy in readonly.strategies
     ] == [
-        ("ataraxia", True, True),
-        ("snowball_us", True, True),
-        ("trading_agents", False, True),
+        ("tranquillo", True, True),
+        ("crescendo_us", True, True),
+        ("fugue", False, True),
     ]
     assert signal.execution.order_posture == "disabled"
     assert approval.execution.order_posture == "dry_run"
@@ -944,17 +944,17 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in signal.strategies
     ] == [
-        ("ataraxia", "kis_mock", True, "dry_run"),
-        ("snowball_us", "dev_sandbox", True, "dry_run"),
-        ("trading_agents", "dev_sandbox", False, "disabled"),
+        ("tranquillo", "kis_mock", True, "dry_run"),
+        ("crescendo_us", "dev_sandbox", True, "dry_run"),
+        ("fugue", "dev_sandbox", False, "disabled"),
     ]
     assert [
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in approval.strategies
     ] == [
-        ("ataraxia", "kis_mock", True, "dry_run"),
-        ("snowball_us", "dev_sandbox", True, "dry_run"),
-        ("trading_agents", "dev_sandbox", False, "disabled"),
+        ("tranquillo", "kis_mock", True, "dry_run"),
+        ("crescendo_us", "dev_sandbox", True, "dry_run"),
+        ("fugue", "dev_sandbox", False, "disabled"),
     ]
 
 
@@ -970,9 +970,9 @@ def test_shared_strategy_account_map_routes_strategies_and_affects_identity(tmp_
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": "kis_isa",
-                    "snowball_us": "kis_brokerage",
-                    "trading_agents": {
+                    "tranquillo": "kis_isa",
+                    "crescendo_us": "kis_brokerage",
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                         "order_posture": "disabled",
@@ -987,18 +987,18 @@ def test_shared_strategy_account_map_routes_strategies_and_affects_identity(tmp_
     before_identity = config_identity(config_path)
 
     assert [(strategy.id, strategy.account_id) for strategy in config.strategies] == [
-        ("ataraxia", "kis_isa"),
-        ("snowball_us", "kis_brokerage"),
-        ("trading_agents", "dev_sandbox"),
+        ("tranquillo", "kis_isa"),
+        ("crescendo_us", "kis_brokerage"),
+        ("fugue", "dev_sandbox"),
     ]
 
     map_path.write_text(
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": "kis_mock",
-                    "snowball_us": "kis_brokerage",
-                    "trading_agents": {
+                    "tranquillo": "kis_mock",
+                    "crescendo_us": "kis_brokerage",
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                         "order_posture": "disabled",
@@ -1028,19 +1028,19 @@ def test_shared_strategy_account_map_applies_phase_controls(tmp_path):
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": {
+                    "tranquillo": {
                         "account_id": "kis_isa",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "snowball_us": {
+                    "crescendo_us": {
                         "account_id": "dev_sandbox",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "trading_agents": {
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "readonly": True,
                         "signal": False,
@@ -1065,9 +1065,9 @@ def test_shared_strategy_account_map_applies_phase_controls(tmp_path):
         )
         for strategy in config.strategies
     ] == [
-        ("ataraxia", True, "kis_isa", True, True, "dry_run"),
-        ("snowball_us", True, "dev_sandbox", True, True, "dry_run"),
-        ("trading_agents", True, "dev_sandbox", True, False, "disabled"),
+        ("tranquillo", True, "kis_isa", True, True, "dry_run"),
+        ("crescendo_us", True, "dev_sandbox", True, True, "dry_run"),
+        ("fugue", True, "dev_sandbox", True, False, "disabled"),
     ]
 
 
@@ -1085,7 +1085,7 @@ def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
                 "execution_sleeves": {
                     "accounts": {
                         "kis_isa": {
-                            "ataraxia_isa": {
+                            "tranquillo_isa": {
                                 "currency_sleeve": "KRW",
                                 "target_weight": 1.0,
                                 "order_generation_mode": "buy_only_contribution",
@@ -1101,7 +1101,7 @@ def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
                             }
                         },
                         "dev_sandbox": {
-                            "snowball_us": {
+                            "crescendo_us": {
                                 "currency_sleeve": "USD",
                                 "target_weight": 1.0,
                                 "order_generation_mode": "target_rebalance",
@@ -1110,21 +1110,21 @@ def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
                     }
                 },
                 "strategies": {
-                    "ataraxia": {
+                    "tranquillo": {
                         "account_id": "kis_isa",
-                        "execution_sleeve": "ataraxia_isa",
+                        "execution_sleeve": "tranquillo_isa",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "snowball_us": {
+                    "crescendo_us": {
                         "account_id": "dev_sandbox",
-                        "execution_sleeve": "snowball_us",
+                        "execution_sleeve": "crescendo_us",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "trading_agents": {
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "readonly": True,
                         "signal": False,
@@ -1142,12 +1142,12 @@ def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
         (strategy.id, strategy.account_id, strategy.execution_sleeve)
         for strategy in config.strategies
     ] == [
-        ("ataraxia", "kis_isa", "ataraxia_isa"),
-        ("snowball_us", "dev_sandbox", "snowball_us"),
-        ("trading_agents", "dev_sandbox", None),
+        ("tranquillo", "kis_isa", "tranquillo_isa"),
+        ("crescendo_us", "dev_sandbox", "crescendo_us"),
+        ("fugue", "dev_sandbox", None),
     ]
     assert (
-        config.execution_sleeves.accounts["kis_isa"]["ataraxia_isa"].order_generation_mode
+        config.execution_sleeves.accounts["kis_isa"]["tranquillo_isa"].order_generation_mode
         == "buy_only_contribution"
     )
     assert (
@@ -1174,7 +1174,7 @@ def test_execution_sleeves_reject_missing_strategy_sleeve(tmp_path):
                 "execution_sleeves": {
                     "accounts": {
                         "kis_isa": {
-                            "ataraxia_isa": {
+                            "tranquillo_isa": {
                                 "currency_sleeve": "KRW",
                                 "target_weight": 1.0,
                                 "order_generation_mode": "target_rebalance",
@@ -1183,16 +1183,16 @@ def test_execution_sleeves_reject_missing_strategy_sleeve(tmp_path):
                     }
                 },
                 "strategies": {
-                    "ataraxia": {
+                    "tranquillo": {
                         "account_id": "kis_isa",
                         "execution_sleeve": "missing",
                         "signal": True,
                     },
-                    "snowball_us": {
+                    "crescendo_us": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                     },
-                    "trading_agents": {
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                     },
@@ -1220,12 +1220,12 @@ def test_execution_sleeves_reject_account_weight_mismatch(tmp_path):
                 "execution_sleeves": {
                     "accounts": {
                         "dev_sandbox": {
-                            "ataraxia_book": {
+                            "tranquillo_book": {
                                 "currency_sleeve": "KRW",
                                 "target_weight": 0.7,
                                 "order_generation_mode": "target_rebalance",
                             },
-                            "snowball_book": {
+                            "crescendo_book": {
                                 "currency_sleeve": "USD",
                                 "target_weight": 0.2,
                                 "order_generation_mode": "target_rebalance",
@@ -1234,17 +1234,17 @@ def test_execution_sleeves_reject_account_weight_mismatch(tmp_path):
                     }
                 },
                 "strategies": {
-                    "ataraxia": {
+                    "tranquillo": {
                         "account_id": "dev_sandbox",
-                        "execution_sleeve": "ataraxia_book",
+                        "execution_sleeve": "tranquillo_book",
                         "signal": True,
                     },
-                    "snowball_us": {
+                    "crescendo_us": {
                         "account_id": "dev_sandbox",
-                        "execution_sleeve": "snowball_book",
+                        "execution_sleeve": "crescendo_book",
                         "signal": True,
                     },
-                    "trading_agents": {
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                     },
@@ -1271,21 +1271,21 @@ def test_shared_strategy_account_map_overrides_strategy_enabled(tmp_path):
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": {
+                    "tranquillo": {
                         "enabled": True,
                         "account_id": "kis_isa",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "snowball_us": {
+                    "crescendo_us": {
                         "enabled": True,
                         "account_id": "dev_sandbox",
                         "readonly": True,
                         "signal": True,
                         "order_posture": "dry_run",
                     },
-                    "trading_agents": {
+                    "fugue": {
                         "enabled": False,
                         "account_id": "dev_sandbox",
                         "readonly": True,
@@ -1301,9 +1301,9 @@ def test_shared_strategy_account_map_overrides_strategy_enabled(tmp_path):
     config = load_config(config_path)
 
     assert [(strategy.id, strategy.enabled) for strategy in config.strategies] == [
-        ("ataraxia", True),
-        ("snowball_us", True),
-        ("trading_agents", False),
+        ("tranquillo", True),
+        ("crescendo_us", True),
+        ("fugue", False),
     ]
 
 
@@ -1319,9 +1319,9 @@ def test_strategy_phase_controls_reject_sandbox_armed(tmp_path):
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": {"account_id": "kis_isa", "order_posture": "dry_run"},
-                    "snowball_us": {"account_id": "dev_sandbox", "order_posture": "armed"},
-                    "trading_agents": {
+                    "tranquillo": {"account_id": "kis_isa", "order_posture": "dry_run"},
+                    "crescendo_us": {"account_id": "dev_sandbox", "order_posture": "armed"},
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                         "order_posture": "disabled",
@@ -1348,9 +1348,9 @@ def test_strategy_phase_controls_reject_mixed_posture_in_same_account(tmp_path):
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": {"account_id": "kis_isa", "order_posture": "dry_run"},
-                    "snowball_us": {"account_id": "kis_isa", "order_posture": "armed"},
-                    "trading_agents": {
+                    "tranquillo": {"account_id": "kis_isa", "order_posture": "dry_run"},
+                    "crescendo_us": {"account_id": "kis_isa", "order_posture": "armed"},
+                    "fugue": {
                         "account_id": "dev_sandbox",
                         "signal": False,
                         "order_posture": "disabled",
@@ -1375,8 +1375,8 @@ def test_shared_strategy_account_map_rejects_unknown_strategy(tmp_path):
         yaml.safe_dump(
             {
                 "strategies": {
-                    "ataraxia": "kis_isa",
-                    "snowball_us": "kis_brokerage",
+                    "tranquillo": "kis_isa",
+                    "crescendo_us": "kis_brokerage",
                     "ghost": "kis_mock",
                 }
             }
@@ -1397,7 +1397,7 @@ def test_shared_strategy_account_map_rejects_inline_mismatch(tmp_path):
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     map_path.write_text(
         yaml.safe_dump(
-            {"strategies": {"ataraxia": "kis_mock", "snowball_us": "kis_brokerage"}}
+            {"strategies": {"tranquillo": "kis_mock", "crescendo_us": "kis_brokerage"}}
         ),
         encoding="utf-8",
     )
@@ -1417,9 +1417,9 @@ def test_fixture_configs_use_canonical_execution_schema():
         assert legacy_keys == [], f"{path} still uses legacy execution keys: {legacy_keys}"
 
 
-def test_ataraxia_contribution_config_declares_budget_range_and_domestic_universe():
-    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
-    config = load_config("tests/fixtures/configs/paper_ataraxia_yahoo.yaml")
+def test_tranquillo_contribution_config_declares_budget_range_and_domestic_universe():
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_tranquillo_yahoo.yaml").read_text())
+    config = load_config("tests/fixtures/configs/paper_tranquillo_yahoo.yaml")
 
     assert "symbol_map" not in raw["datahub"]
     assert config.execution.order_generation_mode == "buy_only_contribution"
@@ -1439,8 +1439,8 @@ def test_ataraxia_contribution_config_declares_budget_range_and_domestic_univers
     )
 
 
-def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
-    config = load_config("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml")
+def test_tranquillo_live_approval_example_uses_safe_domestic_kis_defaults():
+    config = load_config("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml")
 
     assert config.mode == "live_approval"
     assert config.portfolio.base_currency == "KRW"
@@ -1467,14 +1467,14 @@ def test_ataraxia_live_approval_example_uses_safe_domestic_kis_defaults():
     assert config.universe.get("KODEX_US_DIVIDEND_DOWJONES").broker_symbol == "489250"
 
 
-def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
+def test_tranquillo_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
     raw = yaml.safe_load(
-        Path("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml").read_text()
+        Path("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml").read_text()
     )
     raw["execution"]["order_posture"] = "armed"
     raw["approval"]["telegram_allowed_chat_ids"] = [100]
     raw["approval"]["whitelisted_user_ids"] = [100]
-    config_path = tmp_path / "ataraxia_kis_paper_submit.yaml"
+    config_path = tmp_path / "tranquillo_kis_paper_submit.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
     config = load_config(config_path)
@@ -1496,7 +1496,7 @@ def test_ataraxia_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path):
 
 
 def test_contribution_config_rejects_invalid_buy_day(tmp_path):
-    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_tranquillo_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["buy_day"] = 32
     config_path = tmp_path / "invalid_buy_day.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -1506,7 +1506,7 @@ def test_contribution_config_rejects_invalid_buy_day(tmp_path):
 
 
 def test_contribution_config_rejects_budget_outside_range(tmp_path):
-    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_tranquillo_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["monthly_budget"] = 5_000_000
     config_path = tmp_path / "invalid_monthly_budget.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -1516,7 +1516,7 @@ def test_contribution_config_rejects_budget_outside_range(tmp_path):
 
 
 def test_contribution_config_rejects_unsupported_policy(tmp_path):
-    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_ataraxia_yahoo.yaml").read_text())
+    raw = yaml.safe_load(Path("tests/fixtures/configs/paper_tranquillo_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["non_trading_day_policy"] = "skip"
     config_path = tmp_path / "invalid_policy.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -1525,14 +1525,14 @@ def test_contribution_config_rejects_unsupported_policy(tmp_path):
         load_config(config_path)
 
 
-def _ataraxia_fragment() -> dict:
+def _tranquillo_fragment() -> dict:
     return {
         "fragment_version": 1,
         "strategy": {
-            "id": "ataraxia",
+            "id": "tranquillo",
             "enabled": True,
             "weight": 1.0,
-            "entrypoint": "ataraxia.strategy:AtaraxiaStrategy",
+            "entrypoint": "tranquillo.strategy:TranquilloStrategy",
             "config": {
                 "sleeve": "KRW",
                 "allocations": {

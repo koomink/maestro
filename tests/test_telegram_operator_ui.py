@@ -65,7 +65,7 @@ class _TelegramStaticStrategy(BaseStrategyPlugin):
 
 
 class BuyOnlyFundingTelegramStrategy(_TelegramStaticStrategy):
-    strategy_id = "ataraxia"
+    strategy_id = "tranquillo"
 
     def build_data_requests(self, context: StrategyContext) -> list[DataRequest]:
         del context
@@ -88,12 +88,12 @@ class BuyOnlyFundingTelegramStrategy(_TelegramStaticStrategy):
         )
 
 
-class AtaraxiaTelegramSignalStrategy(_TelegramStaticStrategy):
-    strategy_id = "ataraxia"
+class TranquilloTelegramSignalStrategy(_TelegramStaticStrategy):
+    strategy_id = "tranquillo"
 
 
-class SnowballTelegramSignalStrategy(_TelegramStaticStrategy):
-    strategy_id = "snowball_us"
+class CrescendoTelegramSignalStrategy(_TelegramStaticStrategy):
+    strategy_id = "crescendo_us"
 
 
 
@@ -113,18 +113,18 @@ def test_telegram_operator_signal_command_generates_strategy_signal_for_dashboar
         signal_config_path=signal_config_path,
     )
 
-    assert router.process_update(message_update("/signal_ataraxia"))
+    assert router.process_update(message_update("/signal_tranquillo"))
 
     text = client.sent_messages[-1]["text"]
     assert text.startswith("Signal generated")
-    assert "strategy_id: ataraxia" in text
+    assert "strategy_id: tranquillo" in text
     assert "signal_run_id:" in text
-    assert "loaded_strategies: ataraxia" in text
+    assert "loaded_strategies: tranquillo" in text
     assert "orders_preview_count:" in text
     signal_run_id = text.split("signal_run_id: ", 1)[1].splitlines()[0]
     signal = store.load_signal_package(signal_run_id)
     assert signal is not None
-    assert signal["loaded_strategies"] == ["ataraxia"]
+    assert signal["loaded_strategies"] == ["tranquillo"]
     counts = store.status()["counts"]
     assert counts["approvals"] == 0
     assert counts["orders"] == 0
@@ -132,7 +132,7 @@ def test_telegram_operator_signal_command_generates_strategy_signal_for_dashboar
         store,
         max_age_seconds=config.approval.signal_max_age_seconds,
     )
-    assert freshness["strategies"][0]["strategy_id"] == "ataraxia"
+    assert freshness["strategies"][0]["strategy_id"] == "tranquillo"
     assert freshness["strategies"][0]["latest_signal_run_id"] == signal_run_id
 
 
@@ -143,7 +143,7 @@ def test_telegram_operator_signal_command_rejects_signal_disabled_strategy(tmp_p
     raw["strategies"].append(
         {
             **raw["strategies"][0],
-            "id": "trading_agents",
+            "id": "fugue",
             "signal_enabled": False,
             "entrypoint": "missing.strategy:MissingStrategy",
         }
@@ -161,10 +161,10 @@ def test_telegram_operator_signal_command_rejects_signal_disabled_strategy(tmp_p
         signal_config_path=signal_config_path,
     )
 
-    assert router.process_update(message_update("/signal_trading_agents"))
+    assert router.process_update(message_update("/signal_fugue"))
 
     assert "Signal generation failed" in client.sent_messages[-1]["text"]
-    assert "Strategy is not signal-enabled: trading_agents" in client.sent_messages[-1]["text"]
+    assert "Strategy is not signal-enabled: fugue" in client.sent_messages[-1]["text"]
 
 
 def test_telegram_operator_funding_complete_regenerates_signal_and_creates_approval(tmp_path):
@@ -189,7 +189,7 @@ def test_telegram_operator_funding_complete_regenerates_signal_and_creates_appro
         {
             "request_id": "fund_req_1",
             "source_signal_run_id": "signal_old",
-            "strategy_ids": ["ataraxia"],
+            "strategy_ids": ["tranquillo"],
             "account_id": "paper_cash",
             "execution_sleeve": "krw_contribution",
             "currency": "KRW",
@@ -234,7 +234,7 @@ def test_telegram_operator_funding_callback_rejects_unauthorized_user(tmp_path):
     store.save_system_event(
         "signal_old",
         "contribution_funding_request",
-        {"request_id": "fund_req_1", "status": "pending", "strategy_ids": ["ataraxia"]},
+        {"request_id": "fund_req_1", "status": "pending", "strategy_ids": ["tranquillo"]},
     )
     client = FakeTelegramClient()
     router = TelegramOperatorCommandRouter(
@@ -300,7 +300,7 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
             "status": "action_required",
             "action_required": True,
             "orders_preview_count": 2,
-            "loaded_strategies": ["ataraxia"],
+            "loaded_strategies": ["tranquillo"],
             "datahub_evidence": {"issue_count": 0},
         },
     )
@@ -835,11 +835,11 @@ def test_telegram_bot_commands_include_signal_generation_commands(tmp_path):
 
     commands = telegram_bot_commands(signal_config)
 
-    assert {"command": "signal_ataraxia", "description": "Generate Ataraxia signal"} in commands
-    assert {"command": "signal_snowball", "description": "Generate Snowball signal"} in commands
+    assert {"command": "signal_tranquillo", "description": "Generate Tranquillo signal"} in commands
+    assert {"command": "signal_crescendo", "description": "Generate Crescendo signal"} in commands
     assert {
-        "command": "signal_snowball_us",
-        "description": "Generate Snowball signal",
+        "command": "signal_crescendo_us",
+        "description": "Generate Crescendo signal",
     } not in commands
 
 
@@ -993,13 +993,13 @@ def _telegram_signal_config_path(tmp_path) -> Path:
         "telegram_allowed_chat_ids": [100],
         "whitelisted_user_ids": [100],
     }
-    raw["strategies"][0]["id"] = "ataraxia"
-    raw["strategies"][0]["entrypoint"] = f"{__name__}:AtaraxiaTelegramSignalStrategy"
+    raw["strategies"][0]["id"] = "tranquillo"
+    raw["strategies"][0]["entrypoint"] = f"{__name__}:TranquilloTelegramSignalStrategy"
     raw["strategies"].append(
         {
             **raw["strategies"][0],
-            "id": "snowball_us",
-            "entrypoint": f"{__name__}:SnowballTelegramSignalStrategy",
+            "id": "crescendo_us",
+            "entrypoint": f"{__name__}:CrescendoTelegramSignalStrategy",
             "config": {"allocations": {"CASH": 0.4, "MOCK_ETF_A": 0.1, "MOCK_ETF_B": 0.5}},
         }
     )
@@ -1030,7 +1030,7 @@ def _telegram_buy_only_config_path(
     }
     raw["strategies"] = [
         {
-            "id": "ataraxia",
+            "id": "tranquillo",
             "enabled": True,
             "signal_enabled": True,
             "weight": 1.0,

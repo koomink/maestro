@@ -461,7 +461,7 @@
         <div class="card">
           <span class="tag violet">Virtuoso Apps</span>
           <h3>전략 플러그인</h3>
-          <p>Ataraxia, Snowball, TradingAgents처럼 투자 아이디어와 target/signal을 제안하는 외부 전략 앱입니다.</p>
+          <p>Tranquillo, Crescendo, Fugue처럼 투자 아이디어와 target/signal을 제안하는 외부 전략 앱입니다.</p>
         </div>
       </div>
     </section>
@@ -928,8 +928,8 @@ kis.paper_trading: true
           <tr><th>Logical account</th><th>Broker role</th><th>Current purpose</th><th>Failure behavior</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>kis_mock</code></td><td>KIS paper_trading domestic account</td><td>Ataraxia KRW sleeve dry-run and KIS mock-investment rehearsals</td><td>Unknown account, stale snapshot, or changed broker truth blocks approval.</td></tr>
-          <tr><td><code>dev_sandbox</code></td><td>Brokerless sandbox account</td><td>Snowball/TradingAgents development mapping without live broker operations</td><td><code>order_posture=armed</code> is rejected by config validation.</td></tr>
+          <tr><td><code>kis_mock</code></td><td>KIS paper_trading domestic account</td><td>Tranquillo KRW sleeve dry-run and KIS mock-investment rehearsals</td><td>Unknown account, stale snapshot, or changed broker truth blocks approval.</td></tr>
+          <tr><td><code>dev_sandbox</code></td><td>Brokerless sandbox account</td><td>Crescendo/Fugue development mapping without live broker operations</td><td><code>order_posture=armed</code> is rejected by config validation.</td></tr>
           <tr><td>future KIS real accounts</td><td>KIS domestic/overseas real account configs</td><td>Production promotion after readonly, reconciliation, dry-run, and beta preflight</td><td>Preflight and safety gates must pass before broker submit.</td></tr>
         </tbody>
       </table>
@@ -1257,19 +1257,19 @@ maestro telegram-operator --config &lt;operator.yaml&gt;</div>
         </thead>
         <tbody>
           <tr>
-            <td><strong>Ataraxia</strong></td>
+            <td><strong>Tranquillo</strong></td>
             <td>KRW sleeve 월 적립식 buy-only contribution 전략</td>
             <td>국내 ETF 2종 목표 비중을 <code>TargetAllocationResult</code>로 반환합니다. KIS나 데이터 API를 직접 호출하지 않습니다.</td>
             <td>현재 operator mapping은 <code>kis_mock</code>, <code>signal: true</code>, <code>order_posture: dry_run</code>입니다.</td>
           </tr>
           <tr>
-            <td><strong>Snowball</strong></td>
+            <td><strong>Crescendo</strong></td>
             <td>동적 자산배분 전략 묶음</td>
             <td>DGA, Accelerated Dual Momentum, GTT-UE, BAA(A)를 실행하고 strategy book metadata를 냅니다.</td>
             <td>현재 operator mapping은 brokerless <code>dev_sandbox</code>, <code>signal: true</code>, <code>order_posture: dry_run</code>입니다.</td>
           </tr>
           <tr>
-            <td><strong>TradingAgents</strong></td>
+            <td><strong>Fugue</strong></td>
             <td>LLM multi-agent research engine adapter</td>
             <td>market/news/fundamentals 분석을 Maestro DataHub payload와 runtime 요청으로 공급받고 <code>StrategySignalResult</code>를 반환합니다.</td>
             <td>현재 operator mapping은 <code>dev_sandbox</code>, <code>readonly: true</code>, <code>signal: false</code>, <code>order_posture: disabled</code>입니다.</td>
@@ -1366,9 +1366,9 @@ strategies:
 
       <div class="grid cols-2" style="margin-top: 16px;">
         <div class="card">
-          <span class="tag green">Ataraxia fragment</span>
+          <span class="tag green">Tranquillo fragment</span>
           <h3>앱 repo가 제공하는 것</h3>
-          <p><code>Virtuoso/Ataraxia/configs/fragments/ataraxia.yaml</code>은 Ataraxia entrypoint, KRW sleeve, TIGER/KODEX instrument metadata, Yahoo symbol-map hints, buy-only contribution recommendation을 제공합니다.</p>
+          <p><code>Virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml</code>은 Tranquillo entrypoint, KRW sleeve, TIGER/KODEX instrument metadata, Yahoo symbol-map hints, buy-only contribution recommendation을 제공합니다.</p>
         </div>
         <div class="card">
           <span class="tag red">Operator overlay</span>
@@ -1393,9 +1393,9 @@ strategies:
           <h3>가까운 과제</h3>
           <ul>
             <li>KR+US multi-account operator config에서 symbol_map, broker_product, freshness 검증</li>
-            <li>Ataraxia <code>run-signal</code> → <code>approve-signal</code> dry-run rehearsal</li>
-            <li>Snowball strategy book performance와 account-scoped dashboard attribution 검증</li>
-            <li>TradingAgents의 operator mapping 후보화 전 LLM/API credentials와 DataHub payload audit 정리</li>
+            <li>Tranquillo <code>run-signal</code> → <code>approve-signal</code> dry-run rehearsal</li>
+            <li>Crescendo strategy book performance와 account-scoped dashboard attribution 검증</li>
+            <li>Fugue의 operator mapping 후보화 전 LLM/API credentials와 DataHub payload audit 정리</li>
           </ul>
         </div>
         <div class="card">

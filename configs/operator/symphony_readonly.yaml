@@ -1,6 +1,6 @@
 mode: live_readonly
 app_fragment_paths:
-  - ../../../Virtuoso/Ataraxia/configs/fragments/ataraxia.yaml
+  - ../../../Virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
 strategy_account_map_path: strategy_accounts.yaml
 
 portfolio:
@@ -261,22 +261,22 @@ accounts:
       - kis_overseas_stock
 
 strategies:
-  - id: ataraxia
+  - id: tranquillo
     enabled: false
     weight: 1.0
 
-  - id: snowball_us
+  - id: crescendo_us
     enabled: false
     weight: 1.0
-    entrypoint: "snowball.strategy:SnowballUSStrategy"
+    entrypoint: "crescendo.strategy:CrescendoUSStrategy"
     config:
       sleeve: USD
       cash_symbol: CASH_USD
 
-  - id: trading_agents
+  - id: fugue
     enabled: false
     weight: 1.0
-    entrypoint: "tradingagents_app.strategy:TradingAgentsStrategy"
+    entrypoint: "fugue.strategy:FugueStrategy"
     config:
       sleeve: USD
       cash_symbol: CASH_USD

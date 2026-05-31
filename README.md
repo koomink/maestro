@@ -68,11 +68,11 @@ Symphony Ecosystem
 │       └── Telegram adapter
 │
 ├── Virtuoso Apps
-│   ├── Ataraxia
+│   ├── Tranquillo
 │   ├── TechAgora
 │   ├── Macro
 │   ├── Fundamental
-│   └── TradingAgents
+│   └── Fugue
 │
 └── External Systems
     ├── Yahoo/yfinance
@@ -289,7 +289,7 @@ v0.3 DataHub provider work adds:
   `financial_statements` provider behind Maestro DataHub
 - Native `technical_indicators` support derived from OHLCV bars, covering RSI,
   MACD, SMA, EMA, and Bollinger Bands for LLM trading agents such as
-  TradingAgents, Vibe-Trading, and QuantAgent
+  Fugue, Vibe-Trading, and QuantAgent
 - FRED `macro` provider behind Maestro DataHub, using API keys from environment variables
 - RSS `news` provider behind Maestro DataHub
 - Network-free rule-based `sentiment` provider over configured fixture/news text
@@ -503,8 +503,8 @@ For scheduled operation, install the Symphony systemd templates under
 [deploy/systemd](deploy/systemd) and use
 [scripts/operator/symphony_signal_then_approval.sh](scripts/operator/symphony_signal_then_approval.sh)
 to run approval only when `run-signal` emits `action_required=true`.
-Install Ataraxia into the Maestro virtualenv with
-`uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/Ataraxia`
+Install Tranquillo into the Maestro virtualenv with
+`uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/virtuoso-tranquillo`
 for operator rehearsals; do not rely on `PYTHONPATH` or an editable install.
 
 Safe execution config defaults:
@@ -771,10 +771,10 @@ Later, a real Virtuoso package can be installed and configured similarly:
 
 ```yaml
 strategies:
-  - id: ataraxia
+  - id: tranquillo
     enabled: true
     weight: 1.0
-    entrypoint: "virtuoso_ataraxia.strategy:AtaraxiaStrategy"
+    entrypoint: "virtuoso_tranquillo.strategy:TranquilloStrategy"
 ```
 
 Maestro core should not change when strategies are added or removed.
@@ -921,8 +921,8 @@ and `symphony_approval`. They share `state.identity_group: symphony` and
 `var/symphony_state.db` so dashboard refreshes, signal generation, and approval
 execution see the same broker and signal state. Multi-product KIS configs use
 explicit `accounts` and `strategy_account_map_path`; the shared mapping file
-currently enables `ataraxia -> kis_mock` and `snowball_us -> dev_sandbox`, while
-`trading_agents -> dev_sandbox` remains `enabled: false` and `signal: false`, so the signal phase does not import or run it.
+currently enables `tranquillo -> kis_mock` and `crescendo_us -> dev_sandbox`, while
+`fugue -> dev_sandbox` remains `enabled: false` and `signal: false`, so the signal phase does not import or run it.
 Change a strategy's account in the shared mapping file instead of editing
 `symphony_signal.yaml` and `symphony_approval.yaml` separately. Common
 environment variable names:
@@ -1261,7 +1261,7 @@ Implemented operator commands:
 - `/status`
 - `/health`
 - `/signal`
-- `/signal_<strategy>` such as `/signal_ataraxia` and `/signal_snowball`
+- `/signal_<strategy>` such as `/signal_tranquillo` and `/signal_crescendo`
 - `/account`
 - `/portfolio`
 - `/apps`

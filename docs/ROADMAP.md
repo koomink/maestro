@@ -510,12 +510,12 @@ Completed scope:
   execution from a saved `signal_run_id`. Signal and approval share
   `configs/operator/strategy_accounts.yaml` for strategy-to-account routing.
 - `strategy_accounts.yaml` now carries strategy-level `readonly`, `signal`, and
-  `order_posture` controls. The current operator mapping keeps Ataraxia on
-  `kis_mock`, routes Snowball to brokerless `dev_sandbox` for dry-run approval
-  rehearsal, and keeps TradingAgents visible but signal-disabled while it
+  `order_posture` controls. The current operator mapping keeps Tranquillo on
+  `kis_mock`, routes Crescendo to brokerless `dev_sandbox` for dry-run approval
+  rehearsal, and keeps Fugue visible but signal-disabled while it
   remains under development.
-- `docs/ataraxia_kis_paper_pilot.md` documents the four scheduled-cycle
-  Ataraxia KIS mock-investment broker-submit pilot and its stop conditions.
+- `docs/tranquillo_kis_paper_pilot.md` documents the four scheduled-cycle
+  Tranquillo KIS mock-investment broker-submit pilot and its stop conditions.
 
 This milestone packages the existing private beta pieces for one operator. It
 does not add `live_auto`, market orders, direct broker trading CLI commands,

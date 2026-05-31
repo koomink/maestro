@@ -228,7 +228,7 @@ def test_single_broker_products_list_selects_readonly_product_without_broker_pro
     monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
     monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
     monkeypatch.setenv("KIS_MOCK_ACCOUNT_ID", "12345678-01")
-    config = load_config("tests/fixtures/configs/live_approval_ataraxia_kis_paper_trading.yaml")
+    config = load_config("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml")
     raw_kis = config.kis.model_dump(mode="json")
     raw_kis.pop("broker_product")
     kis_config = KISConfig.model_validate(raw_kis)

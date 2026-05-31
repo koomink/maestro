@@ -90,14 +90,14 @@ those remain Maestro/operator responsibilities.
 
 ## Live Approval Operator Gates
 
-For LLM-backed Virtuoso apps such as TradingAgents, a production-like
+For LLM-backed Virtuoso apps such as Fugue, a production-like
 `live_approval` dry-run should fail before strategy execution when the selected
 model provider cannot run. Maestro's live approval preflight inspects enabled
 strategy configs for `llm_provider` and `agent_llms[*].provider`, then checks
 only the matching API-key environment variables. Findings name env var names,
 not secret values.
 
-TradingAgents defaults to `openai` when no `llm_provider` is set. Operator
+Fugue defaults to `openai` when no `llm_provider` is set. Operator
 configs that use OpenRouter or agent-level overrides must set the corresponding
 env vars, for example `OPENROUTER_API_KEY` for `openrouter`,
 `OPENAI_API_KEY` for `openai`, and `ANTHROPIC_API_KEY` for `anthropic`.
@@ -395,10 +395,10 @@ config must include an explicit conversion policy:
 
 ```yaml
 strategies:
-  - id: tradingagents
+  - id: fugue
     enabled: true
     weight: 1.0
-    entrypoint: "tradingagents_app.strategy:TradingAgentsStrategy"
+    entrypoint: "fugue.strategy:FugueStrategy"
     signal_to_allocation:
       type: single_symbol_action_map
       cash_symbol: CASH

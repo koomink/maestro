@@ -20,7 +20,7 @@ def _policy(cash_symbol: str = "CASH") -> SignalToAllocationConfig:
 
 def _signal(action: str = "buy", symbol: str = "NVDA") -> StrategySignalResult:
     return StrategySignalResult(
-        strategy_id="tradingagents",
+        strategy_id="fugue",
         strategy_version="0.2.4",
         timestamp=datetime(2026, 1, 15, tzinfo=UTC),
         symbol=symbol,

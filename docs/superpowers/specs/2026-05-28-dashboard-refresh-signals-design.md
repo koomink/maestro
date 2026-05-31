@@ -65,7 +65,7 @@ Suggested response:
     "overall": "stale",
     "strategies": [
       {
-        "strategy_id": "ataraxia",
+        "strategy_id": "tranquillo",
         "status": "stale",
         "latest_signal_run_id": "sig_...",
         "latest_signal_at": "2026-05-28T09:10:00+09:00"
@@ -84,9 +84,9 @@ The `Virtuoso` top-level tab should contain sub-tabs:
 
 ```text
 Overview
-Ataraxia
-Snowball US
-Trading Agents
+Tranquillo
+Crescendo US
+Fugue
 ...
 ```
 
@@ -132,7 +132,7 @@ Suggested response:
 ```json
 {
   "status": "ok",
-  "strategy_id": "ataraxia",
+  "strategy_id": "tranquillo",
   "signal_run_id": "sig_...",
   "action_required": true,
   "orders_preview_count": 3
@@ -162,7 +162,7 @@ the operator intentionally separates them.
 Per-app signal generation requires a backend capability equivalent to:
 
 ```python
-run_signal(strategy_ids=["ataraxia"])
+run_signal(strategy_ids=["tranquillo"])
 ```
 
 The existing all-strategy `run_signal()` behavior should remain available for

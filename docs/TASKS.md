@@ -489,7 +489,7 @@
 - [ ] Keep current full YAML configs supported for explicit audits, examples,
       tests, and single-app operator workflows
 - [x] Add config composition for Maestro operator profiles and Virtuoso app
-      fragments, starting with the Ataraxia v1 fragment
+      fragments, starting with the Tranquillo v1 fragment
 - [x] Define app fragments for strategy entrypoint, strategy config defaults,
       DataHub symbol-map hints, allowed sleeve membership, and recommendations
 - [x] Keep broker, approval, execution, risk, state, audit, and promotion gates
@@ -517,7 +517,7 @@
       live enablement, direct trading, or risk-change controls
 - [x] Add tests for beta preflight pass/fail behavior
 - [x] Add provider-derived LLM API-key checks to live approval preflight for
-      LLM-backed Virtuoso apps such as TradingAgents
+      LLM-backed Virtuoso apps such as Fugue
 
 ### Post-v1.0 Structural Refactor R1-R5
 
@@ -560,7 +560,7 @@
       trading, and risk-change controls deferred
 - [x] Add KIS domestic+overseas multi-product operator config with KRW/USD
       currency sleeves and symbol-level broker-product routing
-- [x] Scope the Ataraxia domestic ETF KIS promotion to mock-investment
+- [x] Scope the Tranquillo domestic ETF KIS promotion to mock-investment
       `paper_trading=true` broker submit and document the four scheduled-cycle
       pilot
 

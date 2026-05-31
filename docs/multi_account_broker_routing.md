@@ -37,7 +37,7 @@ Fragments are recommendations and defaults, not live-trading authority. Maestro
 rejects fragments that contain operator-owned keys such as `execution`,
 `approval`, `risk`, `state`, `audit`, `kis`, `accounts`, or `monitoring`.
 `profile-validate` checks recommendation drift for live approval, KIS
-paper-trading, and production profiles; for example, an Ataraxia fragment can
+paper-trading, and production profiles; for example, an Tranquillo fragment can
 recommend `execution.order_generation_mode=buy_only_contribution` while the
 operator profile remains responsible for the budget and buy day.
 
@@ -45,7 +45,7 @@ Example:
 
 ```yaml
 app_fragment_paths:
-  - ../../../Virtuoso/Ataraxia/configs/fragments/ataraxia.yaml
+  - ../../../Virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
 
 accounts:
   - id: kis_mock
@@ -82,16 +82,16 @@ accounts:
 strategy_account_map_path: strategy_accounts.yaml
 
 strategies:
-  - id: ataraxia
+  - id: tranquillo
     enabled: true
     weight: 1.0
 
-  - id: snowball
-    entrypoint: snowball.plugin:SnowballPlugin
+  - id: crescendo
+    entrypoint: crescendo.plugin:CrescendoPlugin
     weight: 1.0
 
-  - id: trading_agents
-    entrypoint: trading_agents.plugin:TradingAgentsPlugin
+  - id: fugue
+    entrypoint: fugue.strategy:FugueStrategy
     weight: 1.0
 
   - id: candidate_strategy
@@ -113,7 +113,7 @@ execution sleeve, and order posture are explicit:
 execution_sleeves:
   accounts:
     kis_mock:
-      ataraxia_isa:
+      tranquillo_isa:
         currency_sleeve: KRW
         target_weight: 1.0
         order_generation_mode: buy_only_contribution
@@ -125,29 +125,29 @@ execution_sleeves:
           buy_day: 25
 
     dev_sandbox:
-      snowball_us:
+      crescendo_us:
         currency_sleeve: USD
         target_weight: 1.0
         order_generation_mode: target_rebalance
 
 strategies:
-  ataraxia:
+  tranquillo:
     account_id: kis_mock
-    execution_sleeve: ataraxia_isa
+    execution_sleeve: tranquillo_isa
     readonly: true
     signal: true
     order_posture: dry_run
 
-  snowball_us:
+  crescendo_us:
     account_id: dev_sandbox
-    execution_sleeve: snowball_us
+    execution_sleeve: crescendo_us
     readonly: true
     signal: true
     order_posture: dry_run
 
-  trading_agents:
+  fugue:
     account_id: dev_sandbox
-    execution_sleeve: trading_agents
+    execution_sleeve: fugue
     readonly: true
     signal: false
     order_posture: disabled
@@ -196,9 +196,9 @@ Current operator split:
   re-run strategies, and executes approval/order lifecycle after freshness and
   safety checks. It is intentionally `order_posture: dry_run` by default.
 
-The current strategy mapping routes `ataraxia -> kis_mock / ataraxia_isa`,
-`snowball_us -> dev_sandbox / snowball_us`, and
-`trading_agents -> dev_sandbox / trading_agents` through
+The current strategy mapping routes `tranquillo -> kis_mock / tranquillo_isa`,
+`crescendo_us -> dev_sandbox / crescendo_us`, and
+`fugue -> dev_sandbox / fugue` through
 `configs/operator/strategy_accounts.yaml`.
 
 ## Strategy Promotion And Account Binding
@@ -206,7 +206,7 @@ The current strategy mapping routes `ataraxia -> kis_mock / ataraxia_isa`,
 Strategy registration and account binding are intentionally separate.
 
 Development-only Virtuoso apps are not added to the Symphony operator mapping.
-For example, a TradingAgents wrapper can be developed and tested in paper/dev
+For example, a Fugue wrapper can be developed and tested in paper/dev
 configs without any `strategy_accounts.yaml` entry. If a strategy id appears in
 the shared mapping but is not present in the signal/approval strategy list,
 Maestro fails closed with an unknown strategy-id error.
@@ -218,9 +218,9 @@ enable it and add one mapping entry, usually to the safest available account:
 
 ```yaml
 strategies:
-  ataraxia: kis_isa
-  snowball_us: kis_brokerage
-  trading_agents: kis_mock
+  tranquillo: kis_isa
+  crescendo_us: kis_brokerage
+  fugue: kis_mock
 ```
 
 Promotion should move in this order:

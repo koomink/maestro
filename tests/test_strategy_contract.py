@@ -98,8 +98,8 @@ def test_sample_strategy_can_emit_currency_sleeve_allocations():
 def test_sdk_contract_supports_llm_signal_and_rich_data_request_fields():
     timestamp = datetime(2026, 1, 15, tzinfo=UTC)
     manifest = StrategyManifest(
-        strategy_id="tradingagents",
-        name="TradingAgents",
+        strategy_id="fugue",
+        name="Fugue",
         version="0.2.4",
         supported_modes=["paper"],
         supported_asset_types=["stock"],
@@ -135,7 +135,7 @@ def test_sdk_contract_supports_llm_signal_and_rich_data_request_fields():
         fields=["close", "volume"],
     )
     signal = StrategySignalResult(
-        strategy_id="tradingagents",
+        strategy_id="fugue",
         strategy_version="0.2.4",
         timestamp=timestamp,
         symbol="NVDA",
@@ -145,11 +145,11 @@ def test_sdk_contract_supports_llm_signal_and_rich_data_request_fields():
         price_target=195.0,
         time_horizon="3-6 months",
         position_sizing="30% target allocation",
-        rationale="TradingAgents final portfolio manager decision.",
+        rationale="Fugue final portfolio manager decision.",
         metadata={"reports": {"market": "strong momentum"}},
     )
     allocation = TargetAllocationResult(
-        strategy_id="tradingagents",
+        strategy_id="fugue",
         strategy_version="0.2.4",
         timestamp=timestamp,
         allocations={"NVDA": 0.3, "CASH": 0.7},
@@ -184,7 +184,7 @@ def test_strategy_runtime_fetches_data_and_records_audit_payload():
             cycle_id="test",
             timestamp=timestamp,
             run_mode=RunMode.PAPER,
-            strategy_id="tradingagents",
+            strategy_id="fugue",
             config={},
         ),
     )

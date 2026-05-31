@@ -1,7 +1,7 @@
 # Operator Runbook
 
 This runbook covers halt recovery, KIS read-only reconciliation, and links to
-the Ataraxia KIS mock-investment broker-submit pilot. It does not authorize live
+the Tranquillo KIS mock-investment broker-submit pilot. It does not authorize live
 auto-trading, market orders, direct broker CLI actions, dashboard write
 controls, or Telegram admin controls.
 
@@ -165,8 +165,8 @@ Use this promotion ladder for strategy phase controls:
 5. `enabled: true`, `readonly: true`, `signal: true`, `order_posture: armed`: approved orders can
    reach broker submit only when the global config is also armed.
 
-The current shared mapping enables `ataraxia -> kis_mock` and
-`snowball_us -> dev_sandbox`; `trading_agents -> dev_sandbox` is `enabled: false`,
+The current shared mapping enables `tranquillo -> kis_mock` and
+`crescendo_us -> dev_sandbox`; `fugue -> dev_sandbox` is `enabled: false`,
 `readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
 
@@ -220,9 +220,9 @@ approval or order submission.
 KIS current price data is broker reference data for checks and reconciliation.
 Strategy research data must still come through Maestro DataHub.
 
-## Ataraxia KIS Paper Pilot
+## Tranquillo KIS Paper Pilot
 
-Use `docs/ataraxia_kis_paper_pilot.md` for the Ataraxia domestic ETF promotion
+Use `docs/tranquillo_kis_paper_pilot.md` for the Tranquillo domestic ETF promotion
 from Maestro paper runs to the KIS mock-investment approval-gated broker-submit
 path. The pilot scope is `kis_domestic_stock`, `kis.paper_trading=true`,
 Telegram manual approval, limit orders only, and four scheduled trading-day

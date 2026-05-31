@@ -67,7 +67,7 @@ def test_latest_signal_package_card_exposes_actionable_signal_run_id(tmp_path):
             "status": "action_required",
             "action_required": True,
             "orders_preview_count": 2,
-            "loaded_strategies": ["ataraxia"],
+            "loaded_strategies": ["tranquillo"],
             "datahub_evidence": {"issue_count": 0},
         },
     )
