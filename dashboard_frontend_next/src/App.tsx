@@ -6,15 +6,14 @@ import { buildDiagnosticContext } from "./utils/diagnostic";
 import { formatValue } from "./utils/format";
 import {
   TopBar,
-  TrustStrip,
-  DailyBrief,
-  AnalysisReport,
+  PortfolioReport,
+  MaestroReport,
   VirtuosoReport,
   ConsoleDrawer,
   ShellMessage,
 } from "./components";
 
-const tabs = ["Daily Brief", "Analysis Report", "Virtuoso"] as const;
+const tabs = ["Portfolio", "Maestro", "Virtuoso"] as const;
 const periods = ["7D", "30D", "90D", "All"] as const;
 
 type TabName = (typeof tabs)[number];
@@ -33,7 +32,7 @@ function errorMessage(error: unknown, fallback: string): string {
 export function App() {
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null);
   const [displayCurrency, setDisplayCurrency] = useState<"KRW" | "USD">("KRW");
-  const [activeTab, setActiveTab] = useState<TabName>("Daily Brief");
+  const [activeTab, setActiveTab] = useState<TabName>("Portfolio");
   const [period, setPeriod] = useState<Period>("30D");
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [consoleQuery, setConsoleQuery] = useState("");
@@ -121,13 +120,13 @@ export function App() {
   }
 
   if (loading && !snapshot) {
-    return <ShellMessage title="Symphony Maestro" copy="Loading the editorial dashboard brief..." />;
+    return <ShellMessage title="Symphony" copy="Loading the editorial dashboard brief..." />;
   }
 
   if (error || !snapshot) {
     return (
       <ShellMessage
-        title="Symphony Maestro"
+        title="Symphony"
         copy={error || "Dashboard snapshot is unavailable."}
         tone="danger"
       />
@@ -148,6 +147,11 @@ export function App() {
     selectedStrategy?.strategy_id || "",
   );
 
+  function openVirtuosoApp(strategyId: string) {
+    setSelectedStrategyId(strategyId);
+    setActiveTab("Virtuoso");
+  }
+
   return (
     <div className={consoleOpen ? "app-shell console-is-open" : "app-shell"}>
       <TopBar
@@ -163,15 +167,19 @@ export function App() {
       />
 
       <main className="page">
-        <TrustStrip snapshot={snapshot} trust={trust} />
-        {activeTab === "Daily Brief" && (
-          <DailyBrief snapshot={snapshot} trust={trust} openConsole={() => setConsoleOpen(true)} />
-        )}
-        {activeTab === "Analysis Report" && (
-          <AnalysisReport
+        {activeTab === "Portfolio" && (
+          <PortfolioReport
             period={period}
             setPeriod={setPeriod}
             snapshot={snapshot}
+            trust={trust}
+          />
+        )}
+        {activeTab === "Maestro" && (
+          <MaestroReport
+            snapshot={snapshot}
+            trust={trust}
+            openApp={openVirtuosoApp}
           />
         )}
         {activeTab === "Virtuoso" && (

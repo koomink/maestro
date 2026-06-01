@@ -1,5 +1,5 @@
 /* ===================================================================
-   Symphony Maestro Dashboard — Design System Styles
+   Symphony Dashboard — Design System Styles
    Based on DESIGN.md warm-canvas editorial system
    =================================================================== */
 
@@ -375,7 +375,7 @@ p {
 }
 
 /* ===================================================================
-   Daily Brief — Data-centric marquee strip (replaces hero)
+   Portfolio — Data-centric marquee strip
    =================================================================== */
 
 .brief-marquee-strip {
@@ -800,6 +800,18 @@ p {
   stroke-width: 2;
 }
 
+.cash-flow-marker line {
+  stroke: var(--warning);
+  stroke-dasharray: 5 5;
+  stroke-width: 1.5;
+}
+
+.cash-flow-marker circle {
+  fill: var(--warning);
+  stroke: var(--canvas);
+  stroke-width: 2.5;
+}
+
 .chart-label {
   fill: var(--muted-soft);
   font-family: var(--ui-font);
@@ -841,6 +853,37 @@ p {
 }
 
 .sub-tab.active {
+  border-color: var(--surface-dark);
+  background: var(--surface-dark);
+  color: var(--on-dark);
+}
+
+.app-subtab-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-xs);
+}
+
+.app-subtab {
+  min-height: 40px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  color: var(--muted);
+  cursor: pointer;
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 13px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.app-subtab:hover {
+  border-color: var(--surface-strong);
+  color: var(--ink);
+}
+
+.app-subtab.active {
   border-color: var(--surface-dark);
   background: var(--surface-dark);
   color: var(--on-dark);
@@ -931,7 +974,7 @@ p {
   gap: var(--space-sm);
   width: 100%;
   border: 1px solid var(--hairline);
-  border-radius: 14px;
+  border-radius: 8px;
   background: var(--canvas);
   cursor: pointer;
   padding: var(--space-md);
@@ -996,6 +1039,197 @@ p {
 
 .dark-feature .metric strong {
   color: var(--on-dark);
+}
+
+
+/* ===================================================================
+   Workflow Pipelines
+   =================================================================== */
+
+.pipeline-graph {
+  display: grid;
+  gap: var(--space-md);
+}
+
+.pipeline-track {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: var(--space-xs);
+}
+
+.pipeline-node {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-xxs) var(--space-sm);
+  min-height: 74px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  cursor: pointer;
+  padding: var(--space-sm);
+  text-align: left;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.pipeline-node:hover,
+.pipeline-node.active {
+  border-color: var(--surface-dark);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.pipeline-step {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--surface-dark);
+  color: var(--on-dark);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.pipeline-node strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pipeline-node small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pipeline-detail {
+  display: grid;
+  gap: var(--space-sm);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--canvas) 68%, var(--surface-soft));
+  padding: var(--space-md);
+}
+
+.pipeline-detail > div:first-child {
+  display: grid;
+  gap: var(--space-xxs);
+}
+
+.pipeline-detail strong {
+  color: var(--ink);
+  font-size: 20px;
+}
+
+.pipeline-detail p {
+  margin-bottom: 0;
+  color: var(--body);
+}
+
+.pipeline-detail dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-xs);
+  margin: 0;
+}
+
+.pipeline-detail dl div {
+  display: grid;
+  gap: var(--space-xxs);
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: var(--canvas);
+  padding: var(--space-sm);
+}
+
+.pipeline-detail dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pipeline-detail dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.pipeline-graph.compact {
+  gap: var(--space-xs);
+}
+
+.pipeline-graph.compact .pipeline-track {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.pipeline-graph.compact .pipeline-node {
+  min-height: 54px;
+  padding: var(--space-xs);
+}
+
+.pipeline-graph.compact .pipeline-node small {
+  font-size: 11px;
+}
+
+.app-pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-md);
+}
+
+.app-pipeline-card {
+  display: grid;
+  gap: var(--space-sm);
+  width: 100%;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--canvas);
+  cursor: pointer;
+  padding: var(--space-md);
+  text-align: left;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.app-pipeline-card:hover {
+  border-color: var(--surface-dark);
+  box-shadow: var(--shadow-sm);
+  transform: translateY(-1px);
+}
+
+.app-pipeline-card > strong {
+  color: var(--ink);
+  font-family: var(--display-font);
+  font-size: 26px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.app-pipeline-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-xs);
+}
+
+.app-pipeline-facts span {
+  border: 1px solid var(--hairline-soft);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-soft) 68%, var(--canvas));
+  color: var(--muted);
+  font-size: 12px;
+  padding: var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.operation-card {
+  min-height: 100%;
 }
 
 /* ===================================================================
@@ -1239,7 +1473,8 @@ p {
     grid-template-columns: 1fr;
   }
 
-  .key-values div {
+  .key-values div,
+  .pipeline-detail dl {
     grid-template-columns: 1fr;
     gap: var(--space-xxs);
   }
@@ -1249,6 +1484,10 @@ p {
   .freshness-strip {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .app-subtab-list {
+    grid-template-columns: 1fr;
   }
 
   .signal-action-box {

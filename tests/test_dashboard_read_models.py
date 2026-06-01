@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from maestro.config.broker import BrokerAccountConfig
@@ -761,6 +762,66 @@ def test_account_performance_table_tracks_returns_drawdown_and_reconciliation(tm
     assert rows[2]["period_return"] is None
     assert rows[2]["cumulative_return"] == 0.0
     assert rows[2]["reconciliation_status"] == "unreconciled"
+
+
+def test_strategy_book_performance_uses_explicit_strategy_cash_flows_for_twr_and_mwr(
+    tmp_path,
+):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    snapshots = [
+        ("run_1", 1000.0, "2024-01-01T00:00:00+00:00"),
+        ("run_2", 1600.0, "2024-07-01T00:00:00+00:00"),
+        ("run_3", 1700.0, "2025-01-01T00:00:00+00:00"),
+    ]
+    for run_id, book_value, created_at in snapshots:
+        store.save_strategy_book_snapshots(
+            run_id,
+            [
+                {
+                    "strategy_id": "ataraxia",
+                    "book_id": "ataraxia:KRW",
+                    "book_value": book_value,
+                    "cash": 100.0,
+                    "allocations": {"CASH": 1.0},
+                }
+            ],
+        )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE strategy_book_snapshots SET created_at = ? WHERE run_id = ?",
+                (created_at, run_id),
+            )
+    store.save_system_event(
+        "cash_flow_1",
+        "strategy_cash_flow",
+        {
+            "strategy_id": "ataraxia",
+            "account_id": "paper_cash",
+            "execution_sleeve": "krw_contribution",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "effective_at": "2024-07-01T00:00:00+00:00",
+            "source": "telegram_funding_confirmation",
+        },
+    )
+
+    rows = build_strategy_book_performance_table(store)
+
+    assert [row["run_id"] for row in rows] == ["run_3", "run_2", "run_1"]
+    latest = rows[0]
+    assert latest["current_value"] == 1700.0
+    assert latest["book_value"] == 1700.0
+    assert latest["cash_flow"] == 0.0
+    assert latest["cumulative_cash_flow"] == 500.0
+    assert latest["net_pnl"] == 200.0
+    assert latest["period_return"] == 0.0625
+    assert latest["twr"] == 0.16875
+    assert latest["cumulative_return"] == 0.16875
+    assert latest["drawdown"] == 0.0
+    assert latest["mwr"] == pytest.approx(0.161, abs=0.01)
+    assert rows[1]["cash_flow"] == 500.0
+    assert rows[1]["period_return"] == 0.1
 
 
 def test_broker_performance_prefers_broker_total_asset_value_and_currency(tmp_path):

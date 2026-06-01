@@ -3,7 +3,7 @@ import { firstValue } from "./data";
 import { formatValue } from "./format";
 import { trustSummary } from "./trust";
 
-type TabName = "Daily Brief" | "Analysis Report" | "Virtuoso";
+type TabName = "Portfolio" | "Maestro" | "Virtuoso";
 
 export function buildDiagnosticContext(
   snapshot: DashboardSnapshot,
@@ -15,7 +15,7 @@ export function buildDiagnosticContext(
 ): string {
   const trust = trustSummary(snapshot);
   return [
-    "Symphony Maestro diagnostic context",
+    "Symphony diagnostic context",
     `tab: ${activeTab}`,
     `display_currency: ${displayCurrency}`,
     `analysis_period: ${period}`,

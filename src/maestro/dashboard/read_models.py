@@ -878,10 +878,12 @@ def build_strategy_book_performance_table(
     limit: int = 500,
 ) -> list[dict[str, Any]]:
     source_rows = store.list_strategy_book_snapshots(limit=limit)
+    cash_flows_by_strategy = _strategy_cash_flows_by_strategy(store)
     states: dict[str, dict[str, Any]] = {}
     rows = []
     for row in reversed(source_rows):
         payload = _mapping(row.get("payload"))
+        strategy_id = str(row.get("strategy_id") or payload.get("strategy_id") or "")
         book_id = str(row.get("book_id") or payload.get("book_id") or "")
         state = states.setdefault(
             book_id,
@@ -890,24 +892,49 @@ def build_strategy_book_performance_table(
                 "previous_value": None,
                 "peak_value": None,
                 "cumulative_cash_flow": 0.0,
+                "twr_growth": 1.0,
+                "previous_timestamp": None,
+                "cash_flow_events": [],
+                "mwr_flows": [],
             },
         )
         book_value = _float_or_none(payload.get("book_value"))
-        performance = _advance_performance_state(state, book_value, 0.0)
+        timestamp = _parse_timestamp(row.get("created_at"))
+        cash_flow_events = _period_cash_flow_events(
+            cash_flows_by_strategy.get(strategy_id, []),
+            state.get("previous_timestamp"),
+            timestamp,
+        )
+        cash_flow = sum(event["signed_amount"] for event in cash_flow_events)
+        performance = _advance_twr_performance_state(
+            state,
+            book_value,
+            cash_flow,
+            timestamp,
+            cash_flow_events,
+        )
         rows.append(
             {
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
-                "strategy_id": row.get("strategy_id") or payload.get("strategy_id"),
+                "strategy_id": strategy_id,
                 "book_id": book_id,
                 "label": payload.get("label"),
                 "target_weight": _float_or_none(payload.get("target_weight")),
                 "book_value": book_value,
+                "current_value": book_value,
+                "cash_flow": _round_money(cash_flow),
+                "cumulative_cash_flow": performance["cumulative_cash_flow"],
+                "net_pnl": performance["net_pnl"],
                 "period_return": performance["period_return"],
-                "cumulative_return": performance["cumulative_return"],
+                "twr": performance["twr"],
+                "cumulative_return": performance["twr"],
+                "mwr": performance["mwr"],
+                "irr": performance["mwr"],
                 "drawdown": performance["drawdown"],
                 "cash": _float_or_none(payload.get("cash")),
                 "allocations": _mapping(payload.get("allocations")),
+                "cash_flow_events": [event["payload"] for event in cash_flow_events],
             }
         )
     return list(reversed(rows))
@@ -1977,6 +2004,172 @@ def _snapshot_currency(account: dict[str, Any], payload: dict[str, Any]) -> str:
         return str(next(iter(cash_by_currency)))
     return "UNKNOWN"
 
+
+
+def _strategy_cash_flows_by_strategy(store: StateStore) -> dict[str, list[dict[str, Any]]]:
+    flows: dict[str, list[dict[str, Any]]] = {}
+    for row in store.list_system_events_by_type("strategy_cash_flow", limit=1000):
+        payload = _mapping(row.get("payload"))
+        strategy_id = str(payload.get("strategy_id") or "")
+        if not strategy_id:
+            continue
+        amount = _float_or_none(payload.get("amount"))
+        if amount is None:
+            continue
+        flow_type = str(payload.get("flow_type") or "deposit").lower()
+        signed_amount = -abs(amount) if flow_type in {"withdrawal", "withdraw"} else abs(amount)
+        timestamp = _parse_timestamp(payload.get("effective_at") or row.get("created_at"))
+        if timestamp is None:
+            continue
+        event = {
+            "timestamp": timestamp,
+            "signed_amount": signed_amount,
+            "payload": {
+                **payload,
+                "amount": amount,
+                "signed_amount": signed_amount,
+                "effective_at": payload.get("effective_at") or row.get("created_at"),
+                "run_id": row.get("run_id"),
+            },
+        }
+        flows.setdefault(strategy_id, []).append(event)
+    for strategy_flows in flows.values():
+        strategy_flows.sort(key=lambda item: item["timestamp"])
+    return flows
+
+
+def _period_cash_flow_events(
+    events: list[dict[str, Any]],
+    previous_timestamp: datetime | None,
+    current_timestamp: datetime | None,
+) -> list[dict[str, Any]]:
+    if current_timestamp is None:
+        return []
+    period_events = []
+    for event in events:
+        timestamp = event["timestamp"]
+        after_previous = previous_timestamp is None or timestamp > previous_timestamp
+        if after_previous and timestamp <= current_timestamp:
+            period_events.append(event)
+    return period_events
+
+
+def _advance_twr_performance_state(
+    state: dict[str, Any],
+    total_value: float | None,
+    cash_flow: float,
+    timestamp: datetime | None,
+    cash_flow_events: list[dict[str, Any]],
+) -> dict[str, float | None]:
+    period_return = None
+    previous_value = state["previous_value"]
+    if previous_value is not None and previous_value > 0 and total_value is not None:
+        period_return = (total_value - previous_value - cash_flow) / previous_value
+        state["twr_growth"] *= 1.0 + period_return
+    if state["first_value"] is None and total_value is not None:
+        state["first_value"] = total_value
+        if timestamp is not None:
+            state["mwr_flows"].append((timestamp, -total_value))
+    elif total_value is not None:
+        state["cumulative_cash_flow"] += cash_flow
+    for event in cash_flow_events:
+        state["cash_flow_events"].append(event["payload"])
+        state["mwr_flows"].append((event["timestamp"], -event["signed_amount"]))
+    net_pnl = None
+    first_value = state["first_value"]
+    if first_value is not None and total_value is not None:
+        net_pnl = total_value - first_value - state["cumulative_cash_flow"]
+    if total_value is not None:
+        state["peak_value"] = (
+            total_value if state["peak_value"] is None else max(state["peak_value"], total_value)
+        )
+        state["previous_value"] = total_value
+    if timestamp is not None:
+        state["previous_timestamp"] = timestamp
+    drawdown = _safe_weight(total_value, state["peak_value"])
+    if drawdown is not None:
+        drawdown -= 1.0
+    twr = state["twr_growth"] - 1.0 if first_value is not None else None
+    mwr = _money_weighted_return(state["mwr_flows"], timestamp, total_value)
+    return {
+        "period_return": _round_ratio(period_return),
+        "twr": _round_ratio(twr),
+        "mwr": _round_ratio(mwr),
+        "cumulative_cash_flow": _round_money(state["cumulative_cash_flow"]),
+        "net_pnl": _round_money(net_pnl),
+        "drawdown": _round_ratio(drawdown),
+    }
+
+
+def _money_weighted_return(
+    flows: list[tuple[datetime, float]],
+    ending_timestamp: datetime | None,
+    ending_value: float | None,
+) -> float | None:
+    if ending_timestamp is None or ending_value is None or not flows:
+        return None
+    dated_flows = [(timestamp, amount) for timestamp, amount in flows]
+    dated_flows.append((ending_timestamp, ending_value))
+    if not any(amount < 0 for _, amount in dated_flows) or not any(
+        amount > 0 for _, amount in dated_flows
+    ):
+        return None
+    base_date = min(timestamp for timestamp, _ in dated_flows)
+
+    def npv(rate: float) -> float:
+        total = 0.0
+        for timestamp, amount in dated_flows:
+            years = max((timestamp - base_date).total_seconds() / (365.0 * 24 * 60 * 60), 0.0)
+            total += amount / ((1.0 + rate) ** years)
+        return total
+
+    low = -0.999999
+    high = 10.0
+    low_value = npv(low)
+    high_value = npv(high)
+    expansion_count = 0
+    while low_value * high_value > 0 and high < 1_000_000 and expansion_count < 12:
+        high *= 10.0
+        high_value = npv(high)
+        expansion_count += 1
+    if low_value * high_value > 0:
+        return None
+    for _ in range(100):
+        mid = (low + high) / 2.0
+        mid_value = npv(mid)
+        if abs(mid_value) < 1e-7:
+            return mid
+        if low_value * mid_value <= 0:
+            high = mid
+            high_value = mid_value
+        else:
+            low = mid
+            low_value = mid_value
+    return (low + high) / 2.0
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _round_money(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return round(value, 6)
 
 def _advance_performance_state(
     state: dict[str, Any],

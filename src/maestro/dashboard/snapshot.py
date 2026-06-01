@@ -129,6 +129,14 @@ def build_dashboard_snapshot(
         for strategy in getattr(config, "strategies", [])
         if getattr(strategy, "enabled", False)
     ]
+    virtuoso_apps = _virtuoso_apps(
+        config,
+        strategy_runs,
+        strategy_book_performance,
+        strategy_attribution,
+        strategy_book_snapshots,
+        signal_freshness,
+    )
 
     snapshot = {
         "title": "Symphony",
@@ -261,14 +269,24 @@ def build_dashboard_snapshot(
             config,
             strategy_book_performance,
         ),
-        "virtuoso_apps": _virtuoso_apps(
+        "workflow_pipelines": _workflow_pipelines(
             config,
+            operator_home,
+            health,
+            reconciliation,
+            broker_snapshot,
+            freshness,
             strategy_runs,
-            strategy_book_performance,
-            strategy_attribution,
-            strategy_book_snapshots,
+            risk_decisions,
+            orders,
+            approvals,
+            live_order_lifecycle,
+            run_index,
+            broker_account_overview,
             signal_freshness,
+            virtuoso_apps,
         ),
+        "virtuoso_apps": virtuoso_apps,
         "audit_trail": {
             "metrics": [
                 _metric("Indexed Runs", len(run_index), "neutral"),
@@ -431,6 +449,451 @@ def _system_nodes(
             _count_tone(operator_home["attention_count"]),
         ),
     ]
+
+
+def _workflow_pipelines(
+    config: Any,
+    operator_home: dict[str, Any],
+    health: dict[str, Any],
+    reconciliation: dict[str, Any],
+    broker_snapshot: dict[str, Any],
+    freshness: list[dict[str, Any]],
+    strategy_runs: list[dict[str, Any]],
+    risk_decisions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    approvals: list[dict[str, Any]],
+    live_order_lifecycle: dict[str, Any],
+    run_index: list[dict[str, Any]],
+    broker_account_overview: dict[str, Any],
+    signal_freshness: dict[str, Any],
+    virtuoso_apps: dict[str, Any],
+) -> dict[str, Any]:
+    strategy_configs = {
+        strategy.id: strategy
+        for strategy in getattr(config, "strategies", [])
+        if getattr(strategy, "readonly_enabled", True)
+    }
+    return {
+        "system": {
+            "nodes": _system_pipeline_nodes(
+                config,
+                operator_home,
+                health,
+                reconciliation,
+                broker_snapshot,
+                freshness,
+                strategy_runs,
+                risk_decisions,
+                orders,
+                approvals,
+                live_order_lifecycle,
+                run_index,
+                signal_freshness,
+            )
+        },
+        "apps": [
+            _app_pipeline(
+                app,
+                strategy_configs.get(str(app.get("strategy_id"))),
+                broker_account_overview,
+                risk_decisions,
+                orders,
+                approvals,
+                signal_freshness,
+                config,
+            )
+            for app in virtuoso_apps.get("strategies", [])
+        ],
+    }
+
+
+def _system_pipeline_nodes(
+    config: Any,
+    operator_home: dict[str, Any],
+    health: dict[str, Any],
+    reconciliation: dict[str, Any],
+    broker_snapshot: dict[str, Any],
+    freshness: list[dict[str, Any]],
+    strategy_runs: list[dict[str, Any]],
+    risk_decisions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    approvals: list[dict[str, Any]],
+    live_order_lifecycle: dict[str, Any],
+    run_index: list[dict[str, Any]],
+    signal_freshness: dict[str, Any],
+) -> list[dict[str, Any]]:
+    latest_strategy = strategy_runs[0] if strategy_runs else {}
+    latest_risk = risk_decisions[0] if risk_decisions else {}
+    latest_order = orders[0] if orders else {}
+    latest_approval = approvals[0] if approvals else {}
+    latest_lifecycle = live_order_lifecycle.get("latest") or {}
+    enabled_count = sum(
+        1 for strategy in getattr(config, "strategies", []) if getattr(strategy, "enabled", False)
+    )
+    data_status = _freshness_rollup(freshness)
+    signal_status = signal_freshness.get("overall") or "missing"
+    risk_status = _approval_label(latest_risk.get("approved"))
+    output_status = (
+        latest_lifecycle.get("status")
+        or latest_order.get("approval_status")
+        or latest_approval.get("status")
+        or "read-only"
+    )
+    return [
+        _pipeline_node(
+            "data",
+            "Data",
+            data_status,
+            _pipeline_status_tone(data_status),
+            _freshness_pipeline_detail(freshness),
+            updated_at=broker_snapshot.get("created_at"),
+            run_id=broker_snapshot.get("run_id"),
+            next_check="Run account sync if broker data is stale or missing.",
+        ),
+        _pipeline_node(
+            "virtuoso",
+            "Virtuoso",
+            f"{enabled_count} enabled app(s)",
+            _boolean_tone(bool(enabled_count)),
+            "Configured apps are available for readonly monitoring."
+            if enabled_count
+            else "No enabled Virtuoso apps are configured for dashboard monitoring.",
+            updated_at=latest_strategy.get("created_at"),
+            run_id=latest_strategy.get("run_id"),
+            next_check="Review strategy_accounts.yaml if the enabled app count is unexpected.",
+        ),
+        _pipeline_node(
+            "signal",
+            "Signal",
+            signal_status,
+            _pipeline_status_tone(signal_status),
+            _signal_pipeline_detail(signal_freshness),
+            updated_at=_latest_signal_freshness_time(signal_freshness),
+            run_id=_latest_signal_freshness_run_id(signal_freshness),
+            next_check="Generate or refresh signals from the Virtuoso tab when needed.",
+        ),
+        _pipeline_node(
+            "maestro",
+            "Maestro",
+            _validation_label(latest_strategy.get("validation_ok")),
+            _boolean_tone(latest_strategy.get("validation_ok")),
+            latest_strategy.get("signal_action") or "No recent validated strategy proposal.",
+            updated_at=latest_strategy.get("created_at"),
+            run_id=latest_strategy.get("run_id"),
+            next_check="Run readonly Maestro if strategy proposals are missing or failed.",
+        ),
+        _pipeline_node(
+            "risk",
+            "Risk",
+            risk_status,
+            _pipeline_status_tone(risk_status),
+            _risk_pipeline_detail(latest_risk),
+            updated_at=latest_risk.get("created_at"),
+            run_id=latest_risk.get("run_id"),
+            next_check="Review risk violations before any approval workflow.",
+        ),
+        _pipeline_node(
+            "output",
+            "Output",
+            output_status,
+            _pipeline_status_tone(output_status),
+            latest_lifecycle.get("message")
+            or latest_order.get("symbol")
+            or latest_approval.get("status")
+            or "Readonly dashboard has no trading output to send.",
+            updated_at=(
+                latest_lifecycle.get("created_at")
+                or latest_order.get("created_at")
+                or latest_approval.get("created_at")
+            ),
+            run_id=latest_order.get("run_id") or latest_approval.get("run_id"),
+            next_check="Confirm output posture before any approval or live execution path.",
+        ),
+        _pipeline_node(
+            "state",
+            "State",
+            f"{len(run_index)} indexed run(s)",
+            _pipeline_status_tone(operator_home.get("status")),
+            (
+                f"Dashboard state is {operator_home.get('status', 'unknown')}; "
+                f"health is {health.get('status', 'unknown')} and reconciliation is "
+                f"{_reconciliation_label(reconciliation.get('passed'))}."
+            ),
+            updated_at=run_index[0].get("created_at")
+            if run_index
+            else broker_snapshot.get("created_at"),
+            run_id=run_index[0].get("run_id") if run_index else broker_snapshot.get("run_id"),
+            next_check="Use this node to confirm persisted dashboard state exists.",
+        ),
+    ]
+
+
+def _app_pipeline(
+    app: dict[str, Any],
+    strategy_config: Any | None,
+    broker_account_overview: dict[str, Any],
+    risk_decisions: list[dict[str, Any]],
+    orders: list[dict[str, Any]],
+    approvals: list[dict[str, Any]],
+    signal_freshness: dict[str, Any],
+    config: Any,
+) -> dict[str, Any]:
+    strategy_id = str(app.get("strategy_id") or "")
+    account_id = getattr(strategy_config, "account_id", None)
+    account_row = _account_overview_row(broker_account_overview, account_id)
+    runs = app.get("runs") if isinstance(app.get("runs"), list) else []
+    latest_run = runs[0] if runs else {}
+    risk_row = _matched_run_or_account_row(risk_decisions, latest_run.get("run_id"), account_id)
+    order_row = _matched_run_or_account_row(orders, latest_run.get("run_id"), account_id)
+    approval_row = _matched_run_or_account_row(approvals, latest_run.get("run_id"), account_id)
+    signal_row = _signal_freshness_row(signal_freshness, strategy_id)
+    performance_snapshot = app.get("performance_snapshot") or {}
+    performance_quality = performance_snapshot.get("quality") or {}
+    evidence_status = performance_quality.get("status") or (
+        "ok" if app.get("snapshots") else "missing"
+    )
+    enabled = bool(getattr(strategy_config, "enabled", False))
+    signal_enabled = getattr(strategy_config, "signal_enabled", None)
+    output_status = (
+        order_row.get("approval_status")
+        or approval_row.get("status")
+        or _strategy_order_generation_mode(config, strategy_config)
+        or "read-only"
+    )
+    return {
+        "strategy_id": strategy_id,
+        "display_name": _virtuoso_app_display_name(strategy_id),
+        "account_id": account_id,
+        "nodes": [
+            _pipeline_node(
+                "account",
+                "Account",
+                "connected" if account_id else "missing",
+                "success" if account_id else "warning",
+                account_id or "No account is mapped to this strategy.",
+                updated_at=account_row.get("created_at"),
+                run_id=account_row.get("run_id"),
+                next_check=(
+                    "Set the strategy account mapping if this app should own an account sleeve."
+                ),
+            ),
+            _pipeline_node(
+                "data",
+                "Data",
+                account_row.get("status") or ("missing" if account_id else "disabled"),
+                account_row.get("tone") or ("warning" if account_id else "neutral"),
+                _account_pipeline_detail(account_row, account_id),
+                updated_at=account_row.get("created_at"),
+                run_id=account_row.get("run_id"),
+                next_check="Run account sync when the linked account snapshot is stale.",
+            ),
+            _pipeline_node(
+                "app",
+                "App",
+                "enabled" if enabled else "disabled",
+                "success" if enabled else "neutral",
+                "Signal generation is enabled for this app."
+                if signal_enabled
+                else "This app is configured without signal generation.",
+                updated_at=latest_run.get("created_at"),
+                run_id=latest_run.get("run_id"),
+                next_check="Review strategy_accounts.yaml for app enablement.",
+            ),
+            _pipeline_node(
+                "signal",
+                "Signal",
+                _validation_label(latest_run.get("validation_ok"))
+                if latest_run
+                else signal_row.get("status", "missing"),
+                _boolean_tone(latest_run.get("validation_ok"))
+                if latest_run
+                else _pipeline_status_tone(signal_row.get("status")),
+                _strategy_signal_detail(latest_run, signal_row),
+                updated_at=latest_run.get("created_at") or signal_row.get("latest_signal_at"),
+                run_id=latest_run.get("run_id") or signal_row.get("latest_signal_run_id"),
+                next_check=(
+                    "Generate a signal from the selected Virtuoso app if this node is stale "
+                    "or missing."
+                ),
+            ),
+            _pipeline_node(
+                "risk",
+                "Risk",
+                _approval_label(risk_row.get("approved")) if risk_row else "not_run",
+                _pipeline_status_tone(_approval_label(risk_row.get("approved")))
+                if risk_row
+                else "neutral",
+                _risk_pipeline_detail(risk_row)
+                if risk_row
+                else "No risk decision has been recorded for this app run.",
+                updated_at=risk_row.get("created_at") if risk_row else None,
+                run_id=risk_row.get("run_id") if risk_row else None,
+                next_check="Risk is expected only after Maestro evaluates a proposal.",
+            ),
+            _pipeline_node(
+                "output",
+                "Output",
+                output_status,
+                _pipeline_status_tone(output_status),
+                order_row.get("symbol")
+                or approval_row.get("status")
+                or "No order or approval output is recorded for this app.",
+                updated_at=order_row.get("created_at") or approval_row.get("created_at"),
+                run_id=order_row.get("run_id") or approval_row.get("run_id"),
+                next_check="Readonly dashboards should not create trading/admin/write output.",
+            ),
+            _pipeline_node(
+                "evidence",
+                "Evidence",
+                evidence_status,
+                _pipeline_status_tone(evidence_status),
+                _evidence_pipeline_detail(performance_quality),
+                updated_at=(performance_snapshot.get("latest") or {}).get("created_at"),
+                run_id=(performance_snapshot.get("latest") or {}).get("run_id"),
+                next_check=(
+                    "Backtest and performance evidence need enough history before they become "
+                    "complete."
+                ),
+            ),
+        ],
+    }
+
+
+def _pipeline_node(
+    node_id: str,
+    label: str,
+    status: Any,
+    tone: str,
+    detail: Any,
+    *,
+    updated_at: Any = None,
+    run_id: Any = None,
+    next_check: str = "",
+) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "label": label,
+        "status": status or "unknown",
+        "tone": tone or "neutral",
+        "detail": detail or "n/a",
+        "updated_at": updated_at,
+        "run_id": run_id,
+        "next_check": next_check or "Review dashboard evidence.",
+    }
+
+
+def _pipeline_status_tone(value: Any) -> str:
+    normalized = str(value or "").lower()
+    if normalized in {"connected", "enabled", "ready", "passed", "fresh", "success"}:
+        return "success"
+    if normalized in {"blocked", "danger", "failed", "rejected"}:
+        return "danger"
+    if normalized in {"missing", "stale", "warning", "not_run"}:
+        return "warning"
+    if normalized in {"disabled", "read-only", "read_only", "no_action"}:
+        return "neutral"
+    return _status_tone(value)
+
+
+def _freshness_pipeline_detail(freshness: list[dict[str, Any]]) -> str:
+    if not freshness:
+        return "No freshness rows are available."
+    rollup = _freshness_rollup(freshness)
+    attention = [row for row in freshness if _pipeline_status_tone(row.get("status")) != "success"]
+    if not attention:
+        return f"All tracked freshness checks are {rollup}."
+    names = ", ".join(_row_label(row, "Freshness") for row in attention[:3])
+    return f"{len(attention)} freshness check(s) need attention: {names}."
+
+
+def _signal_pipeline_detail(signal_freshness: dict[str, Any]) -> str:
+    strategies = signal_freshness.get("strategies") or []
+    if not strategies:
+        return "No signal package has been recorded yet."
+    return f"{len(strategies)} strategy signal freshness row(s) are tracked."
+
+
+def _risk_pipeline_detail(risk_row: dict[str, Any]) -> str:
+    if not risk_row:
+        return "No risk decision has been recorded."
+    violations = risk_row.get("violations") or []
+    if violations:
+        return f"Risk recorded {len(violations)} violation(s)."
+    return "Risk decision has no recorded violations."
+
+
+def _account_pipeline_detail(account_row: dict[str, Any], account_id: Any) -> str:
+    if not account_id:
+        return "This strategy has no linked account."
+    if not account_row:
+        return f"No dashboard account snapshot is available for {account_id}."
+    return (
+        f"{account_id} is {account_row.get('status', 'unknown')} with "
+        f"{account_row.get('positions_count', 0)} position(s)."
+    )
+
+
+def _strategy_signal_detail(latest_run: dict[str, Any], signal_row: dict[str, Any]) -> str:
+    if latest_run:
+        symbol = latest_run.get("signal_symbol") or "portfolio"
+        action = latest_run.get("signal_action") or "signal"
+        return f"Latest strategy run produced {action} for {symbol}."
+    if signal_row:
+        return f"Signal package status is {signal_row.get('status', 'unknown')}."
+    return "No strategy signal evidence is available."
+
+
+def _evidence_pipeline_detail(quality: dict[str, Any]) -> str:
+    reasons = quality.get("reasons") or []
+    if not reasons:
+        return "Performance evidence is available."
+    first = reasons[0] if isinstance(reasons[0], dict) else {}
+    return first.get("message") or first.get("code") or "Evidence needs more history."
+
+
+def _account_overview_row(
+    broker_account_overview: dict[str, Any], account_id: Any
+) -> dict[str, Any]:
+    if not account_id:
+        return {}
+    for row in broker_account_overview.get("accounts", []):
+        if str(row.get("account_id")) == str(account_id):
+            return row
+    return {}
+
+
+def _matched_run_or_account_row(
+    rows: list[dict[str, Any]], run_id: Any, account_id: Any
+) -> dict[str, Any]:
+    if run_id:
+        for row in rows:
+            if str(row.get("run_id")) == str(run_id):
+                return row
+    if account_id:
+        for row in rows:
+            account_ids = row.get("account_ids") or []
+            if str(row.get("account_id")) == str(account_id) or str(account_id) in {
+                str(item) for item in account_ids
+            }:
+                return row
+    return {}
+
+
+def _signal_freshness_row(signal_freshness: dict[str, Any], strategy_id: str) -> dict[str, Any]:
+    for row in signal_freshness.get("strategies", []):
+        if str(row.get("strategy_id")) == strategy_id:
+            return row
+    return {}
+
+
+def _latest_signal_freshness_time(signal_freshness: dict[str, Any]) -> Any:
+    strategies = signal_freshness.get("strategies") or []
+    return strategies[0].get("latest_signal_at") if strategies else None
+
+
+def _latest_signal_freshness_run_id(signal_freshness: dict[str, Any]) -> Any:
+    strategies = signal_freshness.get("strategies") or []
+    return strategies[0].get("latest_signal_run_id") if strategies else None
 
 
 def _operator_metrics(
@@ -653,21 +1116,19 @@ def _virtuoso_apps(
         for strategy in getattr(config, "strategies", [])
         if getattr(strategy, "readonly_enabled", True)
     }
-    strategy_ids = _virtuoso_strategy_ids(
-        list(strategy_configs),
-        strategy_runs,
-        strategy_book_performance,
-        strategy_book_snapshots,
-    )
+    strategy_ids = list(strategy_configs)
     enabled_count = sum(1 for strategy in strategy_configs.values() if strategy.enabled)
-    observed_count = len(
+    evidence_strategy_count = len(
         {
             row.get("strategy_id")
             for row in [*strategy_runs, *strategy_book_performance, *strategy_book_snapshots]
             if row.get("strategy_id")
         }
     )
-    latest_run = strategy_runs[0] if strategy_runs else {}
+    configured_strategy_runs = [
+        row for row in strategy_runs if row.get("strategy_id") in strategy_configs
+    ]
+    latest_run = configured_strategy_runs[0] if configured_strategy_runs else {}
     overview_rows = [
         _virtuoso_strategy_overview_row(
             strategy_id,
@@ -686,7 +1147,7 @@ def _virtuoso_apps(
                 enabled_count,
                 _count_tone(len(strategy_configs) - enabled_count),
             ),
-            _metric("Observed Apps", observed_count),
+            _metric("Evidence Strategy IDs", evidence_strategy_count),
             _metric("Latest Strategy Run", latest_run.get("created_at") or "n/a"),
         ],
         "overview": overview_rows,
@@ -702,6 +1163,9 @@ def _virtuoso_apps(
                     _strategy_rows(strategy_book_snapshots, strategy_id),
                 ),
                 "performance": _strategy_rows(strategy_book_performance, strategy_id),
+                "performance_snapshot": _strategy_performance_snapshot(
+                    _strategy_rows(strategy_book_performance, strategy_id),
+                ),
                 "attribution": _strategy_rows(strategy_attribution, strategy_id),
                 "snapshots": _strategy_rows(strategy_book_snapshots, strategy_id),
                 "runs": _strategy_rows(strategy_runs, strategy_id),
@@ -919,6 +1383,22 @@ def _virtuoso_strategy_ids(
     return ids
 
 
+def _virtuoso_app_display_name(strategy_id: str) -> str:
+    explicit_names = {
+        "tranquillo": "Tranquillo",
+        "crescendo_us": "Crescendo",
+        "fugue": "Fugue",
+    }
+    if strategy_id in explicit_names:
+        return explicit_names[strategy_id]
+    trimmed = strategy_id
+    for suffix in ("_us", "_kr", "_krw", "_usd"):
+        if trimmed.lower().endswith(suffix):
+            trimmed = trimmed[: -len(suffix)]
+            break
+    return " ".join(part.capitalize() for part in trimmed.split("_") if part)
+
+
 def _virtuoso_strategy_overview_row(
     strategy_id: str,
     strategy_config: Any | None,
@@ -929,6 +1409,7 @@ def _virtuoso_strategy_overview_row(
     latest_run = runs[0] if runs else {}
     enabled = getattr(strategy_config, "enabled", bool(runs or performance))
     return {
+        "app": _virtuoso_app_display_name(strategy_id),
         "strategy_id": strategy_id,
         "enabled": enabled,
         "entrypoint": getattr(strategy_config, "entrypoint", None),
@@ -953,7 +1434,7 @@ def _virtuoso_concept_rows(strategy_id: str, strategy_config: Any | None) -> lis
     allocation_policy = getattr(strategy_config, "signal_to_allocation", None)
     config_payload = getattr(strategy_config, "config", {}) or {}
     return [
-        {"aspect": "Virtuoso app", "value": strategy_id},
+        {"aspect": "Virtuoso app", "value": _virtuoso_app_display_name(strategy_id)},
         {"aspect": "Python module", "value": app_module or "n/a"},
         {"aspect": "Strategy class", "value": app_class or "n/a"},
         {
@@ -1132,6 +1613,72 @@ def _strategy_execution_sleeve_target(config: Any, strategy_config: Any | None) 
         getattr(strategy_config, "execution_sleeve", None),
     )
     return getattr(sleeve, "target_weight", None)
+
+
+def _strategy_performance_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    latest = rows[0] if rows else {}
+    cash_flow_markers = [
+        marker
+        for row in rows
+        for marker in row.get("cash_flow_events", [])
+        if isinstance(marker, dict)
+    ]
+    quality = _strategy_performance_quality(rows, cash_flow_markers)
+    return {
+        "schema_version": 1,
+        "latest": {
+            "created_at": latest.get("created_at"),
+            "run_id": latest.get("run_id"),
+            "strategy_id": latest.get("strategy_id"),
+            "book_id": latest.get("book_id"),
+            "current_value": latest.get("current_value") or latest.get("book_value"),
+            "book_value": latest.get("book_value"),
+            "twr": latest.get("twr") or latest.get("cumulative_return"),
+            "mwr": latest.get("mwr"),
+            "irr": latest.get("irr") or latest.get("mwr"),
+            "period_return": latest.get("period_return"),
+            "net_pnl": latest.get("net_pnl"),
+            "cumulative_cash_flow": latest.get("cumulative_cash_flow"),
+            "drawdown": latest.get("drawdown"),
+        },
+        "series": {
+            "value": rows,
+            "cash_flow_markers": cash_flow_markers,
+        },
+        "quality": quality,
+        "lineage": {
+            "source_tables": ["strategy_book_snapshots", "system_events.strategy_cash_flow"],
+            "return_method": "time_weighted_return_with_explicit_strategy_cash_flows",
+        },
+    }
+
+
+def _strategy_performance_quality(
+    rows: list[dict[str, Any]], cash_flow_markers: list[dict[str, Any]]
+) -> dict[str, Any]:
+    reasons = []
+    if len(rows) < 2:
+        reasons.append(
+            {
+                "code": "insufficient_history",
+                "message": (
+                    "At least two strategy book snapshots are required for performance history."
+                ),
+            }
+        )
+    if any((row.get("cash_flow") or 0.0) != 0.0 for row in rows) and not cash_flow_markers:
+        reasons.append(
+            {
+                "code": "missing_cash_flow_events",
+                "message": (
+                    "Strategy performance has cash-flow adjustments but no explicit markers."
+                ),
+            }
+        )
+    if not reasons:
+        return {"status": "ok", "reasons": []}
+    status = "missing" if reasons[0]["code"] == "insufficient_history" else "warning"
+    return {"status": status, "reasons": reasons}
 
 
 def _strategy_return_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:

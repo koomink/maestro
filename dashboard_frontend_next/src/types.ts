@@ -20,6 +20,31 @@ export type SignalFreshness = {
   }>;
 };
 
+
+export type PipelineNode = {
+  id: string;
+  label: string;
+  status: unknown;
+  tone: Tone;
+  detail: unknown;
+  updated_at?: string | null;
+  updated_at_display?: string | null;
+  run_id?: string | null;
+  next_check?: string | null;
+};
+
+export type WorkflowPipelineApp = {
+  strategy_id: string;
+  display_name: string;
+  account_id?: string | null;
+  nodes: PipelineNode[];
+};
+
+export type WorkflowPipelines = {
+  system: { nodes: PipelineNode[] };
+  apps: WorkflowPipelineApp[];
+};
+
 export type DashboardRefreshResponse = {
   status: string;
   accounts_synced: number;
@@ -33,6 +58,17 @@ export type GenerateSignalResponse = {
   loaded_strategies: string[];
   action_required: boolean;
   orders_preview_count: number;
+};
+
+export type AppPerformanceSnapshot = {
+  schema_version: number;
+  latest: Row;
+  series: {
+    value: Row[];
+    cash_flow_markers: Row[];
+  };
+  quality: { status: "ok" | "missing_cash_flow_events" | "unattributed_account_flow" | "insufficient_history" | string; reasons: Row[] };
+  lineage: Row;
 };
 
 export type DashboardSnapshot = {
@@ -119,6 +155,7 @@ export type DashboardSnapshot = {
     portfolio_history: Row[];
     broker_history: Row[];
   };
+  workflow_pipelines: WorkflowPipelines;
   virtuoso_apps: {
     metrics: Metric[];
     overview: Row[];
@@ -128,6 +165,7 @@ export type DashboardSnapshot = {
       concept: Row[];
       operation: Row[];
       performance: Row[];
+      performance_snapshot: AppPerformanceSnapshot;
       attribution: Row[];
       snapshots: Row[];
       runs: Row[];

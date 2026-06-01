@@ -42,6 +42,7 @@ export function columnsFor(rows: Row[]): string[] {
   const preferred = [
     "created_at",
     "as_of",
+    "app",
     "currency",
     "strategy_id",
     "symbol",

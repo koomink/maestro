@@ -143,6 +143,38 @@ def _multi_strategy_multi_currency_config(tmp_path: Path) -> Path:
                 }
             ],
         )
+    store.save_strategy_run(
+        "run_legacy",
+        "legacy_removed_app",
+        {
+            "source_signal": {"symbol": "LEGACY", "action": "hold"},
+            "result": {"confidence": 0.1, "allocations": {}},
+            "validation": {"ok": True, "errors": []},
+        },
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE strategy_book_snapshots SET created_at = ? WHERE run_id = ?",
+            ("2024-01-01T00:00:00+00:00", "run_multi_1"),
+        )
+        conn.execute(
+            "UPDATE strategy_book_snapshots SET created_at = ? WHERE run_id = ?",
+            ("2025-01-01T00:00:00+00:00", "run_multi_2"),
+        )
+    store.save_system_event(
+        "cash_flow_tranquillo",
+        "strategy_cash_flow",
+        {
+            "strategy_id": "tranquillo_us",
+            "account_id": "acct_usd",
+            "execution_sleeve": "usd_core",
+            "amount": 100.0,
+            "currency": "USD",
+            "flow_type": "deposit",
+            "effective_at": "2024-07-01T00:00:00+00:00",
+            "source": "telegram_voluntary_deposit_allocation",
+        },
+    )
     store.save_system_event(
         "run_multi_2",
         "broker_reconciliation",
@@ -398,12 +430,14 @@ def test_dashboard_snapshot_includes_feature_parity_read_models(tmp_path):
         "fx_status",
         "reconciliation_status",
     }
-    assert performance_snapshot["series"]["total_portfolio"] == payload["investment_console"][
-        "total_portfolio_performance"
-    ]
-    assert performance_snapshot["series"]["account"] == payload["investment_console"][
-        "account_performance"
-    ]
+    assert (
+        performance_snapshot["series"]["total_portfolio"]
+        == payload["investment_console"]["total_portfolio_performance"]
+    )
+    assert (
+        performance_snapshot["series"]["account"]
+        == payload["investment_console"]["account_performance"]
+    )
     if performance_snapshot["series"]["strategy_attribution"]:
         attribution_row = performance_snapshot["series"]["strategy_attribution"][0]
         assert "lineage" in attribution_row
@@ -447,8 +481,56 @@ def test_dashboard_snapshot_supports_multi_strategy_multi_currency_fixture(tmp_p
     assert {"KRW", "USD"} <= sleeve_currencies
     strategy_ids = {row["strategy_id"] for row in investment["strategy_attribution"]}
     assert {"tranquillo_us", "crescendo_kr"} <= strategy_ids
-    virtuoso_ids = {strategy["strategy_id"] for strategy in payload["virtuoso_apps"]["strategies"]}
+    virtuoso_strategies = payload["virtuoso_apps"]["strategies"]
+    virtuoso_ids = {strategy["strategy_id"] for strategy in virtuoso_strategies}
     assert {"tranquillo_us", "crescendo_kr"} <= virtuoso_ids
+    assert "legacy_removed_app" not in virtuoso_ids
+    virtuoso_metrics = {
+        metric["label"]: metric["value"] for metric in payload["virtuoso_apps"]["metrics"]
+    }
+    assert virtuoso_metrics["Configured Apps"] == 2
+    assert virtuoso_metrics["Evidence Strategy IDs"] == 3
+    overview_by_id = {row["strategy_id"]: row for row in payload["virtuoso_apps"]["overview"]}
+    assert overview_by_id["tranquillo_us"]["app"] == "Tranquillo"
+    assert overview_by_id["crescendo_kr"]["app"] == "Crescendo"
+    virtuoso_by_id = {strategy["strategy_id"]: strategy for strategy in virtuoso_strategies}
+    tranquillo_performance = virtuoso_by_id["tranquillo_us"]["performance_snapshot"]
+    assert tranquillo_performance["latest"]["current_value"] == 1100.0
+    assert tranquillo_performance["latest"]["cumulative_cash_flow"] == 100.0
+    assert tranquillo_performance["latest"]["net_pnl"] == 0.0
+    assert tranquillo_performance["latest"]["twr"] == 0.0
+    assert tranquillo_performance["series"]["cash_flow_markers"][0]["amount"] == 100.0
+    assert tranquillo_performance["quality"]["status"] == "ok"
+    pipelines = payload["workflow_pipelines"]
+    assert [node["id"] for node in pipelines["system"]["nodes"]] == [
+        "data",
+        "virtuoso",
+        "signal",
+        "maestro",
+        "risk",
+        "output",
+        "state",
+    ]
+    assert [app["strategy_id"] for app in pipelines["apps"]] == [
+        "tranquillo_us",
+        "crescendo_kr",
+    ]
+    tranquillo_pipeline = pipelines["apps"][0]
+    assert tranquillo_pipeline["display_name"] == "Tranquillo"
+    assert [node["id"] for node in tranquillo_pipeline["nodes"]] == [
+        "account",
+        "data",
+        "app",
+        "signal",
+        "risk",
+        "output",
+        "evidence",
+    ]
+    account_node = {node["id"]: node for node in tranquillo_pipeline["nodes"]}["account"]
+    assert account_node["status"] == "missing"
+    signal_node = {node["id"]: node for node in tranquillo_pipeline["nodes"]}["signal"]
+    assert signal_node["run_id"] == "run_multi_2"
+    assert signal_node["tone"] == "success"
 
 
 def test_dashboard_run_detail_endpoint_returns_audit_drilldown(tmp_path):

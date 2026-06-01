@@ -1,18 +1,56 @@
 import type { Row } from "../../types";
-import { chartPoints } from "../../utils/data";
+import { chartPoints, dateTime, firstValue } from "../../utils/data";
 import { formatValue } from "../../utils/format";
 import { Panel } from "../ui/Panel";
+
+function markerPoints(rows: Row[], points: ReturnType<typeof chartPoints>, xKey: string, yKey: string, markers: Row[]) {
+  const plottedRows = rows
+    .slice()
+    .reverse()
+    .filter((row) => Number.isFinite(Number(row[yKey])));
+  const rowTimes = plottedRows.map((row) => dateTime(row[xKey]));
+  if (!markers.length || !points.length || rowTimes.every((time) => !Number.isFinite(time))) {
+    return [];
+  }
+  return markers
+    .map((marker) => {
+      const markerTime = dateTime(firstValue(marker, ["effective_at", "created_at", "as_of", "timestamp", xKey]));
+      if (!Number.isFinite(markerTime)) {
+        return null;
+      }
+      let nearestIndex = 0;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      rowTimes.forEach((rowTime, index) => {
+        if (!Number.isFinite(rowTime)) {
+          return;
+        }
+        const distance = Math.abs(rowTime - markerTime);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = index;
+        }
+      });
+      const point = points[nearestIndex];
+      if (!point) {
+        return null;
+      }
+      return { ...point, marker };
+    })
+    .filter((point): point is ReturnType<typeof chartPoints>[number] & { marker: Row } => Boolean(point));
+}
 
 export function LineChart({
   title,
   rows,
   xKey,
   yKey,
+  markers = [],
 }: {
   title: string;
   rows: Row[];
   xKey: string;
   yKey: string;
+  markers?: Row[];
 }) {
   const points = chartPoints(rows, yKey);
   if (points.length < 2) {
@@ -30,6 +68,8 @@ export function LineChart({
   const firstPoint = points[0];
   const minVal = Math.min(...points.map((p) => p.raw));
   const maxVal = Math.max(...points.map((p) => p.raw));
+  const cashFlowPoints = markerPoints(rows, points, xKey, yKey, markers);
+  const gradientId = `grad-${title.replace(/\s+/g, "-")}`;
 
   return (
     <article className="chart-panel">
@@ -44,24 +84,26 @@ export function LineChart({
       </div>
       <svg viewBox="0 0 640 220" role="img" aria-label={title}>
         <defs>
-          <linearGradient id={`grad-${title.replace(/\s+/g, "-")}`} x1="0" y1="0" x2="0" y2="1">
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="var(--primary)" stopOpacity="0.18" />
             <stop offset="100%" stopColor="var(--primary)" stopOpacity="0.01" />
           </linearGradient>
         </defs>
         <path className="chart-grid" d="M 28 42 H 612 M 28 95 H 612 M 28 148 H 612 M 28 200 H 612" />
-        {/* Y-axis labels */}
         <text x="24" y="40" className="chart-label" textAnchor="end">{formatValue(maxVal)}</text>
         <text x="24" y="204" className="chart-label" textAnchor="end">{formatValue(minVal)}</text>
-        {/* Area fill */}
-        <path className="chart-area" d={areaPath} fill={`url(#grad-${title.replace(/\s+/g, "-")})`} />
-        {/* Line shadow and line */}
+        <path className="chart-area" d={areaPath} fill={`url(#${gradientId})`} />
         <path className="chart-line-shadow" d={linePath} />
         <path className="chart-line" d={linePath} />
-        {/* End point marker */}
+        {cashFlowPoints.map((point, index) => (
+          <g className="cash-flow-marker" key={`${point.x}-${index}`}>
+            <line x1={point.x} x2={point.x} y1="44" y2="200" />
+            <circle cx={point.x} cy={point.y} r="6" />
+            <title>{formatValue(point.marker.amount)}</title>
+          </g>
+        ))}
         <circle cx={lastPoint.x} cy={lastPoint.y} r="5" className="chart-dot" />
         <circle cx={lastPoint.x} cy={lastPoint.y} r="2.5" className="chart-dot-inner" />
-        {/* Start point marker */}
         <circle cx={firstPoint.x} cy={firstPoint.y} r="3.5" className="chart-dot-start" />
       </svg>
     </article>

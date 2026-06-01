@@ -1,7 +1,7 @@
 import type { Tone } from "../../types";
 import { SegmentedControl } from "../ui/SegmentedControl";
 
-const tabs = ["Daily Brief", "Analysis Report", "Virtuoso"] as const;
+const tabs = ["Portfolio", "Maestro", "Virtuoso"] as const;
 type TabName = (typeof tabs)[number];
 
 export function TopBar({
@@ -34,7 +34,7 @@ export function TopBar({
           *
         </span>
         <div>
-          <strong>Symphony Maestro</strong>
+          <strong>Symphony</strong>
           <span>Read-only portfolio intelligence</span>
         </div>
       </div>

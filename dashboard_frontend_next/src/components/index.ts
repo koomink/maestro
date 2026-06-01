@@ -6,6 +6,8 @@ export { SectionHeader } from "./layout/SectionHeader";
 // Tabs
 export { DailyBrief } from "./tabs/DailyBrief";
 export { AnalysisReport } from "./tabs/AnalysisReport";
+export { PortfolioReport } from "./tabs/PortfolioReport";
+export { MaestroReport } from "./tabs/MaestroReport";
 export { VirtuosoReport } from "./tabs/VirtuosoReport";
 
 // Console
@@ -18,6 +20,7 @@ export { ReadableTable } from "./data-display/ReadableTable";
 export { ReadableList } from "./data-display/ReadableList";
 export { KeyValueRows } from "./data-display/KeyValueRows";
 export { Signal } from "./data-display/Signal";
+export { PipelineGraph } from "./data-display/PipelineGraph";
 
 // UI
 export { MiniFact } from "./ui/MiniFact";
