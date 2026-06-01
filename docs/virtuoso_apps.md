@@ -240,6 +240,39 @@ has LLM or external-network requirements. The current default for wrappers is to
 request market and research data through Maestro DataHub instead of calling
 external data APIs directly.
 
+## Dashboard Performance And Funding Attribution
+
+The Dashboard exposes each configured Virtuoso app as a focused app view with
+`Overview`, `Performance`, `Backtest`, `Orders`, and `Evidence` subtabs.
+Historical strategy IDs from old runs remain available through evidence/audit
+read models, but they are not shown as current Virtuoso apps unless they remain
+in the active operator config.
+`Performance` is based on Maestro read models, not app-specific code. The app
+value series comes from `strategy_book_snapshots.book_value`, and explicit
+`strategy_cash_flow` system events are joined by `strategy_id` and
+`effective_at` to adjust app-level returns.
+
+The primary app metric is TWR, so approved deposits and withdrawals do not look
+like strategy alpha. Secondary metrics include net PnL, cumulative cash flow,
+current value, drawdown, and MWR/IRR. MWR/IRR uses dated strategy cash flows
+plus the latest app value and is useful for the operator's actual money-weighted
+experience.
+
+Cash-flow attribution is intentionally explicit. Broker snapshot
+`cash_flow`/`net_cash_flow` remains account-level reference data unless a
+Telegram-approved attribution records a `strategy_cash_flow` event with
+`strategy_id`, `account_id`, `execution_sleeve`, `amount`, `currency`,
+`flow_type`, `effective_at`, and Telegram/audit metadata. Strategy-requested
+funding records the event after the operator confirms the deposit flow.
+Voluntary account cash increases are proposed in Telegram and default to the
+configured target-weight split across active strategies in that account; the
+operator may approve the split, assign the whole amount to one strategy, or
+ignore the proposal.
+
+The `Backtest` dashboard subtab is present as the focused UI home for setup,
+latest result, metrics, and equity curve. A full Virtuoso backtest runner and
+persisted backtest result read model are still separate follow-up work.
+
 ## Runtime Lifecycle
 
 For each `run_once`, Maestro performs this strategy-facing sequence:

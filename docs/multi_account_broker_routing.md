@@ -10,6 +10,9 @@ Maestro routes broker execution with `strategy.account_id`.
   `paper_default` account in payloads.
 - `live_approval` strategies with explicit `accounts` must declare
   `strategy.account_id`.
+- Operator configs may set `broker_accounts_path` to load shared broker account
+  definitions from one YAML file. The accounts file is included in config
+  identity and runtime fingerprint checks.
 - Operator configs may set `strategy_account_map_path` to load shared
   strategy routing from one YAML file: account binding, execution sleeve,
   signal/readonly visibility, and order posture. The mapping file is included
@@ -46,39 +49,7 @@ Example:
 ```yaml
 app_fragment_paths:
   - ../../../Virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
-
-accounts:
-  - id: kis_mock
-    broker: kis
-    environment: paper_trading
-    account_id_env: KIS_MOCK_ACCOUNT_ID
-    app_key_env: KIS_MOCK_APP_KEY
-    app_secret_env: KIS_MOCK_APP_SECRET
-    token_cache_path: var/kis_mock_access_token.json
-    broker_products: [kis_domestic_stock]
-
-  - id: kis_isa
-    broker: kis
-    environment: real
-    account_id_env: KIS_ISA_ACCOUNT_ID
-    app_key_env: KIS_ISA_APP_KEY
-    app_secret_env: KIS_ISA_APP_SECRET
-    token_cache_path: var/kis_isa_access_token.json
-    broker_products: [kis_domestic_stock]
-
-  - id: toss_brokerage
-    broker: toss
-    environment: real
-
-  - id: kis_brokerage
-    broker: kis
-    environment: real
-    account_id_env: KIS_BROKERAGE_ACCOUNT_ID
-    app_key_env: KIS_BROKERAGE_APP_KEY
-    app_secret_env: KIS_BROKERAGE_APP_SECRET
-    token_cache_path: var/kis_brokerage_access_token.json
-    broker_products: [kis_domestic_stock, kis_overseas_stock]
-
+broker_accounts_path: broker_accounts.yaml
 strategy_account_map_path: strategy_accounts.yaml
 
 strategies:
@@ -188,6 +159,8 @@ Phase 1 operational support:
 
 Current operator split:
 
+- `configs/operator/broker_accounts.yaml`: shared account inventory for every
+  Symphony phase, including env-var names and broker product capability.
 - `configs/operator/symphony_readonly.yaml`: all configured accounts, no
   strategies, dashboard and Telegram account refresh.
 - `configs/operator/symphony_signal.yaml`: all configured accounts plus Virtuoso
@@ -199,7 +172,9 @@ Current operator split:
 The current strategy mapping routes `tranquillo -> kis_mock / tranquillo_isa`,
 `crescendo_us -> dev_sandbox / crescendo_us`, and
 `fugue -> dev_sandbox / fugue` through
-`configs/operator/strategy_accounts.yaml`.
+`configs/operator/strategy_accounts.yaml`. Account definitions are centralized in
+`configs/operator/broker_accounts.yaml`, including `kis_ps` for the pension
+savings account.
 
 ## Strategy Promotion And Account Binding
 

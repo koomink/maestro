@@ -141,6 +141,10 @@ Do not treat `live_readonly` as a strategy execution mode; signal generation is
 a separate operator phase. `run-once` remains a legacy single-pipeline entrypoint
 for paper and older workflows.
 
+Broker account definitions are centralized in `broker_accounts_path`, normally
+`/root/maestro-operator/broker_accounts.yaml` in deployment. Add or disable KIS
+logical accounts there, and keep secret values in `/etc/maestro/maestro.env`.
+
 Strategy-to-account routing for `symphony_signal` and `symphony_approval` is
 centralized in `strategy_account_map_path`, normally
 `/root/maestro-operator/strategy_accounts.yaml` in deployment. Change `enabled`, account mappings, and phase controls there, then validate the phase configs before the next scheduled signal run.

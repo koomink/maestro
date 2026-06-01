@@ -30,19 +30,29 @@ Edit the generated config before any rehearsal:
   account and strategy.
 - Keep secrets in environment variables only.
 
-Required environment variables:
+Required operator environment values live in `/etc/maestro/maestro.env` on the
+VPS:
 
 ```bash
-export KIS_MOCK_ACCOUNT_ID=...
-export KIS_MOCK_APP_KEY=...
-export KIS_MOCK_APP_SECRET=...
-export TELEGRAM_BOT_TOKEN=...
+KIS_MOCK_ACCOUNT_ID=...
+KIS_MOCK_APP_KEY=...
+KIS_MOCK_APP_SECRET=...
+TELEGRAM_BOT_TOKEN=...
 ```
 
-Maestro CLI commands automatically load `.env` from the current working
-directory without overriding environment variables already set by the shell.
-For local operation from the repository root, copy `.env.example` to `.env` and
-fill the real values there instead of exporting them every time.
+That file is the operator environment source of truth used by systemd. For
+manual CLI runs from the repository root, load it before invoking Maestro:
+
+```bash
+set -a
+. /etc/maestro/maestro.env
+set +a
+.venv/bin/maestro ...
+```
+
+Maestro CLI commands still load a repo-local `.env` when one exists, without
+overriding variables already set by the shell. Use that only for isolated local
+development, not for VPS operator secrets.
 
 `KIS_ACCESS_TOKEN` is optional. Leave it unset unless you have a real pre-issued
 token. If it is absent, Maestro can use the configured token cache path.

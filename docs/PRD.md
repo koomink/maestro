@@ -274,10 +274,12 @@ And Maestro will:
   status; FX conversion must not affect execution, buying power, or risk gates
 - CSV export for performance views without dashboard write controls
 
-Current implementation covers account, currency-sleeve, and total-portfolio
-read models from persisted broker snapshots/events, plus dashboard charts and
-CSV export. Strategy attribution, stale-age labeling, and persisted performance
-tables remain future work.
+Current implementation covers account, currency-sleeve, total-portfolio, and
+Virtuoso app performance read models from persisted broker snapshots/events,
+strategy book snapshots, and explicit Telegram-attributed strategy cash-flow
+events, plus dashboard charts and CSV export. Dedicated persisted performance
+tables, richer lot-level strategy attribution, and the full Virtuoso backtest
+runner remain future work.
 
 ### Phase 10: Limited Live Automation
 
@@ -381,6 +383,10 @@ Current and future requirement:
   converted total return from stale FX.
 - Dashboard rendering must use persisted snapshots/read models and must not call
   KIS or FX endpoints directly.
+- Virtuoso app performance should use TWR as the primary strategy return, show
+  net PnL, cumulative cash flow, current value, drawdown, and MWR/IRR, and use
+  explicit Telegram-approved `strategy_cash_flow` events as the app-level
+  funding source of truth.
 - Dashboard must not expose secrets.
 - Dashboard should be accessible through localhost or Tailscale/VPN rather than public internet.
 

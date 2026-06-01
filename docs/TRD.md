@@ -212,9 +212,11 @@ one account. Many strategies may share one account. Legacy single-account
 paper-trading accounts are operationally routed through the existing KIS
 clients; Toss accounts are configuration-visible but fail closed for broker
 operations until an official trading OpenAPI is available.
-Operator phase configs can set `strategy_account_map_path` so signal and
-approval share one strategy-to-account mapping file. The loader applies that
-mapping before validation, and config identity includes the mapping file bytes.
+Operator phase configs can set `broker_accounts_path` so all phases share one
+broker account inventory file. They can also set `strategy_account_map_path` so
+signal and approval share one strategy-to-account mapping file. The loader
+applies the account inventory before the strategy mapping and before validation;
+config identity includes both shared file byte streams.
 
 The v0.2 provider planning contract is documented in [datahub.md](datahub.md).
 Future DataHub providers should route by canonical symbol, asset type, data type,
@@ -304,7 +306,8 @@ material broker snapshot drift from the signal baseline and carries
   package, and execute approval/order workflow without re-running Virtuoso
   strategies.
 
-Strategy-level phase controls are loaded from the shared
+Broker account definitions are loaded from the shared `broker_accounts_path`
+file. Strategy-level phase controls are loaded from the shared
 `strategy_account_map_path` file. `enabled` is the operator-facing switch for
 whether the app is in the Symphony universe. `readonly` controls dashboard/Telegram
 visibility, `signal` controls whether `symphony_signal` imports and runs
@@ -1359,6 +1362,27 @@ System event read models use a centralized required-field contract from
 audited without failing old/custom events at read time. Unknown event types are
 reported as untracked rather than invalid.
 
+Virtuoso app performance now exposes a per-app `performance_snapshot` under
+`dashboard_snapshot.virtuoso_apps.strategies[*]` for strategies present in the
+active operator config. Historical strategy IDs from old runs remain evidence
+rows in audit/read models but are not listed as current Virtuoso apps. The
+read model uses
+`strategy_book_snapshots` as the app value series and explicit
+`strategy_cash_flow` system events as the authoritative app-level deposit and
+withdrawal ledger. TWR is the primary return metric; net PnL is computed as
+ending value minus starting value minus cumulative cash flow; drawdown uses app
+value peaks; and MWR/IRR is computed from irregular dated cash flows plus the
+ending app value.
+
+Telegram funding attribution records `strategy_cash_flow` for
+strategy-requested deposits after the operator confirms funding. Voluntary
+account cash increases detected from broker snapshots create a
+`strategy_cash_flow_proposal` with target-weight allocations for active
+strategies in the account; approval records one `strategy_cash_flow` event per
+allocation and a `strategy_cash_flow_proposal_ack`. Broker snapshot cash-flow
+fields remain account-level reference data until this explicit attribution
+event exists.
+
 Dashboard freshness rows expose their policy metadata. Configured checks with
 no row are `missing`; disabled checks are `not_configured`; rows with invalid
 or over-limit timestamps are `stale`; and failed reconciliation rows remain
@@ -1445,4 +1469,4 @@ Future VPS deployment:
 - JSONL logs
 - Tailscale for dashboard access
 - Telegram bot polling or webhook
-- KIS secrets via `.env` or secret manager
+- KIS secrets via `/etc/maestro/maestro.env` or a secret manager

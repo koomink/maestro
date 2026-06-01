@@ -938,10 +938,20 @@ environment variable names:
 - `KIS_APPROVAL_KEY`: optional pre-issued WebSocket approval key; leave unset
   unless it is a real current key
 
-Maestro CLI commands load `.env` from the current working directory when the
-file exists and do not override variables already set by the shell. For local
-operator rehearsals, copy `.env.example` to `.env`, fill the KIS and Telegram
-values, and run Maestro from the repository root.
+Operator deployments keep real KIS and Telegram values in
+`/etc/maestro/maestro.env`; repo-local `.env` files are not the production source
+of truth. For manual CLI runs on the VPS, load the operator environment first:
+
+```bash
+set -a
+. /etc/maestro/maestro.env
+set +a
+.venv/bin/maestro ...
+```
+
+Maestro CLI commands still load a repo-local `.env` when one exists, without
+overriding variables already set by the shell. Use that only for isolated local
+development, not for the VPS operator secrets.
 
 The `live_readonly` adapter is read-only. It does not submit, cancel, amend, buy,
 sell, enable `live_auto`, or add market orders. Normal tests use fake/fixture KIS
@@ -1015,8 +1025,8 @@ maestro dashboard --config configs/live_readonly.yaml
 ```
 
 The dashboard is read-only and served by one FastAPI process with a built
-Vite/React frontend. It opens as an editorial operator dashboard with Daily Brief, Analysis
-Report, Virtuoso, and a toggleable Console drawer. The backend exposes only read-only JSON
+Vite/React frontend. It opens as an editorial operator dashboard with Portfolio, Maestro,
+Virtuoso, and a toggleable Console drawer. The backend exposes only read-only JSON
 endpoints over persisted read models; it does not call live KIS endpoints and
 does not expose state-changing write controls. Frontend evidence search/status
 filters, display-currency toggle, theme selection, charts, run drill-down, and
@@ -1025,7 +1035,7 @@ CSV downloads are browser-local UI actions.
 Dashboard operator actions keep read-only state refresh separate from
 proposal generation. Global `Refresh` should update broker/account snapshots and
 check latest signal freshness, while per-app `Generate Signal` controls live in
-the Virtuoso tab and must not approve or execute orders. Daily Brief `Broker Truth`
+the Virtuoso tab and must not approve or execute orders. Portfolio `Broker Accounts`
 is a hybrid multi-account overview: it summarizes total broker value and account
 health, then lists each enabled real broker account as fresh/stale/missing; sandbox
 accounts are excluded from broker truth. See
@@ -1223,6 +1233,13 @@ dashboard should render graphs from persisted read models only, including stored
 FX source, rate, timestamp, and freshness status for converted views; it should
 not call KIS or FX endpoints during page rendering and should not expose trading
 or admin write controls.
+
+Virtuoso app performance uses strategy book snapshots as the app value series
+and explicit Telegram-attributed `strategy_cash_flow` events as the app-level
+deposit/withdrawal ledger. The Dashboard presents TWR first, with net PnL,
+cumulative cash flow, current value, drawdown, MWR/IRR, and cash-flow markers.
+Broker snapshot cash-flow fields remain account-level reference data unless the
+operator attributes the funding event through Telegram.
 
 The current dashboard is a FastAPI/React read-only surface. A future full
 Maestro daemon/API/WebSocket dashboard should wait until Maestro has a daemon

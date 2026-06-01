@@ -684,6 +684,12 @@
       calculations
 - [x] Add fixture/fake-client tests for strategy attribution and stale data
       labeling once implemented
+- [x] Add Virtuoso app-level performance snapshots with TWR, net PnL, cumulative
+      cash flow, current value, drawdown, MWR/IRR, and cash-flow markers
+- [x] Add Telegram-approved `strategy_cash_flow` attribution for
+      strategy-requested and voluntary account funding flows
+- [x] Add focused Virtuoso app dashboard subtabs for Overview, Performance,
+      Backtest, Orders, and Evidence
 - [x] Document current operator usage and limitations in README/TRD
 
 ## Symphony Signal-to-Approval Workflow
@@ -700,6 +706,7 @@
       target/risk preview, order preview, and no-op/action-required status
 - [x] Add stricter DataHub evidence checks
 - [x] Add signal expiry, config identity checks, and account mapping validation
+- [x] Add shared `broker_accounts_path` support so Symphony phases use one broker account inventory.
 - [x] Add shared `strategy_account_map_path` support so signal and approval use
       one account routing file
 - [x] Extend the shared strategy mapping with `readonly`, `signal`, and

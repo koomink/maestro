@@ -603,6 +603,9 @@ Planned scope:
   strategy accounting exists.
 - Add read-only dashboard graphs for account equity/PnL, strategy returns,
   currency-sleeve returns, portfolio return, drawdown, and reconciliation status.
+- Virtuoso app performance now uses strategy book value plus explicit
+  Telegram-approved `strategy_cash_flow` events to show TWR, net PnL, cumulative
+  cash flow, current value, drawdown, MWR/IRR, and cash-flow markers per app.
 - Restructure the read-only dashboard around a Symphony Map landing view,
   Operator Cockpit, Investment Console, Virtuoso Apps, and Audit Trail so the UI
   reflects the Symphony/Maestro/Virtuoso operating model instead of exposing

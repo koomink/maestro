@@ -106,8 +106,9 @@ Set these in the operator environment, not in YAML and not in source control:
 - `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS`
 
 If `KIS_ACCESS_TOKEN` is absent, the KIS adapter may use `kis.token_cache_path`
-to cache an issued token. Do not keep placeholder token values in `.env`. The
-token cache must not be committed or copied into audit/state records.
+to cache an issued token. Keep operator secrets in `/etc/maestro/maestro.env`;
+do not keep real or placeholder secret values in a repo-local `.env`. The token
+cache must not be committed or copied into audit/state records.
 If `KIS_APPROVAL_KEY` is absent, the KIS adapter can issue `/oauth2/Approval`
 for future WebSocket sessions; treat that key as a secret with the same
 no-audit/no-state rule.

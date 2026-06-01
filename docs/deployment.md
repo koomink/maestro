@@ -58,8 +58,9 @@ maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 Then follow `docs/personal_operator_mvp.md` before enabling any live submission.
 For the Symphony operator flow, copy all three operator configs to an
 operator-local config set, for example `/root/maestro-operator/`. Copy the
-shared `strategy_accounts.yaml` file beside them; `symphony_signal.yaml` and
-`symphony_approval.yaml` both load it through `strategy_account_map_path`. Use
+shared `broker_accounts.yaml` and `strategy_accounts.yaml` files beside them;
+the phase configs load them through `broker_accounts_path` and
+`strategy_account_map_path`. Use
 `symphony_readonly.yaml` for account refresh, `symphony_signal.yaml` for
 Virtuoso signal generation, and `symphony_approval.yaml` for approval-gated
 dry-run execution. Keep the copied files on the same `state.sqlite_path`,
