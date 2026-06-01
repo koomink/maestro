@@ -34,6 +34,9 @@ class SystemEventType(StrEnum):
     BROKER_RISK_HALT = "broker_risk_halt"
     FILL_RECONCILIATION = "fill_reconciliation"
     DYNAMIC_UNIVERSE_EVALUATION = "dynamic_universe_evaluation"
+    STRATEGY_CASH_FLOW = "strategy_cash_flow"
+    STRATEGY_CASH_FLOW_PROPOSAL = "strategy_cash_flow_proposal"
+    STRATEGY_CASH_FLOW_PROPOSAL_ACK = "strategy_cash_flow_proposal_ack"
     TELEGRAM_COMMAND = "telegram_command"
 
 
@@ -58,6 +61,24 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
         "skipped_fills",
         "portfolio_updated",
     ),
+    SystemEventType.STRATEGY_CASH_FLOW: (
+        "strategy_id",
+        "account_id",
+        "execution_sleeve",
+        "amount",
+        "currency",
+        "flow_type",
+        "effective_at",
+    ),
+    SystemEventType.STRATEGY_CASH_FLOW_PROPOSAL: (
+        "proposal_id",
+        "account_id",
+        "amount",
+        "currency",
+        "effective_at",
+        "allocations",
+    ),
+    SystemEventType.STRATEGY_CASH_FLOW_PROPOSAL_ACK: ("proposal_id", "status"),
     "fx_rate_snapshot": ("source", "as_of", "rates"),
 }
 

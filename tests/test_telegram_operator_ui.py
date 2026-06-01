@@ -117,9 +117,10 @@ def test_telegram_operator_signal_command_generates_strategy_signal_for_dashboar
 
     text = client.sent_messages[-1]["text"]
     assert text.startswith("Signal generated")
-    assert "strategy_id: tranquillo" in text
+    assert "strategy: Tranquillo" in text
+    assert "strategy_id: tranquillo" not in text
     assert "signal_run_id:" in text
-    assert "loaded_strategies: tranquillo" in text
+    assert "loaded_strategies: Tranquillo" in text
     assert "orders_preview_count:" in text
     signal_run_id = text.split("signal_run_id: ", 1)[1].splitlines()[0]
     signal = store.load_signal_package(signal_run_id)
@@ -134,6 +135,28 @@ def test_telegram_operator_signal_command_generates_strategy_signal_for_dashboar
     )
     assert freshness["strategies"][0]["strategy_id"] == "tranquillo"
     assert freshness["strategies"][0]["latest_signal_run_id"] == signal_run_id
+
+
+def test_telegram_operator_signal_command_rejects_internal_strategy_id_alias(tmp_path):
+    readonly_config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_signal_config_path(tmp_path)
+    config = load_config(readonly_config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+        signal_config_path=signal_config_path,
+    )
+
+    assert router.process_update(message_update("/signal_crescendo_us"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "Signal generation failed" in text
+    assert "Unknown signal command: /signal_crescendo_us" in text
 
 
 def test_telegram_operator_signal_command_rejects_signal_disabled_strategy(tmp_path):
@@ -226,6 +249,136 @@ def test_telegram_operator_funding_complete_regenerates_signal_and_creates_appro
     assert ack_events[0]["payload"]["status"] == "confirmed"
     assert store.status()["counts"]["approvals"] == 1
     assert store.status()["counts"]["orders"] == 2
+    cash_flow_events = store.list_system_events_by_type("strategy_cash_flow", limit=10)
+    assert cash_flow_events[0]["payload"]["strategy_id"] == "tranquillo"
+    assert cash_flow_events[0]["payload"]["amount"] == 1_000_000.0
+    assert cash_flow_events[0]["payload"]["currency"] == "KRW"
+    assert cash_flow_events[0]["payload"]["flow_type"] == "deposit"
+    assert cash_flow_events[0]["payload"]["source"] == "telegram_funding_confirmation"
+
+
+def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target_split(tmp_path):
+    config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_broker_account_snapshot(
+        "run_old_cash",
+        "paper_cash",
+        {
+            "account": {
+                "account_id": "paper_cash",
+                "currency": "KRW",
+                "cash": 1_000_000.0,
+                "total_value": 1_000_000.0,
+                "positions": [],
+                "source": "fixture",
+            }
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_new_cash",
+        "paper_cash",
+        {
+            "account": {
+                "account_id": "paper_cash",
+                "currency": "KRW",
+                "cash": 2_000_000.0,
+                "total_value": 2_000_000.0,
+                "positions": [],
+                "source": "fixture",
+            }
+        },
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    proposal_text = client.sent_messages[-1]["text"]
+    assert proposal_text.startswith("Unattributed deposit detected")
+    assert "Tranquillo: 600,000.00 KRW" in proposal_text
+    assert "Crescendo: 400,000.00 KRW" in proposal_text
+    proposal_events = store.list_system_events_by_type("strategy_cash_flow_proposal", limit=10)
+    proposal_id = proposal_events[0]["payload"]["proposal_id"]
+
+    assert router.process_update(callback_update(f"operator:cash-flow:approve:{proposal_id}"))
+
+    assert client.answered_callbacks[-1]["text"] == "Cash-flow allocation approved."
+    assert "Strategy cash-flow allocation recorded" in client.edited_messages[-1]["text"]
+    cash_flow_events = store.list_system_events_by_type("strategy_cash_flow", limit=10)
+    amounts_by_strategy = {
+        event["payload"]["strategy_id"]: event["payload"]["amount"]
+        for event in cash_flow_events
+    }
+    assert amounts_by_strategy == {"tranquillo": 600_000.0, "crescendo_us": 400_000.0}
+    ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
+    assert ack_events[0]["payload"]["status"] == "approved"
+
+
+def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp_path):
+    config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_broker_account_snapshot(
+        "run_old_cash",
+        "paper_cash",
+        {
+            "account": {
+                "account_id": "paper_cash",
+                "currency": "KRW",
+                "cash": 1_000_000.0,
+                "total_value": 1_000_000.0,
+                "positions": [],
+                "source": "fixture",
+            }
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_new_cash",
+        "paper_cash",
+        {
+            "account": {
+                "account_id": "paper_cash",
+                "currency": "KRW",
+                "cash": 2_000_000.0,
+                "total_value": 2_000_000.0,
+                "positions": [],
+                "source": "fixture",
+            }
+        },
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    proposal_events = store.list_system_events_by_type("strategy_cash_flow_proposal", limit=10)
+    proposal_id = proposal_events[0]["payload"]["proposal_id"]
+    markup = client.sent_messages[-1]["reply_markup"]
+    callback_buttons = [button for row in markup["inline_keyboard"] for button in row]
+    assert any(button["text"] == "Assign Crescendo" for button in callback_buttons)
+
+    callback_data = f"operator:cash-flow:assign:{proposal_id}:crescendo_us"
+    assert router.process_update(callback_update(callback_data))
+
+    assert client.answered_callbacks[-1]["text"] == "Cash-flow allocation assigned."
+    cash_flow_events = store.list_system_events_by_type("strategy_cash_flow", limit=10)
+    assert len(cash_flow_events) == 1
+    payload = cash_flow_events[0]["payload"]
+    assert payload["strategy_id"] == "crescendo_us"
+    assert payload["amount"] == 1_000_000.0
+    assert payload["execution_sleeve"] == "satellite"
+    ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
+    assert ack_events[0]["payload"]["status"] == "assigned"
+    assert ack_events[0]["payload"]["assigned_strategy_id"] == "crescendo_us"
 
 
 def test_telegram_operator_funding_callback_rejects_unauthorized_user(tmp_path):
@@ -337,6 +490,28 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
     assert "Recent orders" in sent_text
     assert "Recent approvals" in sent_text
     assert len(store.list_system_events_by_type("telegram_command", limit=20)) == 8
+
+
+def test_telegram_operator_apps_uses_current_virtuoso_strategy_names(tmp_path):
+    config_path = _telegram_signal_config_path(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+
+    assert router.process_update(message_update("/apps"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "Tranquillo: on signal:on" in text
+    assert "Crescendo: on signal:on" in text
+    assert "tranquillo: on" not in text
+    assert "crescendo_us: on" not in text
 
 
 def test_telegram_operator_status_groups_fields_for_readability(tmp_path):
@@ -843,6 +1018,28 @@ def test_telegram_bot_commands_include_signal_generation_commands(tmp_path):
     } not in commands
 
 
+def test_telegram_bot_commands_do_not_expose_legacy_signal_aliases(tmp_path):
+    config_path = _telegram_signal_config_path(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["strategies"][0]["id"] = "ataraxia"
+    raw["strategies"][1]["id"] = "snowball_us"
+    config_path.write_text(yaml.safe_dump(raw))
+    signal_config = load_config(config_path)
+
+    commands = telegram_bot_commands(signal_config)
+
+    assert {"command": "signal_tranquillo", "description": "Generate Tranquillo signal"} in commands
+    assert {"command": "signal_crescendo", "description": "Generate Crescendo signal"} in commands
+    assert {
+        "command": "signal_ataraxia",
+        "description": "Generate Tranquillo signal",
+    } not in commands
+    assert {
+        "command": "signal_snowball_us",
+        "description": "Generate Crescendo signal",
+    } not in commands
+
+
 def test_telegram_operator_cli_rejects_placeholder_chat_ids(tmp_path):
     config_path = _telegram_config_path(tmp_path)
     raw = yaml.safe_load(config_path.read_text())
@@ -1086,6 +1283,69 @@ def _telegram_buy_only_config_path(
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
 
+
+
+def _telegram_voluntary_deposit_config_path(tmp_path) -> Path:
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["portfolio"]["initial_cash"] = 1_000_000
+    raw["state"]["sqlite_path"] = str(tmp_path / "voluntary_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "voluntary_audit.jsonl")
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+    }
+    raw["accounts"] = [
+        {
+            "id": "paper_cash",
+            "broker": "sandbox",
+            "environment": "paper_trading",
+            "enabled": True,
+        }
+    ]
+    raw["strategies"] = [
+        {
+            "id": "tranquillo",
+            "enabled": True,
+            "signal_enabled": True,
+            "weight": 0.6,
+            "account_id": "paper_cash",
+            "execution_sleeve": "core",
+            "entrypoint": f"{__name__}:TranquilloTelegramSignalStrategy",
+            "config": {},
+        },
+        {
+            "id": "crescendo_us",
+            "enabled": True,
+            "signal_enabled": True,
+            "weight": 0.4,
+            "account_id": "paper_cash",
+            "execution_sleeve": "satellite",
+            "entrypoint": f"{__name__}:CrescendoTelegramSignalStrategy",
+            "config": {},
+        },
+    ]
+    raw["execution_sleeves"] = {
+        "accounts": {
+            "paper_cash": {
+                "core": {
+                    "currency_sleeve": "KRW",
+                    "target_weight": 0.6,
+                    "order_generation_mode": "target_rebalance",
+                },
+                "satellite": {
+                    "currency_sleeve": "KRW",
+                    "target_weight": 0.4,
+                    "order_generation_mode": "target_rebalance",
+                },
+            }
+        }
+    }
+    config_path = tmp_path / "telegram_voluntary_deposit.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
 
 def _telegram_live_readonly_config_path(tmp_path) -> Path:
     raw = yaml.safe_load(Path("tests/fixtures/configs/live_readonly_mock.yaml").read_text())

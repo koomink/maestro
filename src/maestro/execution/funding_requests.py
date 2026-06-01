@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from maestro.config.execution import ExecutionConfig
 from maestro.core.ids import new_funding_request_id
+from maestro.core.strategy_names import strategy_display_name
 from maestro.state.models import PortfolioState
 
 FundingRequestStatus = Literal["pending", "confirmed", "canceled"]
@@ -80,7 +81,7 @@ def format_contribution_funding_request(
         [
             "Maestro funding request",
             f"request_id: {payload.get('request_id')}",
-            f"strategy: {', '.join(payload.get('strategy_ids') or []) or 'unknown'}",
+            f"strategy: {_strategy_label(payload.get('strategy_ids') or [])}",
             f"account_id: {payload.get('account_id') or 'n/a'}",
             f"execution_sleeve: {payload.get('execution_sleeve') or 'n/a'}",
             f"available_cash: {_money(payload.get('available_cash'), currency)}",
@@ -91,6 +92,12 @@ def format_contribution_funding_request(
             "이 버튼은 주문 승인이 아니며, 주문은 별도로 승인해야 합니다.",
         ]
     )
+
+
+def _strategy_label(strategy_ids: list[object]) -> str:
+    if not strategy_ids:
+        return "unknown"
+    return ", ".join(strategy_display_name(strategy_id) for strategy_id in strategy_ids)
 
 
 def funding_request_reply_markup(request_id: str) -> dict[str, Any]:

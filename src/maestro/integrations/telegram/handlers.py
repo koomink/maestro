@@ -4,7 +4,14 @@ from typing import Any
 
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
+from maestro.core.clock import utc_now
 from maestro.core.ids import new_run_id
+from maestro.core.strategy_names import (
+    strategy_command_slug as _telegram_strategy_command_slug,
+)
+from maestro.core.strategy_names import (
+    strategy_display_name as _telegram_strategy_display_name,
+)
 from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.dashboard.actions import generate_strategy_signal
 from maestro.dashboard.read_models import (
@@ -178,6 +185,14 @@ class TelegramOperatorCommandRouter:
                 user_id,
                 username,
             )
+        if action.startswith("cash-flow:"):
+            return self._process_cash_flow_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
         if action not in {"confirm:pause", "confirm:kill-switch"}:
             self._answer(callback, "This command is no longer active.")
             self._record(command, chat_id, user_id, username, "stale_callback")
@@ -194,6 +209,95 @@ class TelegramOperatorCommandRouter:
         self._answer(callback, f"{transition} confirmed.")
         self._edit_callback_message(callback, text)
         self._record(command, chat_id, user_id, username, "confirmed")
+        return True
+
+
+    def _process_cash_flow_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":")
+        transition = parts[1] if len(parts) > 1 else ""
+        valid_callback = (
+            len(parts) == 3
+            and parts[0] == "cash-flow"
+            and transition in {"approve", "ignore"}
+        ) or (
+            len(parts) == 4
+            and parts[0] == "cash-flow"
+            and transition == "assign"
+        )
+        if not valid_callback:
+            self._answer(callback, "This cash-flow proposal is no longer active.")
+            self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
+            return True
+        proposal_id = parts[2]
+        assigned_strategy_id = parts[3] if transition == "assign" else None
+        proposal = self._load_pending_cash_flow_proposal(proposal_id)
+        if proposal is None:
+            self._answer(callback, "This cash-flow proposal is no longer active.")
+            self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
+            return True
+        if transition == "ignore":
+            self._save_cash_flow_proposal_ack(proposal_id, "ignored", user_id, username)
+            self._answer(callback, "Cash-flow allocation ignored.")
+            self._edit_callback_message(callback, "Cash-flow allocation ignored.")
+            self._record("/cash-flow_ignore", chat_id, user_id, username, "ignored")
+            return True
+        allocations = list(proposal.get("allocations") or [])
+        if assigned_strategy_id:
+            allocation = next(
+                (row for row in allocations if row.get("strategy_id") == assigned_strategy_id),
+                None,
+            )
+            if allocation is None:
+                self._answer(callback, "This cash-flow proposal is no longer active.")
+                self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
+                return True
+            allocations = [dict(allocation, amount=proposal.get("amount"))]
+        effective_at = utc_now().isoformat()
+        for allocation in allocations:
+            payload = {
+                "strategy_id": allocation.get("strategy_id"),
+                "account_id": proposal.get("account_id"),
+                "execution_sleeve": allocation.get("execution_sleeve"),
+                "amount": allocation.get("amount"),
+                "currency": proposal.get("currency"),
+                "flow_type": "deposit",
+                "effective_at": effective_at,
+                "source": "telegram_voluntary_deposit_allocation",
+                "proposal_id": proposal_id,
+                "decided_by": username or str(user_id),
+            }
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                new_run_id(),
+                "strategy_cash_flow",
+                payload,
+            )
+        if assigned_strategy_id:
+            self._save_cash_flow_proposal_ack(
+                proposal_id,
+                "assigned",
+                user_id,
+                username,
+                assigned_strategy_id=assigned_strategy_id,
+            )
+            self._answer(callback, "Cash-flow allocation assigned.")
+            self._record("/cash-flow_assign", chat_id, user_id, username, "assigned")
+        else:
+            self._save_cash_flow_proposal_ack(proposal_id, "approved", user_id, username)
+            self._answer(callback, "Cash-flow allocation approved.")
+            self._record("/cash-flow_approve", chat_id, user_id, username, "approved")
+        self._edit_callback_message(
+            callback,
+            "Strategy cash-flow allocation recorded\nproposal_id: " + proposal_id,
+        )
         return True
 
 
@@ -263,6 +367,12 @@ class TelegramOperatorCommandRouter:
         strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
         if not strategy_ids:
             raise ValueError("Funding request is missing strategy_ids")
+        self._record_strategy_cash_flow_from_funding_request(
+            request,
+            strategy_ids=strategy_ids,
+            user_id=user_id,
+            username=username,
+        )
         signal_summary = MaestroOrchestrator(
             signal_config,
             config_identity=signal_identity,
@@ -309,6 +419,206 @@ class TelegramOperatorCommandRouter:
         else:
             lines.append("approval_status: not_required")
         return "\n".join(lines)
+
+    def _record_strategy_cash_flow_from_funding_request(
+        self,
+        request: dict[str, Any],
+        *,
+        strategy_ids: list[str],
+        user_id: int,
+        username: str | None,
+    ) -> None:
+        amount = _float_or_none(request.get("required_shortfall"))
+        if amount is None or amount <= 0:
+            return
+        currency = str(request.get("currency") or "")
+        effective_at = utc_now().isoformat()
+        per_strategy_amount = amount / len(strategy_ids)
+        for strategy_id in strategy_ids:
+            payload = {
+                "strategy_id": strategy_id,
+                "account_id": request.get("account_id"),
+                "execution_sleeve": request.get("execution_sleeve"),
+                "amount": per_strategy_amount,
+                "currency": currency,
+                "flow_type": "deposit",
+                "effective_at": effective_at,
+                "source": "telegram_funding_confirmation",
+                "request_id": request.get("request_id"),
+                "source_signal_run_id": request.get("source_signal_run_id"),
+                "decided_by": username or str(user_id),
+            }
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                new_run_id(),
+                "strategy_cash_flow",
+                payload,
+            )
+
+
+    def _send_voluntary_deposit_allocation_proposal(self, chat_id: int) -> None:
+        proposal = self._build_voluntary_deposit_proposal()
+        if proposal is None:
+            return
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "strategy_cash_flow_proposal",
+            proposal,
+        )
+        lines = [
+            "Unattributed deposit detected",
+            f"proposal_id: {proposal['proposal_id']}",
+            f"account_id: {proposal['account_id']}",
+            f"amount: {_money(proposal['amount'])} {proposal['currency']}",
+            "",
+            "Suggested allocation:",
+        ]
+        for allocation in proposal["allocations"]:
+            amount = _money(allocation["amount"])
+            lines.append(
+                f"- {_telegram_strategy_display_name(allocation['strategy_id'])}: "
+                f"{amount} {proposal['currency']}"
+            )
+        self._send(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=_cash_flow_proposal_markup(proposal),
+        )
+
+    def _build_voluntary_deposit_proposal(self) -> dict[str, Any] | None:
+        snapshots = self.store.list_broker_account_snapshots(limit=20)
+        if len(snapshots) < 2:
+            return None
+        latest = snapshots[0]
+        latest_payload = latest.get("payload") or {}
+        latest_account = (
+            latest_payload.get("account") if isinstance(latest_payload, Mapping) else {}
+        )
+        if not isinstance(latest_account, Mapping):
+            return None
+        account_id = _broker_snapshot_account_id(latest)
+        previous = next(
+            (row for row in snapshots[1:] if _broker_snapshot_account_id(row) == account_id),
+            None,
+        )
+        if previous is None:
+            return None
+        previous_payload = previous.get("payload") or {}
+        previous_account = (
+            previous_payload.get("account") if isinstance(previous_payload, Mapping) else {}
+        )
+        if not isinstance(previous_account, Mapping):
+            return None
+        latest_cash = _cash_by_currency(latest_account)
+        previous_cash = _cash_by_currency(previous_account)
+        for currency, cash in latest_cash.items():
+            increase = cash - previous_cash.get(currency, 0.0)
+            if increase <= 0:
+                continue
+            if self._cash_flow_proposal_exists(latest.get("id"), account_id, currency, increase):
+                return None
+            allocations = self._target_cash_flow_allocations(account_id, increase)
+            if not allocations:
+                return None
+            return {
+                "proposal_id": new_run_id(),
+                "status": "pending",
+                "account_id": account_id,
+                "broker_snapshot_id": latest.get("id"),
+                "previous_broker_snapshot_id": previous.get("id"),
+                "amount": increase,
+                "currency": currency,
+                "flow_type": "deposit",
+                "source": "broker_snapshot_cash_increase",
+                "created_at": utc_now().isoformat(),
+                "allocations": allocations,
+            }
+        return None
+
+    def _target_cash_flow_allocations(self, account_id: str, amount: float) -> list[dict[str, Any]]:
+        candidates = []
+        for strategy in getattr(self.config, "strategies", []):
+            if not getattr(strategy, "enabled", False):
+                continue
+            if getattr(strategy, "account_id", None) != account_id:
+                continue
+            sleeve = self.config.execution_sleeves.sleeve(
+                getattr(strategy, "account_id", None),
+                getattr(strategy, "execution_sleeve", None),
+            )
+            weight = _float_or_none(getattr(sleeve, "target_weight", None))
+            if weight is None:
+                weight = _float_or_none(getattr(strategy, "weight", None))
+            if weight is None or weight <= 0:
+                continue
+            candidates.append((strategy, weight))
+        total_weight = sum(weight for _, weight in candidates)
+        if total_weight <= 0:
+            return []
+        return [
+            {
+                "strategy_id": strategy.id,
+                "execution_sleeve": getattr(strategy, "execution_sleeve", None),
+                "target_weight": weight / total_weight,
+                "amount": round(amount * weight / total_weight, 6),
+            }
+            for strategy, weight in candidates
+        ]
+
+    def _cash_flow_proposal_exists(
+        self, broker_snapshot_id: object, account_id: str, currency: str, amount: float
+    ) -> bool:
+        for row in self.store.list_system_events_by_type("strategy_cash_flow_proposal", limit=1000):
+            payload = row.get("payload") or {}
+            if (
+                payload.get("broker_snapshot_id") == broker_snapshot_id
+                and payload.get("account_id") == account_id
+                and payload.get("currency") == currency
+                and _float_or_none(payload.get("amount")) == amount
+            ):
+                return True
+        return False
+
+    def _load_pending_cash_flow_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        acked = {
+            str(row["payload"].get("proposal_id"))
+            for row in self.store.list_system_events_by_type(
+                "strategy_cash_flow_proposal_ack",
+                limit=1000,
+            )
+        }
+        if proposal_id in acked:
+            return None
+        for row in self.store.list_system_events_by_type("strategy_cash_flow_proposal", limit=1000):
+            payload = row.get("payload") or {}
+            if payload.get("proposal_id") == proposal_id and payload.get("status") == "pending":
+                return payload
+        return None
+
+    def _save_cash_flow_proposal_ack(
+        self,
+        proposal_id: str,
+        status: str,
+        user_id: int,
+        username: str | None,
+        **extra: Any,
+    ) -> None:
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "strategy_cash_flow_proposal_ack",
+            {
+                "proposal_id": proposal_id,
+                "status": status,
+                "decided_by": username or str(user_id),
+                **extra,
+            },
+        )
+
 
     def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id") or "")
@@ -477,13 +787,19 @@ class TelegramOperatorCommandRouter:
                 ),
             )
             return
-        loaded = ",".join(result.get("loaded_strategies") or []) or "none"
+        loaded = (
+            ", ".join(
+                _telegram_strategy_display_name(item)
+                for item in result.get("loaded_strategies") or []
+            )
+            or "none"
+        )
         self._send(
             chat_id,
             "\n".join(
                 [
                     "Signal generated",
-                    f"strategy_id: {result['strategy_id']}",
+                    f"strategy: {_telegram_strategy_display_name(result['strategy_id'])}",
                     f"signal_run_id: {result['signal_run_id']}",
                     f"loaded_strategies: {loaded}",
                     f"action_required: {str(result['action_required']).lower()}",
@@ -534,6 +850,7 @@ class TelegramOperatorCommandRouter:
             chat_id,
             "\n".join(lines),
         )
+        self._send_voluntary_deposit_allocation_proposal(chat_id)
 
     def _portfolio(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
@@ -586,7 +903,8 @@ class TelegramOperatorCommandRouter:
             signal = "signal:on" if strategy.signal_enabled else "signal:off"
             posture = strategy.order_posture or self.config.execution.order_posture
             lines.append(
-                f"{strategy.id}: {status} {signal} account={strategy.account_id or 'n/a'} "
+                f"{_telegram_strategy_display_name(strategy.id)}: {status} {signal} "
+                f"account={strategy.account_id or 'n/a'} "
                 f"order_posture={posture}"
             )
         latest_runs = build_strategy_runs_table(self.store, limit=5)
@@ -595,7 +913,9 @@ class TelegramOperatorCommandRouter:
             lines.append("Recent strategy runs")
             for row in latest_runs:
                 ok = row["validation_ok"]
-                lines.append(f"{row['strategy_id']}: validation_ok={ok}")
+                lines.append(
+                    f"{_telegram_strategy_display_name(row['strategy_id'])}: validation_ok={ok}"
+                )
         self._send(chat_id, "\n".join(lines))
 
     def _orders(self, chat_id: int) -> None:
@@ -854,6 +1174,38 @@ def _confirmation_markup(action: str) -> dict[str, Any]:
     }
 
 
+def _cash_flow_proposal_markup(proposal: Mapping[str, Any]) -> dict[str, Any]:
+    proposal_id = str(proposal.get("proposal_id") or "")
+    keyboard = [
+        [
+            {
+                "text": "Approve allocation",
+                "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cash-flow:approve:{proposal_id}",
+            },
+            {
+                "text": "Ignore",
+                "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cash-flow:ignore:{proposal_id}",
+            },
+        ]
+    ]
+    for allocation in proposal.get("allocations") or []:
+        strategy_id = str(_mapping(allocation).get("strategy_id") or "")
+        if not strategy_id:
+            continue
+        keyboard.append(
+            [
+                {
+                    "text": f"Assign {_telegram_strategy_display_name(strategy_id)}",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}cash-flow:assign:"
+                        f"{proposal_id}:{strategy_id}"
+                    ),
+                }
+            ]
+        )
+    return {"inline_keyboard": keyboard}
+
+
 def _mask_identifier(value: object) -> str:
     text = str(value or "")
     if not text:
@@ -883,6 +1235,24 @@ def _number(value: object) -> str:
         return "unknown"
 
 
+def _float_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _broker_snapshot_account_id(row: Mapping[str, Any]) -> str:
+    payload = _mapping(row.get("payload"))
+    account = _mapping(payload.get("account"))
+    return str(
+        row.get("account_id")
+        or payload.get("account_id")
+        or account.get("account_id")
+        or ""
+    )
+
+
 def _cash_by_currency(account: Mapping[str, Any]) -> dict[str, float]:
     cash_by_currency = account.get("cash_by_currency")
     if isinstance(cash_by_currency, Mapping) and cash_by_currency:
@@ -895,7 +1265,7 @@ def _cash_by_currency(account: Mapping[str, Any]) -> dict[str, float]:
     if not _is_number(cash):
         return {}
     cash_balance = account.get("cash_balance")
-    currency = "unknown"
+    currency = str(account.get("currency") or "unknown")
     if isinstance(cash_balance, Mapping):
         currency = str(cash_balance.get("currency") or currency)
     return {currency: float(cash)}
@@ -994,6 +1364,10 @@ def _portfolio_position_line(
     )
 
 
+def _mapping(value: object) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
 def _mapping_items(value: object):
     if not isinstance(value, Mapping):
         return []
@@ -1053,16 +1427,11 @@ def _strategy_id_for_signal_command(command: str, config: MaestroConfig) -> str 
 
 
 def _signal_command_names(strategy_id: str) -> list[str]:
-    slug = _telegram_command_slug(strategy_id)
-    names = [_primary_signal_command(strategy_id)]
-    canonical = f"signal_{slug}"
-    if canonical not in names:
-        names.append(canonical)
-    return names
+    return [_primary_signal_command(strategy_id)]
 
 
 def _primary_signal_command(strategy_id: str) -> str:
-    slug = _telegram_command_slug(strategy_id)
+    slug = _telegram_strategy_command_slug(strategy_id) or _telegram_command_slug(strategy_id)
     if slug.endswith("_us"):
         slug = slug.removesuffix("_us")
     return f"signal_{slug}"
@@ -1085,8 +1454,7 @@ def _telegram_command_slug(value: str) -> str:
 
 
 def _strategy_display_name(strategy_id: str) -> str:
-    slug = _telegram_command_slug(strategy_id).removesuffix("_us")
-    return " ".join(part.capitalize() for part in slug.split("_") if part)
+    return _telegram_strategy_display_name(strategy_id)
 
 
 __all__ = ["TelegramOperatorCommandRouter", "telegram_bot_commands"]

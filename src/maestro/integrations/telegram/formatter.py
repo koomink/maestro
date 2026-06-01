@@ -1,4 +1,5 @@
 from maestro.approval.models import ApprovalRequest
+from maestro.core.strategy_names import strategy_display_label
 
 
 def format_approval_request(request: ApprovalRequest) -> str:
@@ -79,7 +80,7 @@ def _format_order(index: int, order: dict) -> list[str]:
 
 
 def _strategy_label(strategy_ids: list[str]) -> str:
-    return ", ".join(strategy_ids) if strategy_ids else "unknown"
+    return strategy_display_label(strategy_ids)
 
 
 def _approval_total_label(request: ApprovalRequest) -> str:

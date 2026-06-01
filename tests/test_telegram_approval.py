@@ -254,6 +254,19 @@ def test_telegram_approval_message_shows_order_details_and_strategy_source():
     assert "금액: 180.50 USD" in message
 
 
+def test_telegram_approval_message_uses_current_virtuoso_strategy_names():
+    request = approval_request().model_copy(
+        update={"source_strategy_ids": ["ataraxia", "crescendo_us", "trading_agents"]}
+    )
+
+    message = format_approval_request(request)
+
+    assert "🧠 Strategy: Tranquillo, Crescendo, Fugue" in message
+    assert "ataraxia" not in message
+    assert "crescendo_us" not in message
+    assert "trading_agents" not in message
+
+
 def test_approval_manager_records_source_strategy_ids():
     manager = ApprovalManager(
         ApprovalConfig(enabled=True, provider="console", require_approval=True),
