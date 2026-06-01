@@ -27,14 +27,26 @@ def prepare_config(path: str | Path) -> PreparedConfig:
     )
     if app_fragment_fingerprint_parts:
         fingerprint_bytes = b"\0".join([fingerprint_bytes, *app_fragment_fingerprint_parts])
+    accounts_path_value = values.get("broker_accounts_path")
+    if accounts_path_value is not None:
+        if not isinstance(accounts_path_value, str):
+            raise ValueError("broker_accounts_path must be a string")
+        accounts_path = _resolve_config_relative_path(accounts_path_value, config_path)
+        accounts_bytes = accounts_path.read_bytes()
+        values = _apply_broker_accounts(values, accounts_path, accounts_bytes)
+        fingerprint_bytes = b"\0".join(
+            [
+                fingerprint_bytes,
+                b"broker_accounts_path",
+                str(accounts_path).encode("utf-8"),
+                accounts_bytes,
+            ]
+        )
     map_path_value = values.get("strategy_account_map_path")
     if map_path_value is not None:
         if not isinstance(map_path_value, str):
             raise ValueError("strategy_account_map_path must be a string")
-        map_path = Path(map_path_value).expanduser()
-        if not map_path.is_absolute():
-            map_path = config_path.parent / map_path
-        map_path = map_path.resolve()
+        map_path = _resolve_config_relative_path(map_path_value, config_path)
         map_bytes = map_path.read_bytes()
         values = _apply_strategy_account_map(values, map_path, map_bytes)
         fingerprint_bytes = b"\0".join(
@@ -46,6 +58,29 @@ def prepare_config(path: str | Path) -> PreparedConfig:
             ]
         )
     return PreparedConfig(raw=values, fingerprint_bytes=fingerprint_bytes)
+
+
+def _resolve_config_relative_path(path_value: str, config_path: Path) -> Path:
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+def _apply_broker_accounts(
+    raw: dict[str, Any], accounts_path: Path, accounts_bytes: bytes
+) -> dict[str, Any]:
+    if "accounts" in raw:
+        raise ValueError("broker_accounts_path cannot be mixed with inline accounts")
+    accounts_raw = yaml.safe_load(accounts_bytes)
+    if not isinstance(accounts_raw, dict):
+        raise ValueError(f"broker accounts config must be a YAML mapping: {accounts_path}")
+    accounts = accounts_raw.get("accounts")
+    if not isinstance(accounts, list):
+        raise ValueError(f"broker accounts config requires an accounts list: {accounts_path}")
+    values = dict(raw)
+    values["accounts"] = accounts
+    return values
 
 
 def _apply_strategy_account_map(

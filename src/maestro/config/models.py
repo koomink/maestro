@@ -47,6 +47,7 @@ class MaestroConfig(StrictConfigModel):
         default_factory=dict, exclude=True
     )
     strategy_account_map_path: str | None = None
+    broker_accounts_path: str | None = None
     portfolio: PortfolioConfig
     strategies: list[StrategyPluginConfig]
     universe: UniverseConfig = Field(default_factory=UniverseConfig)

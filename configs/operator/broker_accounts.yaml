@@ -1,0 +1,70 @@
+accounts:
+  - id: kis_mock
+    broker: kis
+    environment: paper_trading
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_MOCK_ACCOUNT_ID
+    app_key_env: KIS_MOCK_APP_KEY
+    app_secret_env: KIS_MOCK_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_mock_access_token.json
+    timeout_seconds: 10
+  - id: kis_isa
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_ISA_ACCOUNT_ID
+    app_key_env: KIS_ISA_APP_KEY
+    app_secret_env: KIS_ISA_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_isa_access_token.json
+    timeout_seconds: 10
+  - id: kis_brokerage
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_overseas_stock
+    broker_products:
+      - kis_overseas_stock
+    account_id_env: KIS_BROKERAGE_ACCOUNT_ID
+    app_key_env: KIS_BROKERAGE_APP_KEY
+    app_secret_env: KIS_BROKERAGE_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_brokerage_us_access_token.json
+    timeout_seconds: 10
+    quote_market_code: J
+  - id: kis_ps
+    broker: kis
+    environment: real
+    enabled: true
+    provider: kis
+    broker_product: kis_domestic_stock
+    broker_products:
+      - kis_domestic_stock
+    account_id_env: KIS_PS_ACCOUNT_ID
+    app_key_env: KIS_PS_APP_KEY
+    app_secret_env: KIS_PS_APP_SECRET
+    access_token_env: KIS_ACCESS_TOKEN
+    approval_key_env: KIS_APPROVAL_KEY
+    token_cache_path: var/kis_ps_access_token.json
+    timeout_seconds: 10
+  - id: dev_sandbox
+    broker: sandbox
+    environment: paper_trading
+    enabled: true
+    broker_product: kis_overseas_stock
+    broker_products:
+      - kis_domestic_stock
+      - kis_overseas_stock

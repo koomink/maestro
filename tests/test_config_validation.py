@@ -852,7 +852,7 @@ def test_current_runtime_configs_load():
         *(
             str(path)
             for path in sorted(Path("configs/operator").glob("*.yaml"))
-            if path.name != "strategy_accounts.yaml"
+            if path.name not in {"strategy_accounts.yaml", "broker_accounts.yaml"}
         ),
     ]
     assert len(paths) == 6
@@ -873,6 +873,9 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
     assert readonly.strategy_account_map_path == "strategy_accounts.yaml"
     assert signal.strategy_account_map_path == "strategy_accounts.yaml"
     assert approval.strategy_account_map_path == "strategy_accounts.yaml"
+    assert readonly.broker_accounts_path == "broker_accounts.yaml"
+    assert signal.broker_accounts_path == "broker_accounts.yaml"
+    assert approval.broker_accounts_path == "broker_accounts.yaml"
     assert [strategy.get("account_id") for strategy in signal_raw["strategies"]] == [
         None,
         None,
@@ -924,6 +927,7 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         ("kis_mock", "kis", "paper_trading"),
         ("kis_isa", "kis", "real"),
         ("kis_brokerage", "kis", "real"),
+        ("kis_ps", "kis", "real"),
         ("dev_sandbox", "sandbox", "paper_trading"),
     ]
     assert [
@@ -938,6 +942,7 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
             "KIS_BROKERAGE_APP_KEY",
             "KIS_BROKERAGE_APP_SECRET",
         ),
+        ("kis_ps", "KIS_PS_ACCOUNT_ID", "KIS_PS_APP_KEY", "KIS_PS_APP_SECRET"),
         ("dev_sandbox", None, "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET"),
     ]
     assert [
@@ -1602,6 +1607,10 @@ def _operator_signal_raw_with_absolute_fragments() -> dict:
     raw["app_fragment_paths"] = [
         str((config_path.parent / path).resolve()) for path in raw.get("app_fragment_paths", [])
     ]
+    if raw.get("broker_accounts_path"):
+        raw["broker_accounts_path"] = str(
+            (config_path.parent / raw["broker_accounts_path"]).resolve()
+        )
     return raw
 
 

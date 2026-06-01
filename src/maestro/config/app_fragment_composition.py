@@ -25,6 +25,7 @@ APP_FRAGMENT_OPERATOR_OWNED_KEYS = {
     "monitoring",
     "profile_stage",
     "strategy_account_map_path",
+    "broker_accounts_path",
     "app_fragment_paths",
     "app_fragment_recommendations",
 }
@@ -253,8 +254,7 @@ def _merge_strategy_dict(
             continue
         if key in merged and merged[key] != operator_value:
             raise ValueError(
-                f"Conflicting app fragment strategy field for {operator_strategy.get('id')}: "
-                f"{key}"
+                f"Conflicting app fragment strategy field for {operator_strategy.get('id')}: {key}"
             )
         merged[key] = deepcopy(operator_value)
     return merged
