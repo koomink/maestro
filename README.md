@@ -1025,12 +1025,13 @@ maestro dashboard --config configs/live_readonly.yaml
 ```
 
 The dashboard is read-only and served by one FastAPI process with a built
-Vite/React frontend. It opens as an editorial operator dashboard with Portfolio, Maestro,
-Virtuoso, and a toggleable Console drawer. The backend exposes only read-only JSON
-endpoints over persisted read models; it does not call live KIS endpoints and
-does not expose state-changing write controls. Frontend evidence search/status
-filters, display-currency toggle, theme selection, charts, run drill-down, and
-CSV downloads are browser-local UI actions.
+Vite/React frontend. The active frontend source is `dashboard_frontend/`; the
+older `dashboard_frontend_next/` tree is retained as legacy source. It opens as a
+dense terminal-style operator dashboard with Portfolio, Maestro, Virtuoso,
+Research, and a toggleable Console drawer. The backend exposes read-model JSON
+endpoints over persisted state; it does not expose trading/admin controls.
+Frontend evidence search, display-currency toggle, charts, and Research review
+are browser-local/read-model UI actions.
 
 Dashboard operator actions keep read-only state refresh separate from
 proposal generation. Global `Refresh` should update broker/account snapshots and

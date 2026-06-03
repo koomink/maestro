@@ -16,6 +16,6 @@
     "noEmit": true,
     "jsx": "react-jsx"
   },
-  "include": ["dashboard_frontend_next/src"],
+  "include": ["dashboard_frontend/src"],
   "references": []
 }
