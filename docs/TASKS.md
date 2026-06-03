@@ -713,6 +713,8 @@
       strategy-level `order_posture` controls
 - [x] Extend the shared strategy mapping with execution sleeves, per-sleeve
       `order_generation_mode`, target weights, and cash rebalance boundaries
+- [x] Add a generic multi-account contribution allocator and apply Tranquillo v1
+      across `kis_ps / tranquillo_ps` and `kis_isa / tranquillo_isa`
 - [x] Add brokerless `dev_sandbox` routing for development strategies that need
       signal/approval UX rehearsal without KIS or Toss broker access
 - [x] Reject mixed strategy order posture within one account in a Symphony run

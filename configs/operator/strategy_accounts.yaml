@@ -1,6 +1,24 @@
 execution_sleeves:
   accounts:
-    kis_mock:
+    kis_ps:
+      tranquillo_ps:
+        currency_sleeve: KRW
+        target_weight: 1.0
+        order_generation_mode: buy_only_contribution
+        contribution:
+          enabled: true
+          currency: KRW
+          sleeve: KRW
+          monthly_budget: 500000
+          min_monthly_budget: 500000
+          max_monthly_budget: 500000
+          buy_day: 25
+          non_trading_day_policy: next_trading_day
+          target_policy: buy_only_toward_target
+          funding_request:
+            enabled: true
+
+    kis_isa:
       tranquillo_isa:
         currency_sleeve: KRW
         target_weight: 1.0
@@ -9,8 +27,8 @@ execution_sleeves:
           enabled: true
           currency: KRW
           sleeve: KRW
-          monthly_budget: 3000000
-          min_monthly_budget: 2000000
+          monthly_budget: 4000000
+          min_monthly_budget: 1660000
           max_monthly_budget: 4000000
           buy_day: 25
           non_trading_day_policy: next_trading_day
@@ -29,11 +47,28 @@ execution_sleeves:
         target_weight: 1.0
         order_generation_mode: target_rebalance
 
+multi_account_contributions:
+  tranquillo:
+    strategy_id: tranquillo
+    allocation_basis: aggregate_current_holdings
+    order_generation_mode: buy_only_contribution
+    account_targets:
+      - account_id: kis_ps
+        execution_sleeve: tranquillo_ps
+        allowed_symbols:
+          - KODEX_US_DIVIDEND_DOWJONES
+        monthly_budget: 500000
+      - account_id: kis_isa
+        execution_sleeve: tranquillo_isa
+        allowed_symbols:
+          - TIGER_NASDAQ100_LEVERAGE
+          - KODEX_US_DIVIDEND_DOWJONES
+        min_monthly_budget: 1660000
+        max_monthly_budget: 4000000
+
 strategies:
   tranquillo:
     enabled: true
-    account_id: kis_mock
-    execution_sleeve: tranquillo_isa
     readonly: true
     signal: true
     order_posture: dry_run

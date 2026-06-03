@@ -98,9 +98,7 @@ def _apply_strategy_account_map(
     strategies = raw.get("strategies", [])
     if not isinstance(strategies, list):
         return raw
-    strategy_ids = {
-        strategy.get("id") for strategy in strategies if isinstance(strategy, dict)
-    }
+    strategy_ids = {strategy.get("id") for strategy in strategies if isinstance(strategy, dict)}
     known_ids = {strategy_id for strategy_id in strategy_ids if strategy_id}
     unknown_ids = sorted(set(strategy_map) - known_ids)
     if unknown_ids:
@@ -120,9 +118,7 @@ def _apply_strategy_account_map(
             mapped_strategies.append(strategy_values)
             continue
         if strategy_id not in strategy_map:
-            if strategy_values.get("enabled", True) and strategy_values.get(
-                "signal_enabled", True
-            ):
+            if strategy_values.get("enabled", True) and strategy_values.get("signal_enabled", True):
                 missing_ids.append(strategy_id)
             mapped_strategies.append(strategy_values)
             continue
@@ -163,6 +159,15 @@ def _apply_strategy_account_map(
         ):
             raise ValueError("strategy_account_map_path execution_sleeves conflicts with config")
         values["execution_sleeves"] = mapping_raw["execution_sleeves"]
+    if "multi_account_contributions" in mapping_raw:
+        if (
+            "multi_account_contributions" in values
+            and values["multi_account_contributions"] != mapping_raw["multi_account_contributions"]
+        ):
+            raise ValueError(
+                "strategy_account_map_path multi_account_contributions conflicts with config"
+            )
+        values["multi_account_contributions"] = mapping_raw["multi_account_contributions"]
     return values
 
 

@@ -1482,8 +1482,8 @@ def _virtuoso_operation_rows(
         },
         {
             "item": "Account",
-            "value": _display_value(getattr(strategy_config, "account_id", None)),
-            "status": "ok" if getattr(strategy_config, "account_id", None) else "missing",
+            "value": _display_value(_strategy_account_display(config, strategy_config)),
+            "status": "ok" if _strategy_account_display(config, strategy_config) else "missing",
         },
         {
             "item": "Order posture",
@@ -1492,8 +1492,10 @@ def _virtuoso_operation_rows(
         },
         {
             "item": "Execution sleeve",
-            "value": _display_value(getattr(strategy_config, "execution_sleeve", None)),
-            "status": "ok" if getattr(strategy_config, "execution_sleeve", None) else "missing",
+            "value": _display_value(_strategy_execution_sleeve_display(config, strategy_config)),
+            "status": (
+                "ok" if _strategy_execution_sleeve_display(config, strategy_config) else "missing"
+            ),
         },
         {
             "item": "Order mode",
@@ -1574,6 +1576,41 @@ def _execution_sleeve_summary(
                 "order_posture": getattr(strategy, "order_posture", None),
             }
         )
+    for group_id, group in getattr(config, "multi_account_contributions", {}).items():
+        strategy_config = next(
+            (
+                strategy
+                for strategy in strategies
+                if getattr(strategy, "id", None) == group.strategy_id
+            ),
+            None,
+        )
+        for target in group.account_targets:
+            sleeve = config.execution_sleeves.sleeve(
+                target.account_id,
+                target.execution_sleeve,
+            )
+            if sleeve is None:
+                continue
+            rows.append(
+                {
+                    "account_id": target.account_id,
+                    "execution_sleeve": target.execution_sleeve,
+                    "strategy_id": group.strategy_id,
+                    "contribution_group_id": group_id,
+                    "currency_sleeve": sleeve.currency_sleeve,
+                    "target_weight": sleeve.target_weight,
+                    "current_weight": None,
+                    "drift": None,
+                    "current_value": latest_values.get(group.strategy_id),
+                    "allocated_cash": None,
+                    "order_generation_mode": group.order_generation_mode,
+                    "readonly_enabled": getattr(strategy_config, "readonly_enabled", None),
+                    "signal_enabled": getattr(strategy_config, "signal_enabled", None),
+                    "order_posture": getattr(strategy_config, "order_posture", None),
+                    "allowed_symbols": list(target.allowed_symbols),
+                }
+            )
     return {
         "rows": rows,
         "metrics": [
@@ -1605,14 +1642,43 @@ def _strategy_order_generation_mode(config: Any, strategy_config: Any | None) ->
     return getattr(execution, "order_generation_mode", None)
 
 
+def _strategy_account_display(config: Any, strategy_config: Any | None) -> Any:
+    if strategy_config is None:
+        return None
+    group = _strategy_multi_account_group(config, strategy_config)
+    if group is not None:
+        return ", ".join(target.account_id for target in group.account_targets)
+    return getattr(strategy_config, "account_id", None)
+
+
+def _strategy_execution_sleeve_display(config: Any, strategy_config: Any | None) -> Any:
+    if strategy_config is None:
+        return None
+    group = _strategy_multi_account_group(config, strategy_config)
+    if group is not None:
+        return ", ".join(target.execution_sleeve for target in group.account_targets)
+    return getattr(strategy_config, "execution_sleeve", None)
+
+
 def _strategy_execution_sleeve_target(config: Any, strategy_config: Any | None) -> Any:
     if strategy_config is None:
         return None
+    if _strategy_multi_account_group(config, strategy_config) is not None:
+        return "multi-account"
     sleeve = config.execution_sleeves.sleeve(
         getattr(strategy_config, "account_id", None),
         getattr(strategy_config, "execution_sleeve", None),
     )
     return getattr(sleeve, "target_weight", None)
+
+
+def _strategy_multi_account_group(config: Any, strategy_config: Any | None) -> Any:
+    if strategy_config is None:
+        return None
+    group_method = getattr(config, "multi_account_contribution_group_for_strategy", None)
+    if not callable(group_method):
+        return None
+    return group_method(getattr(strategy_config, "id", ""))
 
 
 def _strategy_performance_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]:

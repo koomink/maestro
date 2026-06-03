@@ -15,12 +15,15 @@ class ContributionFundingRequest(BaseModel):
     request_id: str = Field(default_factory=new_funding_request_id)
     source_signal_run_id: str
     strategy_ids: list[str]
+    contribution_group_id: str | None = None
     account_id: str | None = None
     execution_sleeve: str | None = None
     currency: str
     available_cash: float
     min_monthly_budget: float
+    max_monthly_budget: float | None = None
     required_shortfall: float
+    recommended_top_up: float | None = None
     month_key: str
     created_at: datetime
     expires_at: datetime
@@ -31,6 +34,7 @@ def build_contribution_funding_request(
     *,
     source_signal_run_id: str,
     strategy_ids: list[str],
+    contribution_group_id: str | None = None,
     account_id: str | None,
     execution_sleeve: str | None,
     execution_config: ExecutionConfig,
@@ -48,15 +52,23 @@ def build_contribution_funding_request(
     if available_cash >= contribution.min_monthly_budget:
         return None
     shortfall = contribution.min_monthly_budget - available_cash
+    recommended_top_up = shortfall
+    if contribution.max_monthly_budget > contribution.min_monthly_budget:
+        recommended_top_up = max(0.0, contribution.max_monthly_budget - available_cash)
     return ContributionFundingRequest(
         source_signal_run_id=source_signal_run_id,
         strategy_ids=list(strategy_ids),
+        contribution_group_id=contribution_group_id,
         account_id=account_id,
         execution_sleeve=execution_sleeve,
         currency=contribution.currency.value,
         available_cash=available_cash,
         min_monthly_budget=contribution.min_monthly_budget,
+        max_monthly_budget=(
+            contribution.max_monthly_budget if contribution.max_monthly_budget else None
+        ),
         required_shortfall=shortfall,
+        recommended_top_up=recommended_top_up,
         month_key=month_key,
         created_at=created_at,
         expires_at=created_at + timedelta(seconds=expires_after_seconds),
@@ -86,7 +98,9 @@ def format_contribution_funding_request(
             f"execution_sleeve: {payload.get('execution_sleeve') or 'n/a'}",
             f"available_cash: {_money(payload.get('available_cash'), currency)}",
             f"minimum_required: {_money(payload.get('min_monthly_budget'), currency)}",
+            f"maximum_target: {_money(payload.get('max_monthly_budget'), currency)}",
             f"shortfall: {_money(payload.get('required_shortfall'), currency)}",
+            f"recommended_top_up: {_money(payload.get('recommended_top_up'), currency)}",
             "이 금액 이상을 채워 넣어야 이번 달 최소 매수가 가능합니다.",
             "입금 완료 후 버튼을 누르면 Maestro가 현금을 다시 확인하고 새 signal을 생성합니다.",
             "이 버튼은 주문 승인이 아니며, 주문은 별도로 승인해야 합니다.",

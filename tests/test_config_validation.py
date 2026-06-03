@@ -280,7 +280,6 @@ def test_execution_nested_blocks_load_canonical_schema(tmp_path):
     assert config.execution.live_order_limits.fee_buffer_pct == 0.01
 
 
-
 def test_live_order_limits_accept_currency_specific_caps(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["execution"]["live_order_limits"] = {
@@ -308,7 +307,6 @@ def test_live_order_limits_accept_currency_specific_caps(tmp_path):
         Currency.KRW: 100_000.0,
         Currency.USD: 100.0,
     }
-
 
 
 def test_live_order_limits_reject_invalid_currency_specific_caps(tmp_path):
@@ -621,7 +619,9 @@ def test_profile_stage_derives_from_existing_profiles(tmp_path):
         == ProfileStage.LIVE_APPROVAL_DRY_RUN
     )
     assert (
-        load_config("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml").profile_stage
+        load_config(
+            "tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml"
+        ).profile_stage
         == ProfileStage.KIS_PAPER_TRADING
     )
 
@@ -949,15 +949,42 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in signal.strategies
     ] == [
-        ("tranquillo", "kis_mock", True, "dry_run"),
+        ("tranquillo", None, True, "dry_run"),
         ("crescendo_us", "dev_sandbox", True, "dry_run"),
         ("fugue", "dev_sandbox", False, "disabled"),
+    ]
+    tranquillo_group = signal.multi_account_contributions["tranquillo"]
+    assert tranquillo_group.strategy_id == "tranquillo"
+    assert [
+        (
+            target.account_id,
+            target.execution_sleeve,
+            target.allowed_symbols,
+            target.min_monthly_budget,
+            target.max_monthly_budget,
+        )
+        for target in tranquillo_group.account_targets
+    ] == [
+        (
+            "kis_ps",
+            "tranquillo_ps",
+            ["KODEX_US_DIVIDEND_DOWJONES"],
+            500000,
+            500000,
+        ),
+        (
+            "kis_isa",
+            "tranquillo_isa",
+            ["TIGER_NASDAQ100_LEVERAGE", "KODEX_US_DIVIDEND_DOWJONES"],
+            1660000,
+            4000000,
+        ),
     ]
     assert [
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in approval.strategies
     ] == [
-        ("tranquillo", "kis_mock", True, "dry_run"),
+        ("tranquillo", None, True, "dry_run"),
         ("crescendo_us", "dev_sandbox", True, "dry_run"),
         ("fugue", "dev_sandbox", False, "disabled"),
     ]
@@ -1160,8 +1187,7 @@ def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
         == "buy_only_contribution"
     )
     assert (
-        config.effective_strategy_order_generation_mode(config.strategies[1])
-        == "target_rebalance"
+        config.effective_strategy_order_generation_mode(config.strategies[1]) == "target_rebalance"
     )
 
 
@@ -1401,9 +1427,7 @@ def test_shared_strategy_account_map_rejects_inline_mismatch(tmp_path):
     map_path = tmp_path / "strategy_accounts.yaml"
     config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
     map_path.write_text(
-        yaml.safe_dump(
-            {"strategies": {"tranquillo": "kis_mock", "crescendo_us": "kis_brokerage"}}
-        ),
+        yaml.safe_dump({"strategies": {"tranquillo": "kis_mock", "crescendo_us": "kis_brokerage"}}),
         encoding="utf-8",
     )
 
@@ -1595,9 +1619,7 @@ def _tranquillo_fragment() -> dict:
                 "KODEX_US_DIVIDEND_DOWJONES": "489250.KS",
             }
         },
-        "recommendations": {
-            "execution": {"order_generation_mode": "buy_only_contribution"}
-        },
+        "recommendations": {"execution": {"order_generation_mode": "buy_only_contribution"}},
     }
 
 

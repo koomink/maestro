@@ -1,9 +1,12 @@
 # Multi-account Broker Routing
 
-Maestro routes broker execution with `strategy.account_id`.
+Maestro normally routes broker execution with `strategy.account_id`.
 
-- One enabled Virtuoso app maps to exactly one broker account.
+- One enabled Virtuoso app maps to exactly one broker account unless it opts into
+  an operator-owned `multi_account_contributions` group.
 - Multiple strategies may share one broker account.
+- A multi-account contribution group keeps one strategy signal but lets Maestro
+  create separate `account_id + execution_sleeve` order scopes.
 - Existing single-account `kis:` configs remain valid and are migrated internally
   to `default_kis`.
 - `paper` strategies may omit `account_id`; Maestro uses the logical
@@ -78,7 +81,8 @@ market differences while sharing common KIS REST plumbing underneath them.
 
 Shared mapping file. The legacy `strategy_id: account_id` form remains valid,
 but operator workflows should prefer the object form so phase visibility,
-execution sleeve, and order posture are explicit:
+execution sleeve, order posture, and multi-account contribution groups are
+explicit:
 
 ```yaml
 execution_sleeves:
@@ -101,10 +105,24 @@ execution_sleeves:
         target_weight: 1.0
         order_generation_mode: target_rebalance
 
+multi_account_contributions:
+  tranquillo:
+    strategy_id: tranquillo
+    allocation_basis: aggregate_current_holdings
+    order_generation_mode: buy_only_contribution
+    account_targets:
+      - account_id: kis_ps
+        execution_sleeve: tranquillo_ps
+        allowed_symbols: [KODEX_US_DIVIDEND_DOWJONES]
+        monthly_budget: 500000
+      - account_id: kis_isa
+        execution_sleeve: tranquillo_isa
+        allowed_symbols: [TIGER_NASDAQ100_LEVERAGE, KODEX_US_DIVIDEND_DOWJONES]
+        min_monthly_budget: 1660000
+        max_monthly_budget: 4000000
+
 strategies:
   tranquillo:
-    account_id: kis_mock
-    execution_sleeve: tranquillo_isa
     readonly: true
     signal: true
     order_posture: dry_run
@@ -131,6 +149,15 @@ routing, target account weight, order generation mode, and contribution budget.
 Maestro enforces one `order_generation_mode` per `account_id + execution_sleeve`.
 When multiple active execution sleeves share one account, their `target_weight`
 values must sum to `1.0`.
+
+Multi-account contribution groups are also operator-owned. They are for cases
+where one Virtuoso strategy target must be allocated across more than one
+account because account capabilities differ. Tranquillo v1 uses this to keep one
+aggregate domestic ETF target while routing pension-savings (`kis_ps`) cash to
+the SCHD-like ETF only and ISA (`kis_isa`) cash to the remaining SCHD-like /
+QLD-like mix. Maestro calculates the aggregate current holdings across the group
+accounts, applies fixed account buys first, and then allocates variable account
+cash toward the group target. It does not sell positions to force the target.
 
 
 For `buy_only_contribution` sleeves, `contribution.funding_request.enabled` is an
@@ -169,12 +196,13 @@ Current operator split:
   re-run strategies, and executes approval/order lifecycle after freshness and
   safety checks. It is intentionally `order_posture: dry_run` by default.
 
-The current strategy mapping routes `tranquillo -> kis_mock / tranquillo_isa`,
-`crescendo_us -> dev_sandbox / crescendo_us`, and
-`fugue -> dev_sandbox / fugue` through
-`configs/operator/strategy_accounts.yaml`. Account definitions are centralized in
-`configs/operator/broker_accounts.yaml`, including `kis_ps` for the pension
-savings account.
+The current strategy mapping routes Tranquillo through the
+`multi_account_contributions.tranquillo` group: `kis_ps / tranquillo_ps` buys
+only the SCHD-like domestic ETF with a fixed 500,000 KRW monthly budget, while
+`kis_isa / tranquillo_isa` uses 1,660,000-4,000,000 KRW toward the aggregate
+60/40 Tranquillo target. `crescendo_us -> dev_sandbox / crescendo_us` and
+`fugue -> dev_sandbox / fugue` remain normal single-account strategy mappings.
+Account definitions are centralized in `configs/operator/broker_accounts.yaml`.
 
 ## Strategy Promotion And Account Binding
 

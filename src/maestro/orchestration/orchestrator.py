@@ -35,6 +35,7 @@ from maestro.execution.factory import build_execution_engine
 from maestro.execution.funding_requests import (
     ContributionFundingRequest,
     build_contribution_funding_request,
+    contribution_available_cash,
 )
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_orders import (
@@ -103,6 +104,7 @@ class ScopedOrderTarget:
     target: PortfolioTarget
     execution_config: ExecutionConfig
     state: PortfolioState
+    contribution_group_id: str | None = None
     allocated_cash: float = 0.0
     current_value: float = 0.0
     current_weight: float = 0.0
@@ -123,9 +125,7 @@ class MaestroOrchestrator:
         config_identity: ConfigIdentity | None = None,
     ) -> None:
         self.config = config
-        signal_strategies = [
-            strategy for strategy in config.strategies if strategy.signal_enabled
-        ]
+        signal_strategies = [strategy for strategy in config.strategies if strategy.signal_enabled]
         self.registry = PluginRegistry.from_configs(signal_strategies, run_mode=config.mode)
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
         self.portfolio_manager = PortfolioManager(signal_strategies)
@@ -170,9 +170,7 @@ class MaestroOrchestrator:
         with self.state_store.writer_lock("approve_signal"):
             return self._approve_signal_locked(signal_run_id)
 
-    def _run_signal_locked(
-        self, *, strategy_ids: list[str] | None = None
-    ) -> SignalRunSummary:
+    def _run_signal_locked(self, *, strategy_ids: list[str] | None = None) -> SignalRunSummary:
         signal_run_id = new_signal_run_id()
         current_state = self._load_run_portfolio_state(signal_run_id)
         selected_strategy_ids = set(strategy_ids or [])
@@ -180,8 +178,7 @@ class MaestroOrchestrator:
             unknown = selected_strategy_ids - self.registry.strategy_ids
             if unknown:
                 raise ValueError(
-                    "Unknown or disabled signal strategy id(s): "
-                    + ", ".join(sorted(unknown))
+                    "Unknown or disabled signal strategy id(s): " + ", ".join(sorted(unknown))
                 )
         broker_snapshot_refs = self._broker_snapshot_refs()
         valid_results, data_requests_by_strategy, data_quality_issues, prices = (
@@ -239,6 +236,7 @@ class MaestroOrchestrator:
                     order_scope.target.source_strategy_ids,
                     account_id=order_scope.account_id,
                     execution_sleeve=order_scope.execution_sleeve,
+                    contribution_group_id=order_scope.contribution_group_id,
                     signal_preview=True,
                 )
             )
@@ -275,9 +273,7 @@ class MaestroOrchestrator:
             "funding_requests_count": len(funding_requests),
             "action_required": bool(approval_orders),
         }
-        payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(
-            self.config
-        )
+        payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(self.config)
         if self.config_identity is not None:
             payload["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
         self.state_store.save_signal_package(signal_run_id, payload)
@@ -727,9 +723,7 @@ class MaestroOrchestrator:
                     if approval_decision
                     else None,
                     "paper_orders": [order.model_dump(mode="json") for order in orders],
-                    "approval_orders": [
-                        order.model_dump(mode="json") for order in approval_orders
-                    ],
+                    "approval_orders": [order.model_dump(mode="json") for order in approval_orders],
                     "execution_results": [
                         result.model_dump(mode="json") for result in execution_results
                     ],
@@ -1197,8 +1191,8 @@ class MaestroOrchestrator:
         orders: list[OrderIntent],
         package: dict[str, Any],
     ) -> list[tuple[list[str], list[OrderIntent]]]:
-        fallback_source_strategy_ids = (
-            package.get("portfolio_target", {}).get("source_strategy_ids", [])
+        fallback_source_strategy_ids = package.get("portfolio_target", {}).get(
+            "source_strategy_ids", []
         )
         groups: dict[tuple[str, ...], list[OrderIntent]] = {}
         for order in orders:
@@ -1210,7 +1204,6 @@ class MaestroOrchestrator:
                 key = ("unknown",)
             groups.setdefault(key, []).append(order)
         return [(list(key), group_orders) for key, group_orders in groups.items()]
-
 
     def _validate_signal_package_for_approval(self, package: dict[str, Any]) -> None:
         if self.config.mode != RunMode.LIVE_APPROVAL:
@@ -1289,9 +1282,7 @@ class MaestroOrchestrator:
             baseline = rows_by_id.get(int(ref.get("id") or 0))
             latest = latest_by_account.get(account_id)
             if baseline is None or latest is None:
-                raise ValueError(
-                    f"Signal package broker snapshot changed: account_id={account_id}"
-                )
+                raise ValueError(f"Signal package broker snapshot changed: account_id={account_id}")
             if int(latest["id"]) == int(baseline["id"]):
                 continue
             difference = _broker_snapshot_material_difference(
@@ -1355,7 +1346,7 @@ class MaestroOrchestrator:
             raise ValueError(f"Signal approval blocked by live execution gate: {reasons}")
 
     def _strategy_account_mappings(self) -> list[dict[str, Any]]:
-        return [
+        mappings = [
             {
                 "strategy_id": loaded.config.id,
                 "account_id": self.account_router.account_id_for_strategy(loaded.config),
@@ -1367,6 +1358,18 @@ class MaestroOrchestrator:
             for loaded in self.registry.strategies
             if loaded.config.enabled
         ]
+        for group_id, group in self.config.multi_account_contributions.items():
+            for target in group.account_targets:
+                mappings.append(
+                    {
+                        "strategy_id": group.strategy_id,
+                        "contribution_group_id": group_id,
+                        "account_id": target.account_id,
+                        "execution_sleeve": target.execution_sleeve,
+                        "order_generation_mode": group.order_generation_mode,
+                    }
+                )
+        return mappings
 
     def _strategy_phase_controls(self) -> list[dict[str, Any]]:
         return [
@@ -1394,11 +1397,7 @@ class MaestroOrchestrator:
         ]
 
     def _orders_requiring_approval(self, orders: list[OrderIntent]) -> list[OrderIntent]:
-        return [
-            order
-            for order in orders
-            if self._effective_order_posture(order) != "disabled"
-        ]
+        return [order for order in orders if self._effective_order_posture(order) != "disabled"]
 
     def _effective_order_posture(self, order: OrderIntent) -> str:
         posture = str(order.metadata.get("order_posture") or self.config.execution.order_posture)
@@ -1664,7 +1663,6 @@ class MaestroOrchestrator:
             self._record_event(run_id, "live_order_dry_run", event)
         return [], self.state_store.load_latest_portfolio_state()
 
-
     def _contribution_funding_request(
         self,
         signal_run_id: str,
@@ -1682,6 +1680,7 @@ class MaestroOrchestrator:
         return build_contribution_funding_request(
             source_signal_run_id=signal_run_id,
             strategy_ids=order_scope.target.source_strategy_ids,
+            contribution_group_id=order_scope.contribution_group_id,
             account_id=order_scope.account_id,
             execution_sleeve=order_scope.execution_sleeve,
             execution_config=config,
@@ -1707,17 +1706,41 @@ class MaestroOrchestrator:
                 current_state,
             )
 
-        scope_results = self._results_by_execution_scope(valid_results)
+        (
+            multi_account_order_targets,
+            multi_account_risk_decisions,
+            remaining_results,
+        ) = self._build_multi_account_contribution_targets(
+            run_id,
+            valid_results,
+            risk_manager,
+            current_state,
+            prices,
+        )
+
+        scope_results = self._results_by_execution_scope(remaining_results)
         if not scope_results:
+            if multi_account_order_targets:
+                aggregate_target = self.portfolio_manager.build_target(valid_results)
+                aggregate_risk = RiskDecision(
+                    approved=all(decision.approved for decision in multi_account_risk_decisions),
+                    target=aggregate_target,
+                    violations=[
+                        violation
+                        for decision in multi_account_risk_decisions
+                        for violation in decision.violations
+                    ],
+                )
+                return aggregate_target, aggregate_risk, multi_account_order_targets
             return self._build_legacy_account_scoped_targets(
                 run_id,
-                valid_results,
+                remaining_results,
                 risk_manager,
                 current_state,
             )
 
         drafts_by_account: dict[str | None, list[ExecutionScopeDraft]] = {}
-        risk_decisions: list[RiskDecision] = []
+        risk_decisions: list[RiskDecision] = list(multi_account_risk_decisions)
         execution_configs: dict[tuple[str | None, str | None], ExecutionConfig] = {}
         for (account_id, execution_sleeve), results in scope_results.items():
             strategy_configs = [self._strategy_config(result.strategy_id) for result in results]
@@ -1752,7 +1775,7 @@ class MaestroOrchestrator:
                 self.config.effective_execution_config_for_strategy(strategy_configs[0])
             )
 
-        order_targets: list[ScopedOrderTarget] = []
+        order_targets: list[ScopedOrderTarget] = list(multi_account_order_targets)
         for account_id, drafts in drafts_by_account.items():
             allocated_scopes = allocate_cash_rebalanced_scope_states(
                 current_state=current_state,
@@ -1772,12 +1795,260 @@ class MaestroOrchestrator:
             approved=all(decision.approved for decision in risk_decisions),
             target=aggregate_target,
             violations=[
-                violation
-                for decision in risk_decisions
-                for violation in decision.violations
+                violation for decision in risk_decisions for violation in decision.violations
             ],
         )
         return aggregate_target, aggregate_risk, order_targets
+
+    def _build_multi_account_contribution_targets(
+        self,
+        run_id: str,
+        valid_results: list[TargetAllocationResult],
+        risk_manager: RiskManager,
+        current_state: PortfolioState,
+        prices: dict[str, float],
+    ) -> tuple[list[ScopedOrderTarget], list[RiskDecision], list[TargetAllocationResult]]:
+        groups_by_strategy_id = {
+            group.strategy_id: (group_id, group)
+            for group_id, group in self.config.multi_account_contributions.items()
+        }
+        if not groups_by_strategy_id:
+            return [], [], valid_results
+
+        order_targets: list[ScopedOrderTarget] = []
+        risk_decisions: list[RiskDecision] = []
+        remaining_results: list[TargetAllocationResult] = []
+        for result in valid_results:
+            group_item = groups_by_strategy_id.get(result.strategy_id)
+            if group_item is None:
+                remaining_results.append(result)
+                continue
+            group_id, group = group_item
+            account_states = self._latest_account_states(
+                [target.account_id for target in group.account_targets],
+                current_state,
+            )
+            target_allocations = self._multi_account_target_allocations(result, group)
+            planned_allocations = self._planned_multi_account_allocations(
+                group,
+                target_allocations,
+                account_states,
+                prices,
+            )
+            for target_config in group.account_targets:
+                execution_config = self._multi_account_execution_config(target_config)
+                contribution = execution_config.contribution
+                account_state = account_states[target_config.account_id]
+                available_cash = contribution_available_cash(
+                    execution_config,
+                    account_state,
+                )
+                planned = planned_allocations.get(
+                    (target_config.account_id, target_config.execution_sleeve),
+                    {},
+                )
+                planned_cash = sum(planned.values())
+                state_cash = planned_cash if planned_cash > 0 else available_cash
+                scope_state = PortfolioState(
+                    cash=state_cash,
+                    cash_by_currency={contribution.currency.value: state_cash},
+                    positions={},
+                )
+                allocations = self._normalize_allocations(
+                    planned
+                    if planned
+                    else {
+                        symbol: target_allocations[symbol]
+                        for symbol in target_config.allowed_symbols
+                        if symbol in target_allocations
+                    }
+                )
+                scope_target = PortfolioTarget(
+                    timestamp=utc_now(),
+                    allocations={},
+                    allocation_sleeves={contribution.sleeve: allocations},
+                    source_strategy_ids=[group.strategy_id],
+                )
+                scope_risk = risk_manager.check(scope_target)
+                self._save_account_risk_decision(
+                    run_id,
+                    scope_risk,
+                    scope_target.source_strategy_ids,
+                    account_id=target_config.account_id,
+                )
+                risk_decisions.append(scope_risk)
+                order_targets.append(
+                    ScopedOrderTarget(
+                        account_id=target_config.account_id,
+                        execution_sleeve=target_config.execution_sleeve,
+                        target=scope_risk.target,
+                        execution_config=execution_config,
+                        state=scope_state,
+                        contribution_group_id=group_id,
+                        allocated_cash=planned_cash,
+                    )
+                )
+        return order_targets, risk_decisions, remaining_results
+
+    def _multi_account_target_allocations(self, result, group) -> dict[str, float]:
+        first_target = group.account_targets[0]
+        first_config = self._multi_account_execution_config(first_target)
+        sleeve_name = first_config.contribution.sleeve
+        if result.allocation_sleeves:
+            allocations = result.allocation_sleeves.get(sleeve_name)
+            if allocations is None:
+                raise ValueError(
+                    f"multi_account_contributions {group.strategy_id} result missing "
+                    f"allocation sleeve: {sleeve_name}"
+                )
+            return self._normalize_allocations(allocations)
+        return self._normalize_allocations(result.allocations)
+
+    def _planned_multi_account_allocations(
+        self,
+        group,
+        target_allocations: dict[str, float],
+        account_states: dict[str, PortfolioState],
+        prices: dict[str, float],
+    ) -> dict[tuple[str, str], dict[str, float]]:
+        target_symbols = list(target_allocations)
+        current_values = {
+            symbol: sum(
+                state.positions.get(symbol, 0.0) * prices[symbol]
+                for state in account_states.values()
+            )
+            for symbol in target_symbols
+        }
+        planned: dict[tuple[str, str], dict[str, float]] = {}
+        variable_targets = []
+        for target_config in group.account_targets:
+            execution_config = self._multi_account_execution_config(target_config)
+            available_cash = contribution_available_cash(
+                execution_config,
+                account_states[target_config.account_id],
+            )
+            budget = self._target_contribution_budget(target_config, available_cash)
+            key = (target_config.account_id, target_config.execution_sleeve)
+            if budget <= 0:
+                planned[key] = {}
+                continue
+            if target_config.monthly_budget and len(target_config.allowed_symbols) == 1:
+                symbol = target_config.allowed_symbols[0]
+                planned[key] = {symbol: budget}
+                current_values[symbol] = current_values.get(symbol, 0.0) + budget
+                continue
+            variable_targets.append((target_config, budget, key))
+
+        for target_config, budget, key in variable_targets:
+            allocation = self._budget_toward_aggregate_target(
+                current_values,
+                target_allocations,
+                set(target_config.allowed_symbols),
+                budget,
+            )
+            planned[key] = allocation
+            for symbol, amount in allocation.items():
+                current_values[symbol] = current_values.get(symbol, 0.0) + amount
+        return planned
+
+    def _target_contribution_budget(self, target_config, available_cash: float) -> float:
+        if available_cash < target_config.min_monthly_budget:
+            return 0.0
+        return min(available_cash, target_config.max_monthly_budget)
+
+    def _budget_toward_aggregate_target(
+        self,
+        current_values: dict[str, float],
+        target_allocations: dict[str, float],
+        allowed_symbols: set[str],
+        budget: float,
+    ) -> dict[str, float]:
+        current_total = sum(current_values.values())
+        final_total = current_total + budget
+        shortfalls = {
+            symbol: max(
+                0.0,
+                target_allocations[symbol] * final_total - current_values.get(symbol, 0.0),
+            )
+            for symbol in allowed_symbols
+            if symbol in target_allocations
+        }
+        shortfall_total = sum(shortfalls.values())
+        if shortfall_total > 0:
+            return {
+                symbol: budget * shortfall / shortfall_total
+                for symbol, shortfall in shortfalls.items()
+                if shortfall > 0
+            }
+        fallback = {
+            symbol: target_allocations[symbol]
+            for symbol in allowed_symbols
+            if symbol in target_allocations
+        }
+        return {
+            symbol: budget * weight
+            for symbol, weight in self._normalize_allocations(fallback).items()
+        }
+
+    def _multi_account_execution_config(self, target_config) -> ExecutionConfig:
+        sleeve = self.config.execution_sleeves.sleeve(
+            target_config.account_id,
+            target_config.execution_sleeve,
+        )
+        if sleeve is None:
+            raise ValueError(
+                "Unknown multi-account execution_sleeve: "
+                f"{target_config.account_id}/{target_config.execution_sleeve}"
+            )
+        values = self.config.execution.model_dump(mode="python")
+        values["order_generation_mode"] = sleeve.order_generation_mode
+        contribution = sleeve.contribution.model_dump(mode="python")
+        contribution["monthly_budget"] = target_config.max_monthly_budget
+        contribution["min_monthly_budget"] = target_config.min_monthly_budget
+        contribution["max_monthly_budget"] = target_config.max_monthly_budget
+        values["contribution"] = contribution
+        return ExecutionConfig.model_validate(values)
+
+    def _latest_account_states(
+        self,
+        account_ids: list[str],
+        fallback_state: PortfolioState,
+    ) -> dict[str, PortfolioState]:
+        account_id_set = set(account_ids)
+        states: dict[str, PortfolioState] = {}
+        for row in self.state_store.list_broker_account_snapshots(
+            limit=max(10, len(account_id_set) * 5)
+        ):
+            payload = row["payload"]
+            account_id = payload.get("account_id") or row.get("account_id")
+            if account_id not in account_id_set or account_id in states:
+                continue
+            account_payload = payload.get("account") or payload
+            states[account_id] = portfolio_state_from_broker_account(
+                account_payload,
+                allowed_symbols=self.config.portfolio.allowed_symbols,
+                universe=self.config.universe,
+            )
+        if len(account_id_set) == 1 and not states:
+            states[next(iter(account_id_set))] = fallback_state
+        missing = sorted(account_id_set - set(states))
+        if missing:
+            raise ValueError(
+                "multi_account_contributions require broker snapshots for account_id: "
+                + ", ".join(missing)
+            )
+        return states
+
+    def _normalize_allocations(self, allocations: dict[str, float]) -> dict[str, float]:
+        investable = {
+            symbol: weight
+            for symbol, weight in allocations.items()
+            if not is_cash_symbol(symbol) and weight > 0
+        }
+        total = sum(investable.values())
+        if total <= 0:
+            return {}
+        return {symbol: weight / total for symbol, weight in investable.items()}
 
     def _build_legacy_account_scoped_targets(
         self,
@@ -1795,15 +2066,19 @@ class MaestroOrchestrator:
             risk_decision = risk_manager.check(target)
             self._save_account_risk_decision(run_id, risk_decision, target.source_strategy_ids)
             account_id = next(iter(account_results), None)
-            return target, risk_decision, [
-                ScopedOrderTarget(
-                    account_id=account_id,
-                    execution_sleeve=None,
-                    target=risk_decision.target,
-                    execution_config=self.config.execution,
-                    state=current_state,
-                )
-            ]
+            return (
+                target,
+                risk_decision,
+                [
+                    ScopedOrderTarget(
+                        account_id=account_id,
+                        execution_sleeve=None,
+                        target=risk_decision.target,
+                        execution_config=self.config.execution,
+                        state=current_state,
+                    )
+                ],
+            )
 
         order_targets: list[ScopedOrderTarget] = []
         risk_decisions = []
@@ -1841,9 +2116,7 @@ class MaestroOrchestrator:
             approved=all(decision.approved for decision in risk_decisions),
             target=aggregate_target,
             violations=[
-                violation
-                for decision in risk_decisions
-                for violation in decision.violations
+                violation for decision in risk_decisions for violation in decision.violations
             ],
         )
         return aggregate_target, aggregate_risk, order_targets
@@ -1936,18 +2209,22 @@ class MaestroOrchestrator:
         return None
 
     def _live_account_ids(self) -> list[str]:
-        return sorted(
-            {
-                self.account_router.account_id_for_strategy(loaded.config)
-                for loaded in self.registry.strategies
-                if loaded.config.enabled
-                and loaded.config.account_id
-                and (
-                    self.account_router.account(loaded.config.account_id) is None
-                    or self.account_router.account(loaded.config.account_id).broker != "sandbox"
-                )
-            }
-        )
+        account_ids = {
+            self.account_router.account_id_for_strategy(loaded.config)
+            for loaded in self.registry.strategies
+            if loaded.config.enabled
+            and loaded.config.account_id
+            and (
+                self.account_router.account(loaded.config.account_id) is None
+                or self.account_router.account(loaded.config.account_id).broker != "sandbox"
+            )
+        }
+        for group in self.config.multi_account_contributions.values():
+            for target in group.account_targets:
+                account = self.account_router.account(target.account_id)
+                if account is None or account.broker != "sandbox":
+                    account_ids.add(target.account_id)
+        return sorted(account_ids)
 
     def _stamp_orders_with_account_id(
         self,
@@ -1956,6 +2233,7 @@ class MaestroOrchestrator:
         *,
         account_id: str | None = None,
         execution_sleeve: str | None = None,
+        contribution_group_id: str | None = None,
         signal_preview: bool = False,
     ) -> list[OrderIntent]:
         account_ids = {
@@ -1969,16 +2247,12 @@ class MaestroOrchestrator:
             else self._effective_strategy_order_posture
         )
         order_postures = {
-            posture_for_strategy(strategy_id)
-            for strategy_id in source_strategy_ids
-            if strategy_id
+            posture_for_strategy(strategy_id) for strategy_id in source_strategy_ids if strategy_id
         }
         resolved_account_id = account_id or (
             next(iter(account_ids)) if len(account_ids) == 1 else None
         )
-        resolved_order_posture = (
-            next(iter(order_postures)) if len(order_postures) == 1 else None
-        )
+        resolved_order_posture = next(iter(order_postures)) if len(order_postures) == 1 else None
         return [
             order.model_copy(
                 update={
@@ -1989,6 +2263,11 @@ class MaestroOrchestrator:
                         "source_strategy_ids": list(source_strategy_ids),
                         "order_posture": resolved_order_posture,
                         "execution_sleeve": execution_sleeve,
+                        **(
+                            {"contribution_group_id": contribution_group_id}
+                            if contribution_group_id
+                            else {}
+                        ),
                     },
                 }
             )
