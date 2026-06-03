@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Annotated
 
 from maestro.config.loader import load_config_with_identity
+from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.dashboard.actions import generate_strategy_signal, refresh_dashboard_state
 from maestro.dashboard.snapshot import build_dashboard_run_detail, build_dashboard_snapshot
 from maestro.state.store import StateStore
@@ -86,6 +87,7 @@ def create_app(
             "state_path": state_path,
             "audit_path": str(Path(config.audit.jsonl_path).expanduser().resolve()),
             "counts": status.get("counts", {}),
+            "credential_env": _credential_env_status(config),
         }
 
     @app.get("/api/dashboard/snapshot")
@@ -111,12 +113,13 @@ def create_app(
     def dashboard_refresh_error(exc: ValueError) -> HTTPException:
         if str(exc).startswith(CONFIG_STATE_MISMATCH_PREFIX):
             return config_state_mismatch_error(exc)
+        message = _dashboard_refresh_message(str(exc))
         return HTTPException(
             status_code=409,
             detail={
                 "status": "dashboard_refresh_failed",
                 "read_only": True,
-                "message": str(exc),
+                "message": message,
             },
         )
 
@@ -197,6 +200,44 @@ def _resolve_config(config_path: str | Path | None) -> Path:
     if env_config:
         return Path(env_config)
     raise ValueError(f"--config is required or set {CONFIG_ENV_VAR}")
+
+
+def _credential_env_status(config) -> dict[str, object]:
+    required: list[str] = []
+    for _logical_account_id, kis_config in _kis_accounts(config):
+        if kis_config.account_id_env and not kis_config.account_id:
+            required.append(kis_config.account_id_env)
+        required.extend([kis_config.app_key_env, kis_config.app_secret_env])
+    required = list(dict.fromkeys(required))
+    missing = [name for name in required if not DEFAULT_CREDENTIAL_RESOLVER.present(name)]
+    present = [name for name in required if name not in missing]
+    return {
+        "status": "missing" if missing else "present",
+        "missing": missing,
+        "present": present,
+    }
+
+
+def _kis_accounts(config) -> list[tuple[str | None, object]]:
+    if config.accounts:
+        return [
+            (account.id, account.to_kis_config())
+            for account in config.accounts
+            if account.enabled and account.broker == "kis"
+        ]
+    if config.kis.enabled:
+        return [(None, config.kis)]
+    return []
+
+
+def _dashboard_refresh_message(message: str) -> str:
+    if "Missing KIS credential environment variables" not in message:
+        return message
+    return (
+        message
+        + " The Dashboard process does not have these environment variables. "
+        + "Start it with --env-file /etc/maestro/maestro.env or via the systemd service."
+    )
 
 
 def _fallback_html() -> str:

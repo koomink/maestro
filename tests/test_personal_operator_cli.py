@@ -6,7 +6,7 @@ import yaml
 from typer.testing import CliRunner
 
 from maestro.cli import _load_dotenv, app
-from maestro.config.env import load_project_dotenv
+from maestro.config.env import load_env_file, load_project_dotenv
 from maestro.config.loader import load_config
 from maestro.state.store import StateStore
 
@@ -91,6 +91,28 @@ def test_project_dotenv_loader_does_not_override_shell_env(monkeypatch, tmp_path
 
     assert os.environ["KIS_MOCK_APP_KEY"] == "shell-app-key"
     assert os.environ["FRED_API_KEY"] == "dotenv-fred-key"
+
+
+def test_explicit_env_file_loader_does_not_override_shell_env(monkeypatch, tmp_path):
+    monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "shell-app-key")
+    env_file = tmp_path / "maestro.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "KIS_MOCK_ACCOUNT_ID=12345678-01",
+                "KIS_MOCK_APP_KEY=file-app-key",
+                "KIS_MOCK_APP_SECRET=file-secret",
+            ]
+        )
+    )
+
+    loaded = load_env_file(env_file)
+
+    assert loaded is True
+    assert os.environ["KIS_MOCK_ACCOUNT_ID"] == "12345678-01"
+    assert os.environ["KIS_MOCK_APP_KEY"] == "shell-app-key"
+    assert os.environ["KIS_MOCK_APP_SECRET"] == "file-secret"
 
 
 def test_personal_check_reports_default_blocked_stages(tmp_path):

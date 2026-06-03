@@ -47,6 +47,21 @@ def test_kis_readonly_service_stores_snapshot(tmp_path):
     assert store.status()["counts"]["broker_account_snapshots"] == 1
 
 
+def test_kis_readonly_service_can_store_snapshot_with_shared_run_id(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+
+    KISReadOnlyService(config.kis, store, audit).fetch_and_store_snapshot(
+        config.portfolio.allowed_symbols,
+        run_id="run_dashboard_refresh",
+    )
+
+    latest = store.load_latest_broker_account_snapshot()
+    assert latest is not None
+    assert latest["run_id"] == "run_dashboard_refresh"
+
+
 def test_kis_cli_sync_and_account(tmp_path):
     config = _live_readonly_config(tmp_path)
     config_path = tmp_path / "live_readonly.yaml"

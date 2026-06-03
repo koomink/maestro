@@ -714,6 +714,63 @@ def test_dashboard_broker_portfolio_analytics_from_latest_snapshot(tmp_path):
     assert history[0]["total_value"] == 1550.0
 
 
+def test_broker_summary_and_exposure_aggregate_latest_snapshot_per_account(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_refresh",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "account": {
+                "account_id": "MOCK",
+                "currency": "KRW",
+                "cash": 9_939_195.0,
+                "positions": [
+                    {
+                        "symbol": "KODEX_US_DIVIDEND_DOWJONES",
+                        "quantity": 1,
+                        "average_price": 32_000,
+                        "current_price": 32_000,
+                    },
+                    {
+                        "symbol": "TIGER_NASDAQ100_LEVERAGE",
+                        "quantity": 1,
+                        "average_price": 33_970,
+                        "current_price": 33_970,
+                    },
+                ],
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_refresh",
+        "kis_ps",
+        {
+            "account_id": "kis_ps",
+            "account": {
+                "account_id": "PS",
+                "currency": "KRW",
+                "cash": 0.0,
+                "positions": [],
+            },
+        },
+    )
+
+    summary = build_broker_account_summary(store)
+    positions = build_broker_position_exposure_table(store)
+
+    assert summary["account_id"] == "multiple"
+    assert summary["cash"] == 9_939_195.0
+    assert summary["positions_count"] == 2
+    assert summary["positions_market_value"] == 65_970.0
+    assert summary["total_value"] == 10_005_165.0
+    assert [row["symbol"] for row in positions] == [
+        "KODEX_US_DIVIDEND_DOWJONES",
+        "TIGER_NASDAQ100_LEVERAGE",
+    ]
+    assert positions[0]["account_id"] == "kis_mock"
+
+
 def test_account_performance_table_tracks_returns_drawdown_and_reconciliation(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     snapshots = [

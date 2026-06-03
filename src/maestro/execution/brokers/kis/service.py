@@ -27,15 +27,19 @@ class KISReadOnlyService:
         self.logical_account_id = logical_account_id
         self.client = client or self._build_client(config)
 
-    def fetch_and_store_snapshot(self, symbols: list[str]) -> KISReadOnlySnapshot:
+    def fetch_and_store_snapshot(
+        self,
+        symbols: list[str],
+        run_id: str | None = None,
+    ) -> KISReadOnlySnapshot:
         if not self.config.enabled:
             raise ValueError("KIS integration is disabled")
         KISAuthManager(self.config).validate_readonly_credentials()
 
         if self.client is None and len(self.config.effective_broker_products()) > 1:
-            return self._fetch_multi_product_snapshot(symbols)
+            return self._fetch_multi_product_snapshot(symbols, run_id=run_id)
 
-        run_id = new_run_id()
+        run_id = run_id or new_run_id()
         account = self.client.get_account_snapshot()
         current_prices = _prices_with_position_prices(
             account,
@@ -74,8 +78,12 @@ class KISReadOnlyService:
             return build_kis_rest_readonly_client(config, instruments or self.instruments)
         raise ValueError(f"Unsupported KIS provider: {config.provider}")
 
-    def _fetch_multi_product_snapshot(self, symbols: list[str]) -> KISReadOnlySnapshot:
-        run_id = new_run_id()
+    def _fetch_multi_product_snapshot(
+        self,
+        symbols: list[str],
+        run_id: str | None = None,
+    ) -> KISReadOnlySnapshot:
+        run_id = run_id or new_run_id()
         snapshots = []
         for product in self.config.effective_broker_products():
             product_config = self.config.model_copy(

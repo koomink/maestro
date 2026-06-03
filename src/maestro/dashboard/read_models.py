@@ -255,9 +255,35 @@ def build_broker_snapshots_table(store: StateStore, limit: int = 20) -> list[dic
     return rows
 
 
+def _latest_broker_snapshots_by_account(
+    store: StateStore,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    latest_by_account = []
+    seen = set()
+    for snapshot in store.list_broker_account_snapshots(limit=limit):
+        account_id = _broker_snapshot_account_id(snapshot)
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        latest_by_account.append(snapshot)
+    return latest_by_account
+
+
+def _broker_snapshot_account_id(snapshot: dict[str, Any]) -> str:
+    payload = _mapping(snapshot.get("payload"))
+    account = _mapping(payload.get("account"))
+    return str(
+        payload.get("account_id")
+        or snapshot.get("account_id")
+        or account.get("account_id")
+        or ""
+    )
+
+
 def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
-    latest = store.load_latest_broker_account_snapshot()
-    if latest is None:
+    latest_snapshots = _latest_broker_snapshots_by_account(store)
+    if not latest_snapshots:
         return {
             "created_at": None,
             "run_id": None,
@@ -272,32 +298,59 @@ def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
             "unrealized_pnl": None,
             "source": None,
         }
-    payload = _mapping(latest.get("payload"))
-    account = _mapping(payload.get("account"))
-    positions = _positions(account)
-    positions_market_value = sum(_position_market_value(position) for position in positions)
-    cash = _float_or_none(account.get("cash"))
-    total_value = _float_or_none(account.get("total_value"))
-    if total_value is None:
-        total_value = (cash or 0.0) + positions_market_value
-    unrealized_pnls = [
-        pnl
-        for pnl in (_float_or_none(position.get("unrealized_pnl")) for position in positions)
-        if pnl is not None
-    ]
+    latest = latest_snapshots[0]
+    cash_values = []
+    buying_power_values = []
+    total_values = []
+    all_positions = []
+    unrealized_pnls = []
+    sources = []
+    for snapshot in latest_snapshots:
+        payload = _mapping(snapshot.get("payload"))
+        account = _mapping(payload.get("account"))
+        positions = _positions(account)
+        all_positions.extend(positions)
+        cash = _float_or_none(account.get("cash"))
+        if cash is not None:
+            cash_values.append(cash)
+        buying_power = _float_or_none(account.get("buying_power"))
+        if buying_power is not None:
+            buying_power_values.append(buying_power)
+        total_value = _account_total_value(account, positions)
+        if total_value is not None:
+            total_values.append(total_value)
+        unrealized_pnls.extend(
+            pnl
+            for pnl in (_float_or_none(position.get("unrealized_pnl")) for position in positions)
+            if pnl is not None
+        )
+        source = account.get("source") or payload.get("source")
+        if source:
+            sources.append(str(source))
+
+    positions_market_value = sum(_position_market_value(position) for position in all_positions)
+    cash = sum(cash_values) if cash_values else None
+    total_value = sum(total_values) if total_values else None
+    account_id = _broker_snapshot_account_id(latest)
     return {
         "created_at": latest.get("created_at"),
         "run_id": latest.get("run_id"),
-        "account_id": latest.get("account_id") or account.get("account_id"),
+        "account_id": "multiple" if len(latest_snapshots) > 1 else account_id,
         "cash": cash,
-        "buying_power": _float_or_none(account.get("buying_power")),
-        "positions_count": len(positions),
+        "buying_power": sum(buying_power_values) if buying_power_values else None,
+        "positions_count": len(all_positions),
         "positions_market_value": positions_market_value,
         "total_value": total_value,
         "cash_weight": _safe_weight(cash, total_value),
         "exposure_weight": _safe_weight(positions_market_value, total_value),
         "unrealized_pnl": sum(unrealized_pnls) if unrealized_pnls else None,
-        "source": account.get("source") or payload.get("source"),
+        "source": (
+            "broker_account_aggregate"
+            if len(latest_snapshots) > 1
+            else sources[0]
+            if sources
+            else None
+        ),
     }
 
 
@@ -462,22 +515,30 @@ def build_broker_position_exposure_table(
     store: StateStore,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    latest = store.load_latest_broker_account_snapshot()
-    if latest is None:
+    latest_snapshots = _latest_broker_snapshots_by_account(store)
+    if not latest_snapshots:
         return []
-    payload = _mapping(latest.get("payload"))
-    account = _mapping(payload.get("account"))
-    positions = _positions(account)
-    total_value = _float_or_none(account.get("total_value"))
-    if total_value is None:
-        total_value = (_float_or_none(account.get("cash")) or 0.0) + sum(
-            _position_market_value(position) for position in positions
-        )
+    positions_by_account = []
+    total_values = []
+    for snapshot in latest_snapshots:
+        payload = _mapping(snapshot.get("payload"))
+        account = _mapping(payload.get("account"))
+        positions = _positions(account)
+        account_id = _broker_snapshot_account_id(snapshot)
+        positions_by_account.extend((account_id, position) for position in positions)
+        total_value = _account_total_value(account, positions)
+        if total_value is not None:
+            total_values.append(total_value)
+    total_value = sum(total_values) if total_values else None
     rows = []
-    for position in sorted(positions, key=lambda item: str(item.get("symbol") or "")):
+    for account_id, position in sorted(
+        positions_by_account,
+        key=lambda item: (item[0], str(item[1].get("symbol") or "")),
+    ):
         market_value = _position_market_value(position)
         rows.append(
             {
+                "account_id": account_id,
                 "symbol": position.get("symbol"),
                 "name": position.get("name"),
                 "quantity": _float_or_none(position.get("quantity")),

@@ -8,6 +8,7 @@ from typing import Any
 from maestro.config.loader import load_config_with_identity
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
+from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
@@ -39,6 +40,7 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
     audit = AuditLogger(config.audit.jsonl_path)
     accounts_synced = 0
     if config.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        refresh_run_id = new_run_id()
         for logical_account_id, kis_config in _kis_accounts(config):
             account_label = logical_account_id or "default_kis"
             try:
@@ -49,7 +51,10 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
                     instruments=config.universe.instruments,
                     logical_account_id=logical_account_id,
                 )
-                service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
+                service.fetch_and_store_snapshot(
+                    config.portfolio.allowed_symbols,
+                    run_id=refresh_run_id,
+                )
             except ValueError as exc:
                 raise ValueError(f"Failed to refresh account {account_label}: {exc}") from exc
             accounts_synced += 1

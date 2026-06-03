@@ -1021,7 +1021,7 @@ To install dashboard dependencies and open the read-only dashboard:
 
 ```bash
 uv sync --extra dashboard
-maestro dashboard --config configs/live_readonly.yaml
+maestro dashboard --env-file /etc/maestro/maestro.env --config configs/live_readonly.yaml
 ```
 
 The dashboard is read-only and served by one FastAPI process with a built
@@ -1041,6 +1041,11 @@ is a hybrid multi-account overview: it summarizes total broker value and account
 health, then lists each enabled real broker account as fresh/stale/missing; sandbox
 accounts are excluded from broker truth. See
 [`docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md`](docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md).
+When the dashboard is started outside systemd, pass `--env-file
+/etc/maestro/maestro.env` so broker refresh and proposal-only signal actions see
+the same credential environment as the operator services. The health endpoint
+reports credential environment variable names as present/missing without
+exposing secret values.
 
 If no CLI entrypoint exists yet during early development, use:
 

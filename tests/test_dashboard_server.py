@@ -196,6 +196,30 @@ def _mismatched_dashboard_config(config_path: Path) -> Path:
     return mismatch_path
 
 
+def _live_readonly_kis_config(tmp_path: Path) -> Path:
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["mode"] = "live_readonly"
+    raw["portfolio"].pop("initial_cash", None)
+    raw["accounts"] = [
+        {
+            "id": "kis_mock",
+            "broker": "kis",
+            "environment": "paper_trading",
+            "enabled": True,
+            "provider": "kis",
+            "account_id_env": "KIS_MOCK_ACCOUNT_ID",
+            "app_key_env": "KIS_MOCK_APP_KEY",
+            "app_secret_env": "KIS_MOCK_APP_SECRET",
+        }
+    ]
+    raw["strategies"][0]["account_id"] = "kis_mock"
+    raw["state"]["sqlite_path"] = str(tmp_path / "live_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "live_audit.jsonl")
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
+
+
 def test_dashboard_health_reports_config_and_readiness(tmp_path):
     config_path = _dashboard_config(tmp_path)
     client = TestClient(create_app(config_path))
@@ -206,6 +230,41 @@ def test_dashboard_health_reports_config_and_readiness(tmp_path):
     assert response.json()["status"] == "ok"
     assert response.json()["read_only"] is True
     assert response.json()["config_path"] == str(config_path)
+
+
+def test_dashboard_health_reports_missing_credential_env_without_secret_values(
+    monkeypatch, tmp_path
+):
+    for key in ("KIS_MOCK_ACCOUNT_ID", "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    config_path = _live_readonly_kis_config(tmp_path)
+    client = TestClient(create_app(config_path))
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    credential_env = response.json()["credential_env"]
+    assert credential_env["status"] == "missing"
+    assert credential_env["missing"] == [
+        "KIS_MOCK_ACCOUNT_ID",
+        "KIS_MOCK_APP_KEY",
+        "KIS_MOCK_APP_SECRET",
+    ]
+    assert "file-app-key" not in str(credential_env)
+
+
+def test_dashboard_refresh_missing_credentials_mentions_env_file(monkeypatch, tmp_path):
+    for key in ("KIS_MOCK_ACCOUNT_ID", "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    config_path = _live_readonly_kis_config(tmp_path)
+    client = TestClient(create_app(config_path), raise_server_exceptions=False)
+
+    response = client.post("/api/dashboard/refresh")
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["status"] == "dashboard_refresh_failed"
+    assert "--env-file /etc/maestro/maestro.env" in detail["message"]
 
 
 def test_dashboard_reports_config_state_mismatch_as_readable_409(tmp_path):
@@ -279,8 +338,8 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
 
         account = Account()
 
-    def fake_fetch(self, symbols):
-        calls.append(list(symbols))
+    def fake_fetch(self, symbols, run_id=None):
+        calls.append({"symbols": list(symbols), "run_id": run_id})
         return FakeSnapshot()
 
     monkeypatch.setattr(
@@ -300,6 +359,14 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
             "enabled": True,
             "provider": "mock",
             "account_id": "MOCK",
+        },
+        {
+            "id": "kis_ps",
+            "broker": "kis",
+            "environment": "paper_trading",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK-PS",
         }
     ]
     raw["strategies"] = []
@@ -312,15 +379,21 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "ok"
-    assert payload["accounts_synced"] == 1
+    assert payload["accounts_synced"] == 2
+    assert len(calls) == 2
+    assert calls[0]["run_id"] is not None
+    assert {call["run_id"] for call in calls} == {calls[0]["run_id"]}
     assert payload["signal_freshness"]["overall"] in {"missing", "fresh", "stale", "failed"}
-    assert calls == [["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]]
+    assert [call["symbols"] for call in calls] == [
+        ["CASH", "MOCK_ETF_A", "MOCK_ETF_B"],
+        ["CASH", "MOCK_ETF_A", "MOCK_ETF_B"],
+    ]
 
 
 def test_dashboard_refresh_reports_action_errors_as_readable_409(monkeypatch, tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
 
-    def fail_fetch(self, symbols):
+    def fail_fetch(self, symbols, run_id=None):
         raise ValueError("Missing KIS credential environment variables: ['KIS_MOCK_APP_KEY']")
 
     monkeypatch.setattr(

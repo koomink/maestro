@@ -9,7 +9,7 @@ import typer
 import yaml
 
 from maestro.config.app_fragment_composition import app_fragment_recommendation_failures
-from maestro.config.env import load_project_dotenv
+from maestro.config.env import load_env_file, load_project_dotenv
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
@@ -1333,12 +1333,19 @@ def dashboard(
     config: Path | None = CONFIG_OPTION,
     host: str = typer.Option("127.0.0.1", help="Dashboard bind host."),
     port: int = typer.Option(8503, help="Dashboard bind port."),
+    env_file: Path | None = typer.Option(
+        None,
+        "--env-file",
+        help="Optional operator environment file, for example /etc/maestro/maestro.env.",
+    ),
     signal_config: Path | None = typer.Option(
         None,
         "--signal-config",
         help="Signal config for Virtuoso generate-signal actions.",
     ),
 ) -> None:
+    if env_file is not None and not load_env_file(env_file):
+        raise typer.BadParameter(f"env file not found or empty: {env_file}")
     resolved_config = _resolve_config(config)
     from maestro.dashboard.server import run_dashboard_server
 

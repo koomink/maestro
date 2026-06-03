@@ -1029,6 +1029,7 @@ kis.paper_trading: true
         </div>
       </div>
       <div class="codeblock" style="margin-top: 16px;">maestro dashboard \
+  --env-file /etc/maestro/maestro.env \
   --config configs/operator/symphony_readonly.yaml \
   --signal-config configs/operator/symphony_signal.yaml \
   --host 127.0.0.1 \
@@ -1134,7 +1135,7 @@ maestro reconcile --config &lt;operator.yaml&gt;
 maestro health --config &lt;operator.yaml&gt;
 maestro live-preflight --config &lt;operator.yaml&gt;
 maestro beta-preflight --config &lt;operator.yaml&gt;
-maestro dashboard --config configs/operator/symphony_readonly.yaml --signal-config configs/operator/symphony_signal.yaml
+maestro dashboard --env-file /etc/maestro/maestro.env --config configs/operator/symphony_readonly.yaml --signal-config configs/operator/symphony_signal.yaml
 maestro telegram-operator --config &lt;operator.yaml&gt;</div>
       <div class="legend">
         <span><i class="dot"></i>Data/strategy cycle and signal handoff</span>
