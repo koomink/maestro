@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from typing import Annotated
 
+from pydantic import ValidationError
+
 from maestro.config.loader import load_config_with_identity
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.dashboard.actions import generate_strategy_signal, refresh_dashboard_state
@@ -62,9 +64,34 @@ def create_app(
             },
         )
 
+    def config_invalid_error(exc: ValidationError) -> HTTPException:
+        errors = []
+        for item in exc.errors():
+            loc = ".".join(str(part) for part in item.get("loc", ()))
+            errors.append(f"{loc}: {item.get('msg')}" if loc else str(item.get("msg")))
+        return HTTPException(
+            status_code=422,
+            detail={
+                "status": "config_invalid",
+                "read_only": True,
+                "message": (
+                    "Operator config failed validation against the running code "
+                    f"({len(errors)} error(s)): {'; '.join(errors[:3])}"
+                    + (" …" if len(errors) > 3 else "")
+                    + ". The dashboard is likely running stale code — restart it after "
+                    "deploying matching code and config."
+                ),
+                "config_path": str(resolved_config),
+                "errors": errors[:20],
+            },
+        )
+
     @app.get("/api/health")
     def health() -> dict[str, object]:
-        config, identity = load_config_with_identity(resolved_config)
+        try:
+            config, identity = load_config_with_identity(resolved_config)
+        except ValidationError as exc:
+            raise config_invalid_error(exc) from exc
         state_path = str(Path(config.state.sqlite_path).expanduser().resolve())
         try:
             store = StateStore(
@@ -96,6 +123,8 @@ def create_app(
     ) -> dict[str, object]:
         try:
             return build_dashboard_snapshot(resolved_config, display_currency=display_currency)
+        except ValidationError as exc:
+            raise config_invalid_error(exc) from exc
         except ValueError as exc:
             raise config_state_mismatch_error(exc) from exc
 
@@ -103,6 +132,8 @@ def create_app(
     def run_detail(run_id: str) -> dict[str, object]:
         try:
             detail = build_dashboard_run_detail(resolved_config, run_id)
+        except ValidationError as exc:
+            raise config_invalid_error(exc) from exc
         except ValueError as exc:
             raise config_state_mismatch_error(exc) from exc
         summary = detail.get("summary", {})

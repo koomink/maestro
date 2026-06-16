@@ -1,23 +1,18 @@
 import { useEffect, useState } from "react";
-import { fetchSnapshot, generateStrategySignal, loadSnapshot, refreshDashboardState } from "./api/snapshot";
+import { fetchSnapshot, generateStrategySignal, refreshDashboardState } from "./api/snapshot";
 import { ConsoleDrawer } from "./components/ConsoleDrawer";
-import { ShellMessage } from "./components/common";
+import { RelativeTime, ShellMessage } from "./components/common";
 import { TopChrome } from "./components/TopChrome";
 import { MaestroTab } from "./tabs/MaestroTab";
 import { PortfolioTab } from "./tabs/PortfolioTab";
 import { ResearchTab } from "./tabs/ResearchTab";
 import { VirtuosoTab } from "./tabs/VirtuosoTab";
-import type { DashboardSnapshot, Tone } from "./types";
+import type { DashboardSnapshot } from "./types";
 import { buildDiagnosticContext } from "./utils/diagnostic";
-import { formatValue } from "./utils/format";
 import type { ActionState, Period, SignalActionState, TabName } from "./viewModel";
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
-}
-
-function lastUpdatedMessage() {
-  return "Last updated: " + formatValue(new Date().toISOString());
 }
 
 export function App() {
@@ -32,9 +27,10 @@ export function App() {
   const [copyState, setCopyState] = useState("Copy diagnostic context");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [refreshAction, setRefreshAction] = useState<ActionState>({
     busy: false,
-    message: "Last updated: not yet refreshed",
+    message: "",
     tone: "neutral",
   });
   const [signalAction, setSignalAction] = useState<SignalActionState>({
@@ -44,8 +40,60 @@ export function App() {
     tone: "neutral",
   });
 
+  // Self-healing snapshot polling: load on mount, then refresh on an interval.
+  // On failure we keep the last good snapshot and retry with backoff, so a
+  // backend restart or transient error never leaves the dashboard blank — it
+  // recovers on its own as soon as the server is reachable again.
   useEffect(() => {
-    void loadSnapshot(displayCurrency, setSnapshot, setLoading, setError);
+    let cancelled = false;
+    let handle = 0;
+    let failures = 0;
+    const STEADY_MS = 30000;
+
+    function schedule(ms: number) {
+      handle = window.setTimeout(() => void tick(false), ms);
+    }
+
+    async function tick(initial: boolean) {
+      if (!initial && typeof document !== "undefined" && document.hidden) {
+        schedule(STEADY_MS);
+        return;
+      }
+      try {
+        const next = await fetchSnapshot(displayCurrency);
+        if (cancelled) return;
+        setSnapshot(next);
+        setError(null);
+        setLastUpdatedAt(Date.now());
+        failures = 0;
+      } catch (loadError) {
+        if (cancelled) return;
+        setError(errorMessage(loadError, "Dashboard snapshot is unavailable"));
+        failures += 1;
+      } finally {
+        if (!cancelled && initial) setLoading(false);
+      }
+      if (!cancelled) {
+        const backoff = Math.min(2000 * 2 ** Math.max(0, failures - 1), STEADY_MS);
+        schedule(failures ? backoff : STEADY_MS);
+      }
+    }
+
+    function onVisible() {
+      if (typeof document !== "undefined" && !document.hidden) {
+        window.clearTimeout(handle);
+        void tick(false);
+      }
+    }
+
+    setLoading(true);
+    void tick(true);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [displayCurrency]);
 
   useEffect(() => {
@@ -59,11 +107,13 @@ export function App() {
   }, [selectedRunId, snapshot]);
 
   async function handleRefresh() {
-    setRefreshAction({ busy: true, message: "Updating...", tone: "primary" });
+    setRefreshAction({ busy: true, message: "Updating…", tone: "primary" });
     try {
       await refreshDashboardState();
       setSnapshot(await fetchSnapshot(displayCurrency));
-      setRefreshAction({ busy: false, message: lastUpdatedMessage(), tone: "success" });
+      setError(null);
+      setLastUpdatedAt(Date.now());
+      setRefreshAction({ busy: false, message: "", tone: "success" });
     } catch (refreshError) {
       setRefreshAction({ busy: false, message: errorMessage(refreshError, "Dashboard refresh failed"), tone: "danger" });
     }
@@ -100,7 +150,10 @@ export function App() {
     return <ShellMessage title="Maestro" copy="Loading terminal dashboard..." />;
   }
 
-  if (error || !snapshot) {
+  // Only fall back to the full-screen error state when there is no data at all.
+  // If we still have a (possibly stale) snapshot, keep the dashboard visible and
+  // surface the error as a non-destructive banner instead.
+  if (!snapshot) {
     return <ShellMessage title="Maestro" copy={error || "Dashboard snapshot is unavailable."} tone="danger" />;
   }
 
@@ -119,10 +172,18 @@ export function App() {
     setActiveTab("Virtuoso");
   }
 
+  const connected = !error;
+
+  const shellClass = ["terminal-shell", consoleOpen ? "console-is-open" : "", error ? "has-banner" : ""]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div className={consoleOpen ? "terminal-shell console-is-open" : "terminal-shell"}>
+    <div className={shellClass}>
+      <a className="skip-link" href="#dashboard-content">Skip to dashboard content</a>
       <TopChrome
         activeTab={activeTab}
+        connected={connected}
         consoleOpen={consoleOpen}
         displayCurrency={displayCurrency}
         loading={loading}
@@ -133,8 +194,20 @@ export function App() {
         snapshot={snapshot}
         onRefresh={() => void handleRefresh()}
       />
-      <main className="dashboard-main">
-        {activeTab === "Portfolio" && <PortfolioTab period={period} setPeriod={setPeriod} snapshot={snapshot} />}
+      {error && (
+        <div className="error-banner" role="alert">
+          <span><strong>Connection issue:</strong> {error}</span>
+          <span className="error-banner-note">Showing last loaded data (<RelativeTime fromMs={lastUpdatedAt} />).</span>
+        </div>
+      )}
+      <main
+        className="dashboard-main"
+        id="dashboard-content"
+        role="tabpanel"
+        aria-labelledby={`tab-${activeTab}`}
+        tabIndex={-1}
+      >
+        {activeTab === "Portfolio" && <PortfolioTab displayCurrency={displayCurrency} period={period} setPeriod={setPeriod} snapshot={snapshot} />}
         {activeTab === "Maestro" && <MaestroTab openApp={openVirtuosoApp} snapshot={snapshot} />}
         {activeTab === "Virtuoso" && (
           <VirtuosoTab
@@ -149,7 +222,15 @@ export function App() {
         {activeTab === "Research" && <ResearchTab snapshot={snapshot} />}
       </main>
       <footer className="statusbar">
-        <span>{refreshAction.message}</span>
+        <span aria-live="polite" className={refreshAction.tone === "danger" ? "tone-danger" : undefined}>
+          {refreshAction.busy ? (
+            "Updating…"
+          ) : refreshAction.message ? (
+            refreshAction.message
+          ) : (
+            <>Last updated: <RelativeTime fromMs={lastUpdatedAt} /></>
+          )}
+        </span>
         <span>Read-only dashboard / proposal-only signals / no trading controls</span>
       </footer>
       <ConsoleDrawer

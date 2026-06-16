@@ -2,7 +2,14 @@ import type { ReactNode } from "react";
 import type { Metric, Row, Tone } from "../types";
 import { chartPoints, columnsFor, firstValue } from "../utils/data";
 import { formatValue, humanize } from "../utils/format";
-import { toneClass } from "../viewModel";
+import { relativeTime, useNow } from "../utils/hooks";
+import { toneClass, toneGlyph } from "../viewModel";
+
+/** Self-ticking relative time ("Ns ago") that re-renders only itself. */
+export function RelativeTime({ fromMs }: { fromMs: number | null }) {
+  const now = useNow(1000);
+  return <>{relativeTime(fromMs, now.getTime())}</>;
+}
 
 export function ShellMessage({ title, copy, tone = "neutral" }: { title: string; copy: string; tone?: Tone }) {
   return (
@@ -35,7 +42,12 @@ export function TerminalButton({
 }
 
 export function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
-  return <span className={`status-pill ${toneClass(tone)}`}>{children}</span>;
+  return (
+    <span className={`status-pill ${toneClass(tone)}`}>
+      {tone !== "neutral" && <i className="tone-glyph" aria-hidden="true">{toneGlyph(tone)}</i>}
+      {children}
+    </span>
+  );
 }
 
 
@@ -68,11 +80,32 @@ export function MetricRows({ metrics }: { metrics: Metric[] }) {
       {metrics.map((metric) => (
         <div className="metric-row" key={metric.label}>
           <b>{metric.label}</b>
-          <span className={toneClass(metric.tone)}>{formatValue(metric.value)}</span>
+          <span className={toneClass(metric.tone)}>
+            {metric.tone && metric.tone !== "neutral" && (
+              <i className="tone-glyph" aria-hidden="true">{toneGlyph(metric.tone)}</i>
+            )}
+            {formatValue(metric.value)}
+          </span>
         </div>
       ))}
     </div>
   );
+}
+
+function isNumericColumn(rows: Row[], column: string): boolean {
+  let numeric = 0;
+  let populated = 0;
+  for (const row of rows) {
+    const value = row[column];
+    if (value === null || value === undefined || value === "") {
+      continue;
+    }
+    populated += 1;
+    if (typeof value === "number" || (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)))) {
+      numeric += 1;
+    }
+  }
+  return populated > 0 && numeric / populated >= 0.6;
 }
 
 export function CompactTable({ rows, limit = 8, columns }: { rows: Row[]; limit?: number; columns?: string[] }) {
@@ -81,22 +114,26 @@ export function CompactTable({ rows, limit = 8, columns }: { rows: Row[]; limit?
   if (!limitedRows.length) {
     return <p className="muted-copy">No persisted rows are available.</p>;
   }
+  const numericColumns = new Set(tableColumns.filter((column) => isNumericColumn(limitedRows, column)));
   return (
     <div className="table-scroll">
       <table className="terminal-table">
         <thead>
           <tr>
             {tableColumns.map((column) => (
-              <th key={column}>{humanize(column)}</th>
+              <th className={numericColumns.has(column) ? "num" : undefined} key={column}>{humanize(column)}</th>
             ))}
           </tr>
         </thead>
         <tbody>
           {limitedRows.map((row, rowIndex) => (
             <tr key={rowIndex}>
-              {tableColumns.map((column) => (
-                <td key={column}>{formatValue(row[column])}</td>
-              ))}
+              {tableColumns.map((column) => {
+                const text = formatValue(row[column]);
+                return (
+                  <td className={numericColumns.has(column) ? "num" : undefined} key={column} title={text}>{text}</td>
+                );
+              })}
             </tr>
           ))}
         </tbody>

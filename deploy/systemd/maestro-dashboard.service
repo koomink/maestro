@@ -3,13 +3,16 @@ Description=Maestro read-only Dashboard
 Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
+# Never give up restarting: keep the dashboard available even after repeated
+# crashes (default systemd rate-limiting would stop it after a few failures).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --host 127.0.0.1 --port 8503
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --host 127.0.0.1 --port 8503
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

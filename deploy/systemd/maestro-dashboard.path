@@ -1,0 +1,16 @@
+[Unit]
+Description=Watch Maestro operator config and dashboard assets; reload on change
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+
+# Restart the dashboard automatically when the operator config or the built
+# frontend changes, so a deploy / config edit takes effect without leaving a
+# stale daemon serving outdated models. Adjust the watched paths to match the
+# operator config locations referenced by /etc/maestro/maestro.env.
+[Path]
+PathModified=/root/maestro-operator/symphony_readonly.yaml
+PathModified=/root/maestro-operator/symphony_signal.yaml
+PathChanged=/root/projects/Symphony/Maestro/src/maestro/dashboard/web/index.html
+Unit=maestro-dashboard-reload.service
+
+[Install]
+WantedBy=multi-user.target

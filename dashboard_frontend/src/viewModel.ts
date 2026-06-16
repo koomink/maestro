@@ -16,6 +16,25 @@ export function toneClass(tone?: Tone) {
   return `tone-${String(tone || "neutral").toLowerCase()}`;
 }
 
+/**
+ * Non-color status glyph so tone is distinguishable without relying on color
+ * alone (accessibility / color-blind users).
+ */
+export function toneGlyph(tone?: Tone): string {
+  switch (String(tone || "neutral").toLowerCase()) {
+    case "success":
+      return "✓";
+    case "warning":
+      return "!";
+    case "danger":
+      return "✕";
+    case "primary":
+      return "◆";
+    default:
+      return "•";
+  }
+}
+
 export function appName(strategyId: string) {
   const known: Record<string, string> = {
     tranquillo: "Tranquillo",

@@ -1,0 +1,13 @@
+[Unit]
+Description=Maestro dashboard liveness probe (auto-heal a hung/unreachable server)
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+
+# Restart ONLY when the server is unreachable (connection refused / timeout) —
+# i.e. the process is hung or dead. A reachable server that returns an HTTP
+# error (e.g. 422 config_invalid) is alive and is NOT restarted, so a bad
+# config surfaces in the UI instead of triggering a restart loop.
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'curl -s -o /dev/null --max-time 10 http://127.0.0.1:8503/api/health || (echo "dashboard unreachable; restarting" && systemctl restart maestro-dashboard.service)'
+StandardOutput=journal
+StandardError=journal
