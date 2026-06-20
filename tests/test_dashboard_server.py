@@ -204,6 +204,7 @@ def _live_readonly_kis_config(tmp_path: Path) -> Path:
         {
             "id": "kis_mock",
             "broker": "kis",
+            "broker_products": ["kis_overseas_stock"],
             "environment": "paper_trading",
             "enabled": True,
             "provider": "kis",
@@ -355,6 +356,7 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
         {
             "id": "kis_paper",
             "broker": "kis",
+            "broker_products": ["kis_overseas_stock"],
             "environment": "paper_trading",
             "enabled": True,
             "provider": "mock",
@@ -363,6 +365,7 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
         {
             "id": "kis_ps",
             "broker": "kis",
+            "broker_products": ["kis_overseas_stock"],
             "environment": "paper_trading",
             "enabled": True,
             "provider": "mock",
@@ -390,6 +393,33 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
     ]
 
 
+def test_dashboard_refresh_records_fx_failure_without_failing(monkeypatch, tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "readonly_state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "readonly_audit.jsonl")
+    raw["strategies"] = []
+    readonly_path = tmp_path / "readonly.yaml"
+    readonly_path.write_text(yaml.safe_dump(raw))
+
+    def fail_fx_refresh(self, run_id=None):
+        del run_id
+        raise ValueError("EXCHANGERATE_API_KEY is not set")
+
+    monkeypatch.setattr(
+        "maestro.fx.service.ConfiguredFXRefreshService.refresh_from_config",
+        fail_fx_refresh,
+    )
+    client = TestClient(create_app(readonly_path))
+
+    response = client.post("/api/dashboard/refresh")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["fx_refresh"]["status"] == "failed"
+    assert payload["fx_refresh"]["error_type"] == "ValueError"
+
+
 def test_dashboard_refresh_reports_action_errors_as_readable_409(monkeypatch, tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
 
@@ -409,6 +439,7 @@ def test_dashboard_refresh_reports_action_errors_as_readable_409(monkeypatch, tm
         {
             "id": "kis_paper",
             "broker": "kis",
+            "broker_products": ["kis_overseas_stock"],
             "environment": "paper_trading",
             "enabled": True,
             "provider": "mock",

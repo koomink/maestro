@@ -10,6 +10,7 @@ portfolio:
   cash_by_currency:
     KRW: 0
     USD: 0
+  unknown_broker_position_policy: include_readonly
   currency_sleeves:
     USD:
       cash_symbol: CASH_USD
@@ -249,7 +250,8 @@ datahub:
 execution:
   proposal_engine: paper
   order_generation_mode: target_rebalance
-  order_posture: dry_run
+  order_posture: armed
+  live_order_enabled: true
   require_reconciliation_pass: true
   live_order_limits:
     max_order_notional_by_currency:
@@ -268,10 +270,10 @@ execution:
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
   market_session:
-    required: false
-    timezone: Asia/Seoul
-    open: "09:00"
-    close: "15:30"
+    required: true
+    timezone: America/New_York
+    open: "09:30"
+    close: "16:00"
     weekdays: [0, 1, 2, 3, 4]
     holidays: []
   broker_validation:

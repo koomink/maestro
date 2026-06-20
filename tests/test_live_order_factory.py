@@ -15,9 +15,9 @@ from maestro.config.models import (
 )
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, RunMode
-from maestro.execution.broker_router import UnsupportedBrokerOperation
 from maestro.execution.brokers.kis.domestic_live_order import KISRestDomesticStockLiveOrderClient
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.toss.live_order_client import TossLiveOrderClient
 from maestro.execution.live_order_factory import (
     _build_live_order_client,
     build_live_approval_dependencies,
@@ -206,7 +206,7 @@ def test_single_broker_products_list_selects_live_order_product_without_default(
     assert isinstance(client, KISRestDomesticStockLiveOrderClient)
 
 
-def test_toss_account_live_order_client_fails_closed(tmp_path):
+def test_toss_account_builds_live_order_client(tmp_path):
     config = _config(tmp_path).model_copy(
         update={
             "accounts": [
@@ -214,13 +214,15 @@ def test_toss_account_live_order_client_fails_closed(tmp_path):
                     id="toss_brokerage",
                     broker="toss",
                     environment="real",
+                    account_seq=7,
                 )
             ]
         }
     )
 
-    with pytest.raises(UnsupportedBrokerOperation, match="Toss Securities"):
-        _build_live_order_client(config, account_id="toss_brokerage")
+    client = _build_live_order_client(config, account_id="toss_brokerage")
+
+    assert isinstance(client, TossLiveOrderClient)
 
 
 def _config(tmp_path) -> MaestroConfig:

@@ -61,6 +61,38 @@ def test_multi_account_contribution_config_loads_group(tmp_path):
     assert [target.account_id for target in group.account_targets] == ["kis_ps", "kis_isa"]
 
 
+def test_multi_account_contribution_uses_virtual_strategy_account_id(tmp_path):
+    config = _multi_account_config(tmp_path)
+    strategy = next(strategy for strategy in config.strategies if strategy.id == "tranquillo")
+
+    assert strategy.account_id == "multi_account_contributions.tranquillo"
+    assert strategy.execution_sleeve is None
+    assert config.effective_strategy_order_generation_mode(strategy) == "buy_only_contribution"
+
+
+def test_multi_account_contribution_rejects_direct_strategy_account_id(tmp_path):
+    raw = _multi_account_raw(tmp_path)
+    raw["accounts"].append(
+        {"id": "kis_mock", "broker": "sandbox", "environment": "paper_trading", "enabled": True}
+    )
+    raw["strategies"][0]["account_id"] = "kis_mock"
+    config_path = tmp_path / "invalid_direct_strategy_account.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="account_id must be"):
+        load_config(config_path)
+
+
+def test_multi_account_contribution_rejects_strategy_execution_sleeve(tmp_path):
+    raw = _multi_account_raw(tmp_path)
+    raw["strategies"][0]["execution_sleeve"] = "tranquillo_isa"
+    config_path = tmp_path / "invalid_virtual_strategy_sleeve.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="must not set execution_sleeve"):
+        load_config(config_path)
+
+
 def test_multi_account_contribution_rejects_disallowed_symbol(tmp_path):
     raw = _multi_account_raw(tmp_path)
     raw["multi_account_contributions"]["tranquillo"]["account_targets"][0]["allowed_symbols"] = [
@@ -126,10 +158,86 @@ def test_tranquillo_multi_account_isa_cash_below_minimum_creates_range_funding_r
     assert isa_request["min_monthly_budget"] == 1_660_000
     assert isa_request["required_shortfall"] == 660_000
     assert isa_request["max_monthly_budget"] == 4_000_000
-    assert isa_request["recommended_top_up"] == 3_000_000
+    assert isa_request["recommended_top_up"] == 660_000
 
 
-def _multi_account_config(tmp_path, *, isa_cash=2_000_000, ps_cash=500_000):
+def test_tranquillo_multi_account_isa_budget_request_blocks_isa_orders_only(
+    tmp_path,
+):
+    config = _multi_account_config(
+        tmp_path,
+        isa_cash=8_000_000,
+        ps_cash=500_000,
+        isa_budget_request=True,
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_account_snapshot(store, "kis_ps", cash=500_000, positions=[])
+    _save_account_snapshot(store, "kis_isa", cash=8_000_000, positions=[])
+
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["tranquillo"])
+
+    signal = store.load_signal_package(summary.signal_run_id)
+    orders = signal["orders_preview"]
+    requests = signal["budget_requests"]
+    assert signal["status"] == "budget_required"
+    assert signal["action_required"] is False
+    assert signal["budget_requests_count"] == 1
+    assert [order["account_id"] for order in orders] == ["kis_ps"]
+    assert orders[0]["notional"] == pytest.approx(500_000)
+    assert requests[0]["account_id"] == "kis_isa"
+    assert requests[0]["execution_sleeve"] == "tranquillo_isa"
+    assert requests[0]["available_cash"] == 8_000_000
+    assert requests[0]["min_monthly_budget"] == 1_660_000
+    assert requests[0]["recommended_budget"] == 4_000_000
+    assert requests[0]["selectable_max_budget"] == 8_000_000
+
+
+def test_tranquillo_multi_account_budget_decision_can_exceed_legacy_max(
+    tmp_path,
+):
+    config = _multi_account_config(
+        tmp_path,
+        isa_cash=8_000_000,
+        ps_cash=500_000,
+        isa_budget_request=True,
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_account_snapshot(store, "kis_ps", cash=500_000, positions=[])
+    _save_account_snapshot(store, "kis_isa", cash=8_000_000, positions=[])
+    store.save_system_event(
+        "operator_budget",
+        "contribution_budget_request_decision",
+        {
+            "request_id": "budget_req_manual",
+            "status": "selected",
+            "strategy_ids": ["tranquillo"],
+            "contribution_group_id": "tranquillo",
+            "account_id": "kis_isa",
+            "execution_sleeve": "tranquillo_isa",
+            "currency": "KRW",
+            "selected_budget": 8_000_000,
+            "month_key": "2026-06",
+        },
+    )
+
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["tranquillo"])
+
+    signal = store.load_signal_package(summary.signal_run_id)
+    isa_orders = [order for order in signal["orders_preview"] if order["account_id"] == "kis_isa"]
+    assert signal["budget_requests"] == []
+    assert sum(order["notional"] for order in isa_orders) == pytest.approx(8_000_000)
+    assert sum(order["notional"] for order in signal["orders_preview"]) == pytest.approx(
+        8_500_000
+    )
+
+
+def _multi_account_config(
+    tmp_path,
+    *,
+    isa_cash=2_000_000,
+    ps_cash=500_000,
+    isa_budget_request=False,
+):
     raw = _multi_account_raw(tmp_path)
     raw["state"]["sqlite_path"] = str(tmp_path / f"state_{isa_cash}_{ps_cash}.db")
     raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
@@ -138,6 +246,10 @@ def _multi_account_config(tmp_path, *, isa_cash=2_000_000, ps_cash=500_000):
     raw["execution_sleeves"]["accounts"]["kis_ps"]["tranquillo_ps"]["contribution"][
         "monthly_budget"
     ] = 500_000
+    if isa_budget_request:
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
+            "budget_request"
+        ] = {"enabled": True}
     config_path = tmp_path / f"multi_account_{isa_cash}_{ps_cash}.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return load_config(config_path)
@@ -171,6 +283,7 @@ def _multi_account_raw(tmp_path):
             "enabled": True,
             "signal_enabled": True,
             "weight": 1.0,
+            "account_id": "multi_account_contributions.tranquillo",
             "order_posture": "dry_run",
             "entrypoint": f"{__name__}:MultiAccountTranquilloTestStrategy",
             "config": {},

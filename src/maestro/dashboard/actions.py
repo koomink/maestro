@@ -9,7 +9,11 @@ from maestro.config.loader import load_config_with_identity
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
 from maestro.core.ids import new_run_id
-from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly_factory import (
+    broker_readonly_accounts,
+    build_broker_readonly_services,
+)
+from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state.store import StateStore
@@ -20,12 +24,14 @@ class DashboardRefreshResult:
     status: str
     accounts_synced: int
     signal_freshness: dict[str, Any]
+    fx_refresh: dict[str, Any]
 
     def as_payload(self) -> dict[str, Any]:
         return {
             "status": self.status,
             "accounts_synced": self.accounts_synced,
             "signal_freshness": self.signal_freshness,
+            "fx_refresh": self.fx_refresh,
         }
 
 
@@ -41,16 +47,9 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
     accounts_synced = 0
     if config.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         refresh_run_id = new_run_id()
-        for logical_account_id, kis_config in _kis_accounts(config):
+        for logical_account_id, service in build_broker_readonly_services(config, store, audit):
             account_label = logical_account_id or "default_kis"
             try:
-                service = KISReadOnlyService(
-                    kis_config,
-                    store,
-                    audit,
-                    instruments=config.universe.instruments,
-                    logical_account_id=logical_account_id,
-                )
                 service.fetch_and_store_snapshot(
                     config.portfolio.allowed_symbols,
                     run_id=refresh_run_id,
@@ -65,6 +64,7 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
             store,
             max_age_seconds=config.approval.signal_max_age_seconds,
         ),
+        fx_refresh=_refresh_fx_nonblocking(config, store),
     )
 
 
@@ -125,15 +125,25 @@ def build_signal_freshness(store: StateStore, *, max_age_seconds: int) -> dict[s
 
 
 def _kis_accounts(config) -> list[tuple[str | None, Any]]:
-    if config.accounts:
-        return [
-            (account.id, account.to_kis_config())
-            for account in config.accounts
-            if account.enabled and account.broker == "kis"
-        ]
-    if config.kis.enabled:
-        return [(None, config.kis)]
-    return []
+    return [
+        (
+            account_id,
+            account.to_kis_config() if getattr(account, "broker", None) == "kis" else account,
+        )
+        for account_id, account in broker_readonly_accounts(config)
+    ]
+
+
+def _refresh_fx_nonblocking(config, store: StateStore) -> dict[str, Any]:
+    try:
+        result = ConfiguredFXRefreshService(config, store).refresh_from_config()
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
+    return result.model_dump(mode="json")
 
 
 def _created_at_sort_key(created_at: Any, now: datetime) -> datetime:

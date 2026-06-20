@@ -2,13 +2,19 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
 from maestro.cli import _load_dotenv, app
-from maestro.config.env import load_env_file, load_project_dotenv
+from maestro.config.env import load_default_env_files, load_env_file, load_project_dotenv
 from maestro.config.loader import load_config
 from maestro.state.store import StateStore
+
+
+@pytest.fixture(autouse=True)
+def _isolate_operator_env_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAESTRO_ENV_FILE", str(tmp_path / "missing_maestro.env"))
 
 
 def test_init_personal_creates_safe_operator_config(monkeypatch, tmp_path):
@@ -93,8 +99,32 @@ def test_project_dotenv_loader_does_not_override_shell_env(monkeypatch, tmp_path
     assert os.environ["FRED_API_KEY"] == "dotenv-fred-key"
 
 
+def test_default_env_loader_reads_operator_env_without_overriding_project_env(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("EXCHANGERATE_API_KEY", raising=False)
+    monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    operator_env = tmp_path / "maestro.env"
+    (tmp_path / ".env").write_text("EXCHANGERATE_API_KEY=project-key\n")
+    operator_env.write_text(
+        "\n".join(
+            [
+                "EXCHANGERATE_API_KEY=operator-key",
+                "KIS_MOCK_ACCOUNT_ID=12345678-01",
+            ]
+        )
+    )
+
+    load_default_env_files(operator_env_path=operator_env)
+
+    assert os.environ["EXCHANGERATE_API_KEY"] == "project-key"
+    assert os.environ["KIS_MOCK_ACCOUNT_ID"] == "12345678-01"
+
+
 def test_explicit_env_file_loader_does_not_override_shell_env(monkeypatch, tmp_path):
     monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
     monkeypatch.setenv("KIS_MOCK_APP_KEY", "shell-app-key")
     env_file = tmp_path / "maestro.env"
     env_file.write_text(
@@ -115,7 +145,11 @@ def test_explicit_env_file_loader_does_not_override_shell_env(monkeypatch, tmp_p
     assert os.environ["KIS_MOCK_APP_SECRET"] == "file-secret"
 
 
-def test_personal_check_reports_default_blocked_stages(tmp_path):
+def test_personal_check_reports_default_blocked_stages(monkeypatch, tmp_path):
+    monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
+    monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     config_path = tmp_path / "maestro_personal.yaml"
     init = CliRunner().invoke(app, ["init-personal", "--output", str(config_path)])
     assert init.exit_code == 0, init.output

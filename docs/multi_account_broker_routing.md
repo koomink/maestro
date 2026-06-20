@@ -74,10 +74,11 @@ strategies:
 ```
 
 KIS account entries define the credential/account boundary. The actual KIS REST
-API family is selected per instrument through `broker_product`: KRX-listed
-stocks and ETFs use `kis_domestic_stock`, while US-listed stocks and ETFs use
-`kis_overseas_stock`. Maestro keeps separate product-specific adapters for those
-market differences while sharing common KIS REST plumbing underneath them.
+API families available to an account are declared through `broker_products`:
+KRX-listed stocks and ETFs use `kis_domestic_stock`, while US-listed stocks and
+ETFs use `kis_overseas_stock`. Maestro keeps separate product-specific adapters
+for those market differences while sharing common KIS REST plumbing underneath
+them.
 
 Shared mapping file. The legacy `strategy_id: account_id` form remains valid,
 but operator workflows should prefer the object form so phase visibility,
@@ -99,11 +100,18 @@ execution_sleeves:
           monthly_budget: 3000000
           buy_day: 25
 
-    dev_sandbox:
+    toss_brokerage:
       crescendo_us:
         currency_sleeve: USD
         target_weight: 1.0
         order_generation_mode: target_rebalance
+
+account_strategy_targets:
+  toss_brokerage:
+    crescendo_us:
+      target_weight: 0.7
+    manual:
+      target_weight: 0.3
 
 multi_account_contributions:
   tranquillo:
@@ -123,12 +131,13 @@ multi_account_contributions:
 
 strategies:
   tranquillo:
+    account_id: multi_account_contributions.tranquillo
     readonly: true
     signal: true
     order_posture: dry_run
 
   crescendo_us:
-    account_id: dev_sandbox
+    account_id: toss_brokerage
     execution_sleeve: crescendo_us
     readonly: true
     signal: true
@@ -150,6 +159,14 @@ Maestro enforces one `order_generation_mode` per `account_id + execution_sleeve`
 When multiple active execution sleeves share one account, their `target_weight`
 values must sum to `1.0`.
 
+`account_strategy_targets` declares the operator-facing account books for
+accounts that mix Maestro-managed strategies with manual investing. The
+`manual` bucket is not an automatic trading target; it is reserved capacity that
+Maestro does not sell or rebalance. For `toss_brokerage`, `crescendo_us` uses
+70% target capacity and `manual` reserves 30%. If manual holdings exceed their
+target, Maestro reduces automatic strategy capacity and reports the drift
+instead of selling manual positions.
+
 Multi-account contribution groups are also operator-owned. They are for cases
 where one Virtuoso strategy target must be allocated across more than one
 account because account capabilities differ. Tranquillo v1 uses this to keep one
@@ -158,6 +175,10 @@ the SCHD-like ETF only and ISA (`kis_isa`) cash to the remaining SCHD-like /
 QLD-like mix. Maestro calculates the aggregate current holdings across the group
 accounts, applies fixed account buys first, and then allocates variable account
 cash toward the group target. It does not sell positions to force the target.
+The strategy entry must use the virtual account marker
+`account_id: multi_account_contributions.<group_id>` and must not set
+`execution_sleeve`; the group `account_targets` are the only source of concrete
+account and sleeve routing.
 
 
 For `buy_only_contribution` sleeves, `contribution.funding_request.enabled` is an
@@ -170,19 +191,32 @@ the operator confirms that cash was added, Maestro refreshes broker/account
 state, generates a fresh signal, and any resulting orders still require the
 regular approval flow.
 
+`contribution.budget_request.enabled` is a separate opt-in for variable
+buy-only sleeves. When cash is at or above `min_monthly_budget`, Maestro records
+a `contribution_budget_request` instead of immediately generating orders for
+that sleeve. The operator chooses the minimum, recommended monthly amount, full
+available cash after fee buffer, or a custom `/budget <request_id> <amount>`.
+The selected amount is saved as a budget decision, Maestro regenerates the
+signal, and any generated orders still require the normal approval flow.
+`max_monthly_budget` is kept only as a compatibility field and is not used as a
+cash cap.
+
 Cash rebalance v1 only allocates available account cash across execution sleeves.
 It does not sell existing positions to force sleeve weights. If a sleeve is below
 its target account weight, new cash is allocated to the shortfall first; if no
 sleeve is underweight, cash is split by target weights. Separate execution
 sleeves in the same account may not target the same tradable symbol in v1.
+When account attribution snapshots exist, execution scopes use the attributed
+strategy quantity for order generation so manually owned shares of the same
+symbol are not treated as strategy inventory.
 
 Phase 1 operational support:
 
 - KIS `environment: real` uses the real KIS base URL behavior.
 - KIS `environment: paper_trading` uses the existing KIS VTS behavior.
-- Toss accounts validate and appear in mappings, but live broker submit/read-only
-  calls raise `UnsupportedBrokerOperation` until official trading API support is
-  added.
+- Toss accounts validate, appear in mappings, and use the common Toss OpenAPI
+  adapter for snapshots, submit, status, modification, and cancellation.
+  Initial armed operation permits Telegram-approved integer DAY limit orders.
 
 Current operator split:
 
@@ -200,8 +234,9 @@ The current strategy mapping routes Tranquillo through the
 `multi_account_contributions.tranquillo` group: `kis_ps / tranquillo_ps` buys
 only the SCHD-like domestic ETF with a fixed 500,000 KRW monthly budget, while
 `kis_isa / tranquillo_isa` uses 1,660,000-4,000,000 KRW toward the aggregate
-60/40 Tranquillo target. `crescendo_us -> dev_sandbox / crescendo_us` and
-`fugue -> dev_sandbox / fugue` remain normal single-account strategy mappings.
+60/40 Tranquillo target. `crescendo_us -> toss_brokerage / crescendo_us` is a
+normal single-account strategy mapping with manual bucket capacity reserved, and
+`fugue -> dev_sandbox / fugue` remains disabled for operator visibility.
 Account definitions are centralized in `configs/operator/broker_accounts.yaml`.
 
 ## Strategy Promotion And Account Binding
@@ -221,7 +256,8 @@ enable it and add one mapping entry, usually to the safest available account:
 
 ```yaml
 strategies:
-  tranquillo: kis_isa
+  tranquillo:
+    account_id: multi_account_contributions.tranquillo
   crescendo_us: kis_brokerage
   fugue: kis_mock
 ```
@@ -235,8 +271,15 @@ Promotion should move in this order:
 4. Real account promotion: bind to `kis_isa`, `kis_brokerage`, or another real
    account only after operator approval and evidence review.
 
-Toss-backed strategies can be represented in config, but Toss broker operations
-remain fail-closed until official trading API support is implemented.
+Toss-backed strategies use the common broker snapshot path and the official
+OpenAPI document in `docs/toss_openapi.json`. Market and US amount orders are
+implemented at the adapter boundary but remain blocked by the initial live
+safety policy.
+
+The first broker sync writes an `auto_baseline` attribution candidate. Adopt it
+with `maestro adopt-account-attribution --account-id toss_brokerage --reason
+"..."` or `/attribution toss_brokerage` in Telegram. Missing, unapproved, stale,
+or quantity-mismatched attribution blocks submit and modification.
 
 ## Phase Controls And Order Posture
 

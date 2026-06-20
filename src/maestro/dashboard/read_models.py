@@ -800,13 +800,19 @@ def build_total_portfolio_performance_table(
     }
     rows = []
     previous_component_values: dict[str, float] = {}
+    latest_by_account: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for group_rows in grouped.values():
+        for row in group_rows:
+            account_id = _broker_snapshot_account_id(row)
+            if account_id:
+                latest_by_account[account_id] = row
+
         component_values: dict[str, float] = {}
         component_cash_flows: dict[str, float] = {}
         created_at = group_rows[-1].get("created_at")
         run_id = group_rows[-1].get("run_id")
         reconciliation_statuses = []
-        for row in group_rows:
+        for row in latest_by_account.values():
             payload = _mapping(row.get("payload"))
             account = _mapping(payload.get("account"))
             positions = _positions(account)
@@ -814,10 +820,14 @@ def build_total_portfolio_performance_table(
             total_value = _account_total_value(account, positions)
             if total_value is not None:
                 component_values[currency] = component_values.get(currency, 0.0) + total_value
-            cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
-            component_cash_flows[currency] = component_cash_flows.get(currency, 0.0) + cash_flow
             reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
             reconciliation_statuses.append(_reconciliation_status(reconciliation))
+        for row in group_rows:
+            payload = _mapping(row.get("payload"))
+            account = _mapping(payload.get("account"))
+            currency = _snapshot_currency(account, payload)
+            cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
+            component_cash_flows[currency] = component_cash_flows.get(currency, 0.0) + cash_flow
 
         currencies = sorted(component_values)
         converted_value = _convert_components(
@@ -889,7 +899,8 @@ def build_fx_rate_snapshot_card(store: StateStore) -> dict[str, Any]:
         }
     payload = _mapping(latest.get("payload"))
     as_of = payload.get("as_of") or payload.get("created_at") or latest.get("created_at")
-    age_seconds = _age_seconds(as_of)
+    freshness_at = payload.get("fetched_at") or as_of
+    age_seconds = _age_seconds(freshness_at)
     max_age_seconds = int(
         payload.get("max_age_seconds") or payload.get("stale_after_seconds") or 86400
     )
@@ -1052,6 +1063,60 @@ def build_strategy_attribution_table(
                         "linked by symbol or broker order id"
                     ),
                 },
+            }
+        )
+    return rows
+
+
+def build_account_bucket_attribution_table(
+    store: StateStore,
+    *,
+    prices: dict[str, float],
+    target_weights: dict[str, dict[str, float]] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    rows = []
+    latest_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in store.list_account_attribution_snapshots(limit=limit):
+        payload = _mapping(row.get("payload"))
+        key = (
+            str(row.get("account_id") or payload.get("account_id") or ""),
+            str(row.get("symbol") or payload.get("symbol") or ""),
+            str(row.get("bucket_id") or payload.get("bucket_id") or ""),
+        )
+        if key not in latest_by_key:
+            latest_by_key[key] = {**row, "payload": payload}
+
+    values_by_account_bucket: dict[tuple[str, str], float] = {}
+    latest_created_at: dict[tuple[str, str], str | None] = {}
+    for (account_id, symbol, bucket_id), row in latest_by_key.items():
+        quantity = _float_or_none(row["payload"].get("quantity")) or 0.0
+        price = _float_or_none(prices.get(symbol))
+        if price is None:
+            continue
+        bucket_key = (account_id, bucket_id)
+        values_by_account_bucket[bucket_key] = (
+            values_by_account_bucket.get(bucket_key, 0.0) + quantity * price
+        )
+        latest_created_at[bucket_key] = row.get("created_at")
+
+    totals_by_account: dict[str, float] = {}
+    for (account_id, _), value in values_by_account_bucket.items():
+        totals_by_account[account_id] = totals_by_account.get(account_id, 0.0) + value
+
+    for (account_id, bucket_id), market_value in sorted(values_by_account_bucket.items()):
+        total_value = totals_by_account.get(account_id, 0.0)
+        actual_weight = market_value / total_value if total_value > 0 else None
+        target_weight = (target_weights or {}).get(account_id, {}).get(bucket_id)
+        rows.append(
+            {
+                "created_at": latest_created_at.get((account_id, bucket_id)),
+                "account_id": account_id,
+                "bucket_id": bucket_id,
+                "market_value": _round_money(market_value),
+                "target_weight": target_weight,
+                "actual_weight": _round_ratio(actual_weight),
+                "status": _bucket_status(actual_weight, target_weight),
             }
         )
     return rows
@@ -2322,6 +2387,16 @@ def _round_ratio(value: float | None) -> float | None:
     if value is None:
         return None
     return round(value, 10)
+
+
+def _bucket_status(actual_weight: float | None, target_weight: float | None) -> str:
+    if actual_weight is None or target_weight is None:
+        return "missing_target"
+    if actual_weight > target_weight + 1e-6:
+        return "over_target"
+    if actual_weight < target_weight - 1e-6:
+        return "under_target"
+    return "on_target"
 
 
 def _safe_weight(value: float | None, total: float | None) -> float | None:

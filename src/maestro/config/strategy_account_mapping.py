@@ -168,6 +168,15 @@ def _apply_strategy_account_map(
                 "strategy_account_map_path multi_account_contributions conflicts with config"
             )
         values["multi_account_contributions"] = mapping_raw["multi_account_contributions"]
+    if "account_strategy_targets" in mapping_raw:
+        if (
+            "account_strategy_targets" in values
+            and values["account_strategy_targets"] != mapping_raw["account_strategy_targets"]
+        ):
+            raise ValueError(
+                "strategy_account_map_path account_strategy_targets conflicts with config"
+            )
+        values["account_strategy_targets"] = mapping_raw["account_strategy_targets"]
     return values
 
 

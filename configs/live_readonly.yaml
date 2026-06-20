@@ -30,4 +30,5 @@ approval:
 kis:
   enabled: true
   provider: kis
-  broker_product: kis_domestic_stock
+  broker_products:
+    - kis_domestic_stock

@@ -588,7 +588,7 @@ def test_instrument_price_tick_and_quantity_step_validation(tmp_path):
                 min_order_notional=1,
             )
         ],
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
         base_currency=Currency.USD,
     )
     approval = _approval("run_live", "appr_live")
@@ -867,7 +867,12 @@ def _live_orchestrator(
         "whitelisted_user_ids": [100],
         "telegram_poll_interval_seconds": 0.0,
     }
-    raw["kis"] = {"enabled": True, "provider": "mock", "account_id": "MOCK"}
+    raw["kis"] = {
+        "enabled": True,
+        "provider": "mock",
+        "account_id": "MOCK",
+        "broker_products": ["kis_domestic_stock"],
+    }
     config_path = tmp_path / "live_approval.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     orchestrator = MaestroOrchestrator(

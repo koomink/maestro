@@ -295,7 +295,6 @@ class HealthService:
             message="missing_required_env" if missing else "present",
             details={
                 "provider": self.config.kis.provider,
-                "broker_product": self.config.kis.broker_product.value,
                 "broker_products": ",".join(
                     product.value for product in self.config.kis.effective_broker_products()
                 ),

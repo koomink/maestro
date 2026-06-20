@@ -10,6 +10,7 @@ portfolio:
   cash_by_currency:
     KRW: 0
     USD: 0
+  unknown_broker_position_policy: include_readonly
   currency_sleeves:
     USD:
       cash_symbol: CASH_USD

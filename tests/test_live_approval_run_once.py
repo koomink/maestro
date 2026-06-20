@@ -110,12 +110,14 @@ def _mock_kis_broker_snapshot(monkeypatch) -> None:
         audit_logger,
         client=None,
         instruments=None,
+        logical_account_id=None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
         self.instruments = instruments or []
         self.client = client
+        self.logical_account_id = logical_account_id
 
     def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
         return _kis_snapshot(
@@ -144,15 +146,20 @@ def _save_kis_snapshot_as_broker_snapshot(
     service: KISReadOnlyService,
     snapshot: KISReadOnlySnapshot,
 ) -> None:
+    payload = {
+        "account": snapshot.account.model_dump(mode="json"),
+        "current_prices": snapshot.current_prices,
+        "order_fills": [],
+        "unfilled_orders": [],
+    }
+    logical_account_id = getattr(service, "logical_account_id", None)
+    if logical_account_id:
+        payload["account_id"] = logical_account_id
+        payload["broker_account_id"] = snapshot.account.account_id
     service.state_store.save_broker_account_snapshot(
         "run_kis_snapshot",
         snapshot.account.account_id,
-        {
-            "account": snapshot.account.model_dump(mode="json"),
-            "current_prices": snapshot.current_prices,
-            "order_fills": [],
-            "unfilled_orders": [],
-        },
+        payload,
     )
 
 
@@ -526,7 +533,7 @@ def test_live_approval_run_once_fails_closed_when_broker_refresh_fails(
         telegram_client=FakeTelegramClient("appr_missing_baseline"),
     )
 
-    with pytest.raises(ValueError, match="could not refresh KIS broker snapshot"):
+    with pytest.raises(ValueError, match="could not refresh broker snapshot"):
         orchestrator.run_once()
 
     events = orchestrator.state_store.list_system_events_by_type("broker_baseline_required")

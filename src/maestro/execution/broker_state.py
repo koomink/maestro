@@ -1,6 +1,10 @@
+from typing import Literal
+
 from maestro.config.universe import UniverseConfig
 from maestro.core.instruments import TradableInstrument
 from maestro.state.models import PortfolioState
+
+UnknownBrokerPositionPolicy = Literal["fail_closed", "include_readonly"]
 
 
 def portfolio_state_from_broker_account(
@@ -8,6 +12,7 @@ def portfolio_state_from_broker_account(
     *,
     allowed_symbols: list[str],
     universe: UniverseConfig | None = None,
+    unknown_symbol_policy: UnknownBrokerPositionPolicy = "fail_closed",
 ) -> PortfolioState:
     positions: dict[str, float] = {}
     unknown_symbols: list[str] = []
@@ -26,7 +31,10 @@ def portfolio_state_from_broker_account(
             continue
         instrument = instruments.get(symbol)
         if instrument is None:
-            unknown_symbols.append(symbol)
+            if unknown_symbol_policy == "include_readonly":
+                positions[symbol] = positions.get(symbol, 0.0) + quantity
+            else:
+                unknown_symbols.append(symbol)
             continue
         rejections = _universe_policy_rejections(instrument, universe)
         if rejections:

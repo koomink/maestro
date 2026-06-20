@@ -4,7 +4,6 @@ accounts:
     environment: paper_trading
     enabled: true
     provider: kis
-    broker_product: kis_domestic_stock
     broker_products:
       - kis_domestic_stock
     account_id_env: KIS_MOCK_ACCOUNT_ID
@@ -19,7 +18,6 @@ accounts:
     environment: real
     enabled: true
     provider: kis
-    broker_product: kis_domestic_stock
     broker_products:
       - kis_domestic_stock
     account_id_env: KIS_ISA_ACCOUNT_ID
@@ -34,7 +32,6 @@ accounts:
     environment: real
     enabled: true
     provider: kis
-    broker_product: kis_overseas_stock
     broker_products:
       - kis_overseas_stock
     account_id_env: KIS_BROKERAGE_ACCOUNT_ID
@@ -50,7 +47,6 @@ accounts:
     environment: real
     enabled: true
     provider: kis
-    broker_product: kis_domestic_stock
     broker_products:
       - kis_domestic_stock
     account_id_env: KIS_PS_ACCOUNT_ID
@@ -64,7 +60,16 @@ accounts:
     broker: sandbox
     environment: paper_trading
     enabled: true
-    broker_product: kis_overseas_stock
     broker_products:
       - kis_domestic_stock
       - kis_overseas_stock
+  - id: toss_brokerage
+    broker: toss
+    environment: real
+    enabled: true
+    client_id_env: TOSS_CLIENT_ID
+    client_secret_env: TOSS_CLIENT_SECRET
+    access_token_env: TOSS_ACCESS_TOKEN
+    account_seq_env: TOSS_ACCOUNT_SEQ
+    token_cache_path: var/toss_brokerage_access_token.json
+    timeout_seconds: 10

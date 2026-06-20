@@ -9,7 +9,7 @@ import typer
 import yaml
 
 from maestro.config.app_fragment_composition import app_fragment_recommendation_failures
-from maestro.config.env import load_env_file, load_project_dotenv
+from maestro.config.env import load_default_env_files, load_env_file
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
@@ -19,12 +19,22 @@ from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly_factory import (
+    broker_readonly_account_ids,
+    broker_readonly_accounts,
+    build_broker_readonly_services,
+)
+from maestro.execution.budget_requests import (
+    budget_request_reply_markup,
+    format_contribution_budget_request,
+)
 from maestro.execution.funding_requests import (
     format_contribution_funding_request,
     funding_request_reply_markup,
 )
 from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
+from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.integrations.telegram.bot import TelegramBotAPIClient
 from maestro.integrations.telegram.handlers import (
     TelegramOperatorCommandRouter,
@@ -36,6 +46,7 @@ from maestro.monitoring.logging import configure_structured_logging
 from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
 from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.scaffold import create_virtuoso_app_scaffold
 from maestro.state.events import SystemEventType, save_audited_system_event
@@ -54,7 +65,7 @@ CONFIG_OPTION = typer.Option(
 
 
 def _load_dotenv() -> None:
-    load_project_dotenv()
+    load_default_env_files()
 
 
 @app.callback()
@@ -94,31 +105,29 @@ def _broker_snapshot_refresher(
     store: StateStore,
     audit: AuditLogger,
 ):
-    kis_accounts = _kis_readonly_accounts(maestro_config)
-    if not kis_accounts:
+    readonly_services = build_broker_readonly_services(maestro_config, store, audit)
+    if not readonly_services:
         return None
 
     def refresh() -> None:
-        for logical_account_id, kis_config in kis_accounts:
-            KISReadOnlyService(
-                kis_config,
-                store,
-                audit,
-                instruments=maestro_config.universe.instruments,
-                logical_account_id=logical_account_id,
-            ).fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+        for _, service in readonly_services:
+            service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
 
     return refresh
 
 
 def _kis_readonly_accounts(maestro_config: MaestroConfig):
-    if maestro_config.kis.enabled:
-        return [(None, maestro_config.kis)]
     return [
-        (account.id, account.to_kis_config())
-        for account in maestro_config.accounts
-        if account.enabled and account.broker == "kis"
+        (
+            account_id,
+            account.to_kis_config() if getattr(account, "broker", None) == "kis" else account,
+        )
+        for account_id, account in broker_readonly_accounts(maestro_config)
     ]
+
+
+def _reconciliation_account_ids(maestro_config: MaestroConfig) -> list[str]:
+    return broker_readonly_account_ids(maestro_config)
 
 
 def _profile_datahub_providers(maestro_config: MaestroConfig) -> str:
@@ -223,6 +232,10 @@ def daily_signal_approval(
                 stop_telegram_operator=stop_telegram_operator,
                 telegram_operator_service=telegram_operator_service,
             )
+        except Exception as exc:
+            failure_config = signal_config or approval_config or readonly_config
+            _send_daily_failure_notification(failure_config, exc)
+            raise
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
@@ -252,6 +265,16 @@ def _run_daily_signal_approval(
     _send_signal_summary_notification(signal_maestro_config, signal_summary)
 
     if not signal_summary.action_required:
+        budget_sent = _send_signal_budget_request_notifications(
+            signal_maestro_config,
+            signal_summary.signal_run_id,
+        )
+        if budget_sent:
+            typer.echo(
+                f"symphony_daily status=budget_required "
+                f"signal_run_id={signal_summary.signal_run_id}"
+            )
+            return
         funding_sent = _send_signal_funding_request_notifications(
             signal_maestro_config,
             signal_summary.signal_run_id,
@@ -308,31 +331,97 @@ def _refresh_daily_readonly(
         return
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    kis_accounts = _kis_readonly_accounts(maestro_config)
-    if not kis_accounts:
-        typer.echo("symphony_daily readonly=skipped reason=no_kis_accounts")
+    readonly_services = build_broker_readonly_services(maestro_config, store, audit)
+    if not readonly_services:
+        typer.echo("symphony_daily readonly=skipped reason=no_broker_accounts")
         return
-    for logical_account_id, kis_config in kis_accounts:
-        service = KISReadOnlyService(
-            kis_config,
-            store,
-            audit,
-            instruments=maestro_config.universe.instruments,
-            logical_account_id=logical_account_id,
-        )
-        service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+    for logical_account_id, service in readonly_services:
+        account_label = logical_account_id or "default_kis"
+        try:
+            service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
+        except (RuntimeError, TimeoutError, ValueError) as exc:
+            message = f"readonly refresh failed for account {account_label}: {exc}"
+            typer.echo(message)
+            typer.echo(f"symphony_daily readonly=failed account={account_label} message={exc}")
+            raise ValueError(message) from exc
     result = BrokerReconciliationService(
         maestro_config.reconciliation,
         store,
         audit,
+        account_ids=_reconciliation_account_ids(maestro_config),
     ).reconcile_latest()
     status = "passed" if result.passed else "failed"
     typer.echo(
-        f"symphony_daily readonly=refreshed accounts_synced={len(kis_accounts)} "
+        f"symphony_daily readonly=refreshed accounts_synced={len(readonly_services)} "
         f"reconciliation={status} issues={len(result.issues)}"
     )
     if not result.passed:
-        raise typer.Exit(1)
+        raise ValueError(_format_reconciliation_failure(result))
+
+
+def _format_reconciliation_failure(result) -> str:
+    issue_summaries = []
+    for issue in result.issues[:3]:
+        symbol = f":{issue.symbol}" if issue.symbol else ""
+        issue_summaries.append(f"{issue.issue_type}{symbol}: {issue.message}")
+    if len(result.issues) > 3:
+        issue_summaries.append(f"+{len(result.issues) - 3} more")
+    details = "; ".join(issue_summaries) if issue_summaries else "no issue details"
+    return f"reconciliation failed with {len(result.issues)} issue(s): {details}"
+
+
+def _send_daily_failure_notification(config_path: Path | None, exc: Exception) -> None:
+    if config_path is None:
+        return
+    try:
+        maestro_config, _ = _load_operator_config(config_path)
+    except Exception as config_exc:
+        typer.echo(f"telegram_daily_failure=warn message={config_exc}")
+        return
+    if maestro_config.approval.provider != "telegram":
+        return
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_daily_failure=warn message=missing_bot_token")
+        return
+    error_message = _single_line_error(exc)
+    message = "\n".join(
+        [
+            "Maestro daily briefing failed",
+            f"stage: {_daily_failure_stage(error_message)}",
+            f"error: {error_message}",
+        ]
+    )
+    try:
+        client = TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        for chat_id in chat_ids:
+            client.send_message(chat_id, message)
+    except (RuntimeError, TimeoutError, TypeError, ValueError) as send_exc:
+        typer.echo(f"telegram_daily_failure=warn message={send_exc}")
+        return
+    typer.echo(f"telegram_daily_failure=sent chats={len(chat_ids)}")
+
+
+def _daily_failure_stage(error_message: str) -> str:
+    if "readonly refresh" in error_message:
+        return "readonly_refresh"
+    if "reconciliation" in error_message:
+        return "reconciliation"
+    if "signal" in error_message:
+        return "signal"
+    if "approval" in error_message:
+        return "approval"
+    return "daily_signal_approval"
+
+
+def _single_line_error(exc: Exception) -> str:
+    message = str(exc).strip().splitlines()[0] if str(exc).strip() else type(exc).__name__
+    return message[:500]
 
 
 def _send_signal_funding_request_notifications(
@@ -372,6 +461,45 @@ def _send_signal_funding_request_notifications(
         return 0
     sent = len(funding_requests) * len(chat_ids)
     typer.echo(f"telegram_funding_request=sent messages={sent}")
+    return sent
+
+
+def _send_signal_budget_request_notifications(
+    maestro_config: MaestroConfig,
+    signal_run_id: str,
+) -> int:
+    if maestro_config.approval.provider != "telegram":
+        return 0
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return 0
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_budget_request=warn message=missing_bot_token")
+        return 0
+    store = StateStore(
+        maestro_config.state.sqlite_path,
+        maestro_config.portfolio.initial_cash,
+        maestro_config.portfolio.cash_by_currency,
+    )
+    signal = store.load_signal_package(signal_run_id) or {}
+    budget_requests = signal.get("budget_requests") or []
+    if not budget_requests:
+        return 0
+    try:
+        client = TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        for request in budget_requests:
+            message = format_contribution_budget_request(request)
+            markup = budget_request_reply_markup(request)
+            for chat_id in chat_ids:
+                client.send_message(chat_id, message, reply_markup=markup)
+    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+        typer.echo(f"telegram_budget_request=warn message={exc}")
+        return 0
+    sent = len(budget_requests) * len(chat_ids)
+    typer.echo(f"telegram_budget_request=sent messages={sent}")
     return sent
 
 
@@ -1151,19 +1279,12 @@ def kis_sync(config: Path | None = CONFIG_OPTION) -> None:
         raise typer.BadParameter("kis-sync requires mode=live_readonly or live_approval")
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    kis_accounts = _kis_readonly_accounts(maestro_config)
-    if not kis_accounts:
-        raise typer.BadParameter("kis-sync requires at least one enabled KIS account")
     synced = []
     try:
-        for logical_account_id, kis_config in kis_accounts:
-            service = KISReadOnlyService(
-                kis_config,
-                store,
-                audit,
-                instruments=maestro_config.universe.instruments,
-                logical_account_id=logical_account_id,
-            )
+        readonly_services = build_broker_readonly_services(maestro_config, store, audit)
+        if not readonly_services:
+            raise typer.BadParameter("kis-sync requires at least one enabled broker account")
+        for logical_account_id, service in readonly_services:
             snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
             synced.append((logical_account_id, snapshot))
     except ValueError as exc:
@@ -1186,6 +1307,33 @@ def kis_sync(config: Path | None = CONFIG_OPTION) -> None:
             f"total_value={snapshot.account.total_value:.2f}"
         )
     typer.echo(f"accounts_synced={len(synced)}")
+
+
+@app.command("fx-refresh")
+def fx_refresh(
+    config: Path | None = CONFIG_OPTION,
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Bypass FX refresh throttling and call the provider.",
+    ),
+) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    try:
+        result = ConfiguredFXRefreshService(maestro_config, store).refresh_from_config(
+            force=force
+        )
+    except Exception as exc:
+        raise typer.BadParameter(f"fx-refresh failed: {exc}") from exc
+    if result.status == "skipped":
+        typer.echo("fx_refresh=skipped")
+        return
+    rate = result.rates.get("USD/KRW")
+    typer.echo(
+        f"fx_refresh={result.status} source={result.source} USD/KRW={rate} "
+        f"as_of={result.as_of}"
+    )
 
 
 @app.command("kis-account")
@@ -1218,6 +1366,7 @@ def reconcile(config: Path | None = CONFIG_OPTION) -> None:
             store,
             audit,
             snapshot_refresher=_broker_snapshot_refresher(maestro_config, store, audit),
+            account_ids=_reconciliation_account_ids(maestro_config),
         ).reconcile_latest()
     except ValueError as exc:
         raise typer.BadParameter(f"reconcile broker snapshot refresh failed: {exc}") from exc
@@ -1253,8 +1402,12 @@ def adopt_broker_snapshot(
         account,
         allowed_symbols=maestro_config.portfolio.allowed_symbols,
         universe=maestro_config.universe,
+        unknown_symbol_policy=maestro_config.portfolio.unknown_broker_position_policy,
     )
     run_id = new_run_id()
+    account_id = str(latest["payload"].get("account_id") or latest.get("account_id") or "")
+    if account_id:
+        store.save_portfolio_snapshot(run_id, state, account_id=account_id)
     store.save_portfolio_snapshot(run_id, state)
     payload = {
         "reason": reason,
@@ -1275,6 +1428,31 @@ def adopt_broker_snapshot(
         f"adopted run_id={run_id} broker_snapshot_id={latest['id']} "
         f"account_id={account.get('account_id') or 'none'} cash={state.cash:.2f} "
         f"positions={len(state.positions)}"
+    )
+
+
+@app.command("adopt-account-attribution")
+def adopt_account_attribution(
+    account_id: str = typer.Option(..., "--account-id"),
+    config: Path | None = CONFIG_OPTION,
+    reason: str = typer.Option(..., "--reason"),
+) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    if account_id not in maestro_config.account_strategy_targets:
+        raise typer.BadParameter(
+            f"account_strategy_targets is not configured for account_id={account_id}"
+        )
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    positions = AccountAttributionReconciliationService(store, audit).adopt_latest(
+        run_id=new_run_id(),
+        account_id=account_id,
+        reason=reason,
+        adopted_by="cli",
+    )
+    typer.echo(
+        f"adopted account_id={account_id} positions={len(positions)} "
+        f"version={positions[0].version if positions else 1}"
     )
 
 
@@ -1403,12 +1581,14 @@ def _portfolio_state_from_broker_account(
     *,
     allowed_symbols: list[str],
     universe=None,
+    unknown_symbol_policy: str = "fail_closed",
 ) -> PortfolioState:
     try:
         return portfolio_state_from_broker_account(
             account,
             allowed_symbols=allowed_symbols,
             universe=universe,
+            unknown_symbol_policy=unknown_symbol_policy,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1422,6 +1602,7 @@ def _configured_secret_values(maestro_config) -> list[str]:
         maestro_config.kis.access_token_env,
         maestro_config.kis.approval_key_env,
         maestro_config.approval.telegram_bot_token_env,
+        maestro_config.fx.api_key_env,
     ):
         value = DEFAULT_CREDENTIAL_RESOLVER.get(env_name)
         if value:
@@ -1555,7 +1736,7 @@ def _personal_operator_config(output: Path) -> dict:
         "kis": {
             "enabled": True,
             "provider": "kis",
-            "broker_product": "kis_overseas_stock",
+            "broker_products": ["kis_overseas_stock"],
             "account_id": None,
             "account_id_env": "KIS_MOCK_ACCOUNT_ID",
             "app_key_env": "KIS_MOCK_APP_KEY",

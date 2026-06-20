@@ -93,7 +93,7 @@ def _config(*, paper_trading: bool = False) -> KISConfig:
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
         paper_trading=paper_trading,
     )
 

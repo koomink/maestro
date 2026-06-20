@@ -293,6 +293,10 @@
 - [x] Add logical multi-account broker routing with `strategy.account_id`,
       KIS real/paper account configs, and Toss fail-closed placeholder support
       before approval/order gates when reconciliation is required
+- [x] Add Toss OpenAPI account/read-only backbone using the official OpenAPI
+      fixture
+- [x] Add Toss submit, status, modification, and cancellation with
+      approval-gated integer DAY limit orders as the initial armed policy
 - [x] Add daily loss limit config skeleton that fails closed until broker PnL normalization exists
 - [x] Add daily order count and notional limits
 - [x] Add instrument-aware live order validation for quantity step, price tick, minimums, currency, and broker product
@@ -590,8 +594,11 @@
 - [x] Add `/help`
 - [x] Add `/status`
 - [x] Add `/health`
-- [x] Add `/account` from latest broker snapshot only
-- [x] Add `/portfolio` from Maestro state only
+- [x] Add `/account` from latest broker snapshots across enabled read-only accounts
+- [x] Add `/portfolio` with broker refresh/adoption across enabled read-only accounts
+- [x] Split read-only unknown broker position adoption from execution safety so
+      Telegram/CLI portfolio display can include already-held unknown symbols
+      while target allocation and live orders still fail closed
 - [x] Add `/apps` from configured strategies and latest strategy runs
 - [x] Add `/orders` and `/approvals`
 - [x] Add `/signal` latest signal package view
@@ -624,6 +631,10 @@
       for cross-currency portfolio views
 - [x] Define the FX source snapshot/config shape for reporting, including
       source name, rate, as-of timestamp, stale threshold, and supported pairs
+- [x] Add ExchangeRate-API backed FX refresh service, CLI command, dashboard
+      refresh wiring, and `fx_rate_snapshot` persistence for USD/KRW reporting
+- [x] Add a one-hour FX provider request throttle and `maestro fx-refresh
+      --force` override for ExchangeRate-API free-plan budget control
 - [x] Add KRW as the default dashboard performance display currency
 - [x] Add a read-only KRW/USD display-currency toggle for total portfolio
       performance charts and tables
@@ -713,6 +724,10 @@
       strategy-level `order_posture` controls
 - [x] Extend the shared strategy mapping with execution sleeves, per-sleeve
       `order_generation_mode`, target weights, and cash rebalance boundaries
+- [x] Add account strategy/manual bucket targets and attribution snapshots so
+      `toss_brokerage` can reserve manual capacity beside `crescendo_us`
+- [x] Reconcile attribution after broker sync, require baseline adoption,
+      attribute Maestro fills, and enforce account bucket capacity
 - [x] Add a generic multi-account contribution allocator and apply Tranquillo v1
       across `kis_ps / tranquillo_ps` and `kis_isa / tranquillo_isa`
 - [x] Add brokerless `dev_sandbox` routing for development strategies that need

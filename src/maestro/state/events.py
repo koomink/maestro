@@ -80,6 +80,7 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     ),
     SystemEventType.STRATEGY_CASH_FLOW_PROPOSAL_ACK: ("proposal_id", "status"),
     "fx_rate_snapshot": ("source", "as_of", "rates"),
+    "fx_rate_snapshot_failed": ("provider", "pairs", "error_type", "checked_at"),
 }
 
 

@@ -5,6 +5,20 @@ from pydantic import Field, model_validator
 from maestro.config.base import StrictConfigModel
 from maestro.config.execution import OrderGenerationMode
 
+MULTI_ACCOUNT_CONTRIBUTION_ACCOUNT_PREFIX = "multi_account_contributions."
+
+
+def multi_account_contribution_account_id(group_id: str) -> str:
+    return f"{MULTI_ACCOUNT_CONTRIBUTION_ACCOUNT_PREFIX}{group_id}"
+
+
+def is_multi_account_contribution_account_id(account_id: str | None) -> bool:
+    return bool(account_id) and account_id.startswith(MULTI_ACCOUNT_CONTRIBUTION_ACCOUNT_PREFIX)
+
+
+def multi_account_contribution_group_id_from_account_id(account_id: str) -> str:
+    return account_id.removeprefix(MULTI_ACCOUNT_CONTRIBUTION_ACCOUNT_PREFIX)
+
 
 class MultiAccountContributionTargetConfig(StrictConfigModel):
     account_id: str
@@ -26,17 +40,6 @@ class MultiAccountContributionTargetConfig(StrictConfigModel):
                 self.min_monthly_budget = self.monthly_budget
             if self.max_monthly_budget == 0:
                 self.max_monthly_budget = self.monthly_budget
-        if self.max_monthly_budget <= 0:
-            self.max_monthly_budget = self.min_monthly_budget
-        if self.min_monthly_budget > self.max_monthly_budget:
-            raise ValueError(
-                "multi_account_contributions min_monthly_budget must be less than "
-                "or equal to max_monthly_budget"
-            )
-        if self.monthly_budget and self.monthly_budget != self.max_monthly_budget:
-            raise ValueError(
-                "multi_account_contributions fixed monthly_budget must match max_monthly_budget"
-            )
         return self
 
 
@@ -71,6 +74,10 @@ class MultiAccountContributionGroupConfig(StrictConfigModel):
 
 
 __all__ = [
+    "MULTI_ACCOUNT_CONTRIBUTION_ACCOUNT_PREFIX",
     "MultiAccountContributionGroupConfig",
     "MultiAccountContributionTargetConfig",
+    "is_multi_account_contribution_account_id",
+    "multi_account_contribution_account_id",
+    "multi_account_contribution_group_id_from_account_id",
 ]

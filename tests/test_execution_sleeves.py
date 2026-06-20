@@ -99,6 +99,79 @@ def test_cash_rebalance_uses_target_weights_when_no_sleeve_is_underweight():
     assert by_sleeve["fugue_us"].state.cash_by_currency == {"USD": 600}
 
 
+def test_cash_rebalance_uses_attributed_positions_for_scope_value():
+    state = PortfolioState(
+        cash=100,
+        cash_by_currency={"USD": 100},
+        positions={"QQQ": 10},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 5, 28, tzinfo=UTC),
+        allocations={"QQQ": 1.0},
+        source_strategy_ids=["crescendo_us"],
+    )
+
+    allocated = allocate_cash_rebalanced_scope_states(
+        current_state=state,
+        scopes=[
+            ExecutionScopeDraft(
+                account_id="toss_brokerage",
+                execution_sleeve="crescendo_us",
+                currency_sleeve="USD",
+                target_weight=0.7,
+                target=target,
+                attributed_positions={"QQQ": 4},
+            )
+        ],
+        prices={"QQQ": 10},
+    )
+
+    assert allocated[0].current_value == 40
+    assert allocated[0].state.positions == {"QQQ": 4}
+
+
+@pytest.mark.parametrize(
+    ("manual_quantity", "expected_allocated_cash"),
+    [
+        (2.0, 40.0),
+        (3.0, 40.0),
+        (4.0, 30.0),
+    ],
+)
+def test_account_target_weight_reserves_manual_capacity(
+    manual_quantity,
+    expected_allocated_cash,
+):
+    state = PortfolioState(
+        cash=70.0 - manual_quantity * 10.0,
+        positions={"QQQ": 3.0 + manual_quantity},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 5, 28, tzinfo=UTC),
+        allocations={"QQQ": 1.0},
+        source_strategy_ids=["crescendo_us"],
+    )
+
+    allocated = allocate_cash_rebalanced_scope_states(
+        current_state=state,
+        scopes=[
+            ExecutionScopeDraft(
+                account_id="toss_brokerage",
+                execution_sleeve="crescendo_us",
+                currency_sleeve=None,
+                target_weight=0.7,
+                target=target,
+                attributed_positions={"QQQ": 3.0},
+            )
+        ],
+        prices={"QQQ": 10.0},
+    )
+
+    assert allocated[0].allocated_cash == pytest.approx(expected_allocated_cash)
+    assert allocated[0].current_weight == pytest.approx(0.3)
+    assert allocated[0].state.positions == {"QQQ": 3.0}
+
+
 def test_execution_sleeves_reject_shared_target_symbol_within_account():
     target_a = PortfolioTarget(
         timestamp=datetime(2026, 5, 28, tzinfo=UTC),

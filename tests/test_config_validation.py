@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from maestro.config.identity import config_identity
 from maestro.config.loader import load_config
-from maestro.config.models import StrategyPluginConfig
+from maestro.config.models import BrokerAccountConfig, KISConfig, StrategyPluginConfig
 from maestro.core.enums import BrokerProduct, Currency, ProfileStage
 from maestro.datahub.base import build_data_provider
 from maestro.datahub.router import DataHubRouter
@@ -79,6 +79,26 @@ def test_removed_risk_weight_fields_fail(tmp_path):
         load_config(config_path)
 
 
+def test_kis_config_rejects_legacy_single_broker_product():
+    with pytest.raises(ValidationError, match="broker_product"):
+        KISConfig(
+            enabled=True,
+            provider="kis",
+            broker_product="kis_domestic_stock",
+            broker_products=["kis_domestic_stock"],
+        )
+
+
+def test_broker_account_config_rejects_legacy_single_broker_product():
+    with pytest.raises(ValidationError, match="broker_product"):
+        BrokerAccountConfig(
+            id="domestic",
+            broker="kis",
+            broker_product="kis_domestic_stock",
+            broker_products=["kis_domestic_stock"],
+        )
+
+
 def test_telegram_approval_ids_fall_back_to_maestro_env(tmp_path, monkeypatch):
     monkeypatch.setenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", "1001, 1002")
     monkeypatch.setenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", "2001")
@@ -124,6 +144,7 @@ def test_explicit_live_accounts_require_strategy_account_id(tmp_path):
             "broker": "kis",
             "environment": "real",
             "enabled": True,
+            "broker_products": ["kis_domestic_stock"],
         }
     ]
     config_path = tmp_path / "missing_strategy_account.yaml"
@@ -141,6 +162,7 @@ def test_explicit_live_accounts_reject_unknown_strategy_account_id(tmp_path):
             "broker": "kis",
             "environment": "real",
             "enabled": True,
+            "broker_products": ["kis_domestic_stock"],
         }
     ]
     raw["strategies"][0]["account_id"] = "missing_account"
@@ -159,6 +181,7 @@ def test_multiple_accounts_allow_shared_strategy_mapping(tmp_path):
             "broker": "kis",
             "environment": "real",
             "enabled": True,
+            "broker_products": ["kis_domestic_stock"],
         },
         {
             "id": "toss_brokerage",
@@ -895,7 +918,8 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         ("fugue", False, True),
     ]
     assert signal.execution.order_posture == "disabled"
-    assert approval.execution.order_posture == "dry_run"
+    assert approval.execution.order_posture == "armed"
+    assert approval.execution.live_order_enabled is True
     assert readonly.execution.order_posture == "disabled"
     assert readonly.approval.enabled is False
     assert signal.approval.enabled is True
@@ -929,6 +953,7 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         ("kis_brokerage", "kis", "real"),
         ("kis_ps", "kis", "real"),
         ("dev_sandbox", "sandbox", "paper_trading"),
+        ("toss_brokerage", "toss", "real"),
     ]
     assert [
         (account.id, account.account_id_env, account.app_key_env, account.app_secret_env)
@@ -944,15 +969,18 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
         ),
         ("kis_ps", "KIS_PS_ACCOUNT_ID", "KIS_PS_APP_KEY", "KIS_PS_APP_SECRET"),
         ("dev_sandbox", None, "KIS_MOCK_APP_KEY", "KIS_MOCK_APP_SECRET"),
+        ("toss_brokerage", None, None, None),
     ]
     assert [
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in signal.strategies
     ] == [
-        ("tranquillo", None, True, "dry_run"),
-        ("crescendo_us", "dev_sandbox", True, "dry_run"),
+        ("tranquillo", "multi_account_contributions.tranquillo", True, "dry_run"),
+        ("crescendo_us", "toss_brokerage", True, "armed"),
         ("fugue", "dev_sandbox", False, "disabled"),
     ]
+    assert signal.account_strategy_targets["toss_brokerage"]["crescendo_us"].target_weight == 0.7
+    assert signal.account_strategy_targets["toss_brokerage"]["manual"].target_weight == 0.3
     tranquillo_group = signal.multi_account_contributions["tranquillo"]
     assert tranquillo_group.strategy_id == "tranquillo"
     assert [
@@ -972,20 +1000,20 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
             500000,
             500000,
         ),
-        (
-            "kis_isa",
-            "tranquillo_isa",
-            ["TIGER_NASDAQ100_LEVERAGE", "KODEX_US_DIVIDEND_DOWJONES"],
-            1660000,
-            4000000,
-        ),
-    ]
+            (
+                "kis_isa",
+                "tranquillo_isa",
+                ["TIGER_NASDAQ100_LEVERAGE", "KODEX_US_DIVIDEND_DOWJONES"],
+                1660000,
+                0,
+            ),
+        ]
     assert [
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in approval.strategies
     ] == [
-        ("tranquillo", None, True, "dry_run"),
-        ("crescendo_us", "dev_sandbox", True, "dry_run"),
+        ("tranquillo", "multi_account_contributions.tranquillo", True, "dry_run"),
+        ("crescendo_us", "toss_brokerage", True, "armed"),
         ("fugue", "dev_sandbox", False, "disabled"),
     ]
 
@@ -1189,6 +1217,118 @@ def test_shared_strategy_account_map_applies_execution_sleeves(tmp_path):
     assert (
         config.effective_strategy_order_generation_mode(config.strategies[1]) == "target_rebalance"
     )
+
+
+def test_shared_strategy_account_map_applies_account_strategy_targets(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    broker_path = tmp_path / "broker_accounts.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    raw["broker_accounts_path"] = "broker_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    _write_operator_broker_accounts_with_toss_enabled(broker_path)
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "execution_sleeves": {
+                    "accounts": {
+                        "toss_brokerage": {
+                            "crescendo_us": {
+                                "currency_sleeve": "USD",
+                                "target_weight": 1.0,
+                                "order_generation_mode": "target_rebalance",
+                            }
+                        }
+                    }
+                },
+                "account_strategy_targets": {
+                    "toss_brokerage": {
+                        "crescendo_us": {"target_weight": 0.7},
+                        "manual": {"target_weight": 0.3},
+                    }
+                },
+                "strategies": {
+                    "tranquillo": {
+                        "account_id": "kis_isa",
+                        "signal": False,
+                    },
+                    "crescendo_us": {
+                        "account_id": "toss_brokerage",
+                        "execution_sleeve": "crescendo_us",
+                        "signal": True,
+                    },
+                    "fugue": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.account_strategy_targets["toss_brokerage"]["crescendo_us"].target_weight == 0.7
+    assert config.account_strategy_targets["toss_brokerage"]["manual"].target_weight == 0.3
+
+
+def test_account_strategy_targets_reject_account_weight_mismatch(tmp_path):
+    raw = _operator_signal_raw_with_absolute_fragments()
+    raw["strategy_account_map_path"] = "strategy_accounts.yaml"
+    for strategy in raw["strategies"]:
+        strategy.pop("account_id", None)
+    config_path = tmp_path / "symphony_signal.yaml"
+    broker_path = tmp_path / "broker_accounts.yaml"
+    map_path = tmp_path / "strategy_accounts.yaml"
+    raw["broker_accounts_path"] = "broker_accounts.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    _write_operator_broker_accounts_with_toss_enabled(broker_path)
+    map_path.write_text(
+        yaml.safe_dump(
+            {
+                "execution_sleeves": {
+                    "accounts": {
+                        "toss_brokerage": {
+                            "crescendo_us": {
+                                "currency_sleeve": "USD",
+                                "target_weight": 1.0,
+                                "order_generation_mode": "target_rebalance",
+                            }
+                        }
+                    }
+                },
+                "account_strategy_targets": {
+                    "toss_brokerage": {
+                        "crescendo_us": {"target_weight": 0.7},
+                        "manual": {"target_weight": 0.2},
+                    }
+                },
+                "strategies": {
+                    "tranquillo": {
+                        "account_id": "kis_isa",
+                        "signal": False,
+                    },
+                    "crescendo_us": {
+                        "account_id": "toss_brokerage",
+                        "execution_sleeve": "crescendo_us",
+                        "signal": True,
+                    },
+                    "fugue": {
+                        "account_id": "dev_sandbox",
+                        "signal": False,
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValidationError, match="account_strategy_targets target_weight"):
+        load_config(config_path)
 
 
 def test_execution_sleeves_reject_missing_strategy_sleeve(tmp_path):
@@ -1487,7 +1627,6 @@ def test_tranquillo_live_approval_example_uses_safe_domestic_kis_defaults():
     assert config.monitoring.scheduled_run_max_age_seconds == 86400
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
-    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
     assert config.kis.paper_trading is True
     assert config.kis.account_id is None
@@ -1519,7 +1658,6 @@ def test_tranquillo_live_approval_submit_pilot_keeps_kis_paper_trading(tmp_path)
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.kis.provider == "kis"
-    assert config.kis.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK
     assert config.kis.paper_trading is True
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
 
@@ -1534,14 +1672,15 @@ def test_contribution_config_rejects_invalid_buy_day(tmp_path):
         load_config(config_path)
 
 
-def test_contribution_config_rejects_budget_outside_range(tmp_path):
+def test_contribution_config_allows_budget_above_legacy_max(tmp_path):
     raw = yaml.safe_load(Path("tests/fixtures/configs/paper_tranquillo_yahoo.yaml").read_text())
     raw["execution"]["contribution"]["monthly_budget"] = 5_000_000
-    config_path = tmp_path / "invalid_monthly_budget.yaml"
+    config_path = tmp_path / "legacy_max_not_a_cap.yaml"
     config_path.write_text(yaml.safe_dump(raw))
 
-    with pytest.raises(ValidationError, match="monthly_budget"):
-        load_config(config_path)
+    config = load_config(config_path)
+
+    assert config.execution.contribution.monthly_budget == 5_000_000
 
 
 def test_contribution_config_rejects_unsupported_policy(tmp_path):
@@ -1636,6 +1775,14 @@ def _operator_signal_raw_with_absolute_fragments() -> dict:
     return raw
 
 
+def _write_operator_broker_accounts_with_toss_enabled(path: Path) -> None:
+    raw = yaml.safe_load(Path("configs/operator/broker_accounts.yaml").read_text())
+    for account in raw["accounts"]:
+        if account["id"] == "toss_brokerage":
+            account["enabled"] = True
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+
 def test_multi_asset_readonly_example_uses_env_var_names_only():
     raw_text = Path("tests/fixtures/configs/live_readonly_multi_asset_kis.yaml").read_text()
     config = load_config("tests/fixtures/configs/live_readonly_multi_asset_kis.yaml")
@@ -1697,7 +1844,7 @@ def test_live_approval_root_config_is_minimal_operator_skeleton(monkeypatch):
     assert config.approval.telegram_allowed_chat_ids == []
     assert config.approval.whitelisted_user_ids == []
     assert config.kis.provider == "kis"
-    assert config.kis.broker_product == "kis_domestic_stock"
+    assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
     assert config.kis.app_key_env == "KIS_MOCK_APP_KEY"
     assert config.kis.app_secret_env == "KIS_MOCK_APP_SECRET"
     assert config.kis.access_token_env == "KIS_ACCESS_TOKEN"
@@ -1732,7 +1879,7 @@ def test_live_approval_us_etf_example_keeps_concrete_universe_out_of_root_config
     assert config.portfolio.base_currency == "USD"
     assert config.portfolio.initial_cash is None
     assert config.portfolio.allowed_symbols == ["CASH_USD", "AAPL", "MSFT", "VOO", "QQQ"]
-    assert config.kis.broker_product == "kis_overseas_stock"
+    assert [item.value for item in config.kis.effective_broker_products()] == ["kis_overseas_stock"]
     assert config.universe.get("AAPL").broker_product == BrokerProduct.KIS_OVERSEAS_STOCK
     assert config.universe.get("AAPL").exchange_code == "NASD"
     assert config.universe.get("VOO").asset_type == "etf"

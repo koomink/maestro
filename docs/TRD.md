@@ -210,8 +210,10 @@ account IDs, and `strategies[*].account_id` maps each enabled Virtuoso app to
 one account. Many strategies may share one account. Legacy single-account
 `kis:` config is preserved by deriving `default_kis`. KIS real and KIS
 paper-trading accounts are operationally routed through the existing KIS
-clients; Toss accounts are configuration-visible but fail closed for broker
-operations until an official trading OpenAPI is available.
+clients. Toss accounts use a common domestic/overseas OpenAPI adapter for
+account, holding, price, buying-power, submit, status, modification, and
+cancellation. Initial armed operation permits approval-gated integer-quantity
+DAY limit orders.
 Operator phase configs can set `broker_accounts_path` so all phases share one
 broker account inventory file. They can also set `strategy_account_map_path` so
 signal and approval share one strategy-to-account mapping file. The loader
@@ -432,9 +434,12 @@ the same `signal_run_id`.
 - `maestro adopt-broker-snapshot --config ... --reason ...` is a state-only
   operator command for the first real-account rehearsal baseline. It copies the
   latest broker snapshot into Maestro portfolio state, records
-  `broker_snapshot_adopted`, and refuses positions that are neither in
-  `portfolio.allowed_symbols` nor known `universe.instruments` allowed by
-  `universe.policy`.
+  `broker_snapshot_adopted`, and defaults to refusing positions that are neither
+  in `portfolio.allowed_symbols` nor known `universe.instruments` allowed by
+  `universe.policy`. Operator configs may set
+  `portfolio.unknown_broker_position_policy=include_readonly` to include
+  unknown already-held broker positions in read-only display/adoption; target
+  allocation validation and live order execution still reject unknown symbols.
 - Live configs do not carry `portfolio.initial_cash`; live cash and positions
   are sourced from the adopted broker snapshot. KIS-backed
   `live_approval run-once` refreshes and adopts the broker snapshot before
@@ -1051,6 +1056,9 @@ Risk behavior:
 
 - If an unknown symbol is found, reject.
 - If gross exposure is below 1.0, leave residual exposure in cash.
+- Read-only broker display/adoption can include unknown already-held positions
+  only when `portfolio.unknown_broker_position_policy=include_readonly`; this
+  does not make those symbols valid target allocation or live order symbols.
 
 ## 12. PaperExecutionEngine v0.1
 
@@ -1351,10 +1359,14 @@ payloads. The implemented account, currency-sleeve, total-portfolio, and
 strategy book views are computed on read from those persisted snapshots/events;
 strategy attribution rows include a `lineage` object that ties each strategy
 book performance row back to same-run strategy proposals, allocation symbols,
-orders, and fill-reconciliation events where those records exist. Until
-lot-level strategy accounting exists, the attribution value still comes from
-the strategy book snapshot first; order and fill lineage is explanatory
-evidence, not an independent PnL allocator.
+orders, and fill-reconciliation events where those records exist. Account
+bucket attribution snapshots track `account_id + symbol + bucket_id + quantity`
+for strategy/manual books. Maestro-authored fills are assigned to their strategy
+bucket; broker snapshot deltas outside Maestro orders are attributed to
+`manual` first, then to strategy buckets with warning events if manual quantity
+is insufficient. Strategy book performance still uses strategy book snapshots
+as the primary value series, while account bucket attribution supplies
+operator-facing actual weights and scoped order-generation inventory.
 
 System event read models use a centralized required-field contract from
 `maestro.state.events`. Dashboard event rows expose `schema_status`,
@@ -1392,10 +1404,9 @@ dedicated persisted performance tables remain pending. The dashboard must not
 call KIS or FX endpoints directly.
 FX conversion is reporting-only and must not feed order generation,
 buying-power checks, reconciliation cash gates, or broker risk gates. Strategy
-attribution must remain strategy-agnostic: the current dashboard attribution
-uses persisted strategy book snapshots, and future fill/order attribution should
-use persisted lineage where unambiguous plus a documented shared-holding
-allocation rule until lot-level strategy accounting is implemented.
+attribution remains auditable: dashboard strategy attribution uses persisted
+strategy book snapshots and lineage, while account bucket attribution uses
+persisted account attribution snapshots where available.
 
 Account performance v1 is a read model computed from persisted broker account
 snapshots and broker reconciliation events. It exposes account value, cash,
@@ -1412,10 +1423,16 @@ component values and `missing_fx=true` instead of computing a base-currency
 return. With fresh FX, the read model may compute KRW-display or USD-display
 total performance by converting only the non-display currency components. It
 should preserve local sleeve return and expose the FX effect separately so users
-can distinguish investment performance from currency movement. FX rates are read
-from persisted `fx_rate_snapshot` system events with `source`, `as_of`,
-`max_age_seconds` or `stale_after_seconds`, and `rates` entries such as
-`USD/KRW`; stale or missing FX disables converted total returns.
+can distinguish investment performance from currency movement. FX rates are
+refreshed by the reporting-only FX service from ExchangeRate-API in v1, persisted
+as `fx_rate_snapshot` system events with `source`, `as_of`, `fetched_at`,
+`max_age_seconds`, and `rates` entries such as `USD/KRW`; stale or missing FX
+disables converted total returns. `as_of` records the provider's rate timestamp,
+while dashboard freshness is measured from `fetched_at` when available. Provider
+requests are budget-throttled by `refresh_interval_seconds` separately from the
+dashboard freshness threshold; the default one-hour interval caps normal
+automated usage at about 744 requests in a 31-day month, while `maestro
+fx-refresh --force` is reserved for explicit operator checks.
 
 Security:
 
@@ -1469,4 +1486,4 @@ Future VPS deployment:
 - JSONL logs
 - Tailscale for dashboard access
 - Telegram bot polling or webhook
-- KIS secrets via `/etc/maestro/maestro.env` or a secret manager
+- KIS and FX provider secrets via `/etc/maestro/maestro.env` or a secret manager

@@ -130,5 +130,6 @@ approval:
 kis:
   enabled: true
   provider: kis
-  broker_product: kis_overseas_stock
+  broker_products:
+    - kis_overseas_stock
   account_id: "00000000-00"

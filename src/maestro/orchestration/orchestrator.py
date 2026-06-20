@@ -13,6 +13,7 @@ from maestro.approval.models import ApprovalDecision
 from maestro.config.execution import ExecutionConfig
 from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
+from maestro.config.multi_account_contributions import is_multi_account_contribution_account_id
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderType, RunMode
 from maestro.core.ids import new_run_id, new_signal_run_id
@@ -25,7 +26,11 @@ from maestro.execution.broker_router import (
     UnsupportedBrokerOperation,
 )
 from maestro.execution.broker_state import portfolio_state_from_broker_account
-from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly_factory import build_broker_readonly_service
+from maestro.execution.budget_requests import (
+    ContributionBudgetRequest,
+    build_contribution_budget_request,
+)
 from maestro.execution.execution_sleeves import (
     AllocatedExecutionScope,
     ExecutionScopeDraft,
@@ -47,6 +52,7 @@ from maestro.execution.live_orders import (
     LiveOrderStatusClient,
 )
 from maestro.execution.reconciliation import BrokerReconciliationService
+from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.data_quality import (
     data_quality_issues as collect_data_quality_issues,
@@ -56,6 +62,9 @@ from maestro.orchestration.data_quality import (
 )
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.plugins.registry import PluginRegistry
+from maestro.portfolio.account_attribution import (
+    AccountAttributionReconciliationService,
+)
 from maestro.portfolio.manager import PortfolioManager, PortfolioTarget
 from maestro.portfolio.strategy_books import build_strategy_book_snapshots
 from maestro.risk.manager import RiskDecision, RiskManager
@@ -110,6 +119,7 @@ class ScopedOrderTarget:
     current_weight: float = 0.0
     target_weight: float = 1.0
     drift: float = 0.0
+    requires_budget_request: bool = False
 
 
 class MaestroOrchestrator:
@@ -156,6 +166,7 @@ class MaestroOrchestrator:
         self.broker_reconciliation_service = broker_reconciliation_service
         self.telegram_client = telegram_client
         self.account_router = BrokerAccountRouter(config)
+        self.fx_service = ConfiguredFXRefreshService(config, self.state_store)
         self.config_identity = config_identity
 
     def run_once(self) -> RunOnceSummary:
@@ -199,8 +210,10 @@ class MaestroOrchestrator:
             raise ValueError(f"Risk check failed: {risk_decision.violations}")
         order_generation_time = utc_now()
         prices = self._order_generation_prices(prices)
+        prices = self._apply_fx_prices(prices)
         orders = []
         funding_requests: list[ContributionFundingRequest] = []
+        budget_requests: list[ContributionBudgetRequest] = []
         for order_scope in order_targets:
             scoped_execution = build_execution_engine(
                 order_scope.execution_config,
@@ -213,6 +226,17 @@ class MaestroOrchestrator:
                 execution_sleeve=order_scope.execution_sleeve,
                 account_id=order_scope.account_id,
             )
+            if order_scope.requires_budget_request:
+                budget_request = self._contribution_budget_request(
+                    signal_run_id,
+                    order_scope,
+                    scoped_execution,
+                    order_generation_time,
+                    contribution_already_executed=contribution_already_executed,
+                )
+                if budget_request is not None:
+                    budget_requests.append(budget_request)
+                continue
             account_orders = scoped_execution.propose_orders(
                 order_scope.state,
                 order_scope.target,
@@ -241,7 +265,9 @@ class MaestroOrchestrator:
                 )
             )
         approval_orders = self._signal_orders_requiring_approval(orders)
-        if approval_orders:
+        if budget_requests:
+            status = "budget_required"
+        elif approval_orders:
             status = "action_required"
         elif funding_requests:
             status = "funding_required"
@@ -271,7 +297,9 @@ class MaestroOrchestrator:
             "orders_preview_count": len(orders),
             "funding_requests": [request.model_dump(mode="json") for request in funding_requests],
             "funding_requests_count": len(funding_requests),
-            "action_required": bool(approval_orders),
+            "budget_requests": [request.model_dump(mode="json") for request in budget_requests],
+            "budget_requests_count": len(budget_requests),
+            "action_required": bool(approval_orders) and not budget_requests,
         }
         payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(self.config)
         if self.config_identity is not None:
@@ -284,6 +312,12 @@ class MaestroOrchestrator:
                 "contribution_funding_request",
                 request.model_dump(mode="json"),
             )
+        for request in budget_requests:
+            self._record_event(
+                signal_run_id,
+                "contribution_budget_request",
+                request.model_dump(mode="json"),
+            )
         self.state_store.save_system_event(
             signal_run_id,
             "signal_run_completed",
@@ -292,13 +326,14 @@ class MaestroOrchestrator:
                 "status": status,
                 "orders_preview_count": len(orders),
                 "funding_requests_count": len(funding_requests),
-                "action_required": bool(approval_orders),
+                "budget_requests_count": len(budget_requests),
+                "action_required": bool(approval_orders) and not budget_requests,
             },
         )
         return SignalRunSummary(
             signal_run_id=signal_run_id,
             loaded_strategies=[result.strategy_id for result in valid_results],
-            action_required=bool(approval_orders),
+            action_required=bool(approval_orders) and not budget_requests,
             orders_preview_count=len(orders),
         )
 
@@ -501,6 +536,8 @@ class MaestroOrchestrator:
                     )
                 valid_results.append(result)
 
+            prices = self._enrich_sleeve_prices(prices)
+            prices = self._apply_fx_prices(prices)
             target, risk_decision, order_targets = self._build_account_scoped_targets(
                 run_id,
                 valid_results,
@@ -956,8 +993,47 @@ class MaestroOrchestrator:
         if not broker_prices:
             return prices
         if self.config.execution.broker_validation.require_quote_validation:
-            return {**prices, **broker_prices}
+            return {**prices, **_convert_broker_prices_to_base(self.config, broker_prices)}
         return {**broker_prices, **prices}
+
+    def _enrich_sleeve_prices(self, prices: dict[str, float]) -> dict[str, float]:
+        """Merge broker snapshot prices into prices for sleeve capacity calculation.
+
+        This is a lightweight enrichment that only adds position prices, without
+        triggering full order-generation price validation.
+        """
+        latest = self.state_store.load_latest_broker_account_snapshot()
+        if latest is None:
+            return prices
+        broker_prices = _broker_snapshot_prices(latest["payload"])
+        if not broker_prices:
+            return prices
+        return {**broker_prices, **prices}
+
+    def _currency_for_symbol(self, symbol: str) -> str:
+        """Return the trading currency for a symbol based on instrument config."""
+        for instrument in self.config.universe.instruments:
+            if instrument.symbol == symbol:
+                return instrument.currency
+        return self.config.portfolio.base_currency
+
+    def _apply_fx_prices(self, prices: dict[str, float]) -> dict[str, float]:
+        """Convert USD prices to KRW using FX rates."""
+        if self.config.portfolio.base_currency == "KRW":
+            try:
+                fx_result = self.fx_service.refresh_from_config()
+                usd_to_krw = float(fx_result.rates.get("USD/KRW", 1.0))
+            except Exception:
+                return prices
+
+            for symbol, price in prices.items():
+                if symbol.startswith("CASH_"):
+                    continue
+                currency = self._currency_for_symbol(symbol)
+                if currency == "USD":
+                    prices[symbol] = price * usd_to_krw
+
+        return prices
 
     def _initial_prices(self) -> dict[str, float]:
         cash_symbols = self._configured_cash_symbols()
@@ -1010,30 +1086,16 @@ class MaestroOrchestrator:
         if len(live_account_ids) > 1:
             return self._load_multi_account_live_portfolio_state(run_id, live_account_ids)
         baseline_account_id = self._single_live_account_id()
-        baseline_kis_config = self.account_router.kis_config(baseline_account_id)
-        if baseline_kis_config.provider != "kis":
+        if self.config.kis.enabled and self.config.kis.provider != "kis":
             if self.state_store.has_portfolio_snapshot():
                 return self.state_store.load_latest_portfolio_state()
-            self._record_event(
-                run_id,
-                SystemEventType.BROKER_BASELINE_REQUIRED,
-                {
-                    "mode": self.config.mode.value,
-                    "reason": "live_approval requires an adopted broker snapshot before run_once",
-                },
-            )
-            raise ValueError(
-                "live_approval requires an adopted broker snapshot before run_once; "
-                "run kis-sync and adopt-broker-snapshot first"
-            )
         try:
-            readonly_service = KISReadOnlyService(
-                baseline_kis_config,
+            readonly_service = build_broker_readonly_service(
+                self.config,
                 self.state_store,
                 self.audit,
-                instruments=self.config.universe.instruments,
+                account_id=baseline_account_id,
             )
-            readonly_service.logical_account_id = baseline_account_id
             snapshot = readonly_service.fetch_and_store_snapshot(
                 self.config.portfolio.allowed_symbols
             )
@@ -1048,13 +1110,19 @@ class MaestroOrchestrator:
                 SystemEventType.BROKER_BASELINE_REQUIRED,
                 {
                     "mode": self.config.mode.value,
-                    "reason": "live_approval could not refresh KIS broker snapshot before run_once",
+                    "reason": "live_approval could not refresh broker snapshot before run_once",
                     "error": str(exc),
                 },
             )
             raise ValueError(
-                f"live_approval could not refresh KIS broker snapshot before run_once: {exc}"
+                f"live_approval could not refresh broker snapshot before run_once: {exc}"
             ) from exc
+        if baseline_account_id:
+            self.state_store.save_portfolio_snapshot(
+                run_id,
+                state,
+                account_id=baseline_account_id,
+            )
         self.state_store.save_portfolio_snapshot(run_id, state)
         self._record_event(
             run_id,
@@ -1078,21 +1146,16 @@ class MaestroOrchestrator:
         account_ids: list[str],
     ) -> PortfolioState:
         states = []
+        account_states: list[tuple[str, PortfolioState]] = []
         snapshot_events = []
         try:
             for account_id in account_ids:
-                kis_config = self.account_router.kis_config(account_id)
-                if kis_config.provider != "kis":
-                    raise UnsupportedBrokerOperation(
-                        f"live_approval cannot refresh non-KIS account: {account_id}"
-                    )
-                service = KISReadOnlyService(
-                    kis_config,
+                service = build_broker_readonly_service(
+                    self.config,
                     self.state_store,
                     self.audit,
-                    instruments=self.config.universe.instruments,
+                    account_id=account_id,
                 )
-                service.logical_account_id = account_id
                 snapshot = service.fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
                 state = portfolio_state_from_broker_account(
                     snapshot.account.model_dump(mode="json"),
@@ -1100,6 +1163,7 @@ class MaestroOrchestrator:
                     universe=self.config.universe,
                 )
                 states.append(state)
+                account_states.append((account_id, state))
                 snapshot_events.append(
                     {
                         "account_id": account_id,
@@ -1130,6 +1194,12 @@ class MaestroOrchestrator:
                 f"run_once: {exc}"
             ) from exc
         state = _merge_portfolio_states(states)
+        for account_id, account_state in account_states:
+            self.state_store.save_portfolio_snapshot(
+                run_id,
+                account_state,
+                account_id=account_id,
+            )
         self.state_store.save_portfolio_snapshot(run_id, state)
         self._record_event(
             run_id,
@@ -1154,6 +1224,7 @@ class MaestroOrchestrator:
             self.config.reconciliation,
             self.state_store,
             self.audit,
+            account_ids=self._live_account_ids(),
         ).reconcile_latest(run_id=run_id)
 
     def _broker_snapshot_refs(self) -> list[dict[str, Any]]:
@@ -1357,6 +1428,7 @@ class MaestroOrchestrator:
             }
             for loaded in self.registry.strategies
             if loaded.config.enabled
+            and self.config.multi_account_contribution_group_for_strategy(loaded.config.id) is None
         ]
         for group_id, group in self.config.multi_account_contributions.items():
             for target in group.account_targets:
@@ -1690,6 +1762,33 @@ class MaestroOrchestrator:
             expires_after_seconds=self.config.approval.signal_max_age_seconds,
         )
 
+    def _contribution_budget_request(
+        self,
+        signal_run_id: str,
+        order_scope: ScopedOrderTarget,
+        scoped_execution,
+        as_of,
+        *,
+        contribution_already_executed: bool,
+    ) -> ContributionBudgetRequest | None:
+        config = order_scope.execution_config
+        if config.order_generation_mode != "buy_only_contribution":
+            return None
+        if contribution_already_executed or not scoped_execution.contribution_is_due(as_of):
+            return None
+        return build_contribution_budget_request(
+            source_signal_run_id=signal_run_id,
+            strategy_ids=order_scope.target.source_strategy_ids,
+            contribution_group_id=order_scope.contribution_group_id,
+            account_id=order_scope.account_id,
+            execution_sleeve=order_scope.execution_sleeve,
+            execution_config=config,
+            state=order_scope.state,
+            month_key=scoped_execution.contribution_month_key(as_of),
+            created_at=as_of,
+            expires_after_seconds=self.config.approval.signal_max_age_seconds,
+        )
+
     def _build_account_scoped_targets(
         self,
         run_id: str,
@@ -1767,8 +1866,16 @@ class MaestroOrchestrator:
                     account_id=account_id,
                     execution_sleeve=execution_sleeve,
                     currency_sleeve=sleeve.currency_sleeve,
-                    target_weight=sleeve.target_weight,
+                    target_weight=self._account_scope_target_weight(
+                        account_id,
+                        execution_sleeve,
+                        sleeve.target_weight,
+                    ),
                     target=scope_risk.target,
+                    attributed_positions=self._attributed_positions_for_scope(
+                        account_id,
+                        execution_sleeve,
+                    ),
                 )
             )
             execution_configs[(account_id, execution_sleeve)] = (
@@ -1829,11 +1936,14 @@ class MaestroOrchestrator:
                 current_state,
             )
             target_allocations = self._multi_account_target_allocations(result, group)
+            month_key = utc_now().strftime("%Y-%m")
             planned_allocations = self._planned_multi_account_allocations(
+                group_id,
                 group,
                 target_allocations,
                 account_states,
                 prices,
+                month_key,
             )
             for target_config in group.account_targets:
                 execution_config = self._multi_account_execution_config(target_config)
@@ -1849,6 +1959,23 @@ class MaestroOrchestrator:
                 )
                 planned_cash = sum(planned.values())
                 state_cash = planned_cash if planned_cash > 0 else available_cash
+                selected_budget = self._selected_contribution_budget(
+                    group_id,
+                    group.strategy_id,
+                    target_config.account_id,
+                    target_config.execution_sleeve,
+                    month_key,
+                )
+                requires_budget_request = (
+                    contribution.budget_request.enabled
+                    and selected_budget is None
+                    and available_cash >= contribution.min_monthly_budget
+                )
+                if selected_budget is not None:
+                    execution_config = self._execution_config_with_contribution_budget(
+                        execution_config,
+                        selected_budget,
+                    )
                 scope_state = PortfolioState(
                     cash=state_cash,
                     cash_by_currency={contribution.currency.value: state_cash},
@@ -1886,6 +2013,7 @@ class MaestroOrchestrator:
                         state=scope_state,
                         contribution_group_id=group_id,
                         allocated_cash=planned_cash,
+                        requires_budget_request=requires_budget_request,
                     )
                 )
         return order_targets, risk_decisions, remaining_results
@@ -1906,10 +2034,12 @@ class MaestroOrchestrator:
 
     def _planned_multi_account_allocations(
         self,
+        group_id: str,
         group,
         target_allocations: dict[str, float],
         account_states: dict[str, PortfolioState],
         prices: dict[str, float],
+        month_key: str,
     ) -> dict[tuple[str, str], dict[str, float]]:
         target_symbols = list(target_allocations)
         current_values = {
@@ -1927,7 +2057,19 @@ class MaestroOrchestrator:
                 execution_config,
                 account_states[target_config.account_id],
             )
-            budget = self._target_contribution_budget(target_config, available_cash)
+            selected_budget = self._selected_contribution_budget(
+                group_id,
+                group.strategy_id,
+                target_config.account_id,
+                target_config.execution_sleeve,
+                month_key,
+            )
+            budget = self._target_contribution_budget(
+                target_config,
+                execution_config,
+                available_cash,
+                selected_budget,
+            )
             key = (target_config.account_id, target_config.execution_sleeve)
             if budget <= 0:
                 planned[key] = {}
@@ -1951,10 +2093,58 @@ class MaestroOrchestrator:
                 current_values[symbol] = current_values.get(symbol, 0.0) + amount
         return planned
 
-    def _target_contribution_budget(self, target_config, available_cash: float) -> float:
+    def _target_contribution_budget(
+        self,
+        target_config,
+        execution_config: ExecutionConfig,
+        available_cash: float,
+        selected_budget: float | None,
+    ) -> float:
+        if selected_budget is not None:
+            if (
+                selected_budget < target_config.min_monthly_budget
+                or selected_budget > available_cash
+            ):
+                raise ValueError(
+                    "contribution budget decision is outside available range for "
+                    f"{target_config.account_id}/{target_config.execution_sleeve}"
+                )
+            return selected_budget
         if available_cash < target_config.min_monthly_budget:
             return 0.0
-        return min(available_cash, target_config.max_monthly_budget)
+        if execution_config.contribution.budget_request.enabled:
+            return 0.0
+        if target_config.monthly_budget:
+            return min(available_cash, target_config.monthly_budget)
+        return available_cash
+
+    def _selected_contribution_budget(
+        self,
+        group_id: str,
+        strategy_id: str,
+        account_id: str,
+        execution_sleeve: str,
+        month_key: str,
+    ) -> float | None:
+        for row in self.state_store.list_system_events_by_type(
+            "contribution_budget_request_decision",
+            limit=1000,
+        ):
+            payload = row.get("payload") or {}
+            if payload.get("status") != "selected":
+                continue
+            if payload.get("contribution_group_id") != group_id:
+                continue
+            if strategy_id not in [str(item) for item in payload.get("strategy_ids") or []]:
+                continue
+            if payload.get("account_id") != account_id:
+                continue
+            if payload.get("execution_sleeve") != execution_sleeve:
+                continue
+            if payload.get("month_key") != month_key:
+                continue
+            return float(payload["selected_budget"])
+        return None
 
     def _budget_toward_aggregate_target(
         self,
@@ -2003,9 +2193,21 @@ class MaestroOrchestrator:
         values = self.config.execution.model_dump(mode="python")
         values["order_generation_mode"] = sleeve.order_generation_mode
         contribution = sleeve.contribution.model_dump(mode="python")
-        contribution["monthly_budget"] = target_config.max_monthly_budget
+        if target_config.monthly_budget:
+            contribution["monthly_budget"] = target_config.monthly_budget
         contribution["min_monthly_budget"] = target_config.min_monthly_budget
         contribution["max_monthly_budget"] = target_config.max_monthly_budget
+        values["contribution"] = contribution
+        return ExecutionConfig.model_validate(values)
+
+    def _execution_config_with_contribution_budget(
+        self,
+        execution_config: ExecutionConfig,
+        budget: float,
+    ) -> ExecutionConfig:
+        values = execution_config.model_dump(mode="python")
+        contribution = values["contribution"]
+        contribution["monthly_budget"] = budget
         values["contribution"] = contribution
         return ExecutionConfig.model_validate(values)
 
@@ -2139,6 +2341,63 @@ class MaestroOrchestrator:
             drift=allocated.drift,
         )
 
+    def _attributed_positions_for_scope(
+        self,
+        account_id: str | None,
+        execution_sleeve: str | None,
+    ) -> dict[str, float] | None:
+        if not account_id or not execution_sleeve:
+            return None
+        if account_id not in self.config.account_strategy_targets:
+            return None
+        if execution_sleeve not in self.config.account_strategy_targets[account_id]:
+            return None
+        snapshot = self._latest_broker_snapshot_for_account(account_id)
+        if snapshot is None:
+            raise ValueError(
+                f"account attribution requires a broker snapshot for account_id={account_id}"
+            )
+        account = snapshot["payload"]["account"]
+        attributed = AccountAttributionReconciliationService(
+            self.state_store,
+            self.audit,
+        ).require_ready(
+            account_id=account_id,
+            broker_snapshot_id=int(snapshot["id"]),
+            broker_positions={
+                str(position["symbol"]): float(position["quantity"])
+                for position in account.get("positions", [])
+            },
+        )
+        positions: dict[str, float] = {}
+        for position in attributed:
+            if position.bucket_id != execution_sleeve:
+                continue
+            positions[position.symbol] = positions.get(position.symbol, 0.0) + position.quantity
+        return positions
+
+    def _account_scope_target_weight(
+        self,
+        account_id: str | None,
+        execution_sleeve: str | None,
+        fallback: float,
+    ) -> float:
+        if not account_id or not execution_sleeve:
+            return fallback
+        target = self.config.account_strategy_targets.get(account_id, {}).get(execution_sleeve)
+        return target.target_weight if target is not None else fallback
+
+    def _latest_broker_snapshot_for_account(
+        self,
+        account_id: str,
+    ) -> dict[str, Any] | None:
+        for row in self.state_store.list_broker_account_snapshots(limit=1000):
+            payload = row.get("payload") or {}
+            logical_account_id = str(payload.get("account_id") or row.get("account_id") or "")
+            if logical_account_id == account_id:
+                return row
+        return None
+
     def _results_by_account(
         self,
         valid_results: list[TargetAllocationResult],
@@ -2181,7 +2440,11 @@ class MaestroOrchestrator:
         account_id: str | None = None,
     ) -> None:
         account_ids = sorted(
-            {self._strategy_account_id(strategy_id) for strategy_id in source_strategy_ids}
+            {
+                account_id
+                for strategy_id in source_strategy_ids
+                for account_id in self._strategy_account_ids(strategy_id)
+            }
         )
         if account_id and account_id not in account_ids:
             account_ids.append(account_id)
@@ -2202,6 +2465,12 @@ class MaestroOrchestrator:
                 return self.account_router.account_id_for_strategy(loaded.config)
         return PAPER_DEFAULT_ACCOUNT_ID
 
+    def _strategy_account_ids(self, strategy_id: str) -> list[str]:
+        group = self.config.multi_account_contribution_group_for_strategy(strategy_id)
+        if group is not None:
+            return [target.account_id for target in group.account_targets]
+        return [self._strategy_account_id(strategy_id)]
+
     def _single_live_account_id(self) -> str | None:
         account_ids = set(self._live_account_ids())
         if len(account_ids) == 1:
@@ -2214,6 +2483,7 @@ class MaestroOrchestrator:
             for loaded in self.registry.strategies
             if loaded.config.enabled
             and loaded.config.account_id
+            and not is_multi_account_contribution_account_id(loaded.config.account_id)
             and (
                 self.account_router.account(loaded.config.account_id) is None
                 or self.account_router.account(loaded.config.account_id).broker != "sandbox"
@@ -2237,9 +2507,10 @@ class MaestroOrchestrator:
         signal_preview: bool = False,
     ) -> list[OrderIntent]:
         account_ids = {
-            self._strategy_account_id(strategy_id)
+            account_id
             for strategy_id in source_strategy_ids
             if strategy_id
+            for account_id in self._strategy_account_ids(strategy_id)
         }
         posture_for_strategy = (
             self._effective_signal_strategy_order_posture
@@ -2307,8 +2578,38 @@ def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:
         symbol = position.get("symbol")
         current_price = position.get("current_price")
         if symbol and current_price is not None and float(current_price) > 0:
-            prices.setdefault(str(symbol), float(current_price))
+            prices[symbol] = float(current_price)
     return prices
+
+
+def _convert_broker_prices_to_base(
+    config: MaestroConfig,
+    prices: dict[str, float],
+) -> dict[str, float]:
+    """Convert broker snapshot prices from instrument currency to base currency (KRW).
+    This prevents _order_generation_prices from overwriting FX-converted strategy
+    prices with raw broker prices in USD."""
+    from maestro.fx.service import ConfiguredFXRefreshService
+    from maestro.state.store import StateStore
+
+    base = config.portfolio.base_currency
+    if base != "KRW":
+        return prices
+    try:
+        store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+        fx_svc = ConfiguredFXRefreshService(config, store)
+        fx_result = fx_svc.refresh_from_config()
+        usd_to_krw = float(fx_result.rates.get("USD/KRW", 1.0))
+    except Exception:
+        return prices
+
+    instrument_currencies = {inst.symbol: inst.currency for inst in config.universe.instruments}
+    converted = dict(prices)
+    for symbol, price in prices.items():
+        currency = instrument_currencies.get(symbol, "KRW")
+        if currency == "USD":
+            converted[symbol] = price * usd_to_krw
+    return converted
 
 
 def _merge_portfolio_states(states: list[PortfolioState]) -> PortfolioState:

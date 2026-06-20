@@ -20,6 +20,7 @@ KIS_BROKERAGE_APP_KEY=
 KIS_BROKERAGE_APP_SECRET=
 KIS_ACCESS_TOKEN=
 KIS_APPROVAL_KEY=
+EXCHANGERATE_API_KEY=
 MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml
 MAESTRO_READONLY_CONFIG=/root/maestro-operator/symphony_readonly.yaml
 MAESTRO_SIGNAL_CONFIG=/root/maestro-operator/symphony_signal.yaml
@@ -28,6 +29,10 @@ MAESTRO_APPROVAL_CONFIG=/root/maestro-operator/symphony_approval.yaml
 
 Do not commit this file. Do not paste secret values into tickets, docs, audit
 logs, or dashboard rows.
+The ExchangeRate-API free plan supports 1500 requests/month; Maestro's FX
+refresh path reuses a successful snapshot for one hour by default, keeping
+normal automated usage to about 744 requests in a 31-day month. Use
+`maestro fx-refresh --force` only for explicit provider checks.
 
 ## Operator Config
 
@@ -217,7 +222,9 @@ Install `deploy/systemd/maestro-symphony-signal.service` and
 `maestro daily-signal-approval`, which obtains a file lock, refreshes read-only
 broker state when configured, runs `maestro run-signal` semantics through
 `${MAESTRO_SIGNAL_CONFIG}`, sends the daily Telegram signal summary, and only
-continues into approval when `action_required=true`.
+continues into approval when `action_required=true`. If any orchestration step fails,
+it sends a best-effort Telegram failure briefing before preserving the non-zero
+systemd failure status.
 
 During approval polling the command stops `maestro-telegram-operator.service`
 and restarts it on exit so the shared Telegram bot has one `getUpdates`
@@ -316,3 +323,50 @@ sudo systemctl enable --now maestro-symphony-signal.timer
 
 Keep service output in journald or a controlled log sink. Confirm structured
 logs do not contain raw secrets before widening access to logs.
+
+## Dashboard reliability (auto-reload + auto-heal)
+
+The dashboard runs as a long-lived process, so a config or code change does not
+take effect until the service is restarted. If it is not restarted, the daemon
+keeps serving stale models and the operator config can fail validation, which
+the dashboard now surfaces as a clear `422 config_invalid` instead of a blank
+`500`. Three extra units keep it reliable and current:
+
+- `maestro-dashboard.service` — adds `StartLimitIntervalSec=0` so systemd never
+  stops retrying restarts (the dashboard always comes back).
+- `maestro-dashboard.path` + `maestro-dashboard-reload.service` — watch the
+  operator config files and the built frontend (`src/maestro/dashboard/web`) and
+  restart the dashboard automatically when they change (e.g. after a deploy or a
+  config edit). Adjust the watched paths in the `.path` unit to match your
+  operator config locations.
+- `maestro-dashboard-health.timer` + `maestro-dashboard-health.service` — probe
+  `/api/health` every minute and restart the dashboard only if it is unreachable
+  (hung/dead). A reachable server returning an HTTP error is left alone so a bad
+  config is diagnosed in the UI rather than triggering a restart loop.
+
+Install / refresh:
+
+```bash
+sudo cp deploy/systemd/maestro-dashboard.service \
+        deploy/systemd/maestro-dashboard.path \
+        deploy/systemd/maestro-dashboard-reload.service \
+        deploy/systemd/maestro-dashboard-health.service \
+        deploy/systemd/maestro-dashboard-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart maestro-dashboard.service          # pick up the new ExecStart
+sudo systemctl enable --now maestro-dashboard.path
+sudo systemctl enable --now maestro-dashboard-health.timer
+```
+
+Verify:
+
+```bash
+systemctl status maestro-dashboard.service maestro-dashboard.path maestro-dashboard-health.timer
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8503/api/health   # 200
+```
+
+Frontend deploys: after `npm run dashboard:build` writes to
+`src/maestro/dashboard/web`, the `.path` unit restarts the dashboard within a
+few seconds. The frontend itself self-heals — it polls the snapshot on an
+interval with backoff and keeps the last good data on screen during a restart,
+so clients reconnect automatically.

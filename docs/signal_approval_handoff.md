@@ -44,9 +44,11 @@ Strategy controls in the shared mapping determine which phase sees each app:
 Signal packages persist the effective phase controls and per-order posture so
 `symphony_approval` can apply them without re-running strategies.
 
-The current operator mapping enables `tranquillo -> kis_mock` and
-`crescendo_us -> dev_sandbox`; `fugue -> dev_sandbox` is `enabled: false`,
-`readonly: true`, and `signal: false`, so it can appear in
+The current operator mapping routes `tranquillo` through
+`multi_account_contributions.tranquillo` for `kis_ps` and `kis_isa`, and routes
+`crescendo_us -> toss_brokerage / crescendo_us` with manual bucket capacity
+reserved in `account_strategy_targets`. `fugue -> dev_sandbox` is
+`enabled: false`, `readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
 
 ## Responsibilities
@@ -140,7 +142,9 @@ workflow, refreshes read-only broker state when configured, runs the signal
 phase, sends the daily Telegram signal summary, skips approval for no-action
 signals, and creates approval requests only for actionable signals. During
 approval polling it stops `maestro-telegram-operator.service` and restarts it on
-exit so the shared Telegram bot has only one `getUpdates` consumer. The legacy
+exit so the shared Telegram bot has only one `getUpdates` consumer. If the daily
+orchestration fails before the normal summary, it sends a best-effort Telegram
+failure briefing and still exits non-zero for systemd. The legacy
 `scripts/operator/symphony_signal_then_approval.sh` wrapper remains available for
 compatibility, but systemd should use the CLI orchestrator.
 

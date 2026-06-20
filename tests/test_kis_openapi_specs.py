@@ -186,7 +186,7 @@ def _config(broker_product: str, *, paper_trading: bool = False) -> KISConfig:
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
         approval_key_env="TEST_KIS_APPROVAL_KEY",
-        broker_product=broker_product,
+        broker_products=[broker_product],
         paper_trading=paper_trading,
     )
 

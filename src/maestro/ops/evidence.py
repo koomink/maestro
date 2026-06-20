@@ -149,7 +149,6 @@ def _config_summary(config: MaestroConfig, config_label: str) -> dict[str, Any]:
         "kis": {
             "enabled": config.kis.enabled,
             "provider": config.kis.provider,
-            "broker_product": config.kis.broker_product.value,
             "broker_products": [
                 product.value for product in config.kis.effective_broker_products()
             ],

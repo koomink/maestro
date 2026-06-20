@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import Currency, OrderSide, RunMode
+from maestro.core.trading_day import trading_day_bounds_utc_str
 from maestro.execution.base import OrderIntent
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.events import SystemEventType, save_audited_system_event
@@ -210,15 +211,15 @@ class LiveExecutionGateService:
         return None
 
     def _daily_limit_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
-        today = self._now().date().isoformat()
+        start_utc, end_utc = trading_day_bounds_utc_str(
+            self.config.execution.market_session.timezone, at=self._now()
+        )
         existing_count = 0
         existing_notional_by_currency: dict[Currency, float] = {}
-        for row in self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_RESULT, limit=1000
+        for row in self.state_store.list_system_events_in_range(
+            SystemEventType.LIVE_ORDER_RESULT, start_utc=start_utc, end_utc=end_utc
         ):
             payload = row["payload"]
-            if payload.get("submitted_date") != today:
-                continue
             existing_count += 1
             currency = self._event_currency(payload)
             existing_notional_by_currency[currency] = existing_notional_by_currency.get(

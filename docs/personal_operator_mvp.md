@@ -38,21 +38,14 @@ KIS_MOCK_ACCOUNT_ID=...
 KIS_MOCK_APP_KEY=...
 KIS_MOCK_APP_SECRET=...
 TELEGRAM_BOT_TOKEN=...
+EXCHANGERATE_API_KEY=
 ```
 
-That file is the operator environment source of truth used by systemd. For
-manual CLI runs from the repository root, load it before invoking Maestro:
-
-```bash
-set -a
-. /etc/maestro/maestro.env
-set +a
-.venv/bin/maestro ...
-```
-
-Maestro CLI commands still load a repo-local `.env` when one exists, without
-overriding variables already set by the shell. Use that only for isolated local
-development, not for VPS operator secrets.
+That file is the operator environment source of truth used by systemd and by
+Maestro CLI commands. The CLI loads a repo-local `.env` first and then
+`/etc/maestro/maestro.env` when it exists, without overriding variables already
+set by the shell. Use repo-local `.env` only for isolated local development, not
+for VPS operator secrets.
 
 `KIS_ACCESS_TOKEN` is optional. Leave it unset unless you have a real pre-issued
 token. If it is absent, Maestro can use the configured token cache path.

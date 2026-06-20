@@ -53,8 +53,6 @@ def build_contribution_funding_request(
         return None
     shortfall = contribution.min_monthly_budget - available_cash
     recommended_top_up = shortfall
-    if contribution.max_monthly_budget > contribution.min_monthly_budget:
-        recommended_top_up = max(0.0, contribution.max_monthly_budget - available_cash)
     return ContributionFundingRequest(
         source_signal_run_id=source_signal_run_id,
         strategy_ids=list(strategy_ids),

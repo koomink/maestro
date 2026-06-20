@@ -17,6 +17,7 @@ class PortfolioConfig(StrictConfigModel):
     cash_by_currency: dict[str, float] = Field(default_factory=dict)
     allowed_symbols: list[str] = Field(default_factory=list)
     currency_sleeves: dict[str, CurrencySleeveConfig] = Field(default_factory=dict)
+    unknown_broker_position_policy: Literal["fail_closed", "include_readonly"] = "fail_closed"
 
     def configured_symbols(self) -> list[str]:
         if self.allowed_symbols:

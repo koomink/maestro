@@ -153,9 +153,10 @@ rehearsals are acceptable.
 `dry_run` means approval is requested but broker submit is skipped.
 
 KIS accounts can use `environment: real` or `environment: paper_trading`. Toss
-accounts are config-visible placeholders for now; submit/read-only broker
-operations fail closed until an official Toss Securities trading OpenAPI is
-available.
+accounts use one domestic/overseas OpenAPI adapter for snapshots, submit,
+status, modification, and cancellation. Initial armed operation permits
+Telegram-approved integer-quantity DAY limit orders; market and amount orders
+remain blocked by the live safety policy.
 
 ## Project Status
 
@@ -387,8 +388,8 @@ region, currency, broker product, broker symbol, exchange code, price tick, and
 quantity step. Broker adapters translate canonical symbols into product-specific
 request fields. Maestro supports KIS domestic and overseas stock/ETF products as
 explicit broker adapter paths. Single-product configs continue to use
-`kis.broker_product`. Multi-product operator configs use `kis.broker_products`
-and `portfolio.allocation_mode=currency_sleeves` so KRW and USD sleeves
+`kis.broker_products` with one entry. Multi-product operator configs use
+`kis.broker_products` and `portfolio.allocation_mode=currency_sleeves` so KRW and USD sleeves
 rebalance independently without automatic FX conversion or cross-currency
 orders. FX conversion is a reporting concern only: operators may view
 FX-adjusted total performance in the dashboard, but order generation, buying
@@ -859,8 +860,11 @@ lifecycle state has blocked them.
 `adopt-broker-snapshot` is also a state-only operator action. It copies the
 latest read-only broker snapshot into Maestro's portfolio state after the
 operator has accepted that snapshot as the rehearsal baseline, records
-`broker_snapshot_adopted`, and refuses broker positions outside
-`portfolio.allowed_symbols`.
+`broker_snapshot_adopted`, and defaults to refusing broker positions outside
+`portfolio.allowed_symbols` or `universe.instruments`. Set
+`portfolio.unknown_broker_position_policy: include_readonly` only for read-only
+display/adoption of already-held broker positions; target allocations and live
+orders still reject unknown symbols.
 Live configs do not set `portfolio.initial_cash`; KIS cash and positions become
 Maestro's live baseline only after this adoption step. `live_approval run-once`
 refreshes and adopts the KIS broker snapshot before strategy work. When
@@ -921,8 +925,11 @@ and `symphony_approval`. They share `state.identity_group: symphony` and
 `var/symphony_state.db` so dashboard refreshes, signal generation, and approval
 execution see the same broker and signal state. Multi-product KIS configs use
 explicit `accounts` and `strategy_account_map_path`; the shared mapping file
-currently enables `tranquillo -> kis_mock` and `crescendo_us -> dev_sandbox`, while
-`fugue -> dev_sandbox` remains `enabled: false` and `signal: false`, so the signal phase does not import or run it.
+routes `tranquillo` through `multi_account_contributions.tranquillo` for
+`kis_ps` and `kis_isa`, and routes `crescendo_us -> toss_brokerage / crescendo_us`
+with manual bucket capacity reserved in `account_strategy_targets`. `fugue ->
+dev_sandbox` remains `enabled: false` and `signal: false`, so the signal phase
+does not import or run it.
 Change a strategy's account in the shared mapping file instead of editing
 `symphony_signal.yaml` and `symphony_approval.yaml` separately. Common
 environment variable names:
@@ -937,21 +944,17 @@ environment variable names:
   a real current token
 - `KIS_APPROVAL_KEY`: optional pre-issued WebSocket approval key; leave unset
   unless it is a real current key
+- `EXCHANGERATE_API_KEY`: ExchangeRate-API key used by reporting-only FX
+  snapshots for dashboard KRW/USD converted views. FX refresh is throttled to
+  one provider request per hour by default so the ExchangeRate-API free plan
+  remains below roughly 744 requests in a 31-day month.
 
-Operator deployments keep real KIS and Telegram values in
+Operator deployments keep real KIS, Telegram, and FX values in
 `/etc/maestro/maestro.env`; repo-local `.env` files are not the production source
-of truth. For manual CLI runs on the VPS, load the operator environment first:
-
-```bash
-set -a
-. /etc/maestro/maestro.env
-set +a
-.venv/bin/maestro ...
-```
-
-Maestro CLI commands still load a repo-local `.env` when one exists, without
-overriding variables already set by the shell. Use that only for isolated local
-development, not for the VPS operator secrets.
+of truth. Maestro CLI commands load a repo-local `.env` first and then
+`/etc/maestro/maestro.env` when it exists, without overriding variables already
+set by the shell. Use repo-local `.env` only for isolated local development, not
+for the VPS operator secrets.
 
 The `live_readonly` adapter is read-only. It does not submit, cancel, amend, buy,
 sell, enable `live_auto`, or add market orders. Normal tests use fake/fixture KIS
@@ -1035,17 +1038,21 @@ are browser-local/read-model UI actions.
 
 Dashboard operator actions keep read-only state refresh separate from
 proposal generation. Global `Refresh` should update broker/account snapshots and
-check latest signal freshness, while per-app `Generate Signal` controls live in
-the Virtuoso tab and must not approve or execute orders. Portfolio `Broker Accounts`
+check latest signal freshness and reporting-only FX freshness, while per-app
+`Generate Signal` controls live in the Virtuoso tab and must not approve or
+execute orders. Portfolio `Broker Accounts`
 is a hybrid multi-account overview: it summarizes total broker value and account
 health, then lists each enabled real broker account as fresh/stale/missing; sandbox
 accounts are excluded from broker truth. See
 [`docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md`](docs/superpowers/specs/2026-05-28-dashboard-refresh-signals-design.md).
 When the dashboard is started outside systemd, pass `--env-file
-/etc/maestro/maestro.env` so broker refresh and proposal-only signal actions see
-the same credential environment as the operator services. The health endpoint
-reports credential environment variable names as present/missing without
+/etc/maestro/maestro.env` so broker refresh, FX refresh, and proposal-only signal
+actions see the same credential environment as the operator services. The health
+endpoint reports credential environment variable names as present/missing without
 exposing secret values.
+FX refresh reuses the latest successful snapshot when it is less than one hour
+old; use `maestro fx-refresh --force` only for an explicit provider/API-key
+check.
 
 If no CLI entrypoint exists yet during early development, use:
 
@@ -1294,8 +1301,11 @@ Implemented operator commands:
 - `/kill_switch`
 
 Telegram operator commands are intentionally constrained. Most read commands use
-stored SQLite state; `/account` refreshes the KIS read-only broker snapshot
+stored SQLite state; `/account` refreshes enabled read-only broker accounts
 before replying so reported cash and positions reflect current broker truth.
+`/portfolio` may include unknown already-held broker positions for read-only
+display/adoption when the portfolio policy is `include_readonly`; it does not
+make those symbols eligible for new strategy buys.
 `/status` reports broker total value, broker cash, broker positions, and the
 snapshot timestamp instead of the internal dry-run portfolio cash.
 `/signal` shows the latest persisted signal package. `/signal_<strategy>` uses the

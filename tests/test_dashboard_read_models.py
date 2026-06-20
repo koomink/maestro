@@ -205,10 +205,25 @@ def test_broker_account_overview_reports_configured_account_states(tmp_path):
         (),
         {
             "accounts": [
-                BrokerAccountConfig(id="kis_mock", broker="kis", enabled=True),
-                BrokerAccountConfig(id="kis_isa", broker="kis", enabled=True),
+                BrokerAccountConfig(
+                    id="kis_mock",
+                    broker="kis",
+                    enabled=True,
+                    broker_products=["kis_overseas_stock"],
+                ),
+                BrokerAccountConfig(
+                    id="kis_isa",
+                    broker="kis",
+                    enabled=True,
+                    broker_products=["kis_overseas_stock"],
+                ),
                 BrokerAccountConfig(id="dev_sandbox", broker="sandbox", enabled=True),
-                BrokerAccountConfig(id="disabled", broker="kis", enabled=False),
+                BrokerAccountConfig(
+                    id="disabled",
+                    broker="kis",
+                    enabled=False,
+                    broker_products=["kis_overseas_stock"],
+                ),
             ],
             "reconciliation": ReconciliationConfig(max_age_seconds=86400),
         },
@@ -1001,6 +1016,34 @@ def test_total_portfolio_performance_marks_missing_fx_for_mixed_currency(tmp_pat
     assert rows[0]["cumulative_return"] is None
 
 
+def test_total_portfolio_performance_sums_latest_snapshots_across_accounts(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for run_id, account_id, total_value in [
+        ("run_live_account", "acct_live", 10_006_055.0),
+        ("run_empty_isa", "acct_isa", 0.0),
+        ("run_empty_ps", "acct_ps", 0.0),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            account_id,
+            {
+                "account": {
+                    "account_id": account_id,
+                    "currency": "KRW",
+                    "cash": total_value,
+                    "total_value": total_value,
+                    "positions": [],
+                }
+            },
+        )
+
+    rows = build_total_portfolio_performance_table(store)
+
+    assert rows[0]["run_id"] == "run_empty_ps"
+    assert rows[0]["total_value"] == 10_006_055.0
+    assert rows[0]["component_values"] == {"KRW": 10_006_055.0}
+
+
 def test_total_portfolio_performance_uses_persisted_fx_for_display_currency(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     for run_id, usd_value, krw_value in [
@@ -1054,6 +1097,42 @@ def test_total_portfolio_performance_uses_persisted_fx_for_display_currency(tmp_
     assert rows[0]["period_return"] == 0.1
     assert rows[0]["local_return"] == 0.1
     assert rows[0]["fx_effect"] == 0.0
+
+
+def test_fx_snapshot_freshness_uses_fetched_at_when_available(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_1",
+        "acct_usd",
+        {
+            "account": {
+                "account_id": "acct_usd",
+                "currency": "USD",
+                "cash": 1000.0,
+                "total_value": 1000.0,
+                "positions": [],
+            }
+        },
+    )
+    store.save_system_event(
+        "run_fx",
+        "fx_rate_snapshot",
+        {
+            "source": "fixture",
+            "as_of": "2000-01-01T00:00:00+00:00",
+            "fetched_at": utc_now().isoformat(),
+            "max_age_seconds": 3600,
+            "rates": {"USD/KRW": 1000.0},
+        },
+    )
+
+    fx = build_fx_rate_snapshot_card(store)
+    rows = build_total_portfolio_performance_table(store, display_currency="KRW")
+
+    assert fx["status"] == "fresh"
+    assert fx["as_of"] == "2000-01-01T00:00:00+00:00"
+    assert rows[0]["fx_status"] == "fresh"
+    assert rows[0]["total_value"] == 1_000_000.0
 
 
 def test_total_portfolio_performance_disables_converted_return_for_stale_fx(tmp_path):

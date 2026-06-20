@@ -12,23 +12,34 @@ from maestro.execution.live_order_ports import LiveOrderClient
 def build_kis_rest_readonly_client(
     config: KISConfig,
     instruments: list[TradableInstrument] | None = None,
+    broker_product: BrokerProduct | None = None,
 ) -> KISReadOnlyClient:
-    if config.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK:
+    product = broker_product or _single_broker_product(config)
+    if product == BrokerProduct.KIS_DOMESTIC_STOCK:
         return KISRestDomesticStockReadOnlyClient(config, instruments=instruments)
-    if config.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK:
+    if product == BrokerProduct.KIS_OVERSEAS_STOCK:
         return KISRestOverseasStockReadOnlyClient(config, instruments=instruments)
-    raise ValueError(f"Unsupported KIS broker product: {config.broker_product}")
+    raise ValueError(f"Unsupported KIS broker product: {product}")
 
 
 def build_kis_rest_live_order_client(
     config: KISConfig,
     instruments: list[TradableInstrument] | None = None,
+    broker_product: BrokerProduct | None = None,
 ) -> LiveOrderClient:
-    if config.broker_product == BrokerProduct.KIS_DOMESTIC_STOCK:
+    product = broker_product or _single_broker_product(config)
+    if product == BrokerProduct.KIS_DOMESTIC_STOCK:
         return KISRestDomesticStockLiveOrderClient(config, instruments=instruments)
-    if config.broker_product == BrokerProduct.KIS_OVERSEAS_STOCK:
+    if product == BrokerProduct.KIS_OVERSEAS_STOCK:
         return KISRestOverseasStockLiveOrderClient(config, instruments=instruments)
-    raise ValueError(f"Unsupported KIS broker product: {config.broker_product}")
+    raise ValueError(f"Unsupported KIS broker product: {product}")
+
+
+def _single_broker_product(config: KISConfig) -> BrokerProduct:
+    products = config.effective_broker_products()
+    if len(products) != 1:
+        raise ValueError("KIS REST client requires exactly one broker product")
+    return products[0]
 
 
 KISRestReadOnlyClient = KISRestDomesticStockReadOnlyClient

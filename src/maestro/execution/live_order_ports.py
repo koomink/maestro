@@ -5,6 +5,8 @@ from maestro.execution.live_order_models import (
     LiveOrderCancelRequest,
     LiveOrderCancelResult,
     LiveOrderLifecycleNotification,
+    LiveOrderModifyRequest,
+    LiveOrderModifyResult,
     LiveOrderRequest,
     LiveOrderResult,
     LiveOrderStatusSnapshot,
@@ -36,6 +38,12 @@ class LiveOrderCancelClient(ABC):
         raise NotImplementedError
 
 
+class LiveOrderModifyClient(ABC):
+    @abstractmethod
+    def modify_order(self, request: LiveOrderModifyRequest) -> LiveOrderModifyResult:
+        raise NotImplementedError
+
+
 class BrokerReconciliationRunner(ABC):
     @abstractmethod
     def reconcile_latest(self) -> ReconciliationResult:
@@ -52,6 +60,7 @@ __all__ = [
     "BrokerReconciliationRunner",
     "LiveOrderCancelClient",
     "LiveOrderClient",
+    "LiveOrderModifyClient",
     "LiveOrderNotificationClient",
     "LiveOrderPreSubmitValidator",
     "LiveOrderStatusClient",

@@ -7,6 +7,7 @@ from maestro.execution.live_order_models import (
     SkippedFill,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -40,6 +41,24 @@ class PartialFillReconciliationService:
             if applied_fill is None:
                 continue
             _apply_fill(next_state, applied_fill)
+            attribution_context = self._attribution_context(applied_fill.broker_order_id)
+            if attribution_context is not None:
+                account_id, bucket_id = attribution_context
+                AccountAttributionReconciliationService(
+                    self.state_store,
+                    self.audit_logger,
+                ).apply_maestro_fill(
+                    run_id=run_id,
+                    account_id=account_id,
+                    bucket_id=bucket_id,
+                    symbol=applied_fill.symbol,
+                    side=applied_fill.side.value,
+                    quantity=applied_fill.quantity,
+                    fill_key=(
+                        f"{applied_fill.broker_order_id}:"
+                        f"{applied_fill.cumulative_filled_quantity}"
+                    ),
+                )
             applied_by_order[applied_fill.broker_order_id] = (
                 applied_fill.cumulative_filled_quantity,
                 applied_fill.cumulative_filled_notional,
@@ -67,6 +86,27 @@ class PartialFillReconciliationService:
             payload,
         )
         return result
+
+    def _attribution_context(self, broker_order_id: str) -> tuple[str, str] | None:
+        for row in self.state_store.list_system_events_by_type(
+            SystemEventType.LIVE_ORDER_RESULT,
+            limit=2000,
+        ):
+            payload = row["payload"]
+            result_order = payload.get("result", {}).get("broker_order", {})
+            if result_order.get("broker_order_id") != broker_order_id:
+                continue
+            request = payload.get("request", {})
+            account_id = str(request.get("account_id") or "")
+            bucket_id = str(request.get("sleeve") or "")
+            if account_id and bucket_id:
+                attribution = AccountAttributionReconciliationService(
+                    self.state_store,
+                    self.audit_logger,
+                )
+                if attribution.has_attribution(account_id):
+                    return account_id, bucket_id
+        return None
 
     def _load_applied_watermarks(self) -> dict[str, tuple[float, float]]:
         applied: dict[str, tuple[float, float]] = {}

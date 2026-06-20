@@ -4,6 +4,7 @@ from typing import Any
 from maestro.config.loader import load_config_with_identity
 from maestro.core.time_display import add_operator_time_fields, operator_timezone
 from maestro.dashboard.read_models import (
+    build_account_bucket_attribution_table,
     build_account_performance_table,
     build_approvals_table,
     build_broker_account_overview,
@@ -123,6 +124,11 @@ def build_dashboard_snapshot(
     strategy_book_snapshots = build_strategy_book_snapshots_table(store)
     strategy_book_performance = build_strategy_book_performance_table(store)
     strategy_attribution = build_strategy_attribution_table(store)
+    account_bucket_attribution = build_account_bucket_attribution_table(
+        store,
+        prices=_prices_from_broker_positions(broker_positions),
+        target_weights=_account_strategy_target_weights(config),
+    )
     run_index = build_run_index_table(store)
     enabled_strategies = [
         strategy
@@ -258,6 +264,7 @@ def build_dashboard_snapshot(
             "asset_summary_rows": asset_summary_rows,
             "strategy_book_performance": strategy_book_performance,
             "strategy_attribution": strategy_attribution,
+            "account_bucket_attribution": account_bucket_attribution,
             "strategy_book_snapshots": strategy_book_snapshots,
             "broker_positions": broker_positions,
             "maestro_exposure": maestro_exposure,
@@ -1630,6 +1637,25 @@ def _latest_strategy_values(strategy_book_performance: list[dict[str, Any]]) -> 
         if value is not None:
             values[str(strategy_id)] = value
     return values
+
+
+def _prices_from_broker_positions(rows: list[dict[str, Any]]) -> dict[str, float]:
+    prices: dict[str, float] = {}
+    for row in rows:
+        symbol = row.get("symbol")
+        price = _float_value(row.get("current_price"))
+        if symbol and price is not None:
+            prices[str(symbol)] = price
+    return prices
+
+
+def _account_strategy_target_weights(config: Any) -> dict[str, dict[str, float]]:
+    output: dict[str, dict[str, float]] = {}
+    for account_id, targets in getattr(config, "account_strategy_targets", {}).items():
+        output[account_id] = {
+            bucket_id: target.target_weight for bucket_id, target in targets.items()
+        }
+    return output
 
 
 def _strategy_order_generation_mode(config: Any, strategy_config: Any | None) -> Any:

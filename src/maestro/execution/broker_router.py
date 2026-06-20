@@ -36,8 +36,7 @@ class BrokerAccountRouter:
             raise ValueError(f"Unknown broker account_id: {account_id}")
         if account.broker == "toss":
             raise UnsupportedBrokerOperation(
-                "Toss Securities broker execution is disabled until official trading OpenAPI "
-                "support is available."
+                "Toss accounts do not expose KIS configuration; use the Toss broker adapter."
             )
         if account.broker == "sandbox":
             raise UnsupportedBrokerOperation(

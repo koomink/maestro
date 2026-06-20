@@ -11,6 +11,7 @@ from maestro.core.clock import utc_now
 from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnlySnapshot
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.safety.controls import SafetyControlService
 from maestro.sdk import (
@@ -375,6 +376,168 @@ def test_daily_signal_approval_cli_sends_summary_and_approves_actionable_signal(
     text = fake_clients[0].sent_messages[0]["text"]
     assert "Maestro daily signal summary" in text
     assert "action_required: true" in text
+
+
+def test_daily_signal_approval_cli_sends_failure_briefing_when_readonly_refresh_fails(
+    tmp_path,
+    monkeypatch,
+):
+    readonly_path = _live_signal_config_path(
+        tmp_path,
+        "approved",
+        filename="readonly_failure.yaml",
+        account_id="kis_mock",
+    )
+    signal_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="signal_failure.yaml",
+        provider="telegram",
+        identity_group="daily_failure_briefing",
+    )
+    approval_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="approval_failure.yaml",
+        provider="console",
+        identity_group="daily_failure_briefing",
+    )
+    fake_clients: list[FakeTelegramClient] = []
+
+    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
+        assert token_env == "TELEGRAM_BOT_TOKEN"
+        assert timeout_seconds == 10.0
+        client = FakeTelegramClient()
+        fake_clients.append(client)
+        return client
+
+    def init_service(
+        self: KISReadOnlyService,
+        config,
+        state_store,
+        audit_logger,
+        client=None,
+        instruments=None,
+        logical_account_id=None,
+    ) -> None:
+        self.logical_account_id = logical_account_id
+
+    def fail_snapshot(self: KISReadOnlyService, symbols: list[str]):
+        del symbols
+        raise ValueError("KIS request failed with HTTP 500")
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+    monkeypatch.setattr(KISReadOnlyService, "__init__", init_service)
+    monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fail_snapshot)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "daily-signal-approval",
+            "--readonly-config",
+            str(readonly_path),
+            "--signal-config",
+            str(signal_path),
+            "--approval-config",
+            str(approval_path),
+            "--keep-telegram-operator",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "readonly refresh failed for account kis_mock" in result.output
+    assert "telegram_daily_failure=sent chats=1" in result.output
+    assert fake_clients
+    text = fake_clients[0].sent_messages[0]["text"]
+    assert "Maestro daily briefing failed" in text
+    assert "stage: readonly_refresh" in text
+    assert "readonly refresh failed for account kis_mock" in text
+
+
+def test_daily_signal_approval_cli_sends_failure_briefing_when_reconciliation_fails(
+    tmp_path,
+    monkeypatch,
+):
+    readonly_path = _live_signal_config_path(
+        tmp_path,
+        "approved",
+        filename="reconciliation_failure.yaml",
+        account_id="kis_mock",
+    )
+    signal_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="signal_reconciliation_failure.yaml",
+        provider="telegram",
+        identity_group="daily_reconciliation_failure_briefing",
+    )
+    approval_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="approval_reconciliation_failure.yaml",
+        provider="console",
+        identity_group="daily_reconciliation_failure_briefing",
+    )
+    fake_clients: list[FakeTelegramClient] = []
+
+    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
+        assert token_env == "TELEGRAM_BOT_TOKEN"
+        assert timeout_seconds == 10.0
+        client = FakeTelegramClient()
+        fake_clients.append(client)
+        return client
+
+    def fail_reconciliation(self):
+        del self
+        return ReconciliationResult(
+            run_id="reconcile_fail",
+            passed=False,
+            checked_at=utc_now().isoformat(),
+            cash_difference=-100.0,
+            issues=[
+                ReconciliationIssue(
+                    issue_type="cash_mismatch",
+                    symbol="CASH_KRW",
+                    difference=-100.0,
+                    tolerance=1.0,
+                    message="Broker cash differs from Maestro cash.",
+                )
+            ],
+            tolerances={"cash": 1.0, "position": 0.0},
+        )
+
+    _mock_kis_snapshot_refresh(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+    monkeypatch.setattr(
+        "maestro.cli.BrokerReconciliationService.reconcile_latest",
+        fail_reconciliation,
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "daily-signal-approval",
+            "--readonly-config",
+            str(readonly_path),
+            "--signal-config",
+            str(signal_path),
+            "--approval-config",
+            str(approval_path),
+            "--keep-telegram-operator",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "reconciliation=failed issues=1" in result.output
+    assert "telegram_daily_failure=sent chats=1" in result.output
+    assert fake_clients
+    text = fake_clients[0].sent_messages[0]["text"]
+    assert "Maestro daily briefing failed" in text
+    assert "stage: reconciliation" in text
+    assert "cash_mismatch:CASH_KRW" in text
+    assert "Broker cash differs from Maestro cash." in text
 
 
 def test_run_signal_uses_strategy_posture_when_signal_config_global_posture_disabled(
@@ -744,7 +907,7 @@ def _live_signal_config_path(
             "enabled": True,
             "provider": "kis",
             "account_id": "MOCK-LIVE",
-            "broker_product": "kis_overseas_stock",
+            "broker_products": ["kis_overseas_stock"],
         }
     ]
     raw["execution"]["order_posture"] = "dry_run"

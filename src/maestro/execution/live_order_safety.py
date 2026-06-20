@@ -1,8 +1,11 @@
+from collections.abc import Callable
+
 from maestro.approval.models import ApprovalDecision
 from maestro.config.models import ExecutionConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, Currency, OrderStatus, OrderType
 from maestro.core.instruments import TradableInstrument
+from maestro.core.trading_day import trading_day_bounds_utc_str
 from maestro.execution.live_order_models import LiveOrderRequest, LiveOrderResult
 from maestro.execution.live_order_ports import LiveOrderClient, LiveOrderPreSubmitValidator
 from maestro.monitoring.audit_logger import AuditLogger
@@ -18,20 +21,30 @@ class LiveOrderSafetyService:
         audit_logger: AuditLogger,
         broker_client: LiveOrderClient,
         instruments: list[TradableInstrument] | None = None,
-        broker_product: BrokerProduct | None = None,
         broker_products: list[BrokerProduct] | None = None,
         base_currency: Currency | None = None,
+        account_attribution_validator: Callable[[LiveOrderRequest], None] | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
         self.broker_client = broker_client
         self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
-        self.broker_product = broker_product
-        self.broker_products = broker_products or ([broker_product] if broker_product else [])
+        self.broker_products = broker_products or []
         self.base_currency = base_currency
+        self.account_attribution_validator = account_attribution_validator
 
     def submit_approved_order(
+        self,
+        request: LiveOrderRequest,
+        approval_decision: ApprovalDecision,
+    ) -> LiveOrderResult:
+        # Serialize the whole check -> submit -> persist sequence so daily-cap and
+        # duplicate checks are atomic with respect to concurrent live submissions.
+        with self.state_store.live_order_lock("submit_approved_order"):
+            return self._submit_approved_order_locked(request, approval_decision)
+
+    def _submit_approved_order_locked(
         self,
         request: LiveOrderRequest,
         approval_decision: ApprovalDecision,
@@ -133,6 +146,8 @@ class LiveOrderSafetyService:
             if self._daily_live_order_count() + 1 > limits.max_daily_order_count:
                 raise ValueError("Live order count exceeds daily cap")
         self._validate_instrument_contract(request)
+        if self.account_attribution_validator is not None:
+            self.account_attribution_validator(request)
         if self._is_duplicate(request):
             raise ValueError("Duplicate live order request rejected")
         if self.config.require_reconciliation_pass:
@@ -157,12 +172,6 @@ class LiveOrderSafetyService:
                 raise ValueError("Live order currency does not match portfolio base currency")
         if self.broker_products and instrument.broker_product not in self.broker_products:
             raise ValueError("Live order broker product is not enabled for KIS")
-        if (
-            self.broker_product is not None
-            and not self.broker_products
-            and instrument.broker_product != self.broker_product
-        ):
-            raise ValueError("Live order broker product does not match KIS adapter product")
         if request.quantity < instrument.min_order_quantity:
             raise ValueError("Live order quantity is below instrument minimum")
         if request.notional < instrument.min_order_notional:
@@ -194,15 +203,21 @@ class LiveOrderSafetyService:
             payload,
         )
 
+    def _today_utc_bounds(self) -> tuple[str, str]:
+        return trading_day_bounds_utc_str(self.config.market_session.timezone)
+
+    def _daily_live_results(self) -> list[dict]:
+        start_utc, end_utc = self._today_utc_bounds()
+        return self.state_store.list_system_events_in_range(
+            SystemEventType.LIVE_ORDER_RESULT,
+            start_utc=start_utc,
+            end_utc=end_utc,
+        )
+
     def _daily_live_notional(self, currency: Currency | None = None) -> float:
-        today = _live_order_date()
         total = 0.0
-        for row in self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_RESULT, limit=1000
-        ):
+        for row in self._daily_live_results():
             payload = row["payload"]
-            if payload.get("submitted_date") != today:
-                continue
             if currency is None or self._payload_currency(payload) == currency:
                 total += float(payload.get("notional", 0.0))
         return total
@@ -228,35 +243,13 @@ class LiveOrderSafetyService:
         return Currency.KRW
 
     def _daily_live_order_count(self) -> int:
-        today = _live_order_date()
-        count = 0
-        for row in self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_RESULT, limit=1000
-        ):
-            if row["payload"].get("submitted_date") == today:
-                count += 1
-        return count
+        return len(self._daily_live_results())
 
     def _is_duplicate(self, request: LiveOrderRequest) -> bool:
-        key = _duplicate_key(request)
-        for event_type in (
-            SystemEventType.LIVE_ORDER_RESULT,
-            SystemEventType.LIVE_ORDER_HALT,
-            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
-        ):
-            for row in self.state_store.list_system_events_by_type(event_type, limit=1000):
-                if row["payload"].get("duplicate_key") == key:
-                    return True
-        return False
+        return self.state_store.duplicate_key_exists(_duplicate_key(request))
 
     def _broker_order_seen(self, broker_order_id: str) -> bool:
-        for row in self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_RESULT, limit=1000
-        ):
-            broker_order = row["payload"].get("result", {}).get("broker_order") or {}
-            if broker_order.get("broker_order_id") == broker_order_id:
-                return True
-        return False
+        return self.state_store.broker_order_id_seen(broker_order_id)
 
 
 def _duplicate_key(request: LiveOrderRequest) -> str:

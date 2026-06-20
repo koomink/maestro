@@ -5,7 +5,10 @@ from maestro.core.enums import BrokerProduct, Currency
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.execution.brokers.kis.live_order_client import build_kis_rest_live_order_client
-from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly_factory import build_broker_readonly_service
+from maestro.execution.brokers.toss.live_order_client import TossLiveOrderClient
+from maestro.execution.live_order_modification import LiveOrderModificationService
+from maestro.execution.live_order_ports import LiveOrderModifyClient
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
     LiveOrderCancelClient,
@@ -27,6 +30,7 @@ from maestro.integrations.telegram.bot import (
     TelegramLiveOrderNotificationClient,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.state.store import StateStore
 
 
@@ -42,6 +46,7 @@ class LiveApprovalDependencies:
     broker_reconciliation_service: BrokerReconciliationRunner | None = None
     notification_client: LiveOrderNotificationClient | None = None
     cancel_service: LiveOrderCancellationService | None = None
+    modify_service: LiveOrderModificationService | None = None
 
 
 def build_live_approval_dependencies(
@@ -79,17 +84,34 @@ def build_live_approval_dependencies(
             audit_logger,
             snapshot_refresher=snapshot_refresher,
             signal_run_id=signal_run_id,
+            account_ids=[account_id] if account_id else None,
         )
 
+    account = BrokerAccountRouter(config).account(account_id)
+    is_toss = account is not None and account.broker == "toss"
+    attribution_validator = _build_attribution_validator(
+        config,
+        state_store,
+        audit_logger,
+        account_id=account_id,
+    )
     safety_service = LiveOrderSafetyService(
         config.execution,
         state_store,
         audit_logger,
         broker_client,
         instruments=config.universe.instruments,
-        broker_product=_kis_config_for_account(config, account_id).broker_product,
-        broker_products=_kis_config_for_account(config, account_id).effective_broker_products(),
-        base_currency=Currency(config.portfolio.base_currency),
+        broker_products=(
+            []
+            if is_toss
+            else _kis_config_for_account(config, account_id).effective_broker_products()
+        ),
+        base_currency=None if is_toss else Currency(config.portfolio.base_currency),
+        account_attribution_validator=(
+            (lambda request: attribution_validator(request.account_id))
+            if attribution_validator is not None
+            else None
+        ),
     )
     status_service = LiveOrderStatusService(state_store, audit_logger, order_status_client)
     fill_reconciliation_service = PartialFillReconciliationService(state_store, audit_logger)
@@ -121,6 +143,20 @@ def build_live_approval_dependencies(
         if cancel_adapter is not None
         else None
     )
+    modify_adapter = (
+        broker_client if isinstance(broker_client, LiveOrderModifyClient) else None
+    )
+    modify_service = (
+        LiveOrderModificationService(
+            config.execution,
+            state_store,
+            audit_logger,
+            modify_adapter,
+            attribution_validator=attribution_validator,
+        )
+        if modify_adapter is not None
+        else None
+    )
     return LiveApprovalDependencies(
         state_store=state_store,
         audit_logger=audit_logger,
@@ -132,6 +168,7 @@ def build_live_approval_dependencies(
         broker_reconciliation_service=broker_reconciliation,
         notification_client=notifier,
         cancel_service=cancel_service,
+        modify_service=modify_service,
     )
 
 
@@ -140,16 +177,19 @@ def _build_live_order_client(
     *,
     account_id: str | None = None,
 ) -> LiveOrderClient:
+    account = BrokerAccountRouter(config).account(account_id)
+    if account is not None and account.broker == "toss":
+        return TossLiveOrderClient(account, config.universe.instruments)
     kis_config = _kis_config_for_account(config, account_id)
     if kis_config.provider == "kis":
         products = kis_config.effective_broker_products()
         if len(products) > 1:
             return ProductRoutingKISLiveOrderClient(config, kis_config=kis_config)
-        if kis_config.broker_products:
-            kis_config = kis_config.model_copy(
-                update={"broker_product": products[0], "broker_products": []}
-            )
-        return build_kis_rest_live_order_client(kis_config, config.universe.instruments)
+        return build_kis_rest_live_order_client(
+            kis_config,
+            config.universe.instruments,
+            broker_product=products[0],
+        )
     raise ValueError(
         "live_approval requires a real KIS live order client or an injected fake client"
     )
@@ -162,21 +202,62 @@ def _build_broker_snapshot_refresher(
     *,
     account_id: str | None = None,
 ):
-    kis_config = _kis_config_for_account(config, account_id)
-    if kis_config.provider != "kis":
+    try:
+        service = build_broker_readonly_service(
+            config,
+            state_store,
+            audit_logger,
+            account_id=account_id,
+        )
+    except Exception:
         return None
 
     def refresh() -> None:
-        service = KISReadOnlyService(
-            kis_config,
-            state_store,
-            audit_logger,
-            instruments=config.universe.instruments,
-        )
-        service.logical_account_id = account_id
         service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
 
     return refresh
+
+
+def _build_attribution_validator(
+    config: MaestroConfig,
+    state_store: StateStore,
+    audit_logger: AuditLogger,
+    *,
+    account_id: str | None,
+):
+    if not account_id or account_id not in config.account_strategy_targets:
+        return None
+
+    def validate(request_account_id: str | None) -> None:
+        if request_account_id != account_id:
+            raise ValueError(
+                f"Account attribution validation expected account_id={account_id}"
+            )
+        snapshot = None
+        for row in state_store.list_broker_account_snapshots(limit=1000):
+            payload = row.get("payload") or {}
+            logical_account_id = str(payload.get("account_id") or row.get("account_id") or "")
+            if logical_account_id == account_id:
+                snapshot = row
+                break
+        if snapshot is None:
+            raise ValueError(
+                f"Account attribution requires a broker snapshot for account_id={account_id}"
+            )
+        account = snapshot["payload"]["account"]
+        AccountAttributionReconciliationService(
+            state_store,
+            audit_logger,
+        ).require_ready(
+            account_id=account_id,
+            broker_snapshot_id=int(snapshot["id"]),
+            broker_positions={
+                str(position["symbol"]): float(position["quantity"])
+                for position in account.get("positions", [])
+            },
+        )
+
+    return validate
 
 
 def _build_status_client(
@@ -192,13 +273,10 @@ def _build_status_client(
         if len(kis_config.effective_broker_products()) > 1:
             return ProductRoutingKISLiveOrderClient(config, kis_config=kis_config)
         products = kis_config.effective_broker_products()
-        if kis_config.broker_products:
-            kis_config = kis_config.model_copy(
-                update={"broker_product": products[0], "broker_products": []}
-            )
         status_client = build_kis_rest_live_order_client(
             kis_config,
             config.universe.instruments,
+            broker_product=products[0],
         )
         if isinstance(status_client, LiveOrderStatusClient):
             return status_client
@@ -236,7 +314,12 @@ def _build_cancel_client(
         return None
     if len(kis_config.effective_broker_products()) > 1:
         return None
-    candidate = build_kis_rest_live_order_client(kis_config, config.universe.instruments)
+    products = kis_config.effective_broker_products()
+    candidate = build_kis_rest_live_order_client(
+        kis_config,
+        config.universe.instruments,
+        broker_product=products[0],
+    )
     if isinstance(candidate, LiveOrderCancelClient):
         return candidate
     return None
@@ -255,10 +338,9 @@ class ProductRoutingKISLiveOrderClient(
         }
         self.clients = {
             product: build_kis_rest_live_order_client(
-                self.kis_config.model_copy(
-                    update={"broker_product": product, "broker_products": []}
-                ),
+                self.kis_config,
                 _instruments_for_product(config.universe.instruments, product),
+                broker_product=product,
             )
             for product in self.kis_config.effective_broker_products()
         }

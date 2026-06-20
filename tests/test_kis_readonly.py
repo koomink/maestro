@@ -9,7 +9,7 @@ from maestro.config.loader import load_config
 from maestro.config.models import KISConfig
 from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
 from maestro.core.instruments import TradableInstrument
-from maestro.execution.brokers.kis.auth import KISAuthManager
+from maestro.execution.brokers.kis.auth import KISAuthManager, _parse_kis_datetime
 from maestro.execution.brokers.kis.rest_client import (
     KISRestDomesticStockLiveOrderClient,
     KISRestDomesticStockReadOnlyClient,
@@ -89,7 +89,7 @@ def test_kis_cli_sync_fetches_each_configured_kis_account(tmp_path):
             "enabled": True,
             "provider": "mock",
             "account_id": "MOCK-ISA",
-            "broker_product": "kis_domestic_stock",
+            "broker_products": ["kis_domestic_stock"],
         },
         {
             "id": "kis_brokerage",
@@ -98,7 +98,7 @@ def test_kis_cli_sync_fetches_each_configured_kis_account(tmp_path):
             "enabled": True,
             "provider": "mock",
             "account_id": "MOCK-BROKERAGE",
-            "broker_product": "kis_overseas_stock",
+            "broker_products": ["kis_overseas_stock"],
         },
     ]
     config_path = tmp_path / "multi_account_live_readonly.yaml"
@@ -114,6 +114,7 @@ def test_kis_cli_sync_fetches_each_configured_kis_account(tmp_path):
 
 def test_kis_cli_sync_reports_missing_credentials_without_traceback(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MAESTRO_ENV_FILE", str(tmp_path / "missing_maestro.env"))
     monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
     monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
     monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
@@ -245,7 +246,7 @@ def test_single_broker_products_list_selects_readonly_product_without_broker_pro
     monkeypatch.setenv("KIS_MOCK_ACCOUNT_ID", "12345678-01")
     config = load_config("tests/fixtures/configs/live_approval_tranquillo_kis_paper_trading.yaml")
     raw_kis = config.kis.model_dump(mode="json")
-    raw_kis.pop("broker_product")
+    assert "broker_product" not in raw_kis
     kis_config = KISConfig.model_validate(raw_kis)
     store = StateStore(str(tmp_path / "state.db"), config.portfolio.initial_cash)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -321,6 +322,34 @@ def test_adopt_broker_snapshot_rejects_positions_outside_allowed_symbols(tmp_pat
     assert "MOCK_ETF_B" in adopt_result.output
 
 
+def test_adopt_broker_snapshot_can_include_unknown_readonly_positions(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    raw = config.model_dump(mode="json")
+    raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A"]
+    raw["portfolio"]["unknown_broker_position_policy"] = "include_readonly"
+    config_path = tmp_path / "live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    runner = CliRunner()
+
+    sync_result = runner.invoke(app, ["kis-sync", "--config", str(config_path)])
+    adopt_result = runner.invoke(
+        app,
+        [
+            "adopt-broker-snapshot",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator baseline rehearsal",
+        ],
+    )
+
+    assert sync_result.exit_code == 0
+    assert adopt_result.exit_code == 0, adopt_result.output
+    store = StateStore(str(tmp_path / "live_readonly.db"), initial_cash=None)
+    adopted = store.load_latest_portfolio_state()
+    assert adopted.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
+
+
 def test_adopt_broker_snapshot_accepts_universe_position_outside_allowed_symbols(tmp_path):
     config = _live_readonly_config(tmp_path)
     raw = config.model_dump(mode="json")
@@ -387,6 +416,12 @@ def test_kis_rest_client_normalizes_readonly_responses(monkeypatch):
     assert unfilled[0].status == "open"
     assert all(call["method"] == "GET" for call in transport.calls)
     assert not any("/order-cash" in call["url"] for call in transport.calls)
+
+
+def test_kis_token_expiry_without_timezone_is_interpreted_as_seoul_time():
+    parsed = _parse_kis_datetime("2026-06-05 09:10:30")
+
+    assert parsed == datetime(2026, 6, 5, 0, 10, 30, tzinfo=UTC)
 
 
 def test_kis_auth_manager_issues_and_caches_token(monkeypatch, tmp_path):
@@ -486,7 +521,7 @@ def test_kis_domestic_paper_trading_live_order_uses_vts_endpoint_and_demo_tr_id(
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
         paper_trading=True,
     )
     transport = FakeKISTransport()
@@ -531,7 +566,7 @@ def test_kis_domestic_paper_trading_sell_order_uses_demo_tr_id(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
         paper_trading=True,
     )
     transport = FakeKISTransport()
@@ -565,7 +600,7 @@ def test_kis_domestic_adapter_maps_canonical_symbol_to_broker_symbol(monkeypatch
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
     )
     transport = FakeKISTransport()
     client = KISRestDomesticStockLiveOrderClient(
@@ -615,7 +650,7 @@ def test_kis_domestic_adapter_maps_broker_symbol_to_canonical_symbol(monkeypatch
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
     )
     client = KISRestDomesticStockLiveOrderClient(
         config,
@@ -658,7 +693,7 @@ def test_kis_domestic_pre_submit_uses_broker_symbol_and_order_price(monkeypatch)
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
     )
     transport = FakeKISTransport()
     client = KISRestDomesticStockLiveOrderClient(
@@ -709,7 +744,7 @@ def test_kis_domestic_pre_submit_rejects_insufficient_buying_power(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
     )
     client = KISRestDomesticStockLiveOrderClient(
         config,
@@ -762,7 +797,7 @@ def test_kis_overseas_readonly_client_normalizes_us_account(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     transport = FakeKISOverseasTransport()
     client = KISRestOverseasStockReadOnlyClient(
@@ -816,7 +851,7 @@ def test_kis_overseas_readonly_avoids_unsupported_demo_unfilled_order_api(monkey
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
         paper_trading=True,
     )
     transport = FakeKISOverseasTransport()
@@ -843,7 +878,7 @@ def test_kis_overseas_readonly_requires_universe_metadata(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     client = KISRestOverseasStockReadOnlyClient(
         config,
@@ -870,7 +905,7 @@ def test_kis_overseas_live_order_client_uses_verified_us_limit_order_payload(mon
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     transport = FakeKISOverseasTransport()
     client = KISRestOverseasStockLiveOrderClient(
@@ -923,7 +958,7 @@ def test_kis_overseas_pre_submit_uses_order_price_for_buying_power(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     transport = FakeKISOverseasTransport()
     client = KISRestOverseasStockLiveOrderClient(
@@ -962,7 +997,7 @@ def test_kis_overseas_pre_submit_rejects_insufficient_max_buy_quantity(monkeypat
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     client = KISRestOverseasStockLiveOrderClient(
         config,
@@ -999,7 +1034,7 @@ def test_kis_overseas_live_order_client_uses_demo_sell_tr_id(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
         paper_trading=True,
     )
     transport = FakeKISOverseasTransport()
@@ -1038,7 +1073,7 @@ def test_kis_overseas_live_order_client_normalizes_order_status(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     client = KISRestOverseasStockLiveOrderClient(
         config,
@@ -1072,7 +1107,7 @@ def test_kis_overseas_order_status_uses_submitted_at_exchange_date_range(monkeyp
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     transport = FakeKISOverseasTransport()
     client = KISRestOverseasStockLiveOrderClient(
@@ -1104,7 +1139,7 @@ def test_kis_overseas_live_order_client_fails_on_kis_error_response(monkeypatch)
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     client = KISRestOverseasStockLiveOrderClient(
         config,
@@ -1141,7 +1176,7 @@ def test_kis_overseas_live_order_client_unknown_when_order_id_missing(monkeypatc
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     client = KISRestOverseasStockLiveOrderClient(
         config,
@@ -1176,7 +1211,7 @@ def test_kis_overseas_order_status_fails_on_malformed_numeric_field(monkeypatch)
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     client = KISRestOverseasStockLiveOrderClient(
         config,
@@ -1203,7 +1238,7 @@ def test_kis_overseas_cancel_adapter_uses_verified_cancel_payload(monkeypatch):
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
-        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_products=[BrokerProduct.KIS_OVERSEAS_STOCK],
     )
     transport = FakeKISOverseasTransport()
     client = KISRestOverseasStockLiveOrderClient(

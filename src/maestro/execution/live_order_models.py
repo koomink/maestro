@@ -13,6 +13,30 @@ class BrokerOrderId(BaseModel):
     submitted_at: str
     account_id: str | None = None
     broker_product: BrokerProduct | None = None
+    parent_broker_order_id: str | None = None
+
+
+class BrokerOrderRequest(BaseModel):
+    order_id: str
+    symbol: str
+    side: OrderSide
+    order_type: OrderType
+    quantity: float | None = Field(default=None, gt=0)
+    order_amount: float | None = Field(default=None, gt=0)
+    limit_price: float | None = Field(default=None, gt=0)
+    time_in_force: str = "DAY"
+    currency: Currency | None = None
+    account_id: str | None = None
+
+    @model_validator(mode="after")
+    def validate_order_shape(self) -> "BrokerOrderRequest":
+        if (self.quantity is None) == (self.order_amount is None):
+            raise ValueError("Exactly one of quantity or order_amount is required")
+        if self.order_type == OrderType.LIMIT and self.limit_price is None:
+            raise ValueError("Limit orders require limit_price")
+        if self.order_type == OrderType.MARKET and self.limit_price is not None:
+            raise ValueError("Market orders must not include limit_price")
+        return self
 
 
 class LiveOrderRequest(BaseModel):
@@ -143,6 +167,25 @@ class LiveOrderCancelResult(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+class LiveOrderModifyRequest(BaseModel):
+    run_id: str
+    approval_id: str
+    broker_order: BrokerOrderId
+    symbol: str
+    limit_price: float = Field(gt=0)
+    quantity: float | None = Field(default=None, gt=0)
+    currency: Currency | None = None
+    reason: str | None = None
+
+
+class LiveOrderModifyResult(BaseModel):
+    broker_order: BrokerOrderId
+    status: OrderStatus
+    previous_broker_order: BrokerOrderId
+    message: str | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 class LiveOrderWorkflowResult(BaseModel):
     run_id: str
     workflow_status: OrderStatus
@@ -187,6 +230,7 @@ class LiveOrderLifecycleResult(BaseModel):
 
 __all__ = [
     "AppliedFill",
+    "BrokerOrderRequest",
     "BrokerOrderId",
     "FillEvent",
     "FillReconciliationResult",
@@ -194,6 +238,8 @@ __all__ = [
     "LiveOrderCancelResult",
     "LiveOrderLifecycleNotification",
     "LiveOrderLifecycleResult",
+    "LiveOrderModifyRequest",
+    "LiveOrderModifyResult",
     "LiveOrderRequest",
     "LiveOrderResult",
     "LiveOrderStatusSnapshot",

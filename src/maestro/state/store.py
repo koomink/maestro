@@ -21,7 +21,9 @@ class StateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self.live_order_lock_path = self.path.with_suffix(self.path.suffix + ".live.lock")
         self._writer_lock_depth = 0
+        self._live_order_lock_depth = 0
         self.initial_cash = float(initial_cash or 0.0)
         self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
         self._init_db()
@@ -44,10 +46,17 @@ class StateStore:
                 "("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
                 "run_id TEXT, "
+                "account_id TEXT, "
                 "payload TEXT NOT NULL, "
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(portfolio_snapshots)").fetchall()
+            }
+            if "account_id" not in columns:
+                conn.execute("ALTER TABLE portfolio_snapshots ADD COLUMN account_id TEXT")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS strategy_runs "
                 "("
@@ -77,6 +86,25 @@ class StateStore:
                 "payload TEXT NOT NULL, "
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
+            )
+            system_event_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(system_events)").fetchall()
+            }
+            if "duplicate_key" not in system_event_columns:
+                conn.execute("ALTER TABLE system_events ADD COLUMN duplicate_key TEXT")
+            if "broker_order_id" not in system_event_columns:
+                conn.execute("ALTER TABLE system_events ADD COLUMN broker_order_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_system_events_type_created "
+                "ON system_events(event_type, created_at)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_system_events_duplicate_key "
+                "ON system_events(duplicate_key) WHERE duplicate_key IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_system_events_broker_order_id "
+                "ON system_events(broker_order_id) WHERE broker_order_id IS NOT NULL"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS approvals "
@@ -120,6 +148,18 @@ class StateStore:
                 ")"
             )
             conn.execute(
+                "CREATE TABLE IF NOT EXISTS account_attribution_snapshots "
+                "("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "run_id TEXT, "
+                "account_id TEXT, "
+                "symbol TEXT, "
+                "bucket_id TEXT, "
+                "payload TEXT NOT NULL, "
+                "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+            conn.execute(
                 "CREATE TABLE IF NOT EXISTS operator_metadata "
                 "("
                 "key TEXT PRIMARY KEY, "
@@ -157,6 +197,37 @@ class StateStore:
                 self._writer_lock_depth -= 1
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def live_order_lock(
+        self,
+        owner: str,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> Any:
+        del owner
+        if self._live_order_lock_depth > 0:
+            yield
+            return
+        self.live_order_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + timeout_seconds
+        with self.live_order_lock_path.open("a+", encoding="utf-8") as lock_file:
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Live order lock is busy: {self.live_order_lock_path}"
+                        ) from exc
+                    time.sleep(0.1)
+            self._live_order_lock_depth += 1
+            try:
+                yield
+            finally:
+                self._live_order_lock_depth -= 1
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def validate_config_identity(self, identity: ConfigIdentity) -> None:
         payload = identity.model_dump()
         existing = self.load_operator_config_identity()
@@ -185,7 +256,8 @@ class StateStore:
     def load_latest_portfolio_state(self) -> PortfolioState:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT payload FROM portfolio_snapshots ORDER BY id DESC LIMIT 1"
+                "SELECT payload FROM portfolio_snapshots "
+                "WHERE account_id IS NULL ORDER BY id DESC LIMIT 1"
             ).fetchone()
         if row is None:
             return PortfolioState(
@@ -195,13 +267,30 @@ class StateStore:
             )
         return PortfolioState.model_validate_json(row[0])
 
+    def load_latest_account_portfolio_state(self, account_id: str) -> PortfolioState | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM portfolio_snapshots "
+                "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return PortfolioState.model_validate_json(row[0])
+
     def has_portfolio_snapshot(self) -> bool:
         with self._connect() as conn:
             row = conn.execute("SELECT 1 FROM portfolio_snapshots LIMIT 1").fetchone()
         return row is not None
 
-    def save_portfolio_snapshot(self, run_id: str, state: PortfolioState) -> None:
-        self._insert("portfolio_snapshots", run_id, None, state.model_dump(mode="json"))
+    def save_portfolio_snapshot(
+        self,
+        run_id: str,
+        state: PortfolioState,
+        *,
+        account_id: str | None = None,
+    ) -> None:
+        self._insert("portfolio_snapshots", run_id, account_id, state.model_dump(mode="json"))
 
     def save_strategy_run(self, run_id: str, strategy_id: str, payload: dict[str, Any]) -> None:
         self._insert("strategy_runs", run_id, strategy_id, payload)
@@ -293,6 +382,38 @@ class StateStore:
                 conn.executemany(
                     "INSERT INTO strategy_book_snapshots "
                     "(run_id, strategy_id, book_id, payload) VALUES (?, ?, ?, ?)",
+                    payloads,
+                )
+
+    def save_account_attribution_snapshot(
+        self,
+        run_id: str,
+        positions: list[Any],
+    ) -> None:
+        payloads = []
+        for position in positions:
+            payload = (
+                position.model_dump(mode="json")
+                if hasattr(position, "model_dump")
+                else dict(position)
+            )
+            payloads.append(
+                (
+                    run_id,
+                    str(payload["account_id"]),
+                    str(payload["symbol"]),
+                    str(payload["bucket_id"]),
+                    json.dumps(payload, default=str),
+                )
+            )
+        if not payloads:
+            return
+        with self.writer_lock("save_account_attribution_snapshot"):
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT INTO account_attribution_snapshots "
+                    "(run_id, account_id, symbol, bucket_id, payload) "
+                    "VALUES (?, ?, ?, ?, ?)",
                     payloads,
                 )
 
@@ -407,6 +528,50 @@ class StateStore:
             output.append(item)
         return output
 
+    def list_system_events_in_range(
+        self,
+        event_type: str,
+        *,
+        start_utc: str,
+        end_utc: str,
+    ) -> list[dict[str, Any]]:
+        """System events of `event_type` with created_at in UTC ``[start, end)``.
+
+        Bounds are compared against the ``created_at`` column, which is stored as a
+        UTC ``YYYY-MM-DD HH:MM:SS`` string, so callers must format bounds the same way.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM system_events "
+                "WHERE event_type = ? AND created_at >= ? AND created_at < ? "
+                "ORDER BY id DESC",
+                (event_type, start_utc, end_utc),
+            ).fetchall()
+
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            output.append(item)
+        return output
+
+    def duplicate_key_exists(self, duplicate_key: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM system_events WHERE duplicate_key = ? LIMIT 1",
+                (duplicate_key,),
+            ).fetchone()
+        return row is not None
+
+    def broker_order_id_seen(self, broker_order_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM system_events WHERE broker_order_id = ? LIMIT 1",
+                (broker_order_id,),
+            ).fetchone()
+        return row is not None
+
     def load_latest_system_event(self, event_type: str) -> dict[str, Any] | None:
         rows = self.list_system_events_by_type(event_type, limit=1)
         return rows[0] if rows else None
@@ -423,6 +588,9 @@ class StateStore:
     def list_strategy_book_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
         return self._list_rows("strategy_book_snapshots", limit)
 
+    def list_account_attribution_snapshots(self, limit: int = 100) -> list[dict[str, Any]]:
+        return self._list_rows("account_attribution_snapshots", limit)
+
     def load_latest_broker_account_snapshot(self) -> dict[str, Any] | None:
         rows = self.list_broker_account_snapshots(limit=1)
         return rows[0] if rows else None
@@ -438,6 +606,7 @@ class StateStore:
                 "broker_account_snapshots",
                 "risk_decisions",
                 "strategy_book_snapshots",
+                "account_attribution_snapshots",
             ]
             counts = {
                 table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -479,8 +648,16 @@ class StateStore:
                     )
                 elif table == "system_events":
                     conn.execute(
-                        "INSERT INTO system_events (run_id, event_type, payload) VALUES (?, ?, ?)",
-                        (run_id, secondary, payload_json),
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key, broker_order_id) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            secondary,
+                            payload_json,
+                            _system_event_duplicate_key(payload),
+                            _system_event_broker_order_id(payload),
+                        ),
                     )
                 elif table == "approvals":
                     conn.execute(
@@ -500,8 +677,9 @@ class StateStore:
                     )
                 else:
                     conn.execute(
-                        "INSERT INTO portfolio_snapshots (run_id, payload) VALUES (?, ?)",
-                        (run_id, payload_json),
+                        "INSERT INTO portfolio_snapshots "
+                        "(run_id, account_id, payload) VALUES (?, ?, ?)",
+                        (run_id, secondary, payload_json),
                     )
 
     def _set_metadata(self, key: str, value: dict[str, Any]) -> None:
@@ -526,6 +704,7 @@ class StateStore:
             "broker_account_snapshots",
             "risk_decisions",
             "strategy_book_snapshots",
+            "account_attribution_snapshots",
         }
         if table not in allowed_tables:
             raise ValueError(f"Unsupported table: {table}")
@@ -543,6 +722,22 @@ class StateStore:
             item["payload"] = json.loads(item["payload"])
             output.append(item)
         return output
+
+
+def _system_event_duplicate_key(payload: dict[str, Any]) -> str | None:
+    value = payload.get("duplicate_key")
+    return str(value) if value else None
+
+
+def _system_event_broker_order_id(payload: dict[str, Any]) -> str | None:
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    broker_order = result.get("broker_order")
+    if not isinstance(broker_order, dict):
+        return None
+    value = broker_order.get("broker_order_id")
+    return str(value) if value else None
 
 
 def _same_state_config_identity(existing: dict[str, str], current: dict[str, str]) -> bool:

@@ -26,6 +26,7 @@ APP_FRAGMENT_OPERATOR_OWNED_KEYS = {
     "profile_stage",
     "strategy_account_map_path",
     "broker_accounts_path",
+    "account_strategy_targets",
     "app_fragment_paths",
     "app_fragment_recommendations",
 }

@@ -15,6 +15,7 @@ from maestro.state.store import StateStore
 
 
 def test_health_cli_reports_local_checks_without_kis_network(monkeypatch, tmp_path):
+    monkeypatch.setenv("MAESTRO_ENV_FILE", str(tmp_path / "missing_maestro.env"))
     monkeypatch.delenv("KIS_MOCK_ACCOUNT_ID", raising=False)
     monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
     monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)

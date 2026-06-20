@@ -12,6 +12,7 @@ class ExecutionScopeDraft:
     currency_sleeve: str | None
     target_weight: float
     target: PortfolioTarget
+    attributed_positions: dict[str, float] | None = None
 
 
 @dataclass(frozen=True)
@@ -38,14 +39,11 @@ def allocate_cash_rebalanced_scope_states(
         return []
     validate_unique_execution_scope_symbols(scopes)
     current_values = [
-        _scope_position_value(current_state, scope.target, prices)
+        _scope_position_value(current_state, scope, scope.target, prices)
         for scope in scopes
     ]
-    account_value = sum(current_values) + _cash_for_currency(
-        current_state,
-        scopes[0].currency_sleeve,
-    )
     cash = _cash_for_currency(current_state, scopes[0].currency_sleeve)
+    account_value = _account_value(current_state, prices, cash)
     target_values = [account_value * scope.target_weight for scope in scopes]
     shortfalls = [
         max(0.0, target - current)
@@ -55,7 +53,10 @@ def allocate_cash_rebalanced_scope_states(
     if cash <= 0:
         allocations = [0.0 for _ in scopes]
     elif shortfall_total > 0:
-        allocations = [cash * shortfall / shortfall_total for shortfall in shortfalls]
+        allocatable_cash = min(cash, shortfall_total)
+        allocations = [
+            allocatable_cash * shortfall / shortfall_total for shortfall in shortfalls
+        ]
     else:
         weight_total = sum(scope.target_weight for scope in scopes)
         allocations = [cash * scope.target_weight / weight_total for scope in scopes]
@@ -106,9 +107,10 @@ def _scope_state(
     allocated_cash: float,
 ) -> PortfolioState:
     symbols = set(_target_symbols(scope.target))
+    source_positions = scope.attributed_positions or current_state.positions
     positions = {
         symbol: quantity
-        for symbol, quantity in current_state.positions.items()
+        for symbol, quantity in source_positions.items()
         if symbol in symbols
     }
     cash_by_currency = (
@@ -125,12 +127,14 @@ def _scope_state(
 
 def _scope_position_value(
     current_state: PortfolioState,
+    scope: ExecutionScopeDraft,
     target: PortfolioTarget,
     prices: dict[str, float],
 ) -> float:
     total = 0.0
+    positions = scope.attributed_positions or current_state.positions
     for symbol in _target_symbols(target):
-        total += current_state.positions.get(symbol, 0.0) * prices[symbol]
+        total += positions.get(symbol, 0.0) * prices[symbol]
     return total
 
 
@@ -140,6 +144,21 @@ def _cash_for_currency(current_state: PortfolioState, currency_sleeve: str | Non
     if current_state.cash_by_currency:
         return sum(current_state.cash_by_currency.values())
     return current_state.cash
+
+
+def _account_value(
+    current_state: PortfolioState,
+    prices: dict[str, float],
+    cash: float,
+) -> float:
+    total = cash
+    for symbol, quantity in current_state.positions.items():
+        if symbol not in prices:
+            raise ValueError(
+                f"execution sleeve capacity requires a price for account position: {symbol}"
+            )
+        total += quantity * prices[symbol]
+    return total
 
 
 def _target_symbols(target: PortfolioTarget) -> list[str]:

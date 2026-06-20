@@ -12,6 +12,7 @@ from maestro.execution.live_orders import (
     PartialFillSummary,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -111,6 +112,69 @@ def test_sell_fill_updates_cash_and_position(tmp_path):
     assert result.applied_fills[0].side == OrderSide.SELL
     assert state.cash == 280_000.0
     assert state.positions == {"005930": 1.0}
+
+
+def test_fill_reconciliation_updates_strategy_attribution_bucket(tmp_path):
+    store, audit = _context(tmp_path, PortfolioState(cash=1_000.0, positions={"QQQ": 1.0}))
+    attribution = AccountAttributionReconciliationService(store, audit)
+    attribution.reconcile_broker_snapshot(
+        run_id="run_sync",
+        account_id="toss_brokerage",
+        broker_snapshot_id=10,
+        broker_positions={"QQQ": 1.0},
+        strategy_symbols_by_bucket={"crescendo_us": {"QQQ"}},
+    )
+    attribution.adopt_latest(
+        run_id="run_adopt",
+        account_id="toss_brokerage",
+        reason="verified",
+        adopted_by="cli",
+    )
+    store.save_system_event(
+        "run_submit",
+        "live_order_result",
+        {
+            "request": {
+                "account_id": "toss_brokerage",
+                "sleeve": "crescendo_us",
+            },
+            "result": {"broker_order": {"broker_order_id": "TOSS-1"}},
+        },
+    )
+    checked_at = utc_now().isoformat()
+    _save_status(
+        store,
+        LiveOrderStatusSnapshot(
+            broker_order=BrokerOrderId(
+                broker="toss",
+                broker_order_id="TOSS-1",
+                order_id="ord_toss_1",
+                submitted_at=checked_at,
+                account_id="toss_brokerage",
+            ),
+            status=OrderStatus.FILLED,
+            checked_at=checked_at,
+            symbol="QQQ",
+            side=OrderSide.BUY,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=1.0,
+                filled_quantity=1.0,
+                remaining_quantity=0.0,
+                average_fill_price=100.0,
+                fill_count=1,
+            ),
+        ),
+    )
+
+    PartialFillReconciliationService(store, audit).reconcile_latest("run_fill")
+
+    latest = store.load_latest_system_event("account_attribution_reconciliation")
+    strategy = [
+        position
+        for position in latest["payload"]["positions"]
+        if position["bucket_id"] == "crescendo_us"
+    ]
+    assert strategy[0]["quantity"] == 2.0
 
 
 def test_rejected_canceled_halted_and_unknown_do_not_update_portfolio(tmp_path):

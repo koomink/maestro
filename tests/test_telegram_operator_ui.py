@@ -5,14 +5,22 @@ import yaml
 from typer.testing import CliRunner
 
 from maestro.cli import app
+from maestro.config.broker import BrokerAccountConfig
 from maestro.config.loader import load_config
+from maestro.core.clock import utc_now
 from maestro.core.enums import SafetyState
 from maestro.dashboard.actions import build_signal_freshness
+from maestro.execution.brokers.readonly import (
+    BrokerAccountSnapshot,
+    BrokerPosition,
+    BrokerReadOnlySnapshot,
+)
 from maestro.integrations.telegram.handlers import (
     TelegramOperatorCommandRouter,
     telegram_bot_commands,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.sdk import (
     BaseStrategyPlugin,
@@ -257,6 +265,62 @@ def test_telegram_operator_funding_complete_regenerates_signal_and_creates_appro
     assert cash_flow_events[0]["payload"]["source"] == "telegram_funding_confirmation"
 
 
+def test_telegram_operator_funding_complete_fails_when_readonly_refresh_fails(
+    tmp_path,
+    monkeypatch,
+):
+    readonly_config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_buy_only_config_path(
+        tmp_path,
+        filename="funding_signal_refresh_failure.yaml",
+        provider="telegram",
+        require_approval=False,
+    )
+    config = _multi_readonly_config(load_config(readonly_config_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "signal_old",
+        "contribution_funding_request",
+        {
+            "request_id": "fund_req_refresh_failure",
+            "source_signal_run_id": "signal_old",
+            "strategy_ids": ["tranquillo"],
+            "account_id": "toss_brokerage",
+            "execution_sleeve": "krw_contribution",
+            "currency": "KRW",
+            "available_cash": 1_000_000.0,
+            "min_monthly_budget": 2_000_000.0,
+            "required_shortfall": 1_000_000.0,
+            "month_key": "2026-05",
+            "status": "pending",
+        },
+    )
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+        signal_config_path=signal_config_path,
+    )
+
+    def fail_refresh():
+        raise ValueError("Toss OpenAPI request failed: HTTP 500")
+
+    monkeypatch.setattr(router, "_refresh_portfolio_from_broker_snapshot", fail_refresh)
+
+    assert router.process_update(
+        callback_update("operator:funding:complete:fund_req_refresh_failure")
+    )
+
+    assert client.answered_callbacks[-1]["text"] == "Funding request confirmed."
+    assert "Funding confirmation failed" in client.edited_messages[-1]["text"]
+    assert "Toss OpenAPI request failed: HTTP 500" in client.edited_messages[-1]["text"]
+    ack_events = store.list_system_events_by_type("contribution_funding_request_ack", limit=10)
+    assert ack_events == []
+
+
 def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target_split(tmp_path):
     config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -403,6 +467,81 @@ def test_telegram_operator_funding_callback_rejects_unauthorized_user(tmp_path):
 
     assert client.answered_callbacks[-1]["text"] == "Unauthorized Telegram user."
     assert store.list_system_events_by_type("contribution_funding_request_ack", limit=10) == []
+
+
+def test_telegram_operator_budget_callback_records_selected_budget(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "signal_old",
+        "contribution_budget_request",
+        {
+            "request_id": "budget_req_1",
+            "source_signal_run_id": "signal_old",
+            "strategy_ids": ["tranquillo"],
+            "account_id": "kis_isa",
+            "execution_sleeve": "tranquillo_isa",
+            "currency": "KRW",
+            "available_cash": 8_000_000.0,
+            "min_monthly_budget": 1_660_000.0,
+            "recommended_budget": 4_000_000.0,
+            "selectable_max_budget": 8_000_000.0,
+            "month_key": "2026-06",
+            "status": "pending",
+        },
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(callback_update("operator:budget:select:budget_req_1:full"))
+
+    assert client.answered_callbacks[-1]["text"] == "Budget selected."
+    events = store.list_system_events_by_type("contribution_budget_request_decision", limit=10)
+    assert events[0]["payload"]["request_id"] == "budget_req_1"
+    assert events[0]["payload"]["selected_budget"] == 8_000_000.0
+    assert events[0]["payload"]["status"] == "selected"
+
+
+def test_telegram_operator_budget_direct_amount_rejects_out_of_range(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "signal_old",
+        "contribution_budget_request",
+        {
+            "request_id": "budget_req_2",
+            "source_signal_run_id": "signal_old",
+            "strategy_ids": ["tranquillo"],
+            "account_id": "kis_isa",
+            "execution_sleeve": "tranquillo_isa",
+            "currency": "KRW",
+            "available_cash": 8_000_000.0,
+            "min_monthly_budget": 1_660_000.0,
+            "recommended_budget": 4_000_000.0,
+            "selectable_max_budget": 8_000_000.0,
+            "month_key": "2026-06",
+            "status": "pending",
+        },
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(message_update("/budget budget_req_2 9000000"))
+
+    assert "Budget amount out of range" in client.sent_messages[-1]["text"]
+    assert (
+        store.list_system_events_by_type("contribution_budget_request_decision", limit=10) == []
+    )
 
 
 def test_telegram_operator_read_commands_send_state_responses(tmp_path):
@@ -639,6 +778,72 @@ def test_telegram_operator_account_displays_currency_breakdowns(tmp_path):
     assert "1,070.00" not in text
 
 
+def test_telegram_operator_account_displays_multi_account_currency_breakdowns(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_broker_account_snapshot(
+        "run_kis",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "broker_account_id": "MOCK-KIS",
+            "account": {
+                "account_id": "MOCK-KIS",
+                "cash": 1_000_000.0,
+                "cash_by_currency": {"KRW": 1_000_000.0},
+                "positions": [
+                    {
+                        "symbol": "MOCK_ETF_A",
+                        "quantity": 10,
+                        "current_price": 100.0,
+                        "currency": "KRW",
+                    }
+                ],
+                "source": "kis_mock",
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_toss",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "broker_account_id": "12345678901",
+            "account": {
+                "account_id": "12345678901",
+                "cash": 20.0,
+                "cash_by_currency": {"USD": 20.0},
+                "positions": [
+                    {
+                        "symbol": "MOCK_ETF_B",
+                        "quantity": 2,
+                        "current_price": 50.0,
+                        "currency": "USD",
+                    }
+                ],
+                "source": "toss_openapi_readonly",
+            },
+        },
+    )
+
+    assert router.process_update(message_update("/account"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "account_id: multiple" in text
+    assert "cash: 1,000,000.00 KRW, 20.00 USD" in text
+    assert "positions_market_value: 1,000.00 KRW, 100.00 USD" in text
+    assert "positions: 2" in text
+    assert "source: broker_account_aggregate" in text
+
+
 def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp_path):
     config = load_config(_telegram_live_readonly_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -707,12 +912,11 @@ def test_telegram_operator_account_shows_latest_snapshot_when_refresh_fails(
         },
     )
 
-    def fail_refresh(*args, **kwargs):
-        raise ValueError("KIS request failed with HTTP 500")
-
     monkeypatch.setattr(
-        "maestro.integrations.telegram.handlers.KISReadOnlyService.fetch_and_store_snapshot",
-        fail_refresh,
+        "maestro.integrations.telegram.handlers.build_broker_readonly_services",
+        lambda config, store, audit: [
+            ("kis_mock", FailingReadOnlyService("KIS request failed with HTTP 500"))
+        ],
     )
 
     assert router.process_update(message_update("/account"))
@@ -755,6 +959,157 @@ def test_telegram_operator_portfolio_refreshes_from_broker_snapshot_before_respo
     state = store.load_latest_portfolio_state()
     assert state.cash == 5_000_000.0
     assert state.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
+
+
+def test_telegram_operator_portfolio_refreshes_all_readonly_accounts(
+    tmp_path,
+    monkeypatch,
+):
+    config = _multi_readonly_config(load_config(_telegram_config_path(tmp_path)))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    services = [
+        (
+            "kis_mock",
+            StaticReadOnlyService(
+                BrokerReadOnlySnapshot(
+                    account=BrokerAccountSnapshot(
+                        account_id="MOCK-KIS",
+                        cash=1_000_000.0,
+                        cash_by_currency={"KRW": 1_000_000.0},
+                        buying_power=1_000_000.0,
+                        positions=[
+                            BrokerPosition(
+                                symbol="MOCK_ETF_A",
+                                quantity=10.0,
+                                average_price=100.0,
+                                current_price=100.0,
+                                currency="KRW",
+                            )
+                        ],
+                        fetched_at=utc_now(),
+                        source="kis_mock",
+                    ),
+                    current_prices={"MOCK_ETF_A": 100.0},
+                ),
+            ),
+        ),
+        (
+            "toss_brokerage",
+            StaticReadOnlyService(
+                BrokerReadOnlySnapshot(
+                    account=BrokerAccountSnapshot(
+                        account_id="12345678901",
+                        cash=20.0,
+                        cash_by_currency={"USD": 20.0},
+                        buying_power=20.0,
+                        positions=[
+                            BrokerPosition(
+                                symbol="MOCK_ETF_B",
+                                quantity=2.0,
+                                average_price=50.0,
+                                current_price=50.0,
+                                currency="USD",
+                            )
+                        ],
+                        fetched_at=utc_now(),
+                        source="toss_openapi_readonly",
+                    ),
+                    current_prices={"MOCK_ETF_B": 50.0},
+                ),
+            ),
+        ),
+    ]
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.build_broker_readonly_services",
+        lambda config, store, audit: services,
+    )
+
+    assert router.process_update(message_update("/portfolio"))
+
+    assert client.sent_messages[-2]["text"] == (
+        "Maestro portfolio: refreshing from broker snapshot"
+    )
+    state = store.load_latest_portfolio_state()
+    assert state.cash_by_currency == {"KRW": 1_000_000.0, "USD": 20.0}
+    assert state.positions == {"MOCK_ETF_A": 10.0, "MOCK_ETF_B": 2.0}
+    account_states = {
+        row["account_id"]: row["payload"]
+        for row in store.list_portfolio_snapshots(limit=10)
+        if row.get("account_id")
+    }
+    assert set(account_states) == {"kis_mock", "toss_brokerage"}
+    assert account_states["kis_mock"]["positions"] == {"MOCK_ETF_A": 10.0}
+    assert account_states["toss_brokerage"]["positions"] == {"MOCK_ETF_B": 2.0}
+
+
+def test_telegram_operator_portfolio_can_include_unknown_readonly_positions(
+    tmp_path,
+    monkeypatch,
+):
+    config = _multi_readonly_config(load_config(_telegram_config_path(tmp_path)))
+    config = config.model_copy(
+        update={
+            "portfolio": config.portfolio.model_copy(
+                update={"unknown_broker_position_policy": "include_readonly"}
+            )
+        }
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    services = [
+        (
+            "toss_brokerage",
+            StaticReadOnlyService(
+                BrokerReadOnlySnapshot(
+                    account=BrokerAccountSnapshot(
+                        account_id="12345678901",
+                        cash=20.0,
+                        cash_by_currency={"USD": 20.0},
+                        buying_power=20.0,
+                        positions=[
+                            BrokerPosition(
+                                symbol="UNKNOWN_TOSS",
+                                quantity=2.0,
+                                average_price=50.0,
+                                current_price=55.0,
+                                currency="USD",
+                            )
+                        ],
+                        fetched_at=utc_now(),
+                        source="toss_openapi_readonly",
+                    ),
+                    current_prices={"UNKNOWN_TOSS": 55.0},
+                ),
+            ),
+        )
+    ]
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.build_broker_readonly_services",
+        lambda config, store, audit: services,
+    )
+
+    assert router.process_update(message_update("/portfolio"))
+
+    state = store.load_latest_portfolio_state()
+    assert state.cash_by_currency == {"USD": 20.0}
+    assert state.positions == {"UNKNOWN_TOSS": 2.0}
+    text = client.sent_messages[-1]["text"]
+    assert "UNKNOWN_TOSS: 2" in text
 
 
 def test_telegram_operator_portfolio_displays_cash_by_currency(tmp_path):
@@ -814,6 +1169,70 @@ def test_telegram_operator_portfolio_displays_cash_by_currency(tmp_path):
     assert "005930 삼성전자: 1 @ 1,000 KRW = 1,000 KRW" in text
     assert "AAPL: 2 @ 50 USD = 100 USD" in text
     assert "AAPL Apple Inc." not in text
+
+
+def test_telegram_operator_portfolio_does_not_let_zero_price_override_account_position_price(
+    tmp_path,
+):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_portfolio_snapshot(
+        "run_portfolio",
+        PortfolioState(
+            cash=0.0,
+            cash_by_currency={"USD": 0.0},
+            positions={"GOOG": 2.0},
+        ),
+    )
+    store.save_broker_account_snapshot(
+        "run_kis",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "account": {
+                "account_id": "MOCK-KIS",
+                "cash": 0.0,
+                "positions": [],
+                "source": "kis_mock",
+            },
+            "current_prices": {"GOOG": 0.0},
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_toss",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "12345678901",
+                "cash": 0.0,
+                "positions": [
+                    {
+                        "symbol": "GOOG",
+                        "quantity": 2.0,
+                        "current_price": 360.0,
+                        "currency": "USD",
+                    }
+                ],
+                "source": "toss_openapi_readonly",
+            },
+            "current_prices": {"GOOG": 361.0},
+        },
+    )
+
+    assert router.process_update(message_update("/portfolio"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "GOOG: 2 @ 361 USD = 722 USD" in text
+    assert "GOOG: 2 @ 0 USD = 0 USD" not in text
 
 
 def test_telegram_operator_approvals_displays_notional_currency_breakdown(tmp_path):
@@ -908,6 +1327,40 @@ def test_telegram_operator_pause_and_kill_switch_require_confirmation(tmp_path):
     assert "confirmed" in statuses
 
 
+def test_telegram_operator_adopts_account_attribution_once(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    AccountAttributionReconciliationService(store, audit).reconcile_broker_snapshot(
+        run_id="run_sync",
+        account_id="toss_brokerage",
+        broker_snapshot_id=10,
+        broker_positions={"QQQ": 2.0},
+        strategy_symbols_by_bucket={"crescendo_us": {"QQQ"}},
+    )
+
+    assert router.process_update(message_update("/attribution toss_brokerage"))
+    callback_data = client.sent_messages[-1]["reply_markup"]["inline_keyboard"][0][0][
+        "callback_data"
+    ]
+    assert callback_data == "operator:attribution:approve:toss_brokerage"
+    assert router.process_update(callback_update(callback_data))
+    assert (
+        store.load_latest_system_event("account_attribution_adopted")["payload"]["approved"]
+        is True
+    )
+
+    assert router.process_update(callback_update(callback_data))
+    assert "already adopted" in client.answered_callbacks[-1]["text"]
+
+
 def test_telegram_operator_poll_once_routes_updates(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -944,6 +1397,7 @@ def test_telegram_set_commands_cli_registers_bot_commands(
     monkeypatch,
 ):
     config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_signal_config_path(tmp_path)
     fake_clients: list[FakeTelegramClient] = []
 
     def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
@@ -954,16 +1408,25 @@ def test_telegram_set_commands_cli_registers_bot_commands(
         return client
 
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.delenv("MAESTRO_SIGNAL_CONFIG", raising=False)
     monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
 
     result = CliRunner().invoke(
         app,
-        ["telegram-set-commands", "--config", str(config_path)],
+        [
+            "telegram-set-commands",
+            "--config",
+            str(config_path),
+            "--signal-config",
+            str(signal_config_path),
+        ],
     )
 
     assert result.exit_code == 0
     assert "telegram_set_commands status=ok commands=" in result.output
-    assert fake_clients[0].registered_commands == telegram_bot_commands()
+    assert fake_clients[0].registered_commands == telegram_bot_commands(
+        load_config(signal_config_path)
+    )
 
 
 def test_telegram_operator_cli_passes_signal_config_to_router(tmp_path, monkeypatch):
@@ -1114,6 +1577,55 @@ class FakeTelegramClient:
     def set_my_commands(self, commands: list[dict[str, str]]) -> dict[str, Any]:
         self.registered_commands = list(commands)
         return {"ok": True, "result": True}
+
+
+class StaticReadOnlyService:
+    def __init__(self, snapshot: BrokerReadOnlySnapshot) -> None:
+        self.snapshot = snapshot
+
+    def fetch_and_store_snapshot(
+        self,
+        symbols: list[str],
+        run_id: str | None = None,
+    ) -> BrokerReadOnlySnapshot:
+        del symbols, run_id
+        return self.snapshot
+
+
+class FailingReadOnlyService:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def fetch_and_store_snapshot(self, symbols: list[str], run_id: str | None = None):
+        del symbols, run_id
+        raise ValueError(self.message)
+
+
+def _multi_readonly_config(config):
+    return config.model_copy(
+        update={
+            "accounts": [
+                BrokerAccountConfig(
+                    id="kis_mock",
+                    broker="kis",
+                    environment="paper_trading",
+                    enabled=True,
+                    provider="mock",
+                    account_id="MOCK-KIS",
+                    broker_products=["kis_domestic_stock"],
+                ),
+                BrokerAccountConfig(
+                    id="toss_brokerage",
+                    broker="toss",
+                    environment="real",
+                    enabled=True,
+                    account_seq=1,
+                    client_id_env="TOSS_CLIENT_ID",
+                    client_secret_env="TOSS_CLIENT_SECRET",
+                ),
+            ]
+        }
+    )
 
 
 def message_update(

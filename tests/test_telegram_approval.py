@@ -613,7 +613,7 @@ def test_telegram_approval_manager_allows_live_approval_mode(monkeypatch: pytest
             provider="telegram",
             require_approval=True,
             telegram_allowed_chat_ids=[100],
-            timeout_seconds=1,
+            timeout_seconds=60,
         ),
         run_mode=RunMode.LIVE_APPROVAL,
         telegram_client=FakeTelegramClient([callback_update(f"approve:{request.approval_id}")]),

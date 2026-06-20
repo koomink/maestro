@@ -279,6 +279,8 @@ def test_funding_request_defaults_to_disabled():
     assert config.contribution.funding_request.enabled is False
     assert config.contribution.funding_request.provider == "telegram"
     assert config.contribution.funding_request.amount_policy == "min_monthly_budget_shortfall"
+    assert config.contribution.budget_request.enabled is False
+    assert config.contribution.budget_request.provider == "telegram"
 
 
 def test_funding_request_requires_buy_only_contribution_mode():
@@ -290,6 +292,19 @@ def test_funding_request_requires_buy_only_contribution_mode():
                 "monthly_budget": 3_000_000,
                 "min_monthly_budget": 2_000_000,
                 "funding_request": {"enabled": True},
+            },
+        )
+
+
+def test_budget_request_requires_buy_only_contribution_mode():
+    with pytest.raises(ValueError, match="budget_request requires buy_only_contribution"):
+        ExecutionConfig(
+            order_generation_mode="target_rebalance",
+            contribution={
+                "enabled": True,
+                "monthly_budget": 3_000_000,
+                "min_monthly_budget": 2_000_000,
+                "budget_request": {"enabled": True},
             },
         )
 

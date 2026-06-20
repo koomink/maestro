@@ -90,6 +90,48 @@ def test_reconciliation_refreshes_broker_snapshot_before_compare(tmp_path):
     assert result.position_differences == {"005930": 0.0}
 
 
+def test_reconciliation_matches_account_scoped_portfolio_and_broker_snapshots(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    store.save_portfolio_snapshot(
+        "run_global_stale",
+        PortfolioState(cash=999.0, positions={"000660": 9.0}),
+    )
+    store.save_portfolio_snapshot(
+        "run_mock_state",
+        PortfolioState(cash=1000.0, positions={"005930": 2.0}),
+        account_id="kis_mock",
+    )
+    store.save_portfolio_snapshot(
+        "run_ps_state",
+        PortfolioState(cash=0.0, positions={}),
+        account_id="kis_ps",
+    )
+    _save_broker_snapshot(
+        store,
+        account_id="kis_mock",
+        broker_cash=1000.0,
+        broker_positions={"005930": 2.0},
+    )
+    _save_broker_snapshot(
+        store,
+        account_id="kis_ps",
+        broker_cash=0.0,
+        broker_positions={},
+    )
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        account_ids=["kis_mock", "kis_ps"],
+    ).reconcile_latest()
+
+    assert result.passed is True
+    assert result.cash_difference == 0.0
+    assert result.position_differences == {"005930": 0.0}
+    assert {item["account_id"] for item in result.account_results} == {"kis_mock", "kis_ps"}
+
+
 def test_reconciliation_cash_mismatch_fails(tmp_path):
     config, store, audit = _reconciliation_context(tmp_path)
     _save_portfolio_and_broker(
@@ -249,10 +291,10 @@ def _save_portfolio_and_broker(
 def _save_broker_snapshot(
     store: StateStore,
     *,
+    account_id: str = "TEST-ACCOUNT",
     broker_cash: float,
     broker_positions: dict[str, float],
 ) -> None:
-    account_id = "TEST-ACCOUNT"
     store.save_broker_account_snapshot(
         new_run_id(),
         account_id,

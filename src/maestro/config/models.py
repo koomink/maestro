@@ -7,6 +7,7 @@ from maestro.config.base import StrictConfigModel
 from maestro.config.broker import BrokerAccountConfig, KISConfig
 from maestro.config.datahub import DataHubConfig, DataHubProviderConfig
 from maestro.config.execution import (
+    AccountStrategyTargetConfig,
     BrokerValidationConfig,
     ContributionConfig,
     ExecutionConfig,
@@ -14,9 +15,13 @@ from maestro.config.execution import (
     LiveOrderLimitsConfig,
     MarketSessionConfig,
 )
+from maestro.config.fx import FXConfig
 from maestro.config.monitoring_config import MonitoringConfig
 from maestro.config.multi_account_contributions import (
     MultiAccountContributionGroupConfig,
+    is_multi_account_contribution_account_id,
+    multi_account_contribution_account_id,
+    multi_account_contribution_group_id_from_account_id,
 )
 from maestro.config.portfolio import CurrencySleeveConfig, PortfolioConfig
 from maestro.config.reconciliation_config import ReconciliationConfig
@@ -55,8 +60,12 @@ class MaestroConfig(StrictConfigModel):
     strategies: list[StrategyPluginConfig]
     universe: UniverseConfig = Field(default_factory=UniverseConfig)
     datahub: DataHubConfig = Field(default_factory=DataHubConfig)
+    fx: FXConfig = Field(default_factory=FXConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     execution_sleeves: ExecutionSleevesConfig = Field(default_factory=ExecutionSleevesConfig)
+    account_strategy_targets: dict[str, dict[str, AccountStrategyTargetConfig]] = Field(
+        default_factory=dict
+    )
     multi_account_contributions: dict[str, MultiAccountContributionGroupConfig] = Field(
         default_factory=dict
     )
@@ -145,8 +154,9 @@ class MaestroConfig(StrictConfigModel):
     def validate_mode_contract(self) -> "MaestroConfig":
         self._derive_legacy_accounts()
         self._validate_account_mappings()
-        self._validate_execution_sleeves()
         self._validate_multi_account_contributions()
+        self._validate_execution_sleeves()
+        self._validate_account_strategy_targets()
         if self.mode == RunMode.PAPER and self.portfolio.initial_cash is None:
             raise ValueError("paper mode requires portfolio.initial_cash")
         if self.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
@@ -191,7 +201,6 @@ class MaestroConfig(StrictConfigModel):
                 environment="paper_trading" if self.kis.paper_trading else "real",
                 enabled=True,
                 provider=self.kis.provider,
-                broker_product=self.kis.broker_product,
                 broker_products=list(self.kis.broker_products),
                 account_id=self.kis.account_id,
                 account_id_env=self.kis.account_id_env,
@@ -234,6 +243,25 @@ class MaestroConfig(StrictConfigModel):
                 )
             if not strategy.account_id:
                 continue
+            if is_multi_account_contribution_account_id(strategy.account_id):
+                group_id = multi_account_contribution_group_id_from_account_id(strategy.account_id)
+                group = self.multi_account_contributions.get(group_id)
+                if group is None:
+                    raise ValueError(
+                        f"strategy {strategy.id} references unknown "
+                        f"multi_account_contributions account_id: {strategy.account_id}"
+                    )
+                if group.strategy_id != strategy.id:
+                    raise ValueError(
+                        f"strategy {strategy.id} references {strategy.account_id}, "
+                        f"but that group uses strategy_id {group.strategy_id}"
+                    )
+                if strategy.execution_sleeve:
+                    raise ValueError(
+                        f"strategy {strategy.id} uses {strategy.account_id} and must not set "
+                        "execution_sleeve"
+                    )
+                continue
             if strategy.account_id not in enabled_accounts:
                 raise ValueError(
                     f"strategy {strategy.id} references unknown or disabled account_id: "
@@ -274,6 +302,8 @@ class MaestroConfig(StrictConfigModel):
                 continue
             if not strategy.account_id:
                 continue
+            if is_multi_account_contribution_account_id(strategy.account_id):
+                continue
             if not strategy.execution_sleeve:
                 raise ValueError(
                     f"strategy {strategy.id} requires execution_sleeve when "
@@ -312,6 +342,7 @@ class MaestroConfig(StrictConfigModel):
         enabled_accounts = {account.id for account in self.accounts if account.enabled}
         portfolio_symbols = set(self.portfolio.allowed_symbols)
         grouped_strategy_ids: dict[str, str] = {}
+        strategy_by_id = {strategy.id: strategy for strategy in self.strategies}
         for group_id, group in self.multi_account_contributions.items():
             if group.strategy_id not in strategy_id_set:
                 raise ValueError(
@@ -325,6 +356,18 @@ class MaestroConfig(StrictConfigModel):
                     f"{group.strategy_id} in {previous_group}, {group_id}"
                 )
             grouped_strategy_ids[group.strategy_id] = group_id
+            strategy = strategy_by_id[group.strategy_id]
+            expected_account_id = multi_account_contribution_account_id(group_id)
+            if strategy.account_id != expected_account_id:
+                raise ValueError(
+                    f"strategy {strategy.id} uses multi_account_contributions.{group_id}; "
+                    f"account_id must be {expected_account_id}"
+                )
+            if strategy.execution_sleeve:
+                raise ValueError(
+                    f"strategy {strategy.id} uses {expected_account_id} and must not set "
+                    "execution_sleeve"
+                )
             for target in group.account_targets:
                 if target.account_id not in enabled_accounts:
                     raise ValueError(
@@ -358,6 +401,48 @@ class MaestroConfig(StrictConfigModel):
                     raise ValueError(
                         f"multi_account_contributions {group_id} has unsupported "
                         "allowed_symbols: " + ", ".join(unsupported_symbols)
+                    )
+
+    def _validate_account_strategy_targets(self) -> None:
+        if not self.account_strategy_targets:
+            return
+        enabled_accounts = {account.id for account in self.accounts if account.enabled}
+        active_scope_by_account_bucket = {
+            (strategy.account_id, strategy.execution_sleeve)
+            for strategy in self.strategies
+            if strategy.enabled
+            and strategy.signal_enabled
+            and strategy.account_id
+            and not is_multi_account_contribution_account_id(strategy.account_id)
+        }
+        for account_id, targets in self.account_strategy_targets.items():
+            if account_id not in enabled_accounts:
+                raise ValueError(
+                    "account_strategy_targets references unknown or disabled account_id: "
+                    + account_id
+                )
+            total = sum(target.target_weight for target in targets.values())
+            if abs(total - 1.0) > 1e-6:
+                raise ValueError(
+                    "account_strategy_targets target_weight for each account must sum to 1.0 "
+                    f"for account_id {account_id}: {total}"
+                )
+            for bucket_id, target in targets.items():
+                if bucket_id == "manual":
+                    continue
+                if (account_id, bucket_id) not in active_scope_by_account_bucket:
+                    raise ValueError(
+                        "account_strategy_targets bucket must match an active "
+                        f"strategy execution_sleeve: {account_id}/{bucket_id}"
+                    )
+                unknown_symbols = sorted(
+                    set(target.allowed_symbols) - set(self.portfolio.allowed_symbols)
+                )
+                if unknown_symbols:
+                    raise ValueError(
+                        "account_strategy_targets allowed_symbols must be configured "
+                        f"portfolio symbols for {account_id}/{bucket_id}: "
+                        + ", ".join(unknown_symbols)
                     )
 
     def _multi_account_contribution_strategy_ids(self) -> set[str]:
@@ -404,7 +489,10 @@ class MaestroConfig(StrictConfigModel):
         if self.mode == RunMode.LIVE_READONLY:
             return ProfileStage.LIVE_READONLY
         if any(
-            account.enabled and account.environment == "paper_trading" for account in self.accounts
+            account.enabled
+            and account.broker == "kis"
+            and account.environment == "paper_trading"
+            for account in self.accounts
         ):
             return ProfileStage.KIS_PAPER_TRADING
         if self.kis.paper_trading:
@@ -425,6 +513,7 @@ __all__ = [
     "CurrencySleeveConfig",
     "DataHubConfig",
     "DataHubProviderConfig",
+    "AccountStrategyTargetConfig",
     "ExecutionConfig",
     "ExecutionSleevesConfig",
     "KISConfig",

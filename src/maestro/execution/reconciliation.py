@@ -17,6 +17,7 @@ ReconciliationIssueType = Literal[
     "unknown_broker_position",
     "missing_broker_position",
     "no_broker_snapshot",
+    "no_portfolio_snapshot",
 ]
 
 
@@ -39,6 +40,7 @@ class ReconciliationResult(BaseModel):
     issues: list[ReconciliationIssue] = Field(default_factory=list)
     broker_snapshot_id: int | None = None
     broker_account_id: str | None = None
+    account_results: list[dict[str, Any]] = Field(default_factory=list)
     tolerances: dict[str, float]
 
 
@@ -50,12 +52,14 @@ class BrokerReconciliationService:
         audit_logger: AuditLogger,
         snapshot_refresher: Callable[[], None] | None = None,
         signal_run_id: str | None = None,
+        account_ids: list[str] | None = None,
     ) -> None:
         self.config = config
         self.state_store = state_store
         self.audit_logger = audit_logger
         self.snapshot_refresher = snapshot_refresher
         self.signal_run_id = signal_run_id
+        self.account_ids = list(account_ids or [])
 
     def reconcile_latest(
         self,
@@ -66,6 +70,10 @@ class BrokerReconciliationService:
         effective_signal_run_id = signal_run_id or self.signal_run_id
         if self.snapshot_refresher is not None:
             self.snapshot_refresher()
+        if self.account_ids:
+            result = self._reconcile_accounts(run_id)
+            self._persist(result, signal_run_id=effective_signal_run_id)
+            return result
         portfolio_state = self.state_store.load_latest_portfolio_state()
         latest_snapshot = self.state_store.load_latest_broker_account_snapshot()
         if latest_snapshot is None:
@@ -82,6 +90,95 @@ class BrokerReconciliationService:
         )
         self._persist(result, signal_run_id=effective_signal_run_id)
         return result
+
+    def _reconcile_accounts(self, run_id: str) -> ReconciliationResult:
+        account_results: list[dict[str, Any]] = []
+        issues: list[ReconciliationIssue] = []
+        cash_difference = 0.0
+        position_differences: dict[str, float] = {}
+        broker_snapshot_ids: list[int] = []
+
+        latest_broker_snapshots = _latest_broker_snapshots_by_account(
+            self.state_store.list_broker_account_snapshots(
+                limit=max(100, len(self.account_ids) * 10)
+            )
+        )
+        for account_id in self.account_ids:
+            portfolio_state = self.state_store.load_latest_account_portfolio_state(account_id)
+            latest_snapshot = latest_broker_snapshots.get(account_id)
+            if portfolio_state is None:
+                issue = ReconciliationIssue(
+                    issue_type="no_portfolio_snapshot",
+                    tolerance=0.0,
+                    message=(
+                        "No Maestro portfolio snapshot is available for "
+                        f"account_id={account_id}."
+                    ),
+                )
+                issues.append(issue)
+                account_results.append(
+                    {
+                        "account_id": account_id,
+                        "passed": False,
+                        "issues": [issue.model_dump(mode="json")],
+                    }
+                )
+                continue
+            if latest_snapshot is None:
+                issue = ReconciliationIssue(
+                    issue_type="no_broker_snapshot",
+                    tolerance=0.0,
+                    message=f"No broker account snapshot is available for account_id={account_id}.",
+                )
+                issues.append(issue)
+                account_results.append(
+                    {
+                        "account_id": account_id,
+                        "passed": False,
+                        "issues": [issue.model_dump(mode="json")],
+                    }
+                )
+                continue
+
+            account = latest_snapshot["payload"]["account"]
+            account_result = self._compare(
+                run_id=run_id,
+                portfolio_state=portfolio_state,
+                broker_account=account,
+                broker_snapshot_id=latest_snapshot["id"],
+            )
+            account_issues = [
+                _issue_for_account(issue, account_id) for issue in account_result.issues
+            ]
+            issues.extend(account_issues)
+            cash_difference += account_result.cash_difference or 0.0
+            for symbol, difference in account_result.position_differences.items():
+                position_differences[symbol] = position_differences.get(symbol, 0.0) + difference
+            broker_snapshot_ids.append(latest_snapshot["id"])
+            account_results.append(
+                {
+                    "account_id": account_id,
+                    "passed": not account_issues,
+                    "cash_difference": account_result.cash_difference,
+                    "position_differences": account_result.position_differences,
+                    "issues": [issue.model_dump(mode="json") for issue in account_issues],
+                    "broker_snapshot_id": latest_snapshot["id"],
+                    "broker_account_id": account_result.broker_account_id,
+                }
+            )
+
+        return ReconciliationResult(
+            run_id=run_id,
+            passed=not issues,
+            checked_at=utc_now().isoformat(),
+            cash_difference=cash_difference,
+            position_differences=position_differences,
+            issues=issues,
+            broker_snapshot_id=max(broker_snapshot_ids) if broker_snapshot_ids else None,
+            broker_account_id="aggregate:" + ",".join(self.account_ids),
+            account_results=account_results,
+            tolerances=self._tolerances(),
+        )
 
     def _compare(
         self,
@@ -249,3 +346,20 @@ def _broker_positions_by_symbol(broker_account: dict[str, Any]) -> dict[str, flo
             continue
         positions[symbol] = positions.get(symbol, 0.0) + float(position.get("quantity", 0.0))
     return positions
+
+
+def _latest_broker_snapshots_by_account(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    snapshots: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        payload = row["payload"]
+        account_id = str(payload.get("account_id") or row.get("account_id") or "")
+        if not account_id or account_id in snapshots:
+            continue
+        snapshots[account_id] = row
+    return snapshots
+
+
+def _issue_for_account(issue: ReconciliationIssue, account_id: str) -> ReconciliationIssue:
+    payload = issue.model_dump()
+    payload["message"] = f"account_id={account_id}: {issue.message}"
+    return ReconciliationIssue.model_validate(payload)

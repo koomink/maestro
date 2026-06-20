@@ -29,23 +29,46 @@ execution_sleeves:
           sleeve: KRW
           monthly_budget: 4000000
           min_monthly_budget: 1660000
-          max_monthly_budget: 4000000
           buy_day: 25
           non_trading_day_policy: next_trading_day
           target_policy: buy_only_toward_target
           funding_request:
             enabled: true
+          budget_request:
+            enabled: true
 
-    dev_sandbox:
+    toss_brokerage:
       crescendo_us:
         currency_sleeve: USD
         target_weight: 1.0
         order_generation_mode: target_rebalance
 
+    dev_sandbox:
       fugue:
         currency_sleeve: USD
         target_weight: 1.0
         order_generation_mode: target_rebalance
+
+account_strategy_targets:
+  toss_brokerage:
+    crescendo_us:
+      target_weight: 0.7
+      allowed_symbols:
+        - QQQ
+        - SCHD
+        - BIL
+        - TLT
+        - PDBC
+        - TIP
+        - SPY
+        - SCZ
+        - EFA
+        - EEM
+        - AGG
+        - IEF
+        - LQD
+    manual:
+      target_weight: 0.3
 
 multi_account_contributions:
   tranquillo:
@@ -64,22 +87,22 @@ multi_account_contributions:
           - TIGER_NASDAQ100_LEVERAGE
           - KODEX_US_DIVIDEND_DOWJONES
         min_monthly_budget: 1660000
-        max_monthly_budget: 4000000
 
 strategies:
   tranquillo:
     enabled: true
+    account_id: multi_account_contributions.tranquillo
     readonly: true
     signal: true
     order_posture: dry_run
 
   crescendo_us:
     enabled: true
-    account_id: dev_sandbox
+    account_id: toss_brokerage
     execution_sleeve: crescendo_us
     readonly: true
     signal: true
-    order_posture: dry_run
+    order_posture: armed
 
   fugue:
     enabled: false

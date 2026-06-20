@@ -64,18 +64,23 @@ class KISReadOnlyService:
         self,
         config: KISConfig,
         instruments: list[TradableInstrument] | None = None,
+        broker_product=None,
     ) -> KISReadOnlyClient:
-        products = config.effective_broker_products()
-        if len(products) > 1:
+        products = (
+            [broker_product]
+            if broker_product is not None
+            else config.effective_broker_products()
+        )
+        if len(products) != 1:
             return None
-        if config.broker_products:
-            config = config.model_copy(
-                update={"broker_product": products[0], "broker_products": []}
-            )
         if config.provider == "mock":
             return MockKISReadOnlyClient(config.account_id or "MOCK-ACCOUNT")
         if config.provider == "kis":
-            return build_kis_rest_readonly_client(config, instruments or self.instruments)
+            return build_kis_rest_readonly_client(
+                config,
+                instruments or self.instruments,
+                broker_product=products[0],
+            )
         raise ValueError(f"Unsupported KIS provider: {config.provider}")
 
     def _fetch_multi_product_snapshot(
@@ -86,11 +91,12 @@ class KISReadOnlyService:
         run_id = run_id or new_run_id()
         snapshots = []
         for product in self.config.effective_broker_products():
-            product_config = self.config.model_copy(
-                update={"broker_product": product, "broker_products": []}
-            )
             product_instruments = self._instruments_for_product(product)
-            client = self._build_client(product_config, product_instruments)
+            client = self._build_client(
+                self.config,
+                product_instruments,
+                broker_product=product,
+            )
             product_symbols = self._symbols_for_product(symbols, product)
             account = client.get_account_snapshot()
             current_prices = _prices_with_position_prices(

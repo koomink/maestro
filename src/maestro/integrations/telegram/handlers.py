@@ -2,6 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from maestro.approval.models import ApprovalDecision
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
@@ -25,16 +26,32 @@ from maestro.dashboard.read_models import (
     build_strategy_runs_table,
 )
 from maestro.execution.broker_state import portfolio_state_from_broker_account
-from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly_factory import (
+    broker_readonly_accounts,
+    build_broker_readonly_services,
+)
+from maestro.execution.budget_requests import (
+    budget_request_reply_markup,
+    format_contribution_budget_request,
+    selected_budget_from_request,
+    validate_selected_budget,
+)
 from maestro.execution.funding_requests import (
     format_contribution_funding_request,
     funding_request_reply_markup,
 )
+from maestro.execution.live_order_factory import build_live_approval_dependencies
+from maestro.execution.live_order_models import (
+    LiveOrderModifyRequest,
+    LiveOrderStatusSnapshot,
+)
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.state.events import SystemEventType, save_audited_system_event
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 OPERATOR_CALLBACK_PREFIX = "operator:"
@@ -48,6 +65,9 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("apps", "Show configured strategy apps"),
     ("orders", "Show recent orders"),
     ("approvals", "Show recent approvals"),
+    ("budget", "Select a pending contribution budget: /budget <request_id> <amount>"),
+    ("attribution", "Review account attribution: /attribution <account_id>"),
+    ("modify", "Propose order modification: /modify <broker_order_id> <price> [quantity]"),
     ("pause", "Confirm pause of live approval execution"),
     ("kill_switch", "Confirm emergency live execution stop"),
 )
@@ -99,6 +119,16 @@ class TelegramOperatorCommandRouter:
         if command.startswith("/signal_"):
             self._generate_strategy_signal(chat_id, command)
             self._record(command, chat_id, user_id, username, "handled")
+            return True
+
+        if command == "/budget":
+            self._process_budget_command(text, chat_id, user_id, username)
+            return True
+        if command == "/attribution":
+            self._process_attribution_command(text, chat_id, user_id, username)
+            return True
+        if command == "/modify":
+            self._process_modify_command(text, chat_id, user_id, username)
             return True
 
         handler = {
@@ -185,8 +215,32 @@ class TelegramOperatorCommandRouter:
                 user_id,
                 username,
             )
+        if action.startswith("budget:"):
+            return self._process_budget_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
         if action.startswith("cash-flow:"):
             return self._process_cash_flow_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("attribution:"):
+            return self._process_attribution_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("modify:"):
+            return self._process_modify_callback(
                 callback,
                 action,
                 chat_id,
@@ -209,6 +263,214 @@ class TelegramOperatorCommandRouter:
         self._answer(callback, f"{transition} confirmed.")
         self._edit_callback_message(callback, text)
         self._record(command, chat_id, user_id, username, "confirmed")
+        return True
+
+    def _process_attribution_command(
+        self,
+        text: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> None:
+        parts = text.strip().split()
+        if len(parts) != 2:
+            self._send(chat_id, "Usage: /attribution <account_id>")
+            self._record("/attribution", chat_id, user_id, username, "invalid")
+            return
+        account_id = parts[1]
+        latest = self._latest_attribution_event(account_id)
+        if latest is None:
+            self._send(chat_id, f"No attribution baseline for account_id={account_id}.")
+            self._record("/attribution", chat_id, user_id, username, "missing")
+            return
+        payload = latest["payload"]
+        positions = payload.get("positions") or []
+        lines = [
+            "Account attribution baseline",
+            f"account_id: {account_id}",
+            f"version: {payload.get('version')}",
+            f"broker_snapshot_id: {payload.get('broker_snapshot_id')}",
+            f"approved: {str(bool(payload.get('approved'))).lower()}",
+        ]
+        for position in positions:
+            item = _mapping(position)
+            lines.append(
+                f"{item.get('symbol')}: {item.get('bucket_id')} "
+                f"{_number(item.get('quantity'))}"
+            )
+        reply_markup = None
+        if not payload.get("approved"):
+            reply_markup = _attribution_markup(account_id)
+        self._send(chat_id, "\n".join(lines), reply_markup=reply_markup)
+        self._record("/attribution", chat_id, user_id, username, "handled")
+
+    def _process_attribution_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] != "approve":
+            self._answer(callback, "This attribution approval is no longer active.")
+            return True
+        account_id = parts[2]
+        try:
+            positions = AccountAttributionReconciliationService(
+                self.store,
+                self.audit,
+            ).adopt_latest(
+                run_id=new_run_id(),
+                account_id=account_id,
+                reason=f"Telegram attribution approved by {username or user_id}",
+                adopted_by=f"telegram:{user_id}",
+            )
+        except ValueError as exc:
+            self._answer(callback, str(exc))
+            self._record("/attribution", chat_id, user_id, username, "stale_callback")
+            return True
+        text = f"Attribution adopted\naccount_id: {account_id}\npositions: {len(positions)}"
+        self._answer(callback, "Attribution adopted.")
+        self._edit_callback_message(callback, text)
+        self._record("/attribution", chat_id, user_id, username, "approved")
+        return True
+
+    def _process_modify_command(
+        self,
+        text: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> None:
+        parts = text.strip().split()
+        if len(parts) not in {3, 4}:
+            self._send(
+                chat_id,
+                "Usage: /modify <broker_order_id> <price> [quantity]",
+            )
+            self._record("/modify", chat_id, user_id, username, "invalid")
+            return
+        status = self._latest_order_status(parts[1])
+        if status is None:
+            self._send(chat_id, "Order status not found.")
+            self._record("/modify", chat_id, user_id, username, "missing")
+            return
+        instrument = self.config.universe.get(status.symbol or "")
+        if instrument is None:
+            self._send(chat_id, "Order symbol is not in the configured universe.")
+            self._record("/modify", chat_id, user_id, username, "invalid")
+            return
+        try:
+            price = float(parts[2])
+            quantity = float(parts[3]) if len(parts) == 4 else None
+            proposal_id = new_run_id()
+            request = LiveOrderModifyRequest(
+                run_id=proposal_id,
+                approval_id=f"modify_{proposal_id}",
+                broker_order=status.broker_order,
+                symbol=status.symbol or instrument.symbol,
+                limit_price=price,
+                quantity=quantity,
+                currency=instrument.currency,
+                reason=f"Telegram proposal by {username or user_id}",
+            )
+        except ValueError as exc:
+            self._send(chat_id, f"Invalid modification: {exc}")
+            self._record("/modify", chat_id, user_id, username, "invalid")
+            return
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            proposal_id,
+            "live_order_modify_proposal",
+            {
+                "proposal_id": proposal_id,
+                "request": request.model_dump(mode="json"),
+                "status": "pending",
+                "created_at": utc_now().isoformat(),
+            },
+        )
+        self._send(
+            chat_id,
+            (
+                "Order modification proposal\n"
+                f"broker_order_id: {parts[1]}\n"
+                f"symbol: {request.symbol}\n"
+                f"price: {request.limit_price}\n"
+                f"quantity: {request.quantity or 'unchanged'}"
+            ),
+            reply_markup=_modify_markup(proposal_id),
+        )
+        self._record("/modify", chat_id, user_id, username, "proposed")
+
+    def _process_modify_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] != "approve":
+            self._answer(callback, "This modification proposal is no longer active.")
+            return True
+        proposal = self._pending_modify_proposal(parts[2])
+        if proposal is None:
+            self._answer(callback, "This modification proposal is no longer active.")
+            self._record("/modify", chat_id, user_id, username, "stale_callback")
+            return True
+        request = LiveOrderModifyRequest.model_validate(proposal["request"])
+        try:
+            config = self.config
+            if self.approval_config_path is not None:
+                config = load_config(self.approval_config_path)
+            dependencies = build_live_approval_dependencies(
+                config,
+                self.store,
+                self.audit,
+                account_id=request.broker_order.account_id,
+                telegram_client=self.client,
+            )
+            if dependencies.modify_service is None:
+                raise ValueError("Configured broker does not support order modification")
+            result = dependencies.modify_service.modify_order(
+                request,
+                ApprovalDecision(
+                    approval_id=request.approval_id,
+                    run_id=request.run_id,
+                    status="approved",
+                    decided_at=utc_now(),
+                    decided_by=f"telegram:{user_id}",
+                ),
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._answer(callback, f"Modification failed: {exc}")
+            self._record("/modify", chat_id, user_id, username, "failed")
+            return True
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            request.run_id,
+            "live_order_modify_proposal_ack",
+            {
+                "proposal_id": parts[2],
+                "status": "approved",
+                "replacement_broker_order_id": result.broker_order.broker_order_id,
+                "decided_by": f"telegram:{user_id}",
+            },
+        )
+        self._answer(callback, "Order modification submitted.")
+        self._edit_callback_message(
+            callback,
+            (
+                "Order modification submitted\n"
+                f"replacement_broker_order_id: {result.broker_order.broker_order_id}"
+            ),
+        )
+        self._record("/modify", chat_id, user_id, username, "approved")
         return True
 
 
@@ -348,6 +610,171 @@ class TelegramOperatorCommandRouter:
         self._edit_callback_message(callback, text)
         return True
 
+    def _process_budget_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 3)
+        valid = (
+            len(parts) == 3 and parts[0] == "budget" and parts[1] == "cancel"
+        ) or (
+            len(parts) == 4
+            and parts[0] == "budget"
+            and parts[1] == "select"
+            and parts[3] in {"min", "recommended", "full"}
+        )
+        if not valid:
+            self._answer(callback, "This budget request is no longer active.")
+            self._record("/budget", chat_id, user_id, username, "stale_callback")
+            return True
+        transition = parts[1]
+        request_id = parts[2]
+        request = self._load_pending_budget_request(request_id)
+        if request is None:
+            self._answer(callback, "This budget request is no longer active.")
+            self._record("/budget", chat_id, user_id, username, "stale_callback")
+            return True
+        if transition == "cancel":
+            self._save_budget_decision(request, "canceled", user_id, username)
+            self._answer(callback, "Budget request canceled.")
+            self._edit_callback_message(callback, "Budget request canceled.")
+            self._record("/budget_cancel", chat_id, user_id, username, "canceled")
+            return True
+        try:
+            amount = selected_budget_from_request(request, parts[3])
+            text = self._confirm_budget_request(
+                request,
+                selected_budget=amount,
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._answer(callback, "Budget selection failed.")
+            text = "\n".join(
+                [
+                    "Budget selection failed",
+                    f"request_id: {request_id}",
+                    f"message: {exc}",
+                ]
+            )
+            self._record("/budget_select", chat_id, user_id, username, "failed")
+        else:
+            self._answer(callback, "Budget selected.")
+            self._record("/budget_select", chat_id, user_id, username, "selected")
+        self._edit_callback_message(callback, text)
+        return True
+
+    def _process_budget_command(
+        self,
+        text: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> None:
+        parts = text.strip().split()
+        if len(parts) != 3:
+            self._send(chat_id, "Usage: /budget <request_id> <amount>")
+            self._record("/budget", chat_id, user_id, username, "invalid")
+            return
+        request_id = parts[1]
+        request = self._load_pending_budget_request(request_id)
+        if request is None:
+            self._send(chat_id, "This budget request is no longer active.")
+            self._record("/budget", chat_id, user_id, username, "stale")
+            return
+        try:
+            amount = float(parts[2].replace(",", ""))
+            text = self._confirm_budget_request(
+                request,
+                selected_budget=amount,
+                chat_id=chat_id,
+                user_id=user_id,
+                username=username,
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._send(chat_id, f"Budget amount out of range or invalid: {exc}")
+            self._record("/budget", chat_id, user_id, username, "failed")
+            return
+        self._send(chat_id, text)
+        self._record("/budget", chat_id, user_id, username, "selected")
+
+    def _confirm_budget_request(
+        self,
+        request: dict[str, Any],
+        *,
+        selected_budget: float,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> str:
+        validate_selected_budget(request, selected_budget)
+        self._save_budget_decision(
+            request,
+            "selected",
+            user_id,
+            username,
+            selected_budget=selected_budget,
+        )
+        lines = [
+            "Budget selected",
+            f"request_id: {request['request_id']}",
+            f"selected_budget: {selected_budget:,.0f} {request.get('currency') or ''}".rstrip(),
+        ]
+        if self.signal_config_path is None:
+            return "\n".join(lines)
+        try:
+            self._refresh_portfolio_from_broker_snapshot()
+        except (RuntimeError, TimeoutError, ValueError):
+            if self._has_readonly_broker_accounts():
+                raise
+        signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
+        strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
+        if not strategy_ids:
+            raise ValueError("Budget request is missing strategy_ids")
+        signal_summary = MaestroOrchestrator(
+            signal_config,
+            config_identity=signal_identity,
+        ).run_signal(strategy_ids=strategy_ids)
+        lines.append(f"new_signal_run_id: {signal_summary.signal_run_id}")
+        lines.append(f"orders_preview_count: {signal_summary.orders_preview_count}")
+        if signal_summary.action_required:
+            if self.approval_config_path is None:
+                lines.append("approval_status: not_created_missing_approval_config")
+                return "\n".join(lines)
+            approval_config, approval_identity = load_config_with_identity(
+                self.approval_config_path
+            )
+            approval_summary = MaestroOrchestrator(
+                approval_config,
+                telegram_client=self.client,
+                config_identity=approval_identity,
+            ).approve_signal(signal_summary.signal_run_id)
+            lines.extend(
+                [
+                    f"approval_run_id: {approval_summary.run_id}",
+                    f"approval_status: {approval_summary.approval_status}",
+                    f"orders_created: {approval_summary.orders_created}",
+                ]
+            )
+            return "\n".join(lines)
+        signal = self.store.load_signal_package(signal_summary.signal_run_id) or {}
+        for budget_request in signal.get("budget_requests") or []:
+            self._send_budget_request(chat_id, budget_request)
+        for funding_request in signal.get("funding_requests") or []:
+            self._send_funding_request(chat_id, funding_request)
+        if signal.get("budget_requests"):
+            lines.append("approval_status: budget_still_required")
+        elif signal.get("funding_requests"):
+            lines.append("approval_status: funding_still_required")
+        else:
+            lines.append("approval_status: not_required")
+        return "\n".join(lines)
+
     def _confirm_funding_request(
         self,
         request: dict[str, Any],
@@ -361,7 +788,7 @@ class TelegramOperatorCommandRouter:
         try:
             self._refresh_portfolio_from_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError):
-            if self.config.kis.enabled:
+            if self._has_readonly_broker_accounts():
                 raise
         signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
         strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
@@ -628,6 +1055,62 @@ class TelegramOperatorCommandRouter:
             reply_markup=funding_request_reply_markup(request_id),
         )
 
+    def _send_budget_request(self, chat_id: int, request: dict[str, Any]) -> None:
+        self._send(
+            chat_id,
+            format_contribution_budget_request(request),
+            reply_markup=budget_request_reply_markup(request),
+        )
+
+    def _load_pending_budget_request(self, request_id: str) -> dict[str, Any] | None:
+        decided = {
+            str(row["payload"].get("request_id"))
+            for row in self.store.list_system_events_by_type(
+                "contribution_budget_request_decision",
+                limit=1000,
+            )
+        }
+        if request_id in decided:
+            return None
+        for row in self.store.list_system_events_by_type(
+            "contribution_budget_request",
+            limit=1000,
+        ):
+            payload = row.get("payload") or {}
+            if payload.get("request_id") == request_id and payload.get("status") == "pending":
+                return payload
+        return None
+
+    def _save_budget_decision(
+        self,
+        request: dict[str, Any],
+        status: str,
+        user_id: int,
+        username: str | None,
+        *,
+        selected_budget: float | None = None,
+    ) -> None:
+        payload = {
+            "request_id": request.get("request_id"),
+            "status": status,
+            "strategy_ids": list(request.get("strategy_ids") or []),
+            "contribution_group_id": request.get("contribution_group_id"),
+            "account_id": request.get("account_id"),
+            "execution_sleeve": request.get("execution_sleeve"),
+            "currency": request.get("currency"),
+            "month_key": request.get("month_key"),
+            "decided_by": username or str(user_id),
+        }
+        if selected_budget is not None:
+            payload["selected_budget"] = selected_budget
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "contribution_budget_request_decision",
+            payload,
+        )
+
     def _load_pending_funding_request(self, request_id: str) -> dict[str, Any] | None:
         acked = {
             str(row["payload"].get("request_id"))
@@ -813,7 +1296,7 @@ class TelegramOperatorCommandRouter:
     def _account(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
         try:
-            if self.config.kis.enabled:
+            if self._has_readonly_broker_accounts():
                 self._send(chat_id, "Broker account snapshot: refreshing")
             self._refresh_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError) as exc:
@@ -855,7 +1338,7 @@ class TelegramOperatorCommandRouter:
     def _portfolio(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
         try:
-            if self.config.kis.enabled:
+            if self._has_readonly_broker_accounts():
                 self._send(chat_id, "Maestro portfolio: refreshing from broker snapshot")
             self._refresh_portfolio_from_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError) as exc:
@@ -959,44 +1442,60 @@ class TelegramOperatorCommandRouter:
         )
 
     def _refresh_broker_snapshot(self) -> None:
-        if not self.config.kis.enabled:
-            return
-        KISReadOnlyService(
-            self.config.kis,
+        for _, service in build_broker_readonly_services(
+            self.config,
             self.store,
             self.audit,
-            instruments=self.config.universe.instruments,
-        ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
+        ):
+            service.fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
 
     def _refresh_portfolio_from_broker_snapshot(self) -> None:
-        if not self.config.kis.enabled:
+        services = build_broker_readonly_services(self.config, self.store, self.audit)
+        if not services:
             return
-        snapshot = KISReadOnlyService(
-            self.config.kis,
-            self.store,
-            self.audit,
-            instruments=self.config.universe.instruments,
-        ).fetch_and_store_snapshot(self.config.portfolio.allowed_symbols)
-        state = portfolio_state_from_broker_account(
-            snapshot.account.model_dump(mode="json"),
-            allowed_symbols=self.config.portfolio.allowed_symbols,
-            universe=self.config.universe,
-        )
-        self.store.save_portfolio_snapshot(new_run_id(), state)
+        run_id = new_run_id()
+        states = []
+        account_states: list[tuple[str | None, PortfolioState]] = []
+        for logical_account_id, service in services:
+            snapshot = service.fetch_and_store_snapshot(
+                self.config.portfolio.allowed_symbols,
+                run_id=run_id,
+            )
+            state = portfolio_state_from_broker_account(
+                snapshot.account.model_dump(mode="json"),
+                allowed_symbols=self.config.portfolio.allowed_symbols,
+                universe=self.config.universe,
+                unknown_symbol_policy=self.config.portfolio.unknown_broker_position_policy,
+            )
+            states.append(state)
+            account_states.append((logical_account_id, state))
+        for logical_account_id, state in account_states:
+            if logical_account_id:
+                self.store.save_portfolio_snapshot(
+                    run_id,
+                    state,
+                    account_id=logical_account_id,
+                )
+        self.store.save_portfolio_snapshot(run_id, _merge_portfolio_states(states))
 
     def _broker_currency_breakdowns(self) -> dict[str, dict[str, float]]:
-        latest = self.store.load_latest_broker_account_snapshot()
-        if latest is None:
+        snapshots = _latest_broker_snapshots_by_account(self.store)
+        if not snapshots:
             return {"cash": {"unknown": 0.0}, "positions_market_value": {}, "total_value": {}}
-        payload = latest.get("payload")
-        account = payload.get("account") if isinstance(payload, Mapping) else None
-        if not isinstance(account, Mapping):
-            return {"cash": {"unknown": 0.0}, "positions_market_value": {}, "total_value": {}}
-        cash = _cash_by_currency(account)
-        positions_market_value = _positions_market_value_by_currency(
-            account,
-            self._instrument_currencies(),
-        )
+        cash: dict[str, float] = {}
+        positions_market_value: dict[str, float] = {}
+        instrument_currencies = self._instrument_currencies()
+        for snapshot in snapshots:
+            account = _snapshot_account(snapshot)
+            for currency, value in _cash_by_currency(account).items():
+                cash[currency] = cash.get(currency, 0.0) + value
+            for currency, value in _positions_market_value_by_currency(
+                account,
+                instrument_currencies,
+            ).items():
+                positions_market_value[currency] = (
+                    positions_market_value.get(currency, 0.0) + value
+                )
         return {
             "cash": cash,
             "positions_market_value": positions_market_value,
@@ -1010,20 +1509,16 @@ class TelegramOperatorCommandRouter:
         }
 
     def _broker_position_prices(self) -> dict[str, tuple[float, str]]:
-        latest = self.store.load_latest_broker_account_snapshot()
-        if latest is None:
-            return {}
-        payload = latest.get("payload")
-        if not isinstance(payload, Mapping):
-            return {}
-        account = payload.get("account")
-        prices = {
-            str(symbol): float(price)
-            for symbol, price in _mapping_items(payload.get("current_prices"))
-            if _is_number(price)
-        }
+        prices: dict[str, float] = {}
         currencies: dict[str, str] = {}
-        if isinstance(account, Mapping):
+        for snapshot in _latest_broker_snapshots_by_account(self.store):
+            payload = _mapping(snapshot.get("payload"))
+            account = payload.get("account")
+            for symbol, price in _mapping_items(payload.get("current_prices")):
+                if _is_number(price):
+                    _merge_position_price(prices, str(symbol), float(price))
+            if not isinstance(account, Mapping):
+                continue
             positions = account.get("positions")
             if isinstance(positions, list):
                 for position in positions:
@@ -1032,8 +1527,8 @@ class TelegramOperatorCommandRouter:
                     symbol = position.get("symbol")
                     if not isinstance(symbol, str):
                         continue
-                    if symbol not in prices and _is_number(position.get("current_price")):
-                        prices[symbol] = float(position["current_price"])
+                    if _is_number(position.get("current_price")):
+                        _merge_position_price(prices, symbol, float(position["current_price"]))
                     currency = position.get("currency")
                     if currency:
                         currencies[symbol] = str(currency)
@@ -1049,27 +1544,28 @@ class TelegramOperatorCommandRouter:
             currency = _currency_value(instrument.currency)
             if currency == "KRW" and instrument.name:
                 labels[instrument.symbol] = f"{instrument.symbol} {instrument.name}"
-        latest = self.store.load_latest_broker_account_snapshot()
-        if latest is None:
-            return labels
-        payload = latest.get("payload")
-        if not isinstance(payload, Mapping):
-            return labels
-        account = payload.get("account")
-        if not isinstance(account, Mapping):
-            return labels
-        positions = account.get("positions")
-        if not isinstance(positions, list):
-            return labels
-        for position in positions:
-            if not isinstance(position, Mapping):
+        instrument_currencies = self._instrument_currencies()
+        for snapshot in _latest_broker_snapshots_by_account(self.store):
+            positions = _snapshot_account(snapshot).get("positions")
+            if not isinstance(positions, list):
                 continue
-            symbol = position.get("symbol")
-            name = position.get("name")
-            currency = _position_currency(position, self._instrument_currencies())
-            if isinstance(symbol, str) and isinstance(name, str) and name and currency == "KRW":
-                labels[symbol] = f"{symbol} {name}"
+            for position in positions:
+                if not isinstance(position, Mapping):
+                    continue
+                symbol = position.get("symbol")
+                name = position.get("name")
+                currency = _position_currency(position, instrument_currencies)
+                if (
+                    isinstance(symbol, str)
+                    and isinstance(name, str)
+                    and name
+                    and currency == "KRW"
+                ):
+                    labels[symbol] = f"{symbol} {name}"
         return labels
+
+    def _has_readonly_broker_accounts(self) -> bool:
+        return bool(broker_readonly_accounts(self.config))
 
     def _chat_allowed(self, chat_id: int) -> bool:
         return chat_id in set(self.config.approval.telegram_allowed_chat_ids)
@@ -1134,6 +1630,40 @@ class TelegramOperatorCommandRouter:
             payload,
         )
 
+    def _latest_attribution_event(self, account_id: str) -> dict[str, Any] | None:
+        event_types = {"account_attribution_reconciliation", "account_attribution_adopted"}
+        for row in self.store.list_system_events(limit=2000):
+            if row.get("event_type") not in event_types:
+                continue
+            if row["payload"].get("account_id") == account_id:
+                return row
+        return None
+
+    def _latest_order_status(self, broker_order_id: str) -> LiveOrderStatusSnapshot | None:
+        for row in self.store.list_system_events_by_type(
+            SystemEventType.LIVE_ORDER_STATUS,
+            limit=2000,
+        ):
+            status = LiveOrderStatusSnapshot.model_validate(row["payload"])
+            if status.broker_order.broker_order_id == broker_order_id:
+                return status
+        return None
+
+    def _pending_modify_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        for row in self.store.list_system_events_by_type(
+            "live_order_modify_proposal_ack",
+            limit=2000,
+        ):
+            if row["payload"].get("proposal_id") == proposal_id:
+                return None
+        for row in self.store.list_system_events_by_type(
+            "live_order_modify_proposal",
+            limit=2000,
+        ):
+            if row["payload"].get("proposal_id") == proposal_id:
+                return row["payload"]
+        return None
+
 
 def _command_name(text: str) -> str:
     token = text.strip().split()[0]
@@ -1167,6 +1697,36 @@ def _confirmation_markup(action: str) -> dict[str, Any]:
                 {
                     "text": f"Confirm {action}",
                     "callback_data": f"{OPERATOR_CALLBACK_PREFIX}confirm:{action}",
+                }
+            ],
+            [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
+        ]
+    }
+
+
+def _attribution_markup(account_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve attribution",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}attribution:approve:{account_id}"
+                    ),
+                }
+            ],
+            [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
+        ]
+    }
+
+
+def _modify_markup(proposal_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve modification",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}modify:approve:{proposal_id}",
                 }
             ],
             [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
@@ -1210,6 +1770,8 @@ def _mask_identifier(value: object) -> str:
     text = str(value or "")
     if not text:
         return "none"
+    if text == "multiple":
+        return text
     if len(text) <= 4:
         return "*" * len(text)
     return text[:2] + ("*" * max(len(text) - 4, 1)) + text[-2:]
@@ -1240,6 +1802,52 @@ def _float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _merge_position_price(prices: dict[str, float], symbol: str, price: float) -> None:
+    current = prices.get(symbol)
+    if current is None or current <= 0 < price:
+        prices[symbol] = price
+    elif price <= 0 and symbol not in prices:
+        prices[symbol] = price
+
+
+def _latest_broker_snapshots_by_account(store: StateStore) -> list[dict[str, Any]]:
+    latest_by_account = []
+    seen = set()
+    for snapshot in store.list_broker_account_snapshots(limit=1000):
+        account_id = _broker_snapshot_account_id(snapshot)
+        if not account_id or account_id in seen:
+            continue
+        seen.add(account_id)
+        latest_by_account.append(snapshot)
+    return latest_by_account
+
+
+def _snapshot_account(snapshot: Mapping[str, Any]) -> Mapping[str, Any]:
+    payload = _mapping(snapshot.get("payload"))
+    account = payload.get("account")
+    return account if isinstance(account, Mapping) else {}
+
+
+def _merge_portfolio_states(states: list[PortfolioState]) -> PortfolioState:
+    if not states:
+        return PortfolioState(cash=0.0, cash_by_currency={}, positions={})
+    cash_by_currency: dict[str, float] = {}
+    positions: dict[str, float] = {}
+    for state in states:
+        if state.cash_by_currency:
+            for currency, cash in state.cash_by_currency.items():
+                cash_by_currency[currency] = cash_by_currency.get(currency, 0.0) + cash
+        else:
+            cash_by_currency["CASH"] = cash_by_currency.get("CASH", 0.0) + state.cash
+        for symbol, quantity in state.positions.items():
+            positions[symbol] = positions.get(symbol, 0.0) + quantity
+    return PortfolioState(
+        cash=sum(cash_by_currency.values()),
+        cash_by_currency=cash_by_currency,
+        positions=positions,
+    )
 
 
 def _broker_snapshot_account_id(row: Mapping[str, Any]) -> str:

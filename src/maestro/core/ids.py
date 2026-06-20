@@ -19,3 +19,7 @@ def new_signal_run_id() -> str:
 
 def new_funding_request_id() -> str:
     return f"fund_{uuid4().hex}"
+
+
+def new_budget_request_id() -> str:
+    return f"budget_{uuid4().hex}"

@@ -15,6 +15,11 @@ class ContributionFundingRequestConfig(StrictConfigModel):
     amount_policy: Literal["min_monthly_budget_shortfall"] = "min_monthly_budget_shortfall"
 
 
+class ContributionBudgetRequestConfig(StrictConfigModel):
+    enabled: bool = False
+    provider: Literal["telegram"] = "telegram"
+
+
 class ContributionConfig(StrictConfigModel):
     enabled: bool = False
     currency: Currency = Currency.KRW
@@ -28,6 +33,9 @@ class ContributionConfig(StrictConfigModel):
     funding_request: ContributionFundingRequestConfig = Field(
         default_factory=ContributionFundingRequestConfig
     )
+    budget_request: ContributionBudgetRequestConfig = Field(
+        default_factory=ContributionBudgetRequestConfig
+    )
 
     @model_validator(mode="after")
     def validate_budget_range(self) -> "ContributionConfig":
@@ -37,10 +45,6 @@ class ContributionConfig(StrictConfigModel):
             raise ValueError("monthly_budget must be positive when contribution is enabled")
         if self.min_monthly_budget > self.monthly_budget:
             raise ValueError("min_monthly_budget must be less than or equal to monthly_budget")
-        if self.max_monthly_budget and self.monthly_budget > self.max_monthly_budget:
-            raise ValueError("monthly_budget must be less than or equal to max_monthly_budget")
-        if self.max_monthly_budget and self.min_monthly_budget > self.max_monthly_budget:
-            raise ValueError("min_monthly_budget must be less than or equal to max_monthly_budget")
         return self
 
 
@@ -207,6 +211,12 @@ class ExecutionSleeveConfig(StrictConfigModel):
             and self.contribution.funding_request.enabled
         ):
             raise ValueError("funding_request requires buy_only_contribution")
+        if (
+            self.order_generation_mode != "buy_only_contribution"
+            and self.contribution is not None
+            and self.contribution.budget_request.enabled
+        ):
+            raise ValueError("budget_request requires buy_only_contribution")
         return self
 
 
@@ -225,6 +235,11 @@ class ExecutionSleevesConfig(StrictConfigModel):
 
     def has_sleeves(self) -> bool:
         return bool(self.accounts)
+
+
+class AccountStrategyTargetConfig(StrictConfigModel):
+    target_weight: float = Field(gt=0.0, le=1.0)
+    allowed_symbols: list[str] = Field(default_factory=list)
 
 
 class ExecutionConfig(StrictConfigModel):
@@ -296,6 +311,11 @@ class ExecutionConfig(StrictConfigModel):
             and self.contribution.funding_request.enabled
         ):
             raise ValueError("funding_request requires buy_only_contribution")
+        if (
+            self.order_generation_mode != "buy_only_contribution"
+            and self.contribution.budget_request.enabled
+        ):
+            raise ValueError("budget_request requires buy_only_contribution")
         return self
 
     @field_validator("allowed_order_type")
@@ -437,7 +457,9 @@ def _flags_from_order_posture(posture: str) -> tuple[bool, bool]:
 
 __all__ = [
     "BrokerValidationConfig",
+    "ContributionBudgetRequestConfig",
     "ContributionConfig",
+    "AccountStrategyTargetConfig",
     "ExecutionConfig",
     "ExecutionSleeveConfig",
     "ExecutionSleevesConfig",

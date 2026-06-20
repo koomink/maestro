@@ -1,12 +1,15 @@
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 from maestro.config.models import KISConfig
 from maestro.core.clock import utc_now
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER, CredentialResolver
+
+KIS_DATETIME_TZ = ZoneInfo("Asia/Seoul")
 
 
 class KISTransport(Protocol):
@@ -228,15 +231,18 @@ def _parse_kis_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     text = str(value)
-    tzinfo = utc_now().tzinfo
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
         try:
             parsed = datetime.strptime(text, fmt)
-            return parsed.astimezone(tz=tzinfo) if parsed.tzinfo else parsed.replace(tzinfo=tzinfo)
+            if parsed.tzinfo:
+                return parsed.astimezone(tz=UTC)
+            return parsed.replace(tzinfo=KIS_DATETIME_TZ).astimezone(tz=UTC)
         except ValueError:
             continue
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
-    return parsed.astimezone(tz=tzinfo) if parsed.tzinfo else parsed.replace(tzinfo=tzinfo)
+    if parsed.tzinfo:
+        return parsed.astimezone(tz=UTC)
+    return parsed.replace(tzinfo=KIS_DATETIME_TZ).astimezone(tz=UTC)

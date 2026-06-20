@@ -11,6 +11,7 @@ class BrokerSymbolMapping(BaseModel):
     broker: str
     broker_product: BrokerProduct
     broker_symbol: str = Field(min_length=1)
+    broker_symbols: dict[str, str] = Field(default_factory=dict)
     exchange_code: ExchangeCode | None = None
 
 
@@ -37,6 +38,9 @@ class TradableInstrument(BaseModel):
             broker_symbol=self.broker_symbol,
             exchange_code=self.exchange_code,
         )
+
+    def symbol_for_broker(self, broker: str) -> str:
+        return self.broker_symbols.get(broker, self.broker_symbol)
 
     @property
     def price_precision(self) -> float:

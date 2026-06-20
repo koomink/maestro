@@ -135,7 +135,9 @@ The systemd wiring for this workflow is:
   `maestro daily-signal-approval`.
 - The command sends a daily signal summary, creates approval requests only when
   `action_required=true`, and temporarily stops
-  `maestro-telegram-operator.service` during approval polling.
+  `maestro-telegram-operator.service` during approval polling. If the daily
+orchestration fails before the normal summary, it sends a best-effort Telegram
+failure briefing and still exits non-zero for systemd.
 
 Do not treat `live_readonly` as a strategy execution mode; signal generation is
 a separate operator phase. `run-once` remains a legacy single-pipeline entrypoint
@@ -169,10 +171,26 @@ Use this promotion ladder for strategy phase controls:
 5. `enabled: true`, `readonly: true`, `signal: true`, `order_posture: armed`: approved orders can
    reach broker submit only when the global config is also armed.
 
-The current shared mapping enables `tranquillo -> kis_mock` and
-`crescendo_us -> dev_sandbox`; `fugue -> dev_sandbox` is `enabled: false`,
-`readonly: true`, and `signal: false`, so it can appear in
+The current shared mapping routes `tranquillo` through
+`multi_account_contributions.tranquillo` for `kis_ps` and `kis_isa`, and routes
+`crescendo_us -> toss_brokerage / crescendo_us` with manual bucket capacity
+reserved in `account_strategy_targets`. `fugue -> dev_sandbox` is
+`enabled: false`, `readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
+
+Before the first Toss order, refresh the broker snapshot and inspect the
+automatic attribution baseline:
+
+```bash
+maestro adopt-account-attribution \
+  --config <approval-config> \
+  --account-id toss_brokerage \
+  --reason "operator verified initial Toss holdings"
+```
+
+The same adoption is available through `/attribution toss_brokerage` in the
+Telegram operator. Do not approve a baseline with incorrectly assigned
+strategy or manual quantities.
 
 ## KIS Read-only Reconciliation
 
@@ -200,14 +218,24 @@ maestro adopt-broker-snapshot --config <config> --reason "operator baseline acce
 ```
 
 This is a state-only action. It does not call a broker order endpoint and
-refuses broker positions that are neither in `portfolio.allowed_symbols` nor
-known `universe.instruments` allowed by `universe.policy`.
+defaults to refusing broker positions that are neither in
+`portfolio.allowed_symbols` nor known `universe.instruments` allowed by
+`universe.policy`. If `portfolio.unknown_broker_position_policy` is
+`include_readonly`, already-held unknown broker positions are included for
+read-only display/adoption, but they remain ineligible for target allocations
+and live order execution until onboarded into the universe.
 
 5. Reconcile Maestro state against the latest broker snapshot:
 
 ```bash
 maestro reconcile --config <config>
 ```
+
+For configs with multiple enabled KIS accounts, reconciliation compares each
+account-scoped Maestro portfolio snapshot with that account's latest broker
+snapshot, then reports the aggregate cash and position differences. It does not
+compare a global Maestro portfolio against whichever broker snapshot happened
+to be stored last.
 
 6. If reconciliation fails, do not proceed to live approval. Review the reported
    cash and position differences, manual broker activity, fills, and the latest

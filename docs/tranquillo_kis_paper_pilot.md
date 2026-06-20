@@ -36,7 +36,6 @@ monitoring:
   scheduled_run_max_age_seconds: 86400
 kis:
   provider: kis
-  broker_product: kis_domestic_stock
   broker_products:
     - kis_domestic_stock
   paper_trading: true
