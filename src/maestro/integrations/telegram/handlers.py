@@ -1479,7 +1479,7 @@ class TelegramOperatorCommandRouter:
         self.store.save_portfolio_snapshot(run_id, _merge_portfolio_states(states))
 
     def _broker_currency_breakdowns(self) -> dict[str, dict[str, float]]:
-        snapshots = _latest_broker_snapshots_by_account(self.store)
+        snapshots = _latest_broker_snapshots_by_account(self.store, self.config)
         if not snapshots:
             return {"cash": {"unknown": 0.0}, "positions_market_value": {}, "total_value": {}}
         cash: dict[str, float] = {}
@@ -1511,7 +1511,7 @@ class TelegramOperatorCommandRouter:
     def _broker_position_prices(self) -> dict[str, tuple[float, str]]:
         prices: dict[str, float] = {}
         currencies: dict[str, str] = {}
-        for snapshot in _latest_broker_snapshots_by_account(self.store):
+        for snapshot in _latest_broker_snapshots_by_account(self.store, self.config):
             payload = _mapping(snapshot.get("payload"))
             account = payload.get("account")
             for symbol, price in _mapping_items(payload.get("current_prices")):
@@ -1545,7 +1545,7 @@ class TelegramOperatorCommandRouter:
             if currency == "KRW" and instrument.name:
                 labels[instrument.symbol] = f"{instrument.symbol} {instrument.name}"
         instrument_currencies = self._instrument_currencies()
-        for snapshot in _latest_broker_snapshots_by_account(self.store):
+        for snapshot in _latest_broker_snapshots_by_account(self.store, self.config):
             positions = _snapshot_account(snapshot).get("positions")
             if not isinstance(positions, list):
                 continue
@@ -1812,12 +1812,61 @@ def _merge_position_price(prices: dict[str, float], symbol: str, price: float) -
         prices[symbol] = price
 
 
-def _latest_broker_snapshots_by_account(store: StateStore) -> list[dict[str, Any]]:
+def _disabled_broker_account_ids(config: MaestroConfig | None) -> set[str]:
+    """Native identifiers (config `id` and, when set, the literal
+    `account_id`) of accounts that are explicitly disabled in the config.
+
+    Broker snapshots are never deleted, so a disabled/retired account (e.g.
+    a mock/paper account used during setup) keeps its last snapshot in the
+    state DB forever. Without this filter, `_latest_broker_snapshots_by_
+    account` would keep including that stale snapshot in bot-facing
+    aggregates like `_broker_currency_breakdowns` (the /status and /account
+    commands' cash/exposure totals), silently overstating them the same way
+    the dashboard's equivalent bug did. Mirrors `maestro.dashboard.
+    read_models._disabled_native_account_ids` / `maestro.orchestration.
+    live_gates._disabled_account_native_keys` — see those for the deny- vs
+    allow-list rationale — duplicated here rather than imported to keep this
+    module decoupled.
+    """
+    if config is None:
+        return set()
+    disabled: set[str] = set()
+    for account in getattr(config, "accounts", None) or []:
+        if getattr(account, "enabled", False):
+            continue
+        disabled.add(account.id)
+        literal_account_id = getattr(account, "account_id", None)
+        if literal_account_id:
+            disabled.add(str(literal_account_id))
+    return disabled
+
+
+def _broker_snapshot_account_keys(row: Mapping[str, Any]) -> set[str]:
+    payload = _mapping(row.get("payload"))
+    account = _mapping(payload.get("account"))
+    return {
+        str(value)
+        for value in (row.get("account_id"), payload.get("account_id"), account.get("account_id"))
+        if value
+    }
+
+
+def _latest_broker_snapshots_by_account(
+    store: StateStore,
+    config: MaestroConfig | None = None,
+) -> list[dict[str, Any]]:
+    disabled_ids = _disabled_broker_account_ids(config)
     latest_by_account = []
     seen = set()
     for snapshot in store.list_broker_account_snapshots(limit=1000):
         account_id = _broker_snapshot_account_id(snapshot)
         if not account_id or account_id in seen:
+            continue
+        # `account_id` alone may resolve to the raw broker account number
+        # (see _broker_snapshot_account_id's priority order) rather than the
+        # config's logical id, so check every candidate identifier this
+        # snapshot carries against the deny-list, not just the primary one.
+        if disabled_ids and _broker_snapshot_account_keys(snapshot) & disabled_ids:
             continue
         seen.add(account_id)
         latest_by_account.append(snapshot)

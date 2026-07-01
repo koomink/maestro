@@ -691,6 +691,87 @@ def test_telegram_operator_status_groups_fields_for_readability(tmp_path):
     assert "broker_cash:" not in text
 
 
+def test_telegram_operator_currency_breakdown_excludes_disabled_account(tmp_path):
+    """Regression test: a disabled account's stale snapshot must not be
+    folded into the /status command's broker cash/exposure totals.
+
+    Broker snapshots are never deleted, so a disabled/retired account (e.g.
+    a mock account left over from setup) keeps contributing its last
+    snapshot forever unless explicitly filtered out. This mirrors the
+    dashboard's kis_mock incident (a disabled mock account's stale snapshot
+    silently inflating Total Asset), applied to the Telegram bot's own
+    parallel currency-breakdown aggregate instead. Note: production tags
+    a KIS account's snapshot with the raw broker account number as the
+    primary `account_id` (see `_broker_snapshot_account_id`'s DB-column
+    priority) and the config's logical id only in the nested payload — this
+    fixture mirrors that shape rather than using the logical id directly.
+    """
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["execution"]["market_session"] = {
+        "required": False,
+        "timezone": "Asia/Seoul",
+        "open": "09:00",
+        "close": "15:30",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+    }
+    raw["accounts"] = [
+        {"id": "kis_ps", "broker": "kis", "enabled": True, "broker_products": ["kis_domestic_stock"]},
+        {"id": "kis_mock", "broker": "kis", "enabled": False, "broker_products": ["kis_domestic_stock"]},
+    ]
+    config_path = tmp_path / "telegram_currency_breakdown.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(config=config, store=store, audit=audit, client=client)
+    # Disabled account: a stale snapshot from a retired mock account.
+    store.save_broker_account_snapshot(
+        "run_stale",
+        "50186608-01",
+        {
+            "account_id": "kis_mock",
+            "account": {
+                "account_id": "50186608-01",
+                "currency": "KRW",
+                "cash": 10_000_000.0,
+                "positions": [],
+            },
+        },
+    )
+    # Enabled account: the real, currently-active trading account.
+    store.save_broker_account_snapshot(
+        "run_active",
+        "44667023-22",
+        {
+            "account_id": "kis_ps",
+            "account": {
+                "account_id": "44667023-22",
+                "currency": "KRW",
+                "cash": 1_000_000.0,
+                "positions": [],
+            },
+        },
+    )
+
+    assert router.process_update(message_update("/status"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "- total_value: 1,000,000.00 KRW" in text
+    assert "- cash: 1,000,000.00 KRW" in text
+    assert "11,000,000.00" not in text
+
+
 def test_telegram_operator_account_masks_account_id(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
