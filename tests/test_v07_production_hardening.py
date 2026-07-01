@@ -802,6 +802,77 @@ def test_daily_loss_limit_allows_when_normalized_broker_pnl_is_above_limit(tmp_p
     assert orchestrator.state_store.list_system_events_by_type("broker_risk_halt") == []
 
 
+def test_daily_loss_check_ignores_disabled_account_stale_snapshot(tmp_path):
+    """Regression test: a disabled account's stale/PnL-less snapshot must
+    not block live orders for a different, currently-enabled account.
+
+    The daily-loss check iterates every distinct snapshot found in the
+    state DB (broker snapshots are never deleted), so a disabled/retired
+    paper account with no PnL data would otherwise trip
+    `broker_pnl_unavailable` and block ALL live orders — regardless of
+    which account is actually trading. This mirrors the dashboard's
+    kis_mock incident (a disabled mock account's stale snapshot silently
+    inflating Total Asset), applied to the live order risk gate instead.
+
+    Exercises LiveExecutionGateService directly (like the other risk-gate
+    tests in this file) rather than through the full orchestrator, since
+    order execution / broker routing here is wired to whatever account the
+    strategy config resolved at load time and isn't the thing under test.
+    """
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={"live_order_limits": {"daily_loss_limit": 100.0}},
+    )
+    orchestrator.config.accounts = [
+        BrokerAccountConfig(
+            id="kis_ps",
+            broker="kis",
+            enabled=True,
+            account_id="MOCK",
+            broker_products=["kis_domestic_stock"],
+        ),
+        BrokerAccountConfig(
+            id="kis_mock",
+            broker="kis",
+            enabled=False,
+            account_id="RETIRED-MOCK",
+            broker_products=["kis_domestic_stock"],
+        ),
+    ]
+    # Disabled account: a stale snapshot with no PnL fields at all — if this
+    # were wrongly included, the daily-loss check would report
+    # broker_pnl_unavailable and block every live order.
+    _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {},
+        account_overrides={"account_id": "RETIRED-MOCK"},
+    )
+    _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        account_overrides={"account_id": "MOCK", "daily_pnl": -50.0},
+    )
+    orders = [
+        _order("kis_buy", "MOCK_ETF_A", Currency.KRW, 100_000.0).model_copy(
+            update={"account_id": "kis_ps"}
+        )
+    ]
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run_disabled_account_daily_loss", orders, [])
+
+    issues = [
+        issue
+        for block in blocks
+        if block.get("event_type") == "broker_risk_halt"
+        for issue in block.get("issues", [])
+    ]
+    assert not [issue for issue in issues if issue["reason"] == "broker_pnl_unavailable"]
+
+
 def test_live_recovery_required_blocks_next_live_approval_order(tmp_path):
     orchestrator = _live_orchestrator(tmp_path)
     _save_passed_reconciliation(orchestrator.state_store)

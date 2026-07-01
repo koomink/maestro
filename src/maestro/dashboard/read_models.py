@@ -255,18 +255,27 @@ def build_broker_snapshots_table(store: StateStore, limit: int = 20) -> list[dic
     return rows
 
 
-def _enabled_native_account_ids(config: MaestroConfig | None) -> set[str] | None:
-    """Logical account ids (the `id:` in broker_accounts.yaml) that are
-    currently enabled and should count toward aggregate totals, or `None`
-    when there is nothing to filter against (no config, or a config with no
-    accounts list at all — e.g. a simple paper-trading config that doesn't
-    declare `broker_accounts_path` and uses ad hoc account ids instead).
+def _disabled_native_account_ids(config: MaestroConfig | None) -> set[str]:
+    """Native identifiers (config `id` and, when set, the literal
+    `account_id`) of accounts that are explicitly disabled in the config.
 
     Broker snapshots are never deleted, so a disabled/retired account (e.g. a
     mock/paper account used during setup) keeps its last snapshot in the
     state DB forever. Without this filter, aggregation functions that "carry
     forward the latest snapshot per account" would keep including that
     account's stale value indefinitely, silently inflating every total.
+
+    This is a DENY-list (only positively-identified disabled accounts are
+    excluded) rather than an allow-list (only positively-identified enabled
+    accounts pass), which matters in practice: many configs — real ones
+    using `account_id_env` instead of a literal `account_id`, and test
+    fixtures that hand-write a broker snapshot with an ad hoc account_id
+    string unrelated to any config field — have no reliable way to prove a
+    snapshot "belongs" to a specific enabled account. An allow-list would
+    wrongly exclude those as unmatched; a deny-list only ever excludes a
+    snapshot when it's a confirmed match for an account we positively know
+    is disabled, so ambiguous/unmatched snapshots safely pass through
+    exactly as they did before this filter existed.
 
     Unlike `build_broker_account_overview` (which also excludes
     `broker == "sandbox"` for its "connected real broker accounts" display),
@@ -275,25 +284,21 @@ def _enabled_native_account_ids(config: MaestroConfig | None) -> set[str] | None
     on a paper account), so excluding them here would be wrong.
     """
     if config is None:
-        return None
-    accounts = list(getattr(config, "accounts", None) or [])
-    if not accounts:
-        return None
-    allowed: set[str] = set()
-    for account in accounts:
-        if not getattr(account, "enabled", False):
+        return set()
+    disabled: set[str] = set()
+    for account in getattr(config, "accounts", None) or []:
+        if getattr(account, "enabled", False):
             continue
-        allowed.add(account.id)
+        disabled.add(account.id)
         # Snapshots are usually tagged with the account's logical config id
-        # (e.g. "kis_isa"), but some configs (notably the legacy single-`kis:`
-        # block, auto-synthesized into an account with a generated id like
-        # "default_kis") set a literal `account_id` that snapshots are keyed
-        # by instead. Accept either so this filter can't wrongly exclude a
-        # currently-enabled account just because of how its id was resolved.
+        # (e.g. "kis_mock"), but some configs set a literal `account_id`
+        # that snapshots could be keyed by instead. Excluding on either
+        # avoids missing a disabled account just because of how a snapshot
+        # happened to be tagged.
         literal_account_id = getattr(account, "account_id", None)
         if literal_account_id:
-            allowed.add(str(literal_account_id))
-    return allowed
+            disabled.add(str(literal_account_id))
+    return disabled
 
 
 def _latest_broker_snapshots_by_account(
@@ -301,14 +306,14 @@ def _latest_broker_snapshots_by_account(
     config: MaestroConfig | None = None,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
-    allowed_ids = _enabled_native_account_ids(config)
+    disabled_ids = _disabled_native_account_ids(config)
     latest_by_account = []
     seen = set()
     for snapshot in store.list_broker_account_snapshots(limit=limit):
         account_id = _broker_snapshot_account_id(snapshot)
         if not account_id or account_id in seen:
             continue
-        if allowed_ids is not None and account_id not in allowed_ids:
+        if account_id in disabled_ids:
             continue
         seen.add(account_id)
         latest_by_account.append(snapshot)
@@ -857,11 +862,11 @@ def build_total_portfolio_performance_table(
     limit: int = 200,
     display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
-    allowed_ids = _enabled_native_account_ids(config)
+    disabled_ids = _disabled_native_account_ids(config)
     source_rows = [
         row
         for row in store.list_broker_account_snapshots(limit=limit)
-        if allowed_ids is None or _broker_snapshot_account_id(row) in allowed_ids
+        if _broker_snapshot_account_id(row) not in disabled_ids
     ]
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):

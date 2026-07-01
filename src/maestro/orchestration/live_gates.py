@@ -410,7 +410,7 @@ class LiveExecutionGateService:
         limits = execution.live_order_limits
         if not broker_validation.require_risk_validation and not limits.has_daily_loss_limit():
             return None
-        snapshots_by_account = _latest_broker_snapshots_by_account(self.state_store)
+        snapshots_by_account = _latest_broker_snapshots_by_account(self.state_store, self.config)
         if not snapshots_by_account:
             return {"reason": "missing_broker_snapshot"}
 
@@ -744,12 +744,56 @@ def _orders_by_account(orders: list[OrderIntent]) -> dict[str | None, list[Order
     return grouped
 
 
+def _disabled_account_native_keys(config: MaestroConfig | None) -> set[str]:
+    """Native identifiers (config `id` and, when set, the literal
+    `account_id`) of accounts that are explicitly disabled in the config.
+
+    Broker snapshots are never deleted, so a disabled/retired account (e.g. a
+    mock/paper account retired after setup) keeps its last snapshot in the
+    state DB forever. Without this filter, `_latest_broker_snapshots_by_
+    account` would keep including that stale snapshot in portfolio-wide risk
+    checks — most importantly `_daily_loss_risk_issues`, which iterates every
+    distinct snapshot and can block ALL live orders (not just ones for that
+    account) if a disabled account's leftover/missing PnL data looks like it
+    breached the daily loss limit.
+
+    This is a DENY-list (only positively-identified disabled accounts are
+    excluded) rather than an allow-list, which matters in practice: many
+    configs use `account_id_env` instead of a literal `account_id`, so a
+    snapshot's raw account_id can't always be matched back to a specific
+    enabled account. An allow-list would wrongly exclude those as
+    unmatched; a deny-list only ever excludes a snapshot confirmed to
+    belong to an account we positively know is disabled, so ambiguous or
+    unmatched snapshots (e.g. a single-account test fixture using an ad hoc
+    id) safely pass through exactly as they did before this filter existed.
+    This mirrors the equivalent dashboard read-model filter (see
+    `maestro.dashboard.read_models._disabled_native_account_ids`),
+    duplicated here rather than imported to keep the live order gate
+    decoupled from the dashboard module.
+    """
+    if config is None:
+        return set()
+    disabled: set[str] = set()
+    for account in getattr(config, "accounts", None) or []:
+        if getattr(account, "enabled", False):
+            continue
+        disabled.add(account.id)
+        literal_account_id = getattr(account, "account_id", None)
+        if literal_account_id:
+            disabled.add(str(literal_account_id))
+    return disabled
+
+
 def _latest_broker_snapshots_by_account(
     state_store: StateStore,
+    config: MaestroConfig | None = None,
 ) -> dict[str | None, dict[str, Any]]:
+    disabled_keys = _disabled_account_native_keys(config)
     snapshots: dict[str | None, dict[str, Any]] = {}
     for row in state_store.list_broker_account_snapshots(limit=1000):
         keys = _broker_snapshot_account_keys(row)
+        if keys & disabled_keys:
+            continue
         for key in keys:
             snapshots.setdefault(key, row)
         snapshots.setdefault(None, row)
