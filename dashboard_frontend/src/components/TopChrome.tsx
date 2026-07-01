@@ -111,7 +111,7 @@ export function TopChrome({
       <section className="ticker-strip" aria-label="Dashboard status strip">
         <TickerCell primary label="Total NAV" value={formatValue(total.total_value ?? total.current_value ?? total.value)} delta={displayCurrency} />
         <TickerCarousel accounts={snapshot.investment_console.broker_account_overview.accounts} />
-        <TickerCell label="Cash" value={metricValue(snapshot.investment_console.metrics, "Cash", "n/a")} delta="ready" />
+        <TickerCell label="Cash" value={metricValue(snapshot.investment_console.metrics, "Broker Cash", "n/a")} delta="ready" />
         <TickerCell label="Freshness" value={trust.freshness} delta="signals" tone={trust.freshnessTone} />
         <TickerCell label="Recon" value={trust.reconciliation} delta="state" tone={trust.reconciliationTone} />
         <TickerCell label="Gate" value={snapshot.header.order_posture} delta={snapshot.read_only ? "locked" : "active"} tone={snapshot.read_only ? "warning" : "success"} />
