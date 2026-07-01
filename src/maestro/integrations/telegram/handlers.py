@@ -1170,7 +1170,7 @@ class TelegramOperatorCommandRouter:
 
     def _status(self, chat_id: int) -> None:
         overview = build_overview(self.store)
-        broker = build_broker_account_summary(self.store)
+        broker = build_broker_account_summary(self.store, self.config)
         safety = build_safety_state_card(self.store)
         operator_config = overview.get("operator_config") or {}
         fingerprint = operator_config.get("fingerprint", "none")
@@ -1301,7 +1301,7 @@ class TelegramOperatorCommandRouter:
             self._refresh_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError) as exc:
             refresh_error = exc
-        account = build_broker_account_summary(self.store)
+        account = build_broker_account_summary(self.store, self.config)
         if account["created_at"] is None:
             if refresh_error is not None:
                 self._send(chat_id, f"Broker account snapshot refresh failed: {refresh_error}")

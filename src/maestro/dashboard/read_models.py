@@ -255,15 +255,60 @@ def build_broker_snapshots_table(store: StateStore, limit: int = 20) -> list[dic
     return rows
 
 
+def _enabled_native_account_ids(config: MaestroConfig | None) -> set[str] | None:
+    """Logical account ids (the `id:` in broker_accounts.yaml) that are
+    currently enabled and should count toward aggregate totals, or `None`
+    when there is nothing to filter against (no config, or a config with no
+    accounts list at all — e.g. a simple paper-trading config that doesn't
+    declare `broker_accounts_path` and uses ad hoc account ids instead).
+
+    Broker snapshots are never deleted, so a disabled/retired account (e.g. a
+    mock/paper account used during setup) keeps its last snapshot in the
+    state DB forever. Without this filter, aggregation functions that "carry
+    forward the latest snapshot per account" would keep including that
+    account's stale value indefinitely, silently inflating every total.
+
+    Unlike `build_broker_account_overview` (which also excludes
+    `broker == "sandbox"` for its "connected real broker accounts" display),
+    this only checks `enabled` — sandbox/paper accounts are legitimate data
+    sources for other features (e.g. voluntary-deposit cash-flow detection
+    on a paper account), so excluding them here would be wrong.
+    """
+    if config is None:
+        return None
+    accounts = list(getattr(config, "accounts", None) or [])
+    if not accounts:
+        return None
+    allowed: set[str] = set()
+    for account in accounts:
+        if not getattr(account, "enabled", False):
+            continue
+        allowed.add(account.id)
+        # Snapshots are usually tagged with the account's logical config id
+        # (e.g. "kis_isa"), but some configs (notably the legacy single-`kis:`
+        # block, auto-synthesized into an account with a generated id like
+        # "default_kis") set a literal `account_id` that snapshots are keyed
+        # by instead. Accept either so this filter can't wrongly exclude a
+        # currently-enabled account just because of how its id was resolved.
+        literal_account_id = getattr(account, "account_id", None)
+        if literal_account_id:
+            allowed.add(str(literal_account_id))
+    return allowed
+
+
 def _latest_broker_snapshots_by_account(
     store: StateStore,
+    config: MaestroConfig | None = None,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
+    allowed_ids = _enabled_native_account_ids(config)
     latest_by_account = []
     seen = set()
     for snapshot in store.list_broker_account_snapshots(limit=limit):
         account_id = _broker_snapshot_account_id(snapshot)
         if not account_id or account_id in seen:
+            continue
+        if allowed_ids is not None and account_id not in allowed_ids:
             continue
         seen.add(account_id)
         latest_by_account.append(snapshot)
@@ -281,8 +326,11 @@ def _broker_snapshot_account_id(snapshot: dict[str, Any]) -> str:
     )
 
 
-def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
-    latest_snapshots = _latest_broker_snapshots_by_account(store)
+def build_broker_account_summary(
+    store: StateStore,
+    config: MaestroConfig | None = None,
+) -> dict[str, Any]:
+    latest_snapshots = _latest_broker_snapshots_by_account(store, config)
     if not latest_snapshots:
         return {
             "created_at": None,
@@ -536,9 +584,10 @@ def _broker_account_overview_row(
 
 def build_broker_position_exposure_table(
     store: StateStore,
+    config: MaestroConfig | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    latest_snapshots = _latest_broker_snapshots_by_account(store)
+    latest_snapshots = _latest_broker_snapshots_by_account(store, config)
     if not latest_snapshots:
         return []
     positions_by_account = []
@@ -804,10 +853,16 @@ def build_currency_sleeve_performance_table(
 
 def build_total_portfolio_performance_table(
     store: StateStore,
+    config: MaestroConfig | None = None,
     limit: int = 200,
     display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
-    source_rows = store.list_broker_account_snapshots(limit=limit)
+    allowed_ids = _enabled_native_account_ids(config)
+    source_rows = [
+        row
+        for row in store.list_broker_account_snapshots(limit=limit)
+        if allowed_ids is None or _broker_snapshot_account_id(row) in allowed_ids
+    ]
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):
         group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
@@ -1390,7 +1445,7 @@ def build_operator_summary(config: MaestroConfig, store: StateStore) -> dict[str
     safety = build_safety_state_card(store)
     health = build_health_summary(config, store)
     broker_snapshot = build_latest_broker_snapshot_card(store)
-    broker_summary = build_broker_account_summary(store)
+    broker_summary = build_broker_account_summary(store, config)
     reconciliation = build_latest_reconciliation_card(store)
     daily_live_usage = build_daily_live_order_usage(config, store)
     live_order_lifecycle = build_live_order_lifecycle_summary(store)
