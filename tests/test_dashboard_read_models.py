@@ -786,6 +786,86 @@ def test_broker_summary_and_exposure_aggregate_latest_snapshot_per_account(tmp_p
     assert positions[0]["account_id"] == "kis_mock"
 
 
+def test_disabled_account_excluded_from_totals_when_config_is_supplied(tmp_path):
+    """Regression test: a disabled/retired account's stale snapshot must not
+    keep inflating aggregate totals forever.
+
+    Broker snapshots are never deleted, so once an account is disabled (e.g.
+    a mock/paper account retired after setup), its last known snapshot would
+    otherwise be "carried forward" into every total computed from
+    build_broker_account_summary / build_broker_position_exposure_table /
+    build_total_portfolio_performance_table — silently overstating Total
+    Asset by whatever that stale snapshot's value was. See the kis_mock
+    incident this test models: a disabled paper account's June snapshot
+    inflated production "Total assets" by ~10M KRW alongside three real,
+    still-enabled accounts.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    config = type(
+        "Config",
+        (),
+        {
+            "accounts": [
+                BrokerAccountConfig(
+                    id="kis_mock",
+                    broker="kis",
+                    enabled=False,
+                    broker_products=["kis_overseas_stock"],
+                ),
+                BrokerAccountConfig(
+                    id="kis_ps",
+                    broker="kis",
+                    enabled=True,
+                    broker_products=["kis_overseas_stock"],
+                ),
+            ],
+        },
+    )()
+    store.save_broker_account_snapshot(
+        "run_disabled",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "account": {
+                "account_id": "MOCK-BROKER",
+                "currency": "KRW",
+                "cash": 10_000_000.0,
+                "total_value": 10_000_000.0,
+                "positions": [],
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_enabled",
+        "kis_ps",
+        {
+            "account_id": "kis_ps",
+            "account": {
+                "account_id": "PS-BROKER",
+                "currency": "KRW",
+                "cash": 5_000_000.0,
+                "total_value": 5_000_000.0,
+                "positions": [],
+            },
+        },
+    )
+
+    # With config: the disabled account must be excluded.
+    summary = build_broker_account_summary(store, config)
+    positions = build_broker_position_exposure_table(store, config)
+    performance = build_total_portfolio_performance_table(store, config, display_currency="KRW")
+
+    assert summary["cash"] == 5_000_000.0
+    assert summary["total_value"] == 5_000_000.0
+    assert all(row["account_id"] != "kis_mock" for row in positions)
+    assert performance[0]["total_value"] == 5_000_000.0
+
+    # Without config: unfiltered, backward-compatible behavior is preserved
+    # (older/simple configs with no accounts list have nothing to filter by).
+    unfiltered_summary = build_broker_account_summary(store)
+    assert unfiltered_summary["total_value"] == 15_000_000.0
+
+
 def test_account_performance_table_tracks_returns_drawdown_and_reconciliation(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     snapshots = [
