@@ -299,9 +299,17 @@ def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
             "source": None,
         }
     latest = latest_snapshots[0]
+    # Positions and account totals are summed in their OWN currency first and
+    # only converted to `display_currency` at the end. Brokers such as Toss
+    # report a single account holding both KRW and USD-listed instruments
+    # with no pre-aggregated total; summing raw prices across accounts
+    # without this split would silently mix units.
+    display_currency = "KRW"
+    fx_snapshot = build_fx_rate_snapshot_card(store)
     cash_values = []
     buying_power_values = []
-    total_values = []
+    total_value_components: dict[str, float] = {}
+    positions_value_components: dict[str, float] = {}
     all_positions = []
     unrealized_pnls = []
     sources = []
@@ -316,9 +324,10 @@ def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
         buying_power = _float_or_none(account.get("buying_power"))
         if buying_power is not None:
             buying_power_values.append(buying_power)
-        total_value = _account_total_value(account, positions)
-        if total_value is not None:
-            total_values.append(total_value)
+        for currency, value in _account_value_components(
+            account, positions, payload, default_currency=display_currency
+        ).items():
+            total_value_components[currency] = total_value_components.get(currency, 0.0) + value
         unrealized_pnls.extend(
             pnl
             for pnl in (_float_or_none(position.get("unrealized_pnl")) for position in positions)
@@ -328,9 +337,23 @@ def build_broker_account_summary(store: StateStore) -> dict[str, Any]:
         if source:
             sources.append(str(source))
 
-    positions_market_value = sum(_position_market_value(position) for position in all_positions)
+    for position in all_positions:
+        currency = str(position.get("currency") or display_currency)
+        positions_value_components[currency] = positions_value_components.get(
+            currency, 0.0
+        ) + _position_market_value(position)
+
+    positions_market_value = (
+        _convert_components(positions_value_components, display_currency, fx_snapshot)
+        if positions_value_components
+        else None
+    )
     cash = sum(cash_values) if cash_values else None
-    total_value = sum(total_values) if total_values else None
+    total_value = (
+        _convert_components(total_value_components, display_currency, fx_snapshot)
+        if total_value_components
+        else None
+    )
     account_id = _broker_snapshot_account_id(latest)
     return {
         "created_at": latest.get("created_at"),
@@ -816,10 +839,10 @@ def build_total_portfolio_performance_table(
             payload = _mapping(row.get("payload"))
             account = _mapping(payload.get("account"))
             positions = _positions(account)
-            currency = _snapshot_currency(account, payload)
-            total_value = _account_total_value(account, positions)
-            if total_value is not None:
-                component_values[currency] = component_values.get(currency, 0.0) + total_value
+            for currency, value in _account_value_components(
+                account, positions, payload, default_currency=display_currency
+            ).items():
+                component_values[currency] = component_values.get(currency, 0.0) + value
             reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
             reconciliation_statuses.append(_reconciliation_status(reconciliation))
         for row in group_rows:
@@ -2074,7 +2097,7 @@ def _position_market_value(position: dict[str, Any]) -> float:
     return quantity * current_price
 
 
-def _account_total_value(account: dict[str, Any], positions: list[dict[str, Any]]) -> float | None:
+def _broker_reported_total_value(account: dict[str, Any]) -> float | None:
     cash_balance = _mapping(account.get("cash_balance"))
     total_value = _first_float(
         cash_balance,
@@ -2083,17 +2106,65 @@ def _account_total_value(account: dict[str, Any], positions: list[dict[str, Any]
     )
     if total_value is not None:
         return total_value
-    total_value = _first_float(
+    return _first_float(
         account,
         {},
         ("total_value", "total_equity", "equity", "net_asset_value"),
     )
+
+
+def _account_total_value(account: dict[str, Any], positions: list[dict[str, Any]]) -> float | None:
+    total_value = _broker_reported_total_value(account)
     if total_value is not None:
         return total_value
     cash = _float_or_none(account.get("cash"))
     if cash is None and not positions:
         return None
     return (cash or 0.0) + sum(_position_market_value(position) for position in positions)
+
+
+def _account_value_components(
+    account: dict[str, Any],
+    positions: list[dict[str, Any]],
+    payload: dict[str, Any],
+    default_currency: str = "KRW",
+) -> dict[str, float]:
+    """Native-currency breakdown of one account's assets.
+
+    Prefers the broker's own pre-aggregated total (already correctly
+    denominated in the account's reporting currency) when available.
+    Otherwise sums cash and each position at ITS OWN currency: brokers such
+    as Toss report a mixed KRW/USD portfolio under a single account with no
+    aggregate total, and summing raw prices without this split silently
+    mixes units (a $353 USD position would be counted as if it were 353
+    KRW). `_snapshot_currency` only labels the whole account with one
+    currency, so it cannot express that split — this looks at each
+    position's own `currency` field instead.
+
+    `default_currency` is used only when NO currency information exists
+    anywhere on the account/payload/position (`_snapshot_currency` falls
+    back to the "UNKNOWN" sentinel) — e.g. older paper/sandbox fixtures that
+    never set a currency field. In that case there is nothing to split by
+    definition, so this preserves the historical single-bucket behavior
+    instead of producing an unconvertible "UNKNOWN" component.
+    """
+    reported_total = _broker_reported_total_value(account)
+    account_currency = _snapshot_currency(account, payload)
+    if account_currency == "UNKNOWN":
+        account_currency = default_currency
+    if reported_total is not None:
+        return {account_currency: reported_total}
+
+    cash_balance = _mapping(account.get("cash_balance"))
+    cash_currency = str(cash_balance.get("currency") or account_currency)
+    components: dict[str, float] = {}
+    cash = _float_or_none(account.get("cash"))
+    if cash is not None:
+        components[cash_currency] = components.get(cash_currency, 0.0) + cash
+    for position in positions:
+        currency = str(position.get("currency") or cash_currency)
+        components[currency] = components.get(currency, 0.0) + _position_market_value(position)
+    return components
 
 
 def _account_unrealized_pnl(
