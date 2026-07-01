@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Maestro FX refresh hourly (keep FX comfortably under its 4h staleness threshold)
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+Unit=maestro-fx-refresh.service
+
+[Install]
+WantedBy=timers.target

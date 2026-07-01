@@ -375,3 +375,39 @@ Frontend deploys: after `npm run dashboard:build` writes to
 few seconds. The frontend itself self-heals — it polls the snapshot on an
 interval with backoff and keeps the last good data on screen during a restart,
 so clients reconnect automatically.
+
+## FX rate freshness
+
+`fx-refresh` is the only place USD/KRW rates get written; no other scheduled
+job (`kis-sync`, `reconcile`, `daily-signal-approval`) touches FX at all, and
+those only run once or twice a day around market open
+(`maestro-symphony-signal.timer` fires weekdays at 09:10 KST / 09:40 America/
+New York). FX's own staleness threshold is 4h (`fx.stale_after_seconds`,
+default 14400s), so without a dedicated periodic refresh it goes stale every
+afternoon and stays stale overnight and on weekends until someone manually
+clicks "Refresh" in the dashboard — at which point every total that requires a
+currency conversion (Total assets in KRW/USD, Portfolio Pulse cash/exposure,
+the speedometer) reports `n/a` instead of a number.
+
+`maestro-fx-refresh.timer` runs `maestro fx-refresh` hourly to keep it
+comfortably ahead of that 4h threshold. The call is read-only, hits only the
+external FX provider (no broker credentials, no KIS rate limits), and is
+internally throttled to `fx.refresh_interval_seconds` (default 3600s), so
+running it hourly is exactly matched to the throttle — no wasted provider
+calls, and a single missed run still leaves hours of buffer before staleness.
+
+Install:
+
+```bash
+sudo cp deploy/systemd/maestro-fx-refresh.service \
+        deploy/systemd/maestro-fx-refresh.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now maestro-fx-refresh.timer
+```
+
+Verify:
+
+```bash
+systemctl list-timers maestro-fx-refresh.timer
+journalctl -u maestro-fx-refresh.service -n 5 --no-pager
+```

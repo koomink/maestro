@@ -1,0 +1,24 @@
+[Unit]
+Description=Refresh Maestro FX rate snapshot
+Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+After=network-online.target
+Wants=network-online.target
+
+# `fx-refresh` is the only place USD/KRW rates get written; no other
+# scheduled job (kis-sync, reconcile, daily-signal-approval) touches FX at
+# all, and those only run once or twice a day around market open. FX's own
+# staleness threshold is 4h (fx.stale_after_seconds, default 14400s), so
+# without this timer it goes stale every afternoon and stays stale
+# overnight/weekends until someone manually clicks "Refresh" in the
+# dashboard. This call is read-only, hits only the external FX provider (no
+# broker credentials, no KIS rate limits), and is internally throttled to
+# fx.refresh_interval_seconds (default 3600s) — running it more often than
+# that is a harmless no-op cache hit.
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/projects/Symphony/Maestro
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro fx-refresh --config ${MAESTRO_READONLY_CONFIG}
+StandardOutput=journal
+StandardError=journal
