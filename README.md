@@ -156,7 +156,8 @@ KIS accounts can use `environment: real` or `environment: paper_trading`. Toss
 accounts use one domestic/overseas OpenAPI adapter for snapshots, submit,
 status, modification, and cancellation. Initial armed operation permits
 Telegram-approved integer-quantity DAY limit orders; market and amount orders
-remain blocked by the live safety policy.
+remain blocked by the live safety policy. Toss account orders with fractional
+quantities are rejected by live gates before approval or broker submission.
 
 ## Project Status
 
@@ -370,7 +371,9 @@ Paper mode currently records a `safety_gate_warning` and continues so local
 simulation remains usable. The kill switch is intentionally not reset by
 `resume` or `clear-halt`. A halted state can be cleared only with
 `clear-halt --reason` after the operator reviews state, audit events, broker
-account status, and the specific halt cause.
+account status, and the specific halt cause. The CLI re-runs health checks
+before clearing a halt and refuses recovery while any non-safety check is
+failing.
 
 v0.6 starts `live_approval` infrastructure, not `live_auto`. Live order submission
 is disabled by default and is available only through the safety interface. The
@@ -441,8 +444,9 @@ For real-account rehearsals,
 `execution.broker_validation.require_risk_validation=true`
 adds a broker-snapshot risk gate before approval submission. It checks settled
 buying power with `execution.live_order_limits.fee_buffer_pct`, post-order cash,
-pending broker orders, and whether the latest broker snapshot is the one that
-passed reconciliation. When
+pending broker orders, and whether each order account's latest broker snapshot
+is the one that passed reconciliation. Orders with an explicit account id fail
+closed when that account's broker snapshot is missing. When
 `execution.broker_validation.require_quote_validation=true`, live approval order
 generation can reuse the latest broker snapshot's validated `current_prices` as
 the limit price basis instead of drifting from the broker quote checked during
@@ -994,7 +998,9 @@ configuration fails. Health checks cover config loading, SQLite state, audit
 path, enabled strategy plugin loading, safety state, recent halt/failure events,
 DataHub config, KIS env var presence, token cache path, live approval preflight
 configuration, latest broker snapshot age, and latest reconciliation status.
-Missing KIS env vars, plugin import errors, or broker snapshots are reported
+KIS env and broker product checks apply to enabled KIS broker accounts; Toss
+accounts use their account-level broker routing instead of KIS product routing.
+Missing broker env vars, plugin import errors, or broker snapshots are reported
 without printing secret values.
 
 `maestro reconcile --config ...` refreshes the KIS read-only broker snapshot

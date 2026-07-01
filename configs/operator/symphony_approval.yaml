@@ -276,6 +276,35 @@ execution:
     close: "16:00"
     weekdays: [0, 1, 2, 3, 4]
     holidays: []
+  market_sessions_by_exchange:
+    NASD:
+      required: true
+      timezone: America/New_York
+      open: "09:30"
+      close: "16:00"
+      weekdays: [0, 1, 2, 3, 4]
+      holidays: []
+    NYSE:
+      required: true
+      timezone: America/New_York
+      open: "09:30"
+      close: "16:00"
+      weekdays: [0, 1, 2, 3, 4]
+      holidays: []
+    AMEX:
+      required: true
+      timezone: America/New_York
+      open: "09:30"
+      close: "16:00"
+      weekdays: [0, 1, 2, 3, 4]
+      holidays: []
+    KRX:
+      required: true
+      timezone: Asia/Seoul
+      open: "09:00"
+      close: "15:30"
+      weekdays: [0, 1, 2, 3, 4]
+      holidays: []
   broker_validation:
     require_quote_validation: true
     max_quote_deviation_pct: 0.02

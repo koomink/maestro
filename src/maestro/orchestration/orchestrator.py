@@ -199,18 +199,19 @@ class MaestroOrchestrator:
                 strategy_ids=selected_strategy_ids or None,
             )
         )
+        native_prices = self._enrich_sleeve_prices(prices)
+        valuation_prices = self._apply_fx_prices(native_prices)
         target, risk_decision, order_targets = self._build_account_scoped_targets(
             signal_run_id,
             valid_results,
             self.risk_manager,
             current_state,
-            prices,
+            valuation_prices,
         )
         if not risk_decision.approved:
             raise ValueError(f"Risk check failed: {risk_decision.violations}")
         order_generation_time = utc_now()
-        prices = self._order_generation_prices(prices)
-        prices = self._apply_fx_prices(prices)
+        order_prices = self._order_generation_prices(native_prices)
         orders = []
         funding_requests: list[ContributionFundingRequest] = []
         budget_requests: list[ContributionBudgetRequest] = []
@@ -240,7 +241,7 @@ class MaestroOrchestrator:
             account_orders = scoped_execution.propose_orders(
                 order_scope.state,
                 order_scope.target,
-                prices,
+                valuation_prices,
                 as_of=order_generation_time,
                 contribution_already_executed=contribution_already_executed,
             )
@@ -255,13 +256,16 @@ class MaestroOrchestrator:
                 if funding_request is not None:
                     funding_requests.append(funding_request)
             orders.extend(
-                self._stamp_orders_with_account_id(
-                    account_orders,
-                    order_scope.target.source_strategy_ids,
-                    account_id=order_scope.account_id,
-                    execution_sleeve=order_scope.execution_sleeve,
-                    contribution_group_id=order_scope.contribution_group_id,
-                    signal_preview=True,
+                self._apply_native_order_prices(
+                    self._stamp_orders_with_account_id(
+                        account_orders,
+                        order_scope.target.source_strategy_ids,
+                        account_id=order_scope.account_id,
+                        execution_sleeve=order_scope.execution_sleeve,
+                        contribution_group_id=order_scope.contribution_group_id,
+                        signal_preview=True,
+                    ),
+                    order_prices,
                 )
             )
         approval_orders = self._signal_orders_requiring_approval(orders)
@@ -536,14 +540,14 @@ class MaestroOrchestrator:
                     )
                 valid_results.append(result)
 
-            prices = self._enrich_sleeve_prices(prices)
-            prices = self._apply_fx_prices(prices)
+            native_prices = self._enrich_sleeve_prices(prices)
+            valuation_prices = self._apply_fx_prices(native_prices)
             target, risk_decision, order_targets = self._build_account_scoped_targets(
                 run_id,
                 valid_results,
                 risk_manager,
                 current_state,
-                prices,
+                valuation_prices,
             )
             if not risk_decision.approved:
                 raise ValueError(f"Risk check failed: {risk_decision.violations}")
@@ -560,7 +564,7 @@ class MaestroOrchestrator:
                 return self._finish_live_blocked_run(
                     run_id,
                     current_state,
-                    prices,
+                    valuation_prices,
                     data_requests_by_strategy,
                     valid_results,
                     target,
@@ -571,7 +575,7 @@ class MaestroOrchestrator:
                 )
 
             order_generation_time = utc_now()
-            prices = self._order_generation_prices(prices)
+            order_prices = self._order_generation_prices(native_prices)
             orders = []
             for order_scope in order_targets:
                 scoped_execution = build_execution_engine(
@@ -582,7 +586,7 @@ class MaestroOrchestrator:
                 account_orders = scoped_execution.propose_orders(
                     order_scope.state,
                     order_scope.target,
-                    prices,
+                    valuation_prices,
                     as_of=order_generation_time,
                     contribution_already_executed=self._contribution_already_executed(
                         order_generation_time,
@@ -592,11 +596,14 @@ class MaestroOrchestrator:
                     ),
                 )
                 orders.extend(
-                    self._stamp_orders_with_account_id(
-                        account_orders,
-                        order_scope.target.source_strategy_ids,
-                        account_id=order_scope.account_id,
-                        execution_sleeve=order_scope.execution_sleeve,
+                    self._apply_native_order_prices(
+                        self._stamp_orders_with_account_id(
+                            account_orders,
+                            order_scope.target.source_strategy_ids,
+                            account_id=order_scope.account_id,
+                            execution_sleeve=order_scope.execution_sleeve,
+                        ),
+                        order_prices,
                     )
                 )
             approval_orders = self._orders_requiring_approval(orders)
@@ -605,7 +612,7 @@ class MaestroOrchestrator:
                     run_id,
                     orders,
                     data_requests_by_strategy,
-                    prices,
+                    order_prices,
                     data_quality_issues,
                     target,
                     risk_decision,
@@ -629,7 +636,7 @@ class MaestroOrchestrator:
                 return self._finish_live_blocked_run(
                     run_id,
                     current_state,
-                    prices,
+                    valuation_prices,
                     data_requests_by_strategy,
                     valid_results,
                     target,
@@ -731,14 +738,14 @@ class MaestroOrchestrator:
                 run_id,
                 valid_results,
                 next_state,
-                prices,
+                valuation_prices,
             )
 
             summary = RunOnceSummary(
                 run_id=run_id,
                 loaded_strategies=[strategy.config.id for strategy in self.registry.strategies],
                 orders_created=len(approval_orders),
-                total_value=next_state.total_value(prices),
+                total_value=next_state.total_value(valuation_prices),
                 cash=next_state.cash,
             )
             self.audit.log(
@@ -764,7 +771,7 @@ class MaestroOrchestrator:
                     "execution_results": [
                         result.model_dump(mode="json") for result in execution_results
                     ],
-                    "state_summary": next_state.summary(prices),
+                    "state_summary": next_state.summary(valuation_prices),
                 },
             )
             self.state_store.save_system_event(
@@ -993,7 +1000,7 @@ class MaestroOrchestrator:
         if not broker_prices:
             return prices
         if self.config.execution.broker_validation.require_quote_validation:
-            return {**prices, **_convert_broker_prices_to_base(self.config, broker_prices)}
+            return {**prices, **broker_prices}
         return {**broker_prices, **prices}
 
     def _enrich_sleeve_prices(self, prices: dict[str, float]) -> dict[str, float]:
@@ -1019,21 +1026,22 @@ class MaestroOrchestrator:
 
     def _apply_fx_prices(self, prices: dict[str, float]) -> dict[str, float]:
         """Convert USD prices to KRW using FX rates."""
+        converted_prices = dict(prices)
         if self.config.portfolio.base_currency == "KRW":
             try:
                 fx_result = self.fx_service.refresh_from_config()
                 usd_to_krw = float(fx_result.rates.get("USD/KRW", 1.0))
             except Exception:
-                return prices
+                return converted_prices
 
             for symbol, price in prices.items():
                 if symbol.startswith("CASH_"):
                     continue
                 currency = self._currency_for_symbol(symbol)
                 if currency == "USD":
-                    prices[symbol] = price * usd_to_krw
+                    converted_prices[symbol] = price * usd_to_krw
 
-        return prices
+        return converted_prices
 
     def _initial_prices(self) -> dict[str, float]:
         cash_symbols = self._configured_cash_symbols()
@@ -2496,6 +2504,27 @@ class MaestroOrchestrator:
                     account_ids.add(target.account_id)
         return sorted(account_ids)
 
+    def _apply_native_order_prices(
+        self,
+        orders: list[OrderIntent],
+        prices: dict[str, float],
+    ) -> list[OrderIntent]:
+        repriced_orders: list[OrderIntent] = []
+        for order in orders:
+            price = prices.get(order.symbol)
+            if price is None:
+                repriced_orders.append(order)
+                continue
+            repriced_orders.append(
+                order.model_copy(
+                    update={
+                        "price": price,
+                        "notional": abs(order.quantity) * price,
+                    }
+                )
+            )
+        return repriced_orders
+
     def _stamp_orders_with_account_id(
         self,
         orders: list[OrderIntent],
@@ -2580,36 +2609,6 @@ def _broker_snapshot_prices(snapshot: dict[str, Any]) -> dict[str, float]:
         if symbol and current_price is not None and float(current_price) > 0:
             prices[symbol] = float(current_price)
     return prices
-
-
-def _convert_broker_prices_to_base(
-    config: MaestroConfig,
-    prices: dict[str, float],
-) -> dict[str, float]:
-    """Convert broker snapshot prices from instrument currency to base currency (KRW).
-    This prevents _order_generation_prices from overwriting FX-converted strategy
-    prices with raw broker prices in USD."""
-    from maestro.fx.service import ConfiguredFXRefreshService
-    from maestro.state.store import StateStore
-
-    base = config.portfolio.base_currency
-    if base != "KRW":
-        return prices
-    try:
-        store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-        fx_svc = ConfiguredFXRefreshService(config, store)
-        fx_result = fx_svc.refresh_from_config()
-        usd_to_krw = float(fx_result.rates.get("USD/KRW", 1.0))
-    except Exception:
-        return prices
-
-    instrument_currencies = {inst.symbol: inst.currency for inst in config.universe.instruments}
-    converted = dict(prices)
-    for symbol, price in prices.items():
-        currency = instrument_currencies.get(symbol, "KRW")
-        if currency == "USD":
-            converted[symbol] = price * usd_to_krw
-    return converted
 
 
 def _merge_portfolio_states(states: list[PortfolioState]) -> PortfolioState:

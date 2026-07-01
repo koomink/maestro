@@ -66,8 +66,9 @@ For the complete operator-local promotion runbook, see
 - Enable `execution.broker_validation.require_quote_validation=true` only after
   KIS read-only sync writes current prices for the intended order symbols.
 - Enable `execution.broker_validation.require_risk_validation=true` only after
-  the latest KIS read-only snapshot is reconciled and includes cash, buying
-  power, current prices, positions, and unfilled orders.
+  each enabled broker account has a reconciled snapshot with cash, buying power,
+  current prices, positions, and unfilled orders. Explicit account orders fail
+  closed when that account's snapshot is missing.
 - Confirm KIS overseas buy orders perform a pre-submit `/inquire-psamount`
   check with the exact limit price, and fail closed on insufficient buying power
   or max buy quantity.
@@ -204,8 +205,11 @@ maestro health --config <live-approval-config>
 
 Confirm `live_approval_preflight` is `ok`. Do not proceed when it reports
 missing reconciliation requirements, non-Telegram approval, missing Telegram
-chat/user allowlists, missing KIS overseas broker product config, unsupported
-exchange codes, or missing live notional caps.
+chat/user allowlists, missing enabled-broker product config, unsupported
+exchange codes, or missing live notional caps. KIS product checks apply to KIS
+accounts; Toss live routing is validated from the account broker. The first
+armed Toss policy allows integer-quantity DAY limit orders only, and fractional
+Toss quantities fail closed before approval or broker submission.
 
 For the final rehearsal before broker submission, set
 `execution.order_posture=dry_run` in the operator-local config and run:
@@ -386,7 +390,8 @@ maestro clear-halt --config <live-approval-config> --reason "<root cause fixed>"
 ```
 
 `resume` does not clear halted state. `clear-halt` and `resume` do not clear a
-killed state.
+killed state. `clear-halt` also refuses recovery while any non-safety health
+check is failing.
 
 ## Monitoring / Audit Checks
 

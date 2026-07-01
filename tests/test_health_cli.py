@@ -330,6 +330,61 @@ def test_health_live_approval_preflight_reports_ready_when_config_is_safe(
     assert checks["live_approval_preflight"].message == "ready"
 
 
+def test_health_live_approval_preflight_allows_toss_account_without_kis_provider(tmp_path):
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["accounts"] = [
+        {
+            "id": "toss_brokerage",
+            "broker": "toss",
+            "environment": "real",
+            "account_seq": 1,
+        }
+    ]
+    raw["kis"] = {"enabled": False, "provider": "mock"}
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["live_approval_preflight"].status == "ok"
+
+
+def test_health_live_approval_preflight_skips_kis_product_check_for_non_kis_routes(
+    tmp_path,
+):
+    config_path = _live_approval_config(tmp_path)
+    raw = yaml.safe_load(config_path.read_text())
+    raw["accounts"] = [
+        {
+            "id": "kis_isa",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+            "provider": "kis",
+            "broker_products": ["kis_domestic_stock"],
+            "account_id": "00000000-01",
+        },
+        {
+            "id": "toss_brokerage",
+            "broker": "toss",
+            "environment": "real",
+            "account_seq": 1,
+        },
+    ]
+    raw["kis"] = {"enabled": False, "provider": "mock"}
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["live_approval_preflight"].status == "ok"
+
+
 def test_health_fails_when_enabled_strategy_entrypoint_cannot_load(tmp_path):
     config_path = _live_approval_config(tmp_path)
     raw = yaml.safe_load(config_path.read_text())

@@ -2,6 +2,7 @@ import pytest
 
 from maestro.approval.models import ApprovalDecision
 from maestro.config.models import (
+    AccountStrategyTargetConfig,
     ApprovalConfig,
     AuditConfig,
     BrokerAccountConfig,
@@ -39,6 +40,7 @@ from maestro.execution.live_orders import (
 )
 from maestro.execution.reconciliation import ReconciliationResult
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.state.store import StateStore
 
 
@@ -174,6 +176,66 @@ def test_live_approval_factory_can_wire_cancel_service_with_fake_client(tmp_path
 
     assert result.status == OrderStatus.CANCELED
     assert cancel_client.requests == [request]
+
+
+def test_live_approval_submit_blocks_unadopted_toss_attribution_before_broker_submit(
+    tmp_path,
+):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    config = _config(tmp_path).model_copy(
+        update={
+            "accounts": [
+                BrokerAccountConfig(
+                    id="toss_brokerage",
+                    broker="toss",
+                    environment="real",
+                    account_seq=7,
+                )
+            ],
+            "account_strategy_targets": {
+                "toss_brokerage": {
+                    "crescendo_us": AccountStrategyTargetConfig(target_weight=0.7),
+                    "manual": AccountStrategyTargetConfig(target_weight=0.3),
+                }
+            },
+        }
+    )
+    submit_client = FakeLiveOrderClient()
+    store.save_system_event("run_reconcile_initial", "broker_reconciliation", {"passed": True})
+    store.save_broker_account_snapshot(
+        "run_broker_snapshot",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "toss_brokerage",
+                "positions": [{"symbol": "005930", "quantity": 2.0}],
+            },
+        },
+    )
+    snapshot_id = store.list_broker_account_snapshots(limit=1)[0]["id"]
+    AccountAttributionReconciliationService(store, audit).reconcile_broker_snapshot(
+        run_id="run_attribution",
+        account_id="toss_brokerage",
+        broker_snapshot_id=snapshot_id,
+        broker_positions={"005930": 2.0},
+        strategy_symbols_by_bucket={"crescendo_us": {"005930"}},
+    )
+    dependencies = build_live_approval_dependencies(
+        config,
+        store,
+        audit,
+        live_order_client=submit_client,
+        status_client=FakeLiveOrderStatusClient(OrderStatus.OPEN),
+        account_id="toss_brokerage",
+    )
+    request = _request().model_copy(update={"account_id": "toss_brokerage"})
+
+    with pytest.raises(ValueError, match="account attribution is not adopted"):
+        dependencies.safety_service.submit_approved_order(request, _approval(request))
+
+    assert submit_client.requests == []
 
 
 def test_live_approval_factory_requires_injected_clients_for_mock_provider(tmp_path):

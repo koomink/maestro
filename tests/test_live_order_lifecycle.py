@@ -114,6 +114,9 @@ def test_lifecycle_unknown_status_halts(tmp_path):
     assert result.final_status == OrderStatus.HALTED
     assert "unknown order state" in (result.halt_reason or "")
     assert store.list_system_events_by_type("fill_reconciliation") == []
+    recovery = store.list_system_events_by_type("live_order_recovery_required")[0]["payload"]
+    assert recovery["reason"] == "unknown_broker_order_status"
+    assert recovery["order_id"] == request.order_id
     assert notifier.events[-1].status == OrderStatus.HALTED
 
 

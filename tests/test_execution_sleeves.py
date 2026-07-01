@@ -7,6 +7,7 @@ from maestro.execution.execution_sleeves import (
     allocate_cash_rebalanced_scope_states,
     validate_unique_execution_scope_symbols,
 )
+from maestro.execution.order_builder import OrderBuilder
 from maestro.portfolio.manager import PortfolioTarget
 from maestro.state.models import PortfolioState
 
@@ -170,6 +171,40 @@ def test_account_target_weight_reserves_manual_capacity(
     assert allocated[0].allocated_cash == pytest.approx(expected_allocated_cash)
     assert allocated[0].current_weight == pytest.approx(0.3)
     assert allocated[0].state.positions == {"QQQ": 3.0}
+
+
+def test_manual_overweight_capacity_flows_into_generated_strategy_buy_orders():
+    state = PortfolioState(
+        cash=30.0,
+        positions={"QQQ": 7.0},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 5, 28, tzinfo=UTC),
+        allocations={"QQQ": 1.0},
+        source_strategy_ids=["crescendo_us"],
+    )
+    allocated = allocate_cash_rebalanced_scope_states(
+        current_state=state,
+        scopes=[
+            ExecutionScopeDraft(
+                account_id="toss_brokerage",
+                execution_sleeve="crescendo_us",
+                currency_sleeve=None,
+                target_weight=0.7,
+                target=target,
+                attributed_positions={"QQQ": 3.0},
+            )
+        ],
+        prices={"QQQ": 10.0},
+    )[0]
+
+    orders = OrderBuilder().build_orders(allocated.state, allocated.target, {"QQQ": 10.0})
+
+    assert allocated.allocated_cash == pytest.approx(30.0)
+    assert allocated.state.positions == {"QQQ": 3.0}
+    assert [(order.side.value, order.symbol, order.notional) for order in orders] == [
+        ("buy", "QQQ", 30.0)
+    ]
 
 
 def test_execution_sleeves_reject_shared_target_symbol_within_account():

@@ -251,13 +251,18 @@ TimeoutStartSec=1200
 Description=Run Maestro Symphony signal workflow on trading days
 
 [Timer]
-OnCalendar=Mon..Fri 09:10:00
+OnCalendar=Mon..Fri 09:10:00 Asia/Seoul
+OnCalendar=Mon..Fri 09:40:00 America/New_York
 Persistent=true
 Unit=maestro-symphony-signal.service
 
 [Install]
 WantedBy=timers.target
 ```
+
+The first trigger covers the KRX session shortly after the Seoul open. The
+second trigger covers US-listed symbols shortly after the New York open, and
+systemd handles daylight-saving transitions through the explicit timezone.
 
 ## Legacy Scheduled Run-once Timer
 

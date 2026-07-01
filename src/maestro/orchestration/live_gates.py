@@ -5,9 +5,10 @@ from zoneinfo import ZoneInfo
 
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import Currency, OrderSide, RunMode
+from maestro.core.enums import Currency, OrderSide, OrderType, RunMode
 from maestro.core.trading_day import trading_day_bounds_utc_str
 from maestro.execution.base import OrderIntent
+from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.store import StateStore
@@ -50,7 +51,7 @@ class LiveExecutionGateService:
                 {"event_type": SystemEventType.LIVE_ORDER_RECOVERY_HALT.value, **recovery_block}
             )
 
-        market_session_block = self._market_session_block()
+        market_session_block = self._market_session_block(orders)
         if market_session_block is not None:
             self._record_event(run_id, SystemEventType.MARKET_SESSION_HALT, market_session_block)
             blocks.append(
@@ -114,16 +115,43 @@ class LiveExecutionGateService:
             )
         return blocks
 
-    def _market_session_block(self) -> dict[str, Any] | None:
+    def _market_session_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
         market_session = self.config.execution.market_session
         if not market_session.required:
             return None
+        instruments = {
+            instrument.symbol: instrument for instrument in self.config.universe.instruments
+        }
+        sessions_by_exchange = self.config.execution.market_sessions_by_exchange
+        if sessions_by_exchange:
+            checked_sessions: set[str] = set()
+            for order in orders:
+                instrument = instruments.get(order.symbol)
+                exchange_code = str(instrument.exchange_code) if instrument else None
+                session = sessions_by_exchange.get(exchange_code, market_session)
+                session_key = exchange_code or "default"
+                if session_key in checked_sessions:
+                    continue
+                checked_sessions.add(session_key)
+                block = self._market_session_block_for_session(session, exchange_code=exchange_code)
+                if block is not None:
+                    return block
+            return None
+        return self._market_session_block_for_session(market_session, exchange_code=None)
+
+    def _market_session_block_for_session(
+        self,
+        market_session,
+        *,
+        exchange_code: str | None,
+    ) -> dict[str, Any] | None:
         try:
             timezone = ZoneInfo(market_session.timezone)
         except Exception:
             return {
                 "reason": "invalid_market_session_timezone",
                 "timezone": market_session.timezone,
+                **({"exchange_code": exchange_code} if exchange_code else {}),
             }
         local_now = self._now().astimezone(timezone)
         local_date = local_now.date().isoformat()
@@ -136,6 +164,7 @@ class LiveExecutionGateService:
             "timezone": market_session.timezone,
             "open": market_session.open,
             "close": market_session.close,
+            **({"exchange_code": exchange_code} if exchange_code else {}),
         }
         if local_now.weekday() not in market_session.weekdays:
             return {"reason": "market_weekday_closed", **payload}
@@ -299,6 +328,7 @@ class LiveExecutionGateService:
         instruments = {
             instrument.symbol: instrument for instrument in self.config.universe.instruments
         }
+        account_router = BrokerAccountRouter(self.config)
         if not instruments:
             return None
         for order in orders:
@@ -310,8 +340,29 @@ class LiveExecutionGateService:
                 and instrument.currency.value != self.config.portfolio.base_currency
             ):
                 return {"reason": "currency_mismatch", "symbol": order.symbol}
-            if instrument.broker_product not in self.config.kis.effective_broker_products():
+            broker_products = _broker_products_for_order(account_router, order)
+            if broker_products is not None and instrument.broker_product not in broker_products:
                 return {"reason": "broker_product_mismatch", "symbol": order.symbol}
+            broker = _broker_for_order(account_router, order)
+            if broker == "toss" and order.order_type != OrderType.LIMIT:
+                return {
+                    "reason": "unsupported_order_type",
+                    "symbol": order.symbol,
+                    "account_id": order.account_id,
+                    "broker": "toss",
+                    "order_type": order.order_type.value,
+                }
+            if broker == "toss" and not _is_step_multiple(
+                order.quantity,
+                1.0,
+            ):
+                return {
+                    "reason": "integer_quantity_required",
+                    "symbol": order.symbol,
+                    "account_id": order.account_id,
+                    "broker": "toss",
+                    "quantity": order.quantity,
+                }
             if order.quantity < instrument.min_order_quantity:
                 return {"reason": "min_order_quantity", "symbol": order.symbol}
             if order.notional < instrument.min_order_notional:
@@ -359,24 +410,42 @@ class LiveExecutionGateService:
         limits = execution.live_order_limits
         if not broker_validation.require_risk_validation and not limits.has_daily_loss_limit():
             return None
-        latest = self.state_store.load_latest_broker_account_snapshot()
-        if latest is None:
+        snapshots_by_account = _latest_broker_snapshots_by_account(self.state_store)
+        if not snapshots_by_account:
             return {"reason": "missing_broker_snapshot"}
 
-        snapshot = latest["payload"]
-        account = snapshot.get("account", {})
         issues = []
+        account_router = BrokerAccountRouter(self.config)
         if broker_validation.require_risk_validation:
-            issues.extend(self._broker_reconciliation_risk_issues(latest))
-            issues.extend(self._pending_broker_order_issues(snapshot))
-            issues.extend(self._cash_and_exposure_risk_issues(orders, snapshot))
-        issues.extend(self._daily_loss_risk_issues(snapshot))
+            for account_id, account_orders in _orders_by_account(orders).items():
+                latest = _snapshot_for_account(snapshots_by_account, account_router, account_id)
+                if latest is None:
+                    issues.append(
+                        {
+                            "reason": "missing_broker_snapshot",
+                            "account_id": account_id,
+                        }
+                    )
+                    continue
+                snapshot = latest["payload"]
+                issues.extend(self._broker_reconciliation_risk_issues(latest))
+                issues.extend(self._pending_broker_order_issues(snapshot))
+                issues.extend(self._cash_and_exposure_risk_issues(account_orders, snapshot))
+        seen_snapshot_ids: set[int] = set()
+        for latest in snapshots_by_account.values():
+            snapshot_id = int(latest["id"])
+            if snapshot_id in seen_snapshot_ids:
+                continue
+            seen_snapshot_ids.add(snapshot_id)
+            issues.extend(self._daily_loss_risk_issues(latest["payload"]))
         if not issues:
             return None
+        latest_ids = sorted(
+            {int(snapshot["id"]) for snapshot in snapshots_by_account.values()}
+        )
         return {
             "reason": "broker_risk_failed",
-            "broker_snapshot_id": latest.get("id"),
-            "account_id": account.get("account_id"),
+            "broker_snapshot_ids": latest_ids,
             "issues": issues,
         }
 
@@ -646,6 +715,75 @@ def _infer_single_broker_currency(account: dict[str, Any]) -> Currency | None:
         if len(currencies) == 1:
             return Currency(next(iter(currencies)))
     return None
+
+
+def _broker_products_for_order(
+    account_router: BrokerAccountRouter,
+    order: OrderIntent,
+) -> set[Any] | None:
+    account = account_router.account(order.account_id)
+    if account is None:
+        return set(account_router.config.kis.effective_broker_products())
+    if account.broker != "kis":
+        return None
+    return set(account.effective_broker_products())
+
+
+def _broker_for_order(
+    account_router: BrokerAccountRouter,
+    order: OrderIntent,
+) -> str | None:
+    account = account_router.account(order.account_id)
+    return account.broker if account is not None else None
+
+
+def _orders_by_account(orders: list[OrderIntent]) -> dict[str | None, list[OrderIntent]]:
+    grouped: dict[str | None, list[OrderIntent]] = {}
+    for order in orders:
+        grouped.setdefault(order.account_id, []).append(order)
+    return grouped
+
+
+def _latest_broker_snapshots_by_account(
+    state_store: StateStore,
+) -> dict[str | None, dict[str, Any]]:
+    snapshots: dict[str | None, dict[str, Any]] = {}
+    for row in state_store.list_broker_account_snapshots(limit=1000):
+        keys = _broker_snapshot_account_keys(row)
+        for key in keys:
+            snapshots.setdefault(key, row)
+        snapshots.setdefault(None, row)
+    return snapshots
+
+
+def _broker_snapshot_account_keys(row: dict[str, Any]) -> set[str]:
+    payload = row.get("payload", {})
+    account = payload.get("account", {}) if isinstance(payload, dict) else {}
+    keys = {
+        str(value)
+        for value in (
+            row.get("account_id"),
+            payload.get("account_id") if isinstance(payload, dict) else None,
+            account.get("account_id") if isinstance(account, dict) else None,
+        )
+        if value
+    }
+    return keys
+
+
+def _snapshot_for_account(
+    snapshots_by_account: dict[str | None, dict[str, Any]],
+    account_router: BrokerAccountRouter,
+    account_id: str | None,
+) -> dict[str, Any] | None:
+    if account_id in snapshots_by_account:
+        return snapshots_by_account[account_id]
+    account = account_router.account(account_id)
+    if account is not None and account.account_id in snapshots_by_account:
+        return snapshots_by_account[account.account_id]
+    if account_id is not None:
+        return None
+    return snapshots_by_account.get(None)
 
 
 def _normalized_broker_pnl(snapshot: dict[str, Any]) -> tuple[float, str] | None:

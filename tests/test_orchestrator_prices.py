@@ -39,6 +39,7 @@ def test_apply_fx_prices_converts_only_usd_instruments_for_krw_portfolio():
     result = orchestrator._apply_fx_prices(prices)
 
     assert result == {"SPY": 135000.0, "005930": 70000.0, "CASH_KRW": 1.0}
+    assert prices == {"SPY": 100.0, "005930": 70000.0, "CASH_KRW": 1.0}
 
 
 def test_apply_fx_prices_leaves_prices_unchanged_for_non_krw_portfolio():

@@ -146,7 +146,8 @@ def test_symphony_systemd_units_wire_operator_configs_and_daily_cli():
     assert "--approval-config ${MAESTRO_APPROVAL_CONFIG}" in signal_service
     assert "symphony_signal_then_approval.sh" not in signal_service
     assert "TimeoutStartSec=1200" in signal_service
-    assert "OnCalendar=Mon..Fri 09:10:00" in signal_timer
+    assert "OnCalendar=Mon..Fri 09:10:00 Asia/Seoul" in signal_timer
+    assert "OnCalendar=Mon..Fri 09:40:00 America/New_York" in signal_timer
     assert "telegram-operator --config ${MAESTRO_READONLY_CONFIG}" in telegram_service
     assert "--signal-config ${MAESTRO_SIGNAL_CONFIG}" in telegram_service
     assert "Restart=always" in telegram_service

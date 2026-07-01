@@ -81,6 +81,9 @@ maestro recover-live-order --config <config> --reason "broker truth reconciled"
 maestro clear-halt --config <config> --reason "operator reviewed broker state and reconciliation passed"
 ```
 
+The command re-runs health checks and refuses to clear the halt while any
+non-safety check is failing.
+
 `resume` must not clear `killed`. `clear-halt` must not clear `killed`. A kill
 switch requires a separately defined safe recovery procedure.
 
@@ -131,8 +134,8 @@ The systemd wiring for this workflow is:
 
 - `maestro-symphony-readonly.timer`: periodic `kis-sync` and reconciliation
   using `MAESTRO_READONLY_CONFIG`.
-- `maestro-symphony-signal.timer`: weekday 09:10 orchestration using
-  `maestro daily-signal-approval`.
+- `maestro-symphony-signal.timer`: weekday 09:10 Asia/Seoul and 09:40
+  America/New_York orchestration using `maestro daily-signal-approval`.
 - The command sends a daily signal summary, creates approval requests only when
   `action_required=true`, and temporarily stops
   `maestro-telegram-operator.service` during approval polling. If the daily
@@ -191,6 +194,14 @@ maestro adopt-account-attribution \
 The same adoption is available through `/attribution toss_brokerage` in the
 Telegram operator. Do not approve a baseline with incorrectly assigned
 strategy or manual quantities.
+
+For the first armed Toss rollout, keep automated Toss instruments at integer
+`quantity_step` and `min_order_quantity`. Fractional Toss orders are blocked by
+live gates before approval or broker submission.
+
+If a broker status poll returns an unknown order state, Maestro records
+`live_order_recovery_required`; the next live approval run remains blocked until
+operator recovery is completed.
 
 ## KIS Read-only Reconciliation
 

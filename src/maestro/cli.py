@@ -1268,7 +1268,18 @@ def clear_halt(
     config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
-    current = _safety_service(config).clear_halt(new_run_id(), reason)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    report = HealthService(maestro_config, store).run()
+    blocking_checks = [
+        check for check in report.checks if check.status == "fail" and check.name != "safety_state"
+    ]
+    if blocking_checks:
+        names = ",".join(check.name for check in blocking_checks)
+        typer.echo(f"recovery_preflight_failed checks={names}")
+        raise typer.Exit(1)
+    current = SafetyControlService(store, audit).clear_halt(new_run_id(), reason)
     typer.echo(f"state={current.state.value} reason={current.reason}")
 
 

@@ -3,6 +3,7 @@ from typing import Any
 from maestro.config.models import MaestroConfig
 from maestro.core.enums import BrokerProduct, OrderType
 from maestro.core.exceptions import PluginLoadError
+from maestro.core.symbols import is_cash_symbol
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
 from maestro.plugins.loader import load_strategy
 
@@ -50,16 +51,8 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
         failures.append("telegram_chat_missing")
     if not config.approval.whitelisted_user_ids:
         failures.append("telegram_user_whitelist_missing")
-    if not config.kis.enabled:
-        failures.append("kis_disabled")
-    if config.kis.provider != "kis":
-        failures.append("kis_provider_not_real")
-    enabled_products = set(config.kis.effective_broker_products())
-    if not enabled_products <= {
-        BrokerProduct.KIS_DOMESTIC_STOCK,
-        BrokerProduct.KIS_OVERSEAS_STOCK,
-    }:
-        failures.append("kis_broker_product_unsupported")
+    enabled_products = _enabled_kis_broker_products(config, failures)
+    kis_routed_symbols = _kis_routed_symbols(config)
 
     instruments = {instrument.symbol: instrument for instrument in config.universe.instruments}
     for symbol in config.portfolio.allowed_symbols:
@@ -69,10 +62,15 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
             continue
         if (
             config.portfolio.allocation_mode != "currency_sleeves"
-            and instrument.currency.value != config.portfolio.base_currency
+                and instrument.currency.value != config.portfolio.base_currency
         ):
             failures.append(f"currency_mismatch:{symbol}")
-        if instrument.broker_product not in enabled_products:
+        if (
+            not is_cash_symbol(symbol)
+            and symbol in kis_routed_symbols
+            and enabled_products
+            and instrument.broker_product not in enabled_products
+        ):
             failures.append(f"broker_product_mismatch:{symbol}")
         if not symbol.startswith("CASH") and instrument.exchange_code not in {
             "NASD",
@@ -87,6 +85,71 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
         for strategy_id, _message in strategy_plugin_load_failures(config)
     )
     return failures, warnings
+
+
+def _enabled_kis_broker_products(
+    config: MaestroConfig,
+    failures: list[str],
+) -> set[BrokerProduct]:
+    enabled_accounts = [account for account in config.accounts if account.enabled]
+    kis_accounts = [account for account in enabled_accounts if account.broker == "kis"]
+    legacy_kis_enabled = not enabled_accounts and config.kis.enabled
+
+    if legacy_kis_enabled:
+        if config.kis.provider != "kis":
+            failures.append("kis_provider_not_real")
+        products = set(config.kis.effective_broker_products())
+    else:
+        products = set()
+        for account in kis_accounts:
+            if (account.provider or "kis") != "kis":
+                failures.append(f"kis_provider_not_real:{account.id}")
+            products.update(account.effective_broker_products())
+
+    if not enabled_accounts and not legacy_kis_enabled:
+        failures.append("kis_disabled")
+        return set()
+    if not kis_accounts and not legacy_kis_enabled:
+        return set()
+    if not products <= {
+        BrokerProduct.KIS_DOMESTIC_STOCK,
+        BrokerProduct.KIS_OVERSEAS_STOCK,
+    }:
+        failures.append("kis_broker_product_unsupported")
+    return products
+
+
+def _kis_routed_symbols(config: MaestroConfig) -> set[str]:
+    enabled_accounts = {account.id: account for account in config.accounts if account.enabled}
+    if not enabled_accounts and config.kis.enabled:
+        return set(config.portfolio.allowed_symbols)
+
+    symbols: set[str] = set()
+    for group in config.multi_account_contributions.values():
+        for target in group.account_targets:
+            account = enabled_accounts.get(target.account_id)
+            if account is not None and account.broker == "kis":
+                symbols.update(target.allowed_symbols)
+
+    for strategy in config.strategies:
+        if not strategy.enabled or not strategy.signal_enabled or not strategy.account_id:
+            continue
+        account = enabled_accounts.get(strategy.account_id)
+        if account is None or account.broker != "kis":
+            continue
+        targets = config.account_strategy_targets.get(strategy.account_id, {})
+        target = targets.get(strategy.execution_sleeve or strategy.id)
+        if target is not None and target.allowed_symbols:
+            symbols.update(target.allowed_symbols)
+            continue
+        sleeve = config.execution_sleeve_for_strategy(strategy)
+        if sleeve is not None and sleeve.currency_sleeve:
+            currency_sleeve = config.portfolio.currency_sleeves.get(sleeve.currency_sleeve)
+            if currency_sleeve is not None:
+                symbols.update(currency_sleeve.symbols)
+                continue
+        symbols.update(config.portfolio.allowed_symbols)
+    return symbols
 
 
 def strategy_plugin_load_failures(config: MaestroConfig) -> list[tuple[str, str]]:

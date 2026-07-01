@@ -30,6 +30,25 @@ class LiveOrderStatusService:
                     "message": "Live order halted because broker returned an unknown order state.",
                 }
             )
+            save_audited_system_event(
+                self.state_store,
+                self.audit_logger,
+                run_id,
+                SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+                {
+                    "reason": "unknown_broker_order_status",
+                    "order_id": broker_order_id.order_id,
+                    "broker_order_id": broker_order_id.broker_order_id,
+                    "request": {"order_id": broker_order_id.order_id},
+                    "result": {
+                        "broker_order": broker_order_id.model_dump(mode="json"),
+                        "message": snapshot.message,
+                        "status": snapshot.status.value,
+                        "raw_status": snapshot.raw_status,
+                        "raw": snapshot.raw,
+                    },
+                },
+            )
         payload = snapshot.model_dump(mode="json")
         save_audited_system_event(
             self.state_store,

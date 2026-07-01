@@ -270,6 +270,16 @@ def test_execution_nested_blocks_load_canonical_schema(tmp_path):
         "weekdays": [0, 1, 2, 3, 4],
         "holidays": ["2026-05-05"],
     }
+    raw["execution"]["market_sessions_by_exchange"] = {
+        "NASD": {
+            "required": True,
+            "timezone": "America/New_York",
+            "open": "09:30",
+            "close": "16:00",
+            "weekdays": [0, 1, 2, 3, 4],
+            "holidays": [],
+        }
+    }
     raw["execution"]["broker_validation"] = {
         "require_quote_validation": True,
         "max_quote_deviation_pct": 0.02,
@@ -293,6 +303,7 @@ def test_execution_nested_blocks_load_canonical_schema(tmp_path):
     assert config.execution.market_session.close == "15:30"
     assert config.execution.market_session.weekdays == [0, 1, 2, 3, 4]
     assert config.execution.market_session.holidays == ["2026-05-05"]
+    assert config.execution.market_sessions_by_exchange["NASD"].timezone == "America/New_York"
     assert config.execution.broker_validation.require_quote_validation is True
     assert config.execution.broker_validation.max_quote_deviation_pct == 0.02
     assert config.execution.broker_validation.require_risk_validation is True

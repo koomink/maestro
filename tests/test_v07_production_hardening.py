@@ -6,10 +6,20 @@ import pytest
 import yaml
 
 from maestro.approval.models import ApprovalDecision
+from maestro.config.broker import BrokerAccountConfig
 from maestro.config.loader import load_config
 from maestro.config.models import ExecutionConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import BrokerProduct, Currency, OrderSide, OrderStatus
+from maestro.core.enums import (
+    AssetType,
+    BrokerProduct,
+    Currency,
+    ExchangeCode,
+    MarketRegion,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+)
 from maestro.core.ids import new_run_id
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.base import OrderIntent
@@ -174,6 +184,126 @@ def test_currency_max_order_limit_blocks_exceeded_order_currency(tmp_path):
     assert blocks[0]["max_live_order_notional"] == 1_000_000.0
 
 
+def test_toss_order_does_not_require_kis_broker_product_match(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"USD": 10_000},
+            "max_daily_notional_by_currency": {"USD": 10_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.accounts = [
+        BrokerAccountConfig(
+            id="toss_brokerage",
+            broker="toss",
+            environment="real",
+            account_seq=1,
+        )
+    ]
+    config.kis.broker_products = [BrokerProduct.KIS_DOMESTIC_STOCK]
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "toss_gate_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "toss_gate_audit.jsonl")),
+    )
+    order = _order("toss_order", "USD_ETF", Currency.USD, 100.0).model_copy(
+        update={"account_id": "toss_brokerage"}
+    )
+
+    blocks = service.evaluate("run_toss_gate", [order], [])
+
+    assert not [
+        block for block in blocks if block.get("reason") == "broker_product_mismatch"
+    ]
+
+
+def test_toss_live_gate_requires_integer_quantity_even_when_instrument_allows_fractional(
+    tmp_path,
+):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"USD": 10_000},
+            "max_daily_notional_by_currency": {"USD": 10_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.accounts = [
+        BrokerAccountConfig(
+            id="toss_brokerage",
+            broker="toss",
+            environment="real",
+            account_seq=1,
+        )
+    ]
+    usd_instrument = next(
+        instrument for instrument in config.universe.instruments if instrument.symbol == "USD_ETF"
+    )
+    usd_instrument.quantity_step = 0.000001
+    usd_instrument.min_order_quantity = 0.000001
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "toss_integer_gate_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "toss_integer_gate_audit.jsonl")),
+    )
+    order = _order("toss_fractional_order", "USD_ETF", Currency.USD, 50.0).model_copy(
+        update={
+            "account_id": "toss_brokerage",
+            "quantity": 0.5,
+            "order_type": OrderType.LIMIT,
+        }
+    )
+
+    blocks = service.evaluate("run_toss_integer_gate", [order], [])
+
+    assert any(
+        block.get("reason") == "integer_quantity_required"
+        and block.get("broker") == "toss"
+        and block.get("symbol") == "USD_ETF"
+        for block in blocks
+    )
+
+
+def test_toss_live_gate_blocks_market_order_intents_before_approval(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"USD": 10_000},
+            "max_daily_notional_by_currency": {"USD": 10_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.accounts = [
+        BrokerAccountConfig(
+            id="toss_brokerage",
+            broker="toss",
+            environment="real",
+            account_seq=1,
+        )
+    ]
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "toss_market_gate_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "toss_market_gate_audit.jsonl")),
+    )
+    order = _order("toss_market_order", "USD_ETF", Currency.USD, 50.0).model_copy(
+        update={
+            "account_id": "toss_brokerage",
+            "order_type": OrderType.MARKET,
+        }
+    )
+
+    blocks = service.evaluate("run_toss_market_gate", [order], [])
+
+    assert any(
+        block.get("reason") == "unsupported_order_type"
+        and block.get("broker") == "toss"
+        and block.get("order_type") == "market"
+        for block in blocks
+    )
+
+
 def test_daily_order_count_limit_blocks_live_approval(tmp_path):
     orchestrator = _live_orchestrator(tmp_path, max_daily_live_order_count=1)
     _save_passed_reconciliation(orchestrator.state_store)
@@ -242,6 +372,52 @@ def test_market_session_blocks_live_approval_on_configured_holiday(tmp_path, mon
     assert event["payload"]["reason"] == "market_holiday_closed"
 
 
+def test_market_session_uses_exchange_specific_session_for_krx_orders(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "maestro.orchestration.live_gates.utc_now",
+        lambda: datetime(2026, 5, 11, 1, 0, tzinfo=UTC),
+    )
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.execution.market_session.required = True
+    config.execution.market_session.timezone = "America/New_York"
+    config.execution.market_session.open = "09:30"
+    config.execution.market_session.close = "16:00"
+    config.execution.market_sessions_by_exchange = {
+        "KRX": type(config.execution.market_session)(
+            required=True,
+            timezone="Asia/Seoul",
+            open="09:00",
+            close="15:30",
+            weekdays=[0, 1, 2, 3, 4],
+            holidays=[],
+        )
+    }
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "krx_market_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "krx_market_audit.jsonl")),
+        now_fn=lambda: datetime(2026, 5, 11, 1, 0, tzinfo=UTC),
+    )
+
+    blocks = service.evaluate(
+        "run_krx_market",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
+        [],
+    )
+
+    assert not [block for block in blocks if block.get("event_type") == "market_session_halt"]
+
+
 def test_broker_quote_validation_uses_broker_quote_for_live_order_generation(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
@@ -267,6 +443,84 @@ def test_broker_quote_validation_uses_broker_quote_for_live_order_generation(tmp
         "live_proposal_data_snapshot"
     )[0]["payload"]
     assert proposal_snapshot["order_prices"] == {"MOCK_ETF_A": 80.0, "MOCK_ETF_B": 50.0}
+
+
+def test_broker_quote_validation_keeps_usd_order_price_native_for_krw_portfolio(tmp_path):
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {
+                "require_quote_validation": True,
+                "max_quote_deviation_pct": 0.05,
+            },
+            "live_order_dry_run": True,
+        },
+    )
+    orchestrator.config.portfolio.base_currency = Currency.KRW
+    orchestrator.config.portfolio.allocation_mode = "currency_sleeves"
+    orchestrator.config.universe.instruments = [
+        TradableInstrument(
+            symbol="MOCK_ETF_A",
+            asset_type=AssetType.ETF,
+            region=MarketRegion.US,
+            currency=Currency.USD,
+            broker="kis",
+            broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+            broker_symbol="MOCKA",
+            exchange_code=ExchangeCode.NASD,
+            quantity_step=1.0,
+            price_tick=0.01,
+            min_order_quantity=1.0,
+            min_order_notional=1.0,
+        ),
+        TradableInstrument(
+            symbol="MOCK_ETF_B",
+            asset_type=AssetType.ETF,
+            region=MarketRegion.KR,
+            currency=Currency.KRW,
+            broker="kis",
+            broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+            broker_symbol="MOCKB",
+            exchange_code=ExchangeCode.KRX,
+            quantity_step=1.0,
+            price_tick=1.0,
+            min_order_quantity=1.0,
+            min_order_notional=1.0,
+        ),
+    ]
+    orchestrator.config.kis.broker_products = [
+        BrokerProduct.KIS_DOMESTIC_STOCK,
+        BrokerProduct.KIS_OVERSEAS_STOCK,
+    ]
+    for account in orchestrator.config.accounts:
+        if account.broker == "kis":
+            account.broker_products = [
+                BrokerProduct.KIS_DOMESTIC_STOCK,
+                BrokerProduct.KIS_OVERSEAS_STOCK,
+            ]
+    orchestrator.fx_service = type(
+        "FakeFXService",
+        (),
+        {"refresh_from_config": lambda self: type("FX", (), {"rates": {"USD/KRW": 1531.1778}})()},
+    )()
+    _save_passed_reconciliation(orchestrator.state_store)
+    _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 70.11, "MOCK_ETF_B": 50.0},
+    )
+
+    summary = orchestrator.run_once()
+
+    assert summary.orders_created == 2
+    assert orchestrator.state_store.list_system_events_by_type("broker_quote_validation_halt") == []
+    proposal_snapshot = orchestrator.state_store.list_system_events_by_type(
+        "live_proposal_data_snapshot"
+    )[0]["payload"]
+    assert proposal_snapshot["order_prices"]["MOCK_ETF_A"] == 70.11
+    proposed_orders = {
+        order["symbol"]: order for order in proposal_snapshot["proposed_orders"]
+    }
+    assert proposed_orders["MOCK_ETF_A"]["price"] == 70.11
 
 
 def test_broker_quote_validation_allows_live_approval_when_quotes_match(tmp_path):
@@ -316,6 +570,87 @@ def test_broker_risk_validation_blocks_when_fee_buffer_exceeds_buying_power(tmp_
     event = orchestrator.state_store.list_system_events_by_type("broker_risk_halt")[0]
     reasons = {issue["reason"] for issue in event["payload"]["issues"]}
     assert "buying_power_exceeded" in reasons
+
+
+def test_broker_risk_validation_uses_order_account_snapshot(tmp_path):
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_dry_run": True,
+        },
+    )
+    kis_snapshot_id = _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=10_000_000.0,
+        buying_power=10_000_000.0,
+        account_overrides={"account_id": "kis_isa"},
+    )
+    _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=0.0,
+        buying_power=0.0,
+        account_overrides={"account_id": "toss_brokerage"},
+    )
+    _save_passed_reconciliation(orchestrator.state_store, broker_snapshot_id=kis_snapshot_id)
+    orders = [
+        _order("kis_buy", "MOCK_ETF_A", Currency.KRW, 100_000.0).model_copy(
+            update={"account_id": "kis_isa"}
+        )
+    ]
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run_account_risk", orders, [])
+
+    assert not [
+        issue
+        for block in blocks
+        if block.get("event_type") == "broker_risk_halt"
+        for issue in block.get("issues", [])
+        if issue.get("reason") == "buying_power_exceeded"
+    ]
+
+
+def test_broker_risk_validation_fails_closed_when_order_account_snapshot_missing(tmp_path):
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_dry_run": True,
+        },
+    )
+    snapshot_id = _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=10_000_000.0,
+        buying_power=10_000_000.0,
+        account_overrides={"account_id": "toss_brokerage"},
+    )
+    _save_passed_reconciliation(orchestrator.state_store, broker_snapshot_id=snapshot_id)
+    orders = [
+        _order("kis_buy", "MOCK_ETF_A", Currency.KRW, 100_000.0).model_copy(
+            update={"account_id": "kis_isa"}
+        )
+    ]
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run_missing_account_risk", orders, [])
+
+    issues = [
+        issue
+        for block in blocks
+        if block.get("event_type") == "broker_risk_halt"
+        for issue in block.get("issues", [])
+    ]
+    assert {"reason": "missing_broker_snapshot", "account_id": "kis_isa"} in issues
 
 
 def test_broker_risk_validation_blocks_pending_broker_orders(tmp_path):

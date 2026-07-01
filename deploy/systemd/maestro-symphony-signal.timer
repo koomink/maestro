@@ -2,7 +2,8 @@
 Description=Run Maestro Symphony signal workflow on trading days
 
 [Timer]
-OnCalendar=Mon..Fri 09:10:00
+OnCalendar=Mon..Fri 09:10:00 Asia/Seoul
+OnCalendar=Mon..Fri 09:40:00 America/New_York
 Persistent=true
 Unit=maestro-symphony-signal.service
 

@@ -248,6 +248,7 @@ class ExecutionConfig(StrictConfigModel):
     order_generation_mode: OrderGenerationMode = "target_rebalance"
     contribution: ContributionConfig = Field(default_factory=ContributionConfig)
     market_session: MarketSessionConfig = Field(default_factory=MarketSessionConfig)
+    market_sessions_by_exchange: dict[str, MarketSessionConfig] = Field(default_factory=dict)
     broker_validation: BrokerValidationConfig = Field(default_factory=BrokerValidationConfig)
     live_order_limits: LiveOrderLimitsConfig = Field(default_factory=LiveOrderLimitsConfig)
     live_order_enabled: bool = False

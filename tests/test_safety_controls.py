@@ -158,6 +158,42 @@ def test_safety_cli_transitions_are_persisted(tmp_path):
     assert "state=active" in resume.output
 
 
+def test_clear_halt_cli_blocks_when_recovery_health_has_failures(tmp_path):
+    config_path = _paper_config_path(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    SafetyControlService(store, audit).halt(new_run_id(), "production hardening gate")
+    store.save_system_event(new_run_id(), "broker_reconciliation", {"passed": False})
+
+    result = CliRunner().invoke(
+        app,
+        ["clear-halt", "--config", str(config_path), "--reason", "operator reviewed"],
+    )
+
+    assert result.exit_code != 0
+    assert "recovery_preflight_failed" in result.output
+    assert "reconciliation" in result.output
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.HALTED
+
+
+def test_clear_halt_cli_allows_recovery_when_only_safety_state_is_failed(tmp_path):
+    config_path = _paper_config_path(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    SafetyControlService(store, audit).halt(new_run_id(), "manual review needed")
+
+    result = CliRunner().invoke(
+        app,
+        ["clear-halt", "--config", str(config_path), "--reason", "operator reviewed"],
+    )
+
+    assert result.exit_code == 0
+    assert "state=active" in result.output
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.ACTIVE
+
+
 class FakeTelegramClient:
     def __init__(self, approval_id: str) -> None:
         self.approval_id = approval_id
