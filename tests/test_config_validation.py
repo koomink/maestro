@@ -129,6 +129,45 @@ def test_telegram_approval_config_ids_override_maestro_env(tmp_path, monkeypatch
     assert config.approval.whitelisted_user_ids == [4001]
 
 
+def test_live_approval_telegram_requires_whitelisted_user_ids(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", raising=False)
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["approval"]["telegram_allowed_chat_ids"] = [3001]
+    raw["approval"]["whitelisted_user_ids"] = []
+    config_path = tmp_path / "live_approval_missing_whitelist.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="approval.whitelisted_user_ids"):
+        load_config(config_path)
+
+
+def test_live_approval_telegram_accepts_whitelisted_user_ids(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    monkeypatch.delenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", raising=False)
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["approval"]["telegram_allowed_chat_ids"] = [3001]
+    raw["approval"]["whitelisted_user_ids"] = [4001]
+    config_path = tmp_path / "live_approval_with_whitelist.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(config_path)
+
+    assert config.approval.telegram_allowed_chat_ids == [3001]
+    assert config.approval.whitelisted_user_ids == [4001]
+
+
+def test_live_approval_telegram_requires_allowed_chat_ids(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    raw = yaml.safe_load(ATARAXIA_LIVE_APPROVAL_CONFIG.read_text())
+    raw["approval"]["telegram_allowed_chat_ids"] = []
+    raw["approval"]["whitelisted_user_ids"] = [4001]
+    config_path = tmp_path / "live_approval_missing_chat_ids.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    with pytest.raises(ValidationError, match="approval.telegram_allowed_chat_ids"):
+        load_config(config_path)
+
+
 def test_legacy_kis_live_strategy_derives_default_account_id():
     config = load_config(ATARAXIA_LIVE_APPROVAL_CONFIG)
 
@@ -1011,14 +1050,14 @@ def test_operator_symphony_phase_configs_share_state_and_route_strategies():
             500000,
             500000,
         ),
-            (
-                "kis_isa",
-                "tranquillo_isa",
-                ["TIGER_NASDAQ100_LEVERAGE", "KODEX_US_DIVIDEND_DOWJONES"],
-                1660000,
-                0,
-            ),
-        ]
+        (
+            "kis_isa",
+            "tranquillo_isa",
+            ["TIGER_NASDAQ100_LEVERAGE", "KODEX_US_DIVIDEND_DOWJONES"],
+            1660000,
+            0,
+        ),
+    ]
     assert [
         (strategy.id, strategy.account_id, strategy.signal_enabled, strategy.order_posture)
         for strategy in approval.strategies
@@ -1852,8 +1891,8 @@ def test_live_approval_root_config_is_minimal_operator_skeleton(monkeypatch):
     assert config.approval.provider == "telegram"
     assert config.approval.require_approval is True
     assert config.approval.default_decision == "expired"
-    assert config.approval.telegram_allowed_chat_ids == []
-    assert config.approval.whitelisted_user_ids == []
+    assert config.approval.telegram_allowed_chat_ids == [123456789]
+    assert config.approval.whitelisted_user_ids == [123456789]
     assert config.kis.provider == "kis"
     assert [item.value for item in config.kis.effective_broker_products()] == ["kis_domestic_stock"]
     assert config.kis.app_key_env == "KIS_MOCK_APP_KEY"

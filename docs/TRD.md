@@ -1201,6 +1201,8 @@ Requirements:
   (`MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS` and
   `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS`) when a Telegram approval config does
   not provide explicit overrides.
+- In `live_approval` mode with Telegram approval, reject configs that have no
+  allowed chat IDs or whitelisted user IDs after env fallback is applied.
 - Send order proposal messages.
 - Support approve/reject/detail inline buttons.
 - Expire proposals after timeout.

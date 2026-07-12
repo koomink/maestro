@@ -11,8 +11,14 @@ class RiskDecision(BaseModel):
 
 
 class RiskManager:
-    def __init__(self, allowed_symbols: list[str]) -> None:
+    def __init__(
+        self,
+        allowed_symbols: list[str],
+        *,
+        max_position_weight: float | None = None,
+    ) -> None:
         self.allowed_symbols = set(allowed_symbols)
+        self.max_position_weight = max_position_weight
 
     def check(self, target: PortfolioTarget) -> RiskDecision:
         if target.allocation_sleeves:
@@ -25,6 +31,15 @@ class RiskManager:
                 violations.append(f"{symbol} is outside allowed universe")
             if weight < 0:
                 violations.append(f"{symbol} has negative allocation")
+            if (
+                not is_cash_symbol(symbol)
+                and self.max_position_weight is not None
+                and weight > self.max_position_weight + 1e-9
+            ):
+                violations.append(
+                    f"{symbol} weight {weight:.4f} exceeds max_position_weight "
+                    f"{self.max_position_weight}"
+                )
 
         if violations:
             return RiskDecision(
@@ -61,6 +76,15 @@ class RiskManager:
                     violations.append(f"{symbol} is outside allowed universe")
                 if weight < 0:
                     violations.append(f"{symbol} has negative allocation")
+                if (
+                    not is_cash_symbol(symbol)
+                    and self.max_position_weight is not None
+                    and weight > self.max_position_weight + 1e-9
+                ):
+                    violations.append(
+                        f"{symbol} weight {weight:.4f} exceeds max_position_weight "
+                        f"{self.max_position_weight}"
+                    )
             gross = sum(allocations.values())
             if gross > 1.000001:
                 violations.append(f"Gross exposure exceeds 1.0 for {sleeve}")

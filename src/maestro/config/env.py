@@ -19,7 +19,6 @@ def load_default_env_files(
     cwd: Path | None = None,
     operator_env_path: str | Path | None = None,
 ) -> None:
-    load_project_dotenv(cwd)
     resolved_operator_env = Path(
         operator_env_path
         or os.getenv(OPERATOR_ENV_FILE_ENV_VAR)
@@ -27,6 +26,7 @@ def load_default_env_files(
     )
     if resolved_operator_env.exists():
         load_env_file(resolved_operator_env)
+    load_project_dotenv(cwd)
 
 
 __all__ = [

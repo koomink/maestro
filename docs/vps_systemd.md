@@ -100,8 +100,9 @@ WantedBy=multi-user.target
 
 Set `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS` and
 `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS` in the shared Maestro operator
-environment. Per-config `telegram_allowed_chat_ids` and `whitelisted_user_ids`
-are optional overrides. This service handles
+environment. In `live_approval` mode with Telegram approval, these IDs are
+required through the shared environment or per-config `telegram_allowed_chat_ids`
+and `whitelisted_user_ids` overrides. This service handles
 read-only Telegram commands and the limited `/pause` and `/kill_switch`
 confirmations. Approval request polling still happens inside `maestro run-once`
 or `maestro approve-signal` when an approval-gated run is active.
@@ -215,16 +216,22 @@ Unit=maestro-symphony-readonly.service
 WantedBy=timers.target
 ```
 
-## Example Symphony Signal and Conditional Approval Timer
+## Example Symphony Signal and Conditional Approval Timers (Per Market)
 
-Install `deploy/systemd/maestro-symphony-signal.service` and
-`deploy/systemd/maestro-symphony-signal.timer`. The service calls
-`maestro daily-signal-approval`, which obtains a file lock, refreshes read-only
-broker state when configured, runs `maestro run-signal` semantics through
-`${MAESTRO_SIGNAL_CONFIG}`, sends the daily Telegram signal summary, and only
-continues into approval when `action_required=true`. If any orchestration step fails,
-it sends a best-effort Telegram failure briefing before preserving the non-zero
-systemd failure status.
+Install the per-market pairs `deploy/systemd/maestro-symphony-signal-kr.service`
+/ `.timer` and `deploy/systemd/maestro-symphony-signal-us.service` / `.timer`.
+Each service calls `maestro daily-signal-approval` scoped with
+`--strategy-ids`, which obtains a file lock, refreshes read-only broker state
+when configured, runs `maestro run-signal` semantics through
+`${MAESTRO_SIGNAL_CONFIG}` for only the listed strategies, sends the daily
+Telegram signal summary, and only continues into approval when
+`action_required=true`. If any orchestration step fails, it sends a best-effort
+Telegram failure briefing before preserving the non-zero systemd failure
+status.
+
+Scoping each run to one market keeps the proposed orders inside that market's
+session window: a combined KR+US run can never pass the market-session gate for
+both exchanges at once, so the unscoped run halts at either trigger time.
 
 During approval polling the command stops `maestro-telegram-operator.service`
 and restarts it on exit so the shared Telegram bot has one `getUpdates`
@@ -234,7 +241,7 @@ orchestrator.
 
 ```ini
 [Unit]
-Description=Maestro Symphony daily signal approval orchestration
+Description=Maestro Symphony daily signal approval (KR strategies, KRX session)
 After=network-online.target
 Wants=network-online.target
 
@@ -242,27 +249,31 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG}
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids tranquillo
 TimeoutStartSec=1200
 ```
 
 ```ini
 [Unit]
-Description=Run Maestro Symphony signal workflow on trading days
+Description=Run Maestro Symphony KR signal workflow during the KRX session
 
 [Timer]
 OnCalendar=Mon..Fri 09:10:00 Asia/Seoul
-OnCalendar=Mon..Fri 09:40:00 America/New_York
 Persistent=true
-Unit=maestro-symphony-signal.service
+Unit=maestro-symphony-signal-kr.service
 
 [Install]
 WantedBy=timers.target
 ```
 
-The first trigger covers the KRX session shortly after the Seoul open. The
-second trigger covers US-listed symbols shortly after the New York open, and
-systemd handles daylight-saving transitions through the explicit timezone.
+The US pair is identical except for `--strategy-ids crescendo_us` and
+`OnCalendar=Mon..Fri 09:40:00 America/New_York`. The KR trigger covers the KRX
+session shortly after the Seoul open; the US trigger covers US-listed symbols
+shortly after the New York open, and systemd handles daylight-saving
+transitions through the explicit timezone. Both services share the default
+`/tmp/maestro-symphony-signal.lock`, so overlapping runs cannot race the state
+DB. The unscoped `maestro-symphony-signal.service` remains available for
+manual full runs, but its combined dual-timezone timer should stay disabled.
 
 ## Legacy Scheduled Run-once Timer
 

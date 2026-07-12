@@ -177,6 +177,13 @@ class MaestroConfig(StrictConfigModel):
         if self.mode == RunMode.LIVE_APPROVAL:
             if not self.approval.enabled or not self.approval.require_approval:
                 raise ValueError("live_approval mode requires approval.enabled=true")
+            if self.approval.provider == "telegram":
+                if not self.approval.whitelisted_user_ids:
+                    raise ValueError("live_approval mode requires approval.whitelisted_user_ids")
+                if not self.approval.telegram_allowed_chat_ids:
+                    raise ValueError(
+                        "live_approval mode requires approval.telegram_allowed_chat_ids"
+                    )
             if not self._has_enabled_account():
                 raise ValueError("live_approval mode requires an enabled broker account")
         if self.mode == RunMode.PAPER and self.execution.order_posture == "armed":
@@ -489,9 +496,7 @@ class MaestroConfig(StrictConfigModel):
         if self.mode == RunMode.LIVE_READONLY:
             return ProfileStage.LIVE_READONLY
         if any(
-            account.enabled
-            and account.broker == "kis"
-            and account.environment == "paper_trading"
+            account.enabled and account.broker == "kis" and account.environment == "paper_trading"
             for account in self.accounts
         ):
             return ProfileStage.KIS_PAPER_TRADING

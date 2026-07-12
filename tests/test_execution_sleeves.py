@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 
 import pytest
 
+from maestro.core.enums import AssetType, BrokerProduct, Currency, MarketRegion
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.execution_sleeves import (
     ExecutionScopeDraft,
     allocate_cash_rebalanced_scope_states,
@@ -207,6 +209,90 @@ def test_manual_overweight_capacity_flows_into_generated_strategy_buy_orders():
     ]
 
 
+def test_sleeve_orders_skip_below_min_order_notional():
+    builder = OrderBuilder(
+        instruments=[
+            _instrument("MOCK_ETF_A", price_tick=1, min_order_notional=10_000),
+        ],
+        currency_sleeves={"KRW": {"symbols": ["MOCK_ETF_A"], "cash_symbol": "CASH_KRW"}},
+    )
+    state = PortfolioState(cash=5_000, cash_by_currency={"KRW": 5_000}, positions={})
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 5, 28, tzinfo=UTC),
+        allocations={},
+        allocation_sleeves={"KRW": {"MOCK_ETF_A": 1.0}},
+    )
+
+    orders = builder.build_orders(state, target, {"MOCK_ETF_A": 100.0})
+
+    assert orders == []
+
+
+def test_sleeve_orders_use_tick_aligned_price():
+    builder = OrderBuilder(
+        instruments=[
+            _instrument("MOCK_ETF_A", price_tick=5, min_order_notional=1),
+        ],
+        currency_sleeves={"KRW": {"symbols": ["MOCK_ETF_A"], "cash_symbol": "CASH_KRW"}},
+    )
+    state = PortfolioState(cash=100_000, cash_by_currency={"KRW": 100_000}, positions={})
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 5, 28, tzinfo=UTC),
+        allocations={},
+        allocation_sleeves={"KRW": {"MOCK_ETF_A": 1.0}},
+    )
+
+    orders = builder.build_orders(state, target, {"MOCK_ETF_A": 71_357.0})
+
+    assert len(orders) == 1
+    assert orders[0].price == 71_355
+    assert orders[0].notional == 71_355
+
+
+def test_order_quantity_uses_decimal_step_rounding():
+    builder = OrderBuilder(
+        instruments=[
+            _instrument(
+                "MOCK_ETF_A",
+                quantity_step=0.1,
+                price_tick=1,
+                min_order_quantity=0.1,
+                min_order_notional=1,
+            ),
+        ],
+    )
+
+    assert builder._order_quantity("MOCK_ETF_A", 0.3) == 0.3
+
+
+def test_sleeve_orders_keep_normal_order_above_minimums():
+    builder = OrderBuilder(
+        instruments=[
+            _instrument(
+                "MOCK_ETF_A",
+                price_tick=1,
+                min_order_quantity=1,
+                min_order_notional=10_000,
+            ),
+        ],
+        currency_sleeves={"KRW": {"symbols": ["MOCK_ETF_A"], "cash_symbol": "CASH_KRW"}},
+    )
+    state = PortfolioState(cash=50_000, cash_by_currency={"KRW": 50_000}, positions={})
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 5, 28, tzinfo=UTC),
+        allocations={},
+        allocation_sleeves={"KRW": {"MOCK_ETF_A": 1.0}},
+    )
+
+    orders = builder.build_orders(state, target, {"MOCK_ETF_A": 10_000.0})
+
+    assert len(orders) == 1
+    assert orders[0].symbol == "MOCK_ETF_A"
+    assert orders[0].quantity == 5
+    assert orders[0].notional == 50_000
+    assert orders[0].sleeve == "KRW"
+
+
 def test_execution_sleeves_reject_shared_target_symbol_within_account():
     target_a = PortfolioTarget(
         timestamp=datetime(2026, 5, 28, tzinfo=UTC),
@@ -238,3 +324,26 @@ def test_execution_sleeves_reject_shared_target_symbol_within_account():
                 ),
             ]
         )
+
+
+def _instrument(
+    symbol: str,
+    *,
+    quantity_step: float = 1.0,
+    price_tick: float,
+    min_order_quantity: float = 1.0,
+    min_order_notional: float,
+) -> TradableInstrument:
+    return TradableInstrument(
+        symbol=symbol,
+        asset_type=AssetType.ETF,
+        region=MarketRegion.KR,
+        currency=Currency.KRW,
+        broker="kis",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+        broker_symbol=symbol,
+        quantity_step=quantity_step,
+        price_tick=price_tick,
+        min_order_quantity=min_order_quantity,
+        min_order_notional=min_order_notional,
+    )

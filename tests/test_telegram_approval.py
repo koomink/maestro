@@ -613,6 +613,7 @@ def test_telegram_approval_manager_allows_live_approval_mode(monkeypatch: pytest
             provider="telegram",
             require_approval=True,
             telegram_allowed_chat_ids=[100],
+            whitelisted_user_ids=[10],
             timeout_seconds=60,
         ),
         run_mode=RunMode.LIVE_APPROVAL,
@@ -623,6 +624,26 @@ def test_telegram_approval_manager_allows_live_approval_mode(monkeypatch: pytest
 
     assert decision is not None
     assert decision.status == "approved"
+
+
+def test_telegram_approval_manager_requires_whitelist_in_live_approval():
+    client = FakeTelegramClient([])
+    manager = ApprovalManager(
+        ApprovalConfig(
+            enabled=True,
+            provider="telegram",
+            require_approval=True,
+            telegram_allowed_chat_ids=[100],
+            timeout_seconds=60,
+        ),
+        run_mode=RunMode.LIVE_APPROVAL,
+        telegram_client=client,
+    )
+
+    with pytest.raises(ValueError, match="Telegram approval whitelist is required"):
+        manager.request_approval("run_test", [], [], [])
+
+    assert client.sent_messages == []
 
 
 def test_telegram_approval_manager_rejects_live_readonly_mode():
@@ -709,3 +730,16 @@ def test_state_store_rejects_duplicate_approval_decisions(tmp_path):
     assert store.approval_exists("appr_1") is True
     with pytest.raises(ValueError, match="already exists"):
         store.save_approval("run_1", "appr_1", payload)
+
+
+def test_state_store_converts_approval_unique_conflict_to_value_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    payload = {"decision": {"status": "approved"}}
+
+    store.save_approval("run_1", "appr_1", payload)
+    monkeypatch.setattr(store, "approval_exists", lambda approval_id: False)
+
+    with pytest.raises(ValueError, match="Approval decision already exists: appr_1"):
+        store.save_approval("run_2", "appr_1", payload)

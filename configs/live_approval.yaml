@@ -39,16 +39,16 @@ execution:
   order_status_max_polls: 20
   order_status_terminal_timeout_seconds: 1800
   market_session:
-    required: false
+    required: true
     timezone: Asia/Seoul
     open: "09:00"
     close: "15:30"
     weekdays: [0, 1, 2, 3, 4]
     holidays: []
   broker_validation:
-    require_quote_validation: false
+    require_quote_validation: true
     max_quote_deviation_pct: 0.05
-    require_risk_validation: false
+    require_risk_validation: true
 
 
 monitoring:
@@ -68,8 +68,10 @@ approval:
   default_decision: expired
   timeout_seconds: 300
   telegram_bot_token_env: TELEGRAM_BOT_TOKEN
-  telegram_allowed_chat_ids: []
-  whitelisted_user_ids: []
+  telegram_allowed_chat_ids:
+    - 123456789
+  whitelisted_user_ids:
+    - 123456789
   telegram_poll_interval_seconds: 1.0
 
 kis:

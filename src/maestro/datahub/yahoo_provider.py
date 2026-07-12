@@ -199,9 +199,10 @@ class YahooDataProvider(BaseDataProvider):
             if not selected:
                 raise ValueError(f"No Yahoo data for symbol: {request.symbol}")
 
-            bars = [self._build_bar(request.symbol, row) for row in selected]
+            bars, warnings = self._build_bars(request.symbol, selected, generated_at)
+            if not bars:
+                raise ValueError(f"No Yahoo data for symbol: {request.symbol}")
             latest = bars[-1]
-            warnings = []
             if lookback > len(rows):
                 warnings.append(f"Requested lookback {lookback} exceeds available rows {len(rows)}")
 
@@ -628,6 +629,39 @@ class YahooDataProvider(BaseDataProvider):
         if hasattr(row, "to_dict"):
             return row.to_dict()
         raise ValueError("Malformed Yahoo payload: row must be mapping-like")
+
+    FORMING_BAR_MAX_AGE_SECONDS = 24 * 60 * 60
+
+    def _build_bars(
+        self,
+        symbol: str,
+        rows: Sequence[Mapping[str, Any]],
+        generated_at: datetime,
+    ) -> tuple[list[OHLCVBar], list[str]]:
+        bars: list[OHLCVBar] = []
+        warnings: list[str] = []
+        last_index = len(rows) - 1
+        for index, row in enumerate(rows):
+            try:
+                bars.append(self._build_bar(symbol, row))
+            except ValueError as exc:
+                # Yahoo can serve the still-forming current-session bar with
+                # transiently inconsistent OHLC fields (e.g. low > close while
+                # the quote assembles). Drop only that bar; malformed completed
+                # bars stay fail-closed.
+                if index == last_index and self._is_forming_bar_row(row, generated_at):
+                    warnings.append(f"Dropped malformed forming bar for {symbol}: {exc}")
+                    continue
+                raise
+        return bars, warnings
+
+    def _is_forming_bar_row(self, row: Mapping[str, Any], generated_at: datetime) -> bool:
+        try:
+            timestamp = self._parse_timestamp(row.get("timestamp"))
+        except (TypeError, ValueError):
+            return False
+        age_seconds = (generated_at - timestamp).total_seconds()
+        return 0 <= age_seconds < self.FORMING_BAR_MAX_AGE_SECONDS
 
     def _build_bar(self, symbol: str, row: Mapping[str, Any]) -> OHLCVBar:
         try:

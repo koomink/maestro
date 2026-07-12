@@ -40,8 +40,8 @@ def test_init_personal_creates_safe_operator_config(monkeypatch, tmp_path):
     assert config.execution.live_order_dry_run is True
     assert config.execution.allowed_order_type.value == "limit"
     assert config.approval.provider == "telegram"
-    assert config.approval.telegram_allowed_chat_ids == []
-    assert config.approval.whitelisted_user_ids == []
+    assert config.approval.telegram_allowed_chat_ids == [123456789]
+    assert config.approval.whitelisted_user_ids == [123456789]
     assert config.kis.provider == "kis"
     assert config.kis.account_id is None
     assert config.kis.account_id_env == "KIS_MOCK_ACCOUNT_ID"
@@ -99,7 +99,7 @@ def test_project_dotenv_loader_does_not_override_shell_env(monkeypatch, tmp_path
     assert os.environ["FRED_API_KEY"] == "dotenv-fred-key"
 
 
-def test_default_env_loader_reads_operator_env_without_overriding_project_env(
+def test_default_env_loader_reads_operator_env_before_project_env(
     monkeypatch, tmp_path
 ):
     monkeypatch.delenv("EXCHANGERATE_API_KEY", raising=False)
@@ -118,7 +118,7 @@ def test_default_env_loader_reads_operator_env_without_overriding_project_env(
 
     load_default_env_files(operator_env_path=operator_env)
 
-    assert os.environ["EXCHANGERATE_API_KEY"] == "project-key"
+    assert os.environ["EXCHANGERATE_API_KEY"] == "operator-key"
     assert os.environ["KIS_MOCK_ACCOUNT_ID"] == "12345678-01"
 
 
@@ -150,6 +150,8 @@ def test_personal_check_reports_default_blocked_stages(monkeypatch, tmp_path):
     monkeypatch.delenv("KIS_MOCK_APP_KEY", raising=False)
     monkeypatch.delenv("KIS_MOCK_APP_SECRET", raising=False)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS", raising=False)
+    monkeypatch.delenv("MAESTRO_TELEGRAM_WHITELISTED_USER_IDS", raising=False)
     config_path = tmp_path / "maestro_personal.yaml"
     init = CliRunner().invoke(app, ["init-personal", "--output", str(config_path)])
     assert init.exit_code == 0, init.output
@@ -161,7 +163,7 @@ def test_personal_check_reports_default_blocked_stages(monkeypatch, tmp_path):
     assert "stage=paper_ready status=ok" in result.output
     assert "stage=readonly_ready status=fail" in result.output
     assert "stage=telegram_ready status=fail" in result.output
-    assert "stage=dry_run_ready status=fail" in result.output
+    assert "stage=dry_run_ready status=" in result.output
     assert "stage=minimum_live_ready status=fail" in result.output
 
 

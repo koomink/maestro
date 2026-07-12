@@ -1,5 +1,6 @@
 import json
 import logging
+import sqlite3
 from pathlib import Path
 
 import yaml
@@ -10,6 +11,7 @@ from maestro.config.loader import load_config, load_config_with_identity
 from maestro.core.ids import new_run_id
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
+from maestro.monitoring.live_preflight import live_approval_preflight_findings
 from maestro.monitoring.logging import JsonFormatter
 from maestro.state.store import StateStore
 
@@ -135,6 +137,50 @@ def test_health_reports_missing_heartbeat_and_scheduled_run_when_configured(tmp_
     assert checks["heartbeat"].message == "missing"
     assert checks["scheduled_run"].status == "fail"
     assert checks["scheduled_run"].message == "missing"
+
+
+def test_scheduled_run_check_accepts_split_signal_pipeline_completion(tmp_path):
+    """Regression test: the daily-signal-approval pipeline (`run_signal` +
+    `approve_signal`) never emits `run_once_completed` — only the legacy
+    single-config `run-once` loop does. Before this fix, `scheduled_run`
+    only looked at `run_once_completed`, so it reported stale forever for
+    split-pipeline deployments and permanently blocked `clear-halt`."""
+    config_path = _live_approval_config(
+        tmp_path,
+        scheduled_run_max_age_seconds=60,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(new_run_id(), "signal_run_completed", {"status": "no_action"})
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["scheduled_run"].status == "ok"
+    assert checks["scheduled_run"].message == "fresh"
+    assert checks["scheduled_run"].details["event_type"] == "signal_run_completed"
+
+
+def test_scheduled_run_check_uses_freshest_of_either_event_type(tmp_path):
+    config_path = _live_approval_config(
+        tmp_path,
+        scheduled_run_max_age_seconds=3600,
+    )
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(new_run_id(), "run_once_completed", {})
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE system_events SET created_at = ? WHERE event_type = ?",
+            ("2000-01-01 00:00:00", "run_once_completed"),
+        )
+    store.save_system_event(new_run_id(), "signal_run_completed", {"status": "no_action"})
+
+    report = HealthService(config, store).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert checks["scheduled_run"].status == "ok"
+    assert checks["scheduled_run"].details["event_type"] == "signal_run_completed"
 
 
 def test_heartbeat_cli_records_event_and_hash_chained_audit(tmp_path):
@@ -455,6 +501,62 @@ def test_live_preflight_cli_fails_when_enabled_strategy_entrypoint_cannot_load(t
     assert "strategy_plugin_load_failed:tranquillo" in result.output
 
 
+def test_live_approval_preflight_fails_when_quote_validation_disabled(tmp_path):
+    config = load_config(_live_approval_config(tmp_path, require_broker_quote_validation=False))
+
+    failures, _warnings = live_approval_preflight_findings(config)
+
+    assert "quote_validation_disabled" in failures
+
+
+def test_live_approval_preflight_fails_when_risk_validation_disabled(tmp_path):
+    config = load_config(_live_approval_config(tmp_path, require_broker_risk_validation=False))
+
+    failures, _warnings = live_approval_preflight_findings(config)
+
+    assert "risk_validation_disabled" in failures
+
+
+def test_live_approval_preflight_fails_when_market_session_not_required(tmp_path):
+    config = load_config(_live_approval_config(tmp_path, require_market_session=False))
+
+    failures, _warnings = live_approval_preflight_findings(config)
+
+    assert "market_session_not_required" in failures
+
+
+def test_live_approval_preflight_warns_when_daily_loss_limit_missing(tmp_path):
+    config = load_config(_live_approval_config(tmp_path, daily_loss_limit=None))
+
+    _failures, warnings = live_approval_preflight_findings(config)
+
+    assert "missing_daily_loss_limit" in warnings
+
+
+def test_live_approval_preflight_omits_daily_loss_warning_when_configured(tmp_path):
+    config = load_config(_live_approval_config(tmp_path, daily_loss_limit=100.0))
+
+    _failures, warnings = live_approval_preflight_findings(config)
+
+    assert "missing_daily_loss_limit" not in warnings
+
+
+def test_live_approval_preflight_warns_when_fee_buffer_missing(tmp_path):
+    config = load_config(_live_approval_config(tmp_path, fee_buffer_pct=0.0))
+
+    _failures, warnings = live_approval_preflight_findings(config)
+
+    assert "missing_fee_buffer" in warnings
+
+
+def test_example_live_approval_config_loads_with_safe_preflight_defaults():
+    config = load_config("configs/live_approval.yaml")
+
+    assert config.execution.market_session.required is True
+    assert config.execution.broker_validation.require_quote_validation is True
+    assert config.execution.broker_validation.require_risk_validation is True
+
+
 def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_path):
     monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
     monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
@@ -479,7 +581,14 @@ def test_beta_preflight_cli_exits_zero_when_private_beta_ready(monkeypatch, tmp_
 
 
 def test_beta_preflight_cli_exits_one_when_hardening_missing(tmp_path):
-    config_path = _live_approval_config(tmp_path)
+    config_path = _live_approval_config(
+        tmp_path,
+        require_market_session=False,
+        require_broker_quote_validation=False,
+        require_broker_risk_validation=False,
+        daily_loss_limit=None,
+        fee_buffer_pct=0.0,
+    )
 
     result = CliRunner().invoke(app, ["beta-preflight", "--config", str(config_path)])
 
@@ -811,10 +920,11 @@ def _live_approval_config(
     live_order_enabled: bool = True,
     require_reconciliation_pass: bool = True,
     max_daily_live_order_count: int = 3,
-    require_market_session: bool = False,
-    require_broker_quote_validation: bool = False,
-    require_broker_risk_validation: bool = False,
-    daily_loss_limit: float | None = None,
+    require_market_session: bool = True,
+    require_broker_quote_validation: bool = True,
+    require_broker_risk_validation: bool = True,
+    daily_loss_limit: float | None = 100.0,
+    fee_buffer_pct: float = 0.002,
     heartbeat_max_age_seconds: int = 0,
     scheduled_run_max_age_seconds: int = 0,
     datahub_provider: str | None = None,
@@ -830,6 +940,7 @@ def _live_approval_config(
     raw["execution"]["order_posture"] = "armed" if live_order_enabled else "disabled"
     raw["execution"]["require_reconciliation_pass"] = require_reconciliation_pass
     raw["execution"]["live_order_limits"]["max_daily_order_count"] = max_daily_live_order_count
+    raw["execution"]["live_order_limits"]["fee_buffer_pct"] = fee_buffer_pct
     raw["execution"]["market_session"]["required"] = require_market_session
     raw["execution"]["broker_validation"]["require_quote_validation"] = (
         require_broker_quote_validation

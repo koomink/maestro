@@ -110,6 +110,33 @@ def test_enabled_strategy_must_support_maestro_run_mode(monkeypatch):
         load_strategy(config, run_mode=RunMode.LIVE_APPROVAL)
 
 
+def test_live_readonly_mode_loads_strategy_without_readonly_manifest_support(monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def paper_only_manifest(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(
+            update={"supported_modes": ["paper", "live_approval"], "can_run_live": True}
+        )
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        paper_only_manifest,
+    )
+    config = StrategyPluginConfig(
+        id="sample_static_allocation",
+        weight=1.0,
+        entrypoint="sample_static_allocation.strategy:SampleStaticAllocationStrategy",
+    )
+
+    plugin = load_strategy(config, run_mode=RunMode.LIVE_READONLY)
+
+    assert plugin.manifest().strategy_id == "sample_static_allocation"
+
+
 def test_live_approval_mode_requires_manifest_live_permission(monkeypatch):
     import sample_static_allocation.strategy as strategy_module
 

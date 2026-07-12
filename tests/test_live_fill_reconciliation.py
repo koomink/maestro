@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+
 import yaml
 from typer.testing import CliRunner
 
@@ -47,6 +49,143 @@ def test_duplicate_snapshot_does_not_double_count(tmp_path):
     assert result.skipped_fills[-1].reason == "duplicate_or_no_new_fill"
     assert state.cash == 930_000.0
     assert state.positions == {"005930": 1.0}
+
+
+def test_fill_watermark_table_prevents_double_apply(tmp_path):
+    store, audit = _context(tmp_path, PortfolioState(cash=1_000_000.0, positions={}))
+    _save_status(
+        store,
+        _status(
+            order_id="KIS-10",
+            status=OrderStatus.FILLED,
+            filled=10.0,
+            ordered=10.0,
+            avg_price=70_000.0,
+        ),
+    )
+    service = PartialFillReconciliationService(store, audit)
+
+    first = service.reconcile_latest("run_fill_1")
+    second = service.reconcile_latest("run_fill_2")
+
+    state = store.load_latest_portfolio_state()
+    assert first.applied_fills[0].quantity == 10.0
+    assert second.applied_fills == []
+    assert state.cash == 300_000.0
+    assert state.positions == {"005930": 10.0}
+    assert store.load_fill_watermarks()["KIS-10"] == (10.0, 700_000.0)
+
+
+def test_fill_reconciliation_acquires_writer_lock_before_live_order_lock(tmp_path):
+    store, audit = _context(tmp_path, PortfolioState(cash=1_000_000.0, positions={}))
+    lock_order: list[str] = []
+    original_writer_lock = store.writer_lock
+    original_live_order_lock = store.live_order_lock
+
+    @contextmanager
+    def recording_writer_lock(owner: str, **kwargs):
+        lock_order.append("writer")
+        with original_writer_lock(owner, **kwargs):
+            yield
+
+    @contextmanager
+    def recording_live_order_lock(owner: str, **kwargs):
+        lock_order.append("live_order")
+        with original_live_order_lock(owner, **kwargs):
+            yield
+
+    store.writer_lock = recording_writer_lock
+    store.live_order_lock = recording_live_order_lock
+
+    PartialFillReconciliationService(store, audit).reconcile_latest("run_fill_lock_order")
+
+    assert lock_order[:2] == ["writer", "live_order"]
+
+
+def test_fill_watermarks_seed_from_legacy_events(tmp_path):
+    store, audit = _context(tmp_path, PortfolioState(cash=300_000.0, positions={"005930": 10.0}))
+    checked_at = utc_now().isoformat()
+    store.save_system_event(
+        "run_legacy",
+        "fill_reconciliation",
+        {
+            "run_id": "run_legacy",
+            "checked_at": checked_at,
+            "applied_fills": [
+                {
+                    "broker_order_id": "KIS-LEGACY",
+                    "symbol": "005930",
+                    "side": "buy",
+                    "quantity": 10.0,
+                    "price": 70_000.0,
+                    "notional": 700_000.0,
+                    "cumulative_filled_quantity": 10.0,
+                    "cumulative_filled_notional": 700_000.0,
+                    "status_checked_at": checked_at,
+                }
+            ],
+            "skipped_fills": [],
+            "portfolio_updated": True,
+            "cash": 300_000.0,
+            "positions": {"005930": 10.0},
+        },
+    )
+    _save_status(
+        store,
+        _status(
+            order_id="KIS-LEGACY",
+            status=OrderStatus.FILLED,
+            filled=10.0,
+            ordered=10.0,
+            avg_price=70_000.0,
+        ),
+    )
+
+    result = PartialFillReconciliationService(store, audit).reconcile_latest("run_fill_new")
+
+    state = store.load_latest_portfolio_state()
+    assert result.applied_fills == []
+    assert state.cash == 300_000.0
+    assert state.positions == {"005930": 10.0}
+    assert store.load_fill_watermarks()["KIS-LEGACY"] == (10.0, 700_000.0)
+
+
+def test_apply_fill_reconciliation_persists_snapshot_watermark_and_event(tmp_path):
+    store, _ = _context(tmp_path, PortfolioState(cash=1_000_000.0, positions={}))
+    state = PortfolioState(cash=930_000.0, positions={"005930": 1.0})
+    payload = {
+        "run_id": "run_atomic",
+        "checked_at": utc_now().isoformat(),
+        "applied_fills": [
+            {
+                "broker_order_id": "KIS-ATOMIC",
+                "symbol": "005930",
+                "side": "buy",
+                "quantity": 1.0,
+                "price": 70_000.0,
+                "notional": 70_000.0,
+                "cumulative_filled_quantity": 1.0,
+                "cumulative_filled_notional": 70_000.0,
+                "status_checked_at": utc_now().isoformat(),
+            }
+        ],
+        "skipped_fills": [],
+        "portfolio_updated": True,
+        "cash": 930_000.0,
+        "positions": {"005930": 1.0},
+    }
+
+    store.apply_fill_reconciliation(
+        "run_atomic",
+        state,
+        {"KIS-ATOMIC": (1.0, 70_000.0)},
+        payload,
+    )
+
+    assert store.load_latest_portfolio_state().positions == {"005930": 1.0}
+    assert store.load_fill_watermarks()["KIS-ATOMIC"] == (1.0, 70_000.0)
+    events = store.list_system_events_by_type("fill_reconciliation")
+    assert events[0]["payload"]["applied_fills"][0]["broker_order_id"] == "KIS-ATOMIC"
 
 
 def test_later_additional_fill_applies_only_delta(tmp_path):
@@ -198,6 +337,10 @@ def test_rejected_canceled_halted_and_unknown_do_not_update_portfolio(tmp_path):
     assert len(result.skipped_fills) == 4
     assert state.cash == 1_000_000.0
     assert state.positions == {}
+    assert len(store.list_portfolio_snapshots(limit=10)) == 1
+    assert (
+        store.list_system_events_by_type("fill_reconciliation")[0]["payload"]["applied_fills"] == []
+    )
 
 
 def test_fill_reconciliation_event_and_audit_are_persisted(tmp_path):

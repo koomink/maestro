@@ -204,7 +204,6 @@ class TelegramApprovalService:
         self.chat_ids = list(chat_ids)
         self.allowed_user_ids = set(allowed_user_ids)
         self.poll_interval_seconds = poll_interval_seconds
-        self._decided_approval_ids: set[str] = set()
 
     def request_decision(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
         message = format_approval_request(request)
@@ -221,7 +220,6 @@ class TelegramApprovalService:
                     offset = update_id + 1
                 decision = self._decision_from_update(update, request)
                 if decision is not None:
-                    self._decided_approval_ids.add(request.approval_id)
                     return decision, message
             if self.poll_interval_seconds > 0:
                 time.sleep(self.poll_interval_seconds)
@@ -234,7 +232,6 @@ class TelegramApprovalService:
             decided_by="telegram:timeout",
             reason="Telegram approval timed out.",
         )
-        self._decided_approval_ids.add(request.approval_id)
         return decision, message
 
     def _updates(self, offset: int | None) -> list[Mapping[str, Any]]:
@@ -246,18 +243,6 @@ class TelegramApprovalService:
 
     def _decision_from_update(
         self, update: Mapping[str, Any], request: ApprovalRequest
-    ) -> ApprovalDecision | None:
-        if request.approval_id in self._decided_approval_ids:
-            return None
-        callback_decision = self._decision_from_callback_query(update, request)
-        if callback_decision is not None:
-            return callback_decision
-        return None
-
-    def _decision_from_callback_query(
-        self,
-        update: Mapping[str, Any],
-        request: ApprovalRequest,
     ) -> ApprovalDecision | None:
         callback = update.get("callback_query")
         if not isinstance(callback, Mapping):

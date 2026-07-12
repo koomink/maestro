@@ -45,6 +45,13 @@ class BrokerAccountSnapshot(BaseModel):
     positions: list[BrokerPosition] = Field(default_factory=list)
     cash_balance: BrokerCashBalance | None = None
     buying_power_detail: BrokerBuyingPower | None = None
+    # Account-level daily PnL as reported by the broker. The live daily-loss
+    # gate (`maestro.orchestration.live_gates`) reads these keys from the
+    # stored snapshot payload; without them an all-cash account has no
+    # per-position unrealized PnL to fall back on and the gate fails closed
+    # with `broker_pnl_unavailable`.
+    daily_pnl: float | None = None
+    daily_pnl_by_currency: dict[str, float] | None = None
     fetched_at: datetime
     source: str
 

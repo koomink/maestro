@@ -60,7 +60,10 @@ def test_run_once_cli_sends_telegram_success_notification(tmp_path, monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
     monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
 
-    result = CliRunner().invoke(app, ["run-once", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["run-once", "--config", str(config_path), "--keep-telegram-operator"],
+    )
 
     assert result.exit_code == 0
     assert "telegram_notification=sent chats=2" in result.output
@@ -96,7 +99,10 @@ def test_run_once_cli_sends_telegram_failure_notification(tmp_path, monkeypatch)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
     monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
 
-    result = CliRunner().invoke(app, ["run-once", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["run-once", "--config", str(config_path), "--keep-telegram-operator"],
+    )
 
     assert result.exit_code != 0
     assert "telegram_notification=sent chats=1" in result.output
@@ -118,7 +124,10 @@ def test_run_once_cli_telegram_notification_warning_does_not_fail_run(tmp_path, 
     config_path.write_text(yaml.safe_dump(raw))
     monkeypatch.delenv("MISSING_TEST_TELEGRAM_TOKEN", raising=False)
 
-    result = CliRunner().invoke(app, ["run-once", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["run-once", "--config", str(config_path), "--keep-telegram-operator"],
+    )
 
     assert result.exit_code == 0
     assert "run_id=" in result.output
@@ -161,6 +170,58 @@ def test_run_once_records_runtime_data_requests(tmp_path, monkeypatch):
     assert runtime["errors"] == []
 
 
+def test_run_once_cli_console_approval_does_not_stop_telegram_operator(
+    tmp_path,
+    monkeypatch,
+):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"]["provider"] = "console"
+    config_path = tmp_path / "console.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "maestro.cli._systemctl",
+        lambda action, service: calls.append((action, service)),
+    )
+
+    result = CliRunner().invoke(app, ["run-once", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "run_id=" in result.output
+    assert calls == []
+
+
+def test_run_once_cli_stops_telegram_operator_by_default_for_telegram_provider(
+    tmp_path,
+    monkeypatch,
+):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["approval"]["provider"] = "telegram"
+    raw["approval"]["telegram_allowed_chat_ids"] = [100]
+    raw["approval"]["telegram_bot_token_env"] = "MISSING_TEST_TELEGRAM_TOKEN"
+    config_path = tmp_path / "telegram_stop.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "maestro.cli._systemctl",
+        lambda action, service: calls.append((action, service)),
+    )
+    monkeypatch.delenv("MISSING_TEST_TELEGRAM_TOKEN", raising=False)
+
+    result = CliRunner().invoke(app, ["run-once", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "run_id=" in result.output
+    assert calls == [
+        ("stop", "maestro-telegram-operator.service"),
+        ("start", "maestro-telegram-operator.service"),
+    ]
+
+
 def test_run_once_failure_audit_includes_exception_metadata(tmp_path):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
@@ -181,6 +242,8 @@ def test_run_once_failure_audit_includes_exception_metadata(tmp_path):
     assert details["error_type"] == "ValueError"
     assert "Invalid strategy result" in details["error_message"]
     assert "traceback" in details
+    assert "sample_static_allocation" in details["data_requests"]
+    assert "prefetch" in details["data_requests"]["sample_static_allocation"]
 
 
 def test_run_once_normalizes_strategy_signal_to_target_allocation(tmp_path, monkeypatch):

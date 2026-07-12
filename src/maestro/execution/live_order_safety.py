@@ -52,6 +52,7 @@ class LiveOrderSafetyService:
         self._validate_safety_contract(request, approval_decision)
         if isinstance(self.broker_client, LiveOrderPreSubmitValidator):
             self.broker_client.validate_pre_submit_order(request)
+        self._persist_submit_intent(request)
         try:
             result = self.broker_client.submit_limit_order(request)
         except Exception as exc:
@@ -77,10 +78,17 @@ class LiveOrderSafetyService:
                 status=OrderStatus.HALTED,
                 broker_order=result.broker_order,
                 signal_run_id=request.signal_run_id,
-                message="Live order halted because broker returned an unknown order state.",
-                raw=result.raw,
+                message=(
+                    "Live order halted because broker returned an unknown order state; "
+                    "operator recovery is required."
+                ),
+                raw={
+                    **result.raw,
+                    "recovery_required": True,
+                    "reason": "unknown_broker_submit_response",
+                },
             )
-            self._persist(SystemEventType.LIVE_ORDER_HALT, request, halted)
+            self._persist(SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED, request, halted)
             return halted
         if result.broker_order is not None and self._broker_order_seen(
             result.broker_order.broker_order_id
@@ -203,16 +211,47 @@ class LiveOrderSafetyService:
             payload,
         )
 
+    def _persist_submit_intent(self, request: LiveOrderRequest) -> None:
+        duplicate_key = _duplicate_key(request)
+        intent_payload = {
+            "signal_run_id": request.signal_run_id,
+            "request": request.model_dump(mode="json"),
+            "duplicate_key": f"intent:{duplicate_key}",
+            "notional": request.notional,
+            "submitted_date": _live_order_date(),
+            "phase": "submit_intent",
+        }
+        save_audited_system_event(
+            self.state_store,
+            self.audit_logger,
+            request.run_id,
+            "live_order_submit_intent",
+            intent_payload,
+        )
+
     def _today_utc_bounds(self) -> tuple[str, str]:
         return trading_day_bounds_utc_str(self.config.market_session.timezone)
 
     def _daily_live_results(self) -> list[dict]:
         start_utc, end_utc = self._today_utc_bounds()
-        return self.state_store.list_system_events_in_range(
+        rows = []
+        for event_type in (
             SystemEventType.LIVE_ORDER_RESULT,
-            start_utc=start_utc,
-            end_utc=end_utc,
-        )
+            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+            SystemEventType.LIVE_ORDER_HALT,
+        ):
+            for row in self.state_store.list_system_events_in_range(
+                event_type,
+                start_utc=start_utc,
+                end_utc=end_utc,
+            ):
+                if (
+                    event_type == SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED
+                    and "submitted_date" not in row["payload"]
+                ):
+                    continue
+                rows.append(row)
+        return rows
 
     def _daily_live_notional(self, currency: Currency | None = None) -> float:
         total = 0.0
@@ -255,10 +294,9 @@ class LiveOrderSafetyService:
 def _duplicate_key(request: LiveOrderRequest) -> str:
     if request.duplicate_key:
         return request.duplicate_key
-    submitted_minute = utc_now().strftime("%Y%m%d%H%M")
     return (
         f"{request.approval_id}:{request.symbol}:{request.side}:"
-        f"{request.quantity}:{request.limit_price}:{submitted_minute}"
+        f"{request.quantity}:{request.limit_price}"
     )
 
 

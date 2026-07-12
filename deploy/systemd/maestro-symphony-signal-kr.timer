@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Maestro Symphony KR signal workflow during the KRX session
+
+[Timer]
+OnCalendar=Mon..Fri 09:10:00 Asia/Seoul
+Persistent=true
+Unit=maestro-symphony-signal-kr.service
+
+[Install]
+WantedBy=timers.target

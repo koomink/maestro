@@ -3,6 +3,7 @@ import pytest
 from maestro.config.models import KISConfig
 from maestro.core.enums import BrokerProduct
 from maestro.core.instruments import TradableInstrument
+from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.base import KISRestBaseClient
 
 
@@ -85,7 +86,93 @@ def test_kis_rest_base_client_raises_consistent_request_errors(monkeypatch):
         client._get("/uapi/test", "TR_ID", {}, error_context="KIS test request")
 
 
-def _config(*, paper_trading: bool = False) -> KISConfig:
+def test_kis_auth_manager_uses_valid_cached_token_without_reissue(monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    cache_path = tmp_path / "kis-token.json"
+    cache_path.write_text(
+        '{"access_token": "cached-token", "expires_at": "2099-01-01T00:00:00+09:00"}',
+        encoding="utf-8",
+    )
+    transport = FakeTransport([])
+    manager = KISAuthManager(_config(token_cache_path=str(cache_path)), transport=transport)
+
+    token = manager.get_access_token()
+
+    assert token.access_token == "cached-token"
+    assert token.source == "cache"
+    assert transport.calls == []
+
+
+def test_kis_auth_manager_reissues_expired_cached_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    cache_path = tmp_path / "kis-token.json"
+    cache_path.write_text(
+        '{"access_token": "expired-token", "expires_at": "2000-01-01T00:00:00+09:00"}',
+        encoding="utf-8",
+    )
+    transport = FakeTransport(
+        [
+            {
+                "access_token": "issued-token",
+                "access_token_token_expired": "2099-01-01 00:00:00",
+            }
+        ]
+    )
+    manager = KISAuthManager(_config(token_cache_path=str(cache_path)), transport=transport)
+
+    token = manager.get_access_token()
+
+    assert token.access_token == "issued-token"
+    assert len(transport.calls) == 1
+    assert '"issued-token"' in cache_path.read_text(encoding="utf-8")
+
+
+def test_kis_auth_manager_rechecks_cache_after_lock_before_reissue(monkeypatch, tmp_path):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    cache_path = tmp_path / "kis-token.json"
+    cache_path.write_text(
+        '{"access_token": "expired-token", "expires_at": "2000-01-01T00:00:00+09:00"}',
+        encoding="utf-8",
+    )
+    transport = FakeTransport(
+        [
+            {
+                "access_token": "issued-token",
+                "access_token_token_expired": "2099-01-01 00:00:00",
+            }
+        ]
+    )
+    manager = KISAuthManager(_config(token_cache_path=str(cache_path)), transport=transport)
+    original_read_cached_token = manager._read_cached_token
+    reads = 0
+
+    def read_cached_token_once_expired_then_refreshed():
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            cache_path.write_text(
+                '{"access_token": "other-process-token", '
+                '"expires_at": "2099-01-01T00:00:00+09:00"}',
+                encoding="utf-8",
+            )
+        return original_read_cached_token()
+
+    monkeypatch.setattr(
+        manager,
+        "_read_cached_token",
+        read_cached_token_once_expired_then_refreshed,
+    )
+
+    token = manager.get_access_token()
+
+    assert token.access_token == "other-process-token"
+    assert transport.calls == []
+
+
+def _config(*, paper_trading: bool = False, token_cache_path: str | None = None) -> KISConfig:
     return KISConfig(
         enabled=True,
         provider="kis",
@@ -93,6 +180,7 @@ def _config(*, paper_trading: bool = False) -> KISConfig:
         app_key_env="TEST_KIS_APP_KEY",
         app_secret_env="TEST_KIS_APP_SECRET",
         access_token_env="TEST_KIS_ACCESS_TOKEN",
+        token_cache_path=token_cache_path,
         broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
         paper_trading=paper_trading,
     )

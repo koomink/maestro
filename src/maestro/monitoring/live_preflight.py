@@ -36,11 +36,21 @@ def live_approval_preflight_findings(config: MaestroConfig) -> tuple[list[str], 
         failures.append("reconciliation_not_required")
     if config.execution.allowed_order_type != OrderType.LIMIT:
         failures.append("non_limit_order_type")
+    if not config.execution.broker_validation.require_quote_validation:
+        failures.append("quote_validation_disabled")
+    if not config.execution.broker_validation.require_risk_validation:
+        failures.append("risk_validation_disabled")
+    if not config.execution.market_session.required:
+        failures.append("market_session_not_required")
     limits = config.execution.live_order_limits
     if not limits.max_order_notional_by_currency and limits.max_order_notional <= 0:
         failures.append("missing_per_order_notional_cap")
     if not limits.max_daily_notional_by_currency and limits.max_daily_notional <= 0:
         failures.append("missing_daily_notional_cap")
+    if not limits.has_daily_loss_limit():
+        warnings.append("missing_daily_loss_limit")
+    if limits.fee_buffer_pct <= 0:
+        warnings.append("missing_fee_buffer")
     if limits.max_daily_order_count <= 0:
         warnings.append("unbounded_daily_order_count")
     if not config.approval.enabled or not config.approval.require_approval:

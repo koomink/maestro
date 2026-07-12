@@ -1,5 +1,12 @@
 # Dashboard Refresh and Signals Implementation Plan
 
+> **Historical note:** this plan targeted `dashboard_frontend_next/`, which was
+> the active frontend tree when it was written. That tree was later superseded
+> by a separate `dashboard_frontend/` rebuild (with a different internal
+> structure — no `api/`, `components/layout/`, etc.) and has since been
+> deleted as unused legacy code. The `dashboard_frontend_next/...` paths below
+> are kept as-is for historical accuracy and no longer exist in the repo.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add Dashboard global account refresh plus signal freshness checks, and add Virtuoso sub-tabs with per-app proposal-only signal generation.

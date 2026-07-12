@@ -62,6 +62,26 @@ class SafetyControlService:
             raise ValueError("clear-halt requires current state to be halted")
         return self._transition(run_id, SafetyState.ACTIVE, reason, source, current)
 
+    def release_kill(
+        self,
+        run_id: str,
+        reason: str,
+        source: str = "cli",
+    ) -> SafetySnapshot:
+        current = self.current_state()
+        if current.state != SafetyState.KILLED:
+            raise ValueError("release-kill requires current state to be killed")
+        payload = {
+            "reason": reason,
+            "source": source,
+            "previous_reason": current.reason,
+            "killed_at": current.created_at,
+        }
+        snapshot = self._transition(run_id, SafetyState.ACTIVE, reason, source, current)
+        self.state_store.save_system_event(run_id, "safety_kill_released", payload)
+        self.audit_logger.log(run_id, "safety_kill_released", payload)
+        return snapshot
+
     def kill_switch(self, run_id: str, reason: str, source: str = "cli") -> SafetySnapshot:
         return self._transition(
             run_id,

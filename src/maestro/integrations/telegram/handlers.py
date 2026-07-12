@@ -1,3 +1,5 @@
+import os
+import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -6,6 +8,7 @@ from maestro.approval.models import ApprovalDecision
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
+from maestro.core.enums import SafetyState
 from maestro.core.ids import new_run_id
 from maestro.core.strategy_names import (
     strategy_command_slug as _telegram_strategy_command_slug,
@@ -31,6 +34,7 @@ from maestro.execution.brokers.readonly_factory import (
     build_broker_readonly_services,
 )
 from maestro.execution.budget_requests import (
+    BUDGET_SELECTION_KEYS,
     budget_request_reply_markup,
     format_contribution_budget_request,
     selected_budget_from_request,
@@ -47,6 +51,7 @@ from maestro.execution.live_order_models import (
 )
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.monitoring.health import HealthService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
@@ -55,8 +60,17 @@ from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 OPERATOR_CALLBACK_PREFIX = "operator:"
+# Maps strategy ids to systemd units that run the full daily-signal-approval
+# pipeline for that strategy, e.g.
+# MAESTRO_REBALANCE_UNITS="tranquillo=maestro-symphony-signal-kr.service,\
+# crescendo_us=maestro-symphony-signal-us.service".
+# The unit runs outside the telegram-operator cgroup, which matters because
+# daily-signal-approval stops this operator service while approval polling is
+# active — an in-process or child-process run would be killed with it.
+REBALANCE_UNITS_ENV = "MAESTRO_REBALANCE_UNITS"
 TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "Show Maestro command list"),
+    ("rebalance", "Show manual rebalance commands"),
     ("status", "Show Maestro status summary"),
     ("health", "Show health checks"),
     ("signal", "Show latest Symphony signal package"),
@@ -69,6 +83,7 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("attribution", "Review account attribution: /attribution <account_id>"),
     ("modify", "Propose order modification: /modify <broker_order_id> <price> [quantity]"),
     ("pause", "Confirm pause of live approval execution"),
+    ("clear_halt", "Confirm recovery from a safety halt (runs preflight)"),
     ("kill_switch", "Confirm emergency live execution stop"),
 )
 
@@ -121,6 +136,11 @@ class TelegramOperatorCommandRouter:
             self._record(command, chat_id, user_id, username, "handled")
             return True
 
+        if command.startswith("/rebalance_"):
+            self._request_manual_rebalance(chat_id, command)
+            self._record(command, chat_id, user_id, username, "handled")
+            return True
+
         if command == "/budget":
             self._process_budget_command(text, chat_id, user_id, username)
             return True
@@ -135,6 +155,7 @@ class TelegramOperatorCommandRouter:
             f"/{command}": handler
             for command, handler in {
                 "help": self._help,
+                "rebalance": self._rebalance_usage,
                 "status": self._status,
                 "health": self._health,
                 "signal": self._signal,
@@ -144,6 +165,8 @@ class TelegramOperatorCommandRouter:
                 "orders": self._orders,
                 "approvals": self._approvals,
                 "pause": self._pause,
+                "clear-halt": self._clear_halt,
+                "clear_halt": self._clear_halt,
                 "kill-switch": self._kill_switch,
                 "kill_switch": self._kill_switch,
             }.items()
@@ -174,7 +197,13 @@ class TelegramOperatorCommandRouter:
             update_id = update.get("update_id")
             if isinstance(update_id, int):
                 next_offset = update_id + 1
-            self.process_update(update)
+            try:
+                self.process_update(update)
+            except Exception as exc:  # noqa: BLE001 - one bad update must not
+                # wedge the poll loop: re-raising here loses next_offset, so the
+                # same batch (including already side-effecting commands) would
+                # be fetched and executed again on the next poll.
+                self._record_update_failure(update_id, exc)
         return next_offset
 
     def _process_callback(
@@ -247,13 +276,23 @@ class TelegramOperatorCommandRouter:
                 user_id,
                 username,
             )
-        if action not in {"confirm:pause", "confirm:kill-switch"}:
+        if action.startswith("rebalance:"):
+            return self._process_rebalance_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action not in {"confirm:pause", "confirm:kill-switch", "confirm:clear-halt"}:
             self._answer(callback, "This command is no longer active.")
             self._record(command, chat_id, user_id, username, "stale_callback")
             return True
 
         transition = action.removeprefix("confirm:")
         reason = f"Telegram /{transition} confirmed by {username or user_id}"
+        if transition == "clear-halt":
+            return self._confirm_clear_halt(callback, command, chat_id, user_id, username, reason)
         safety = SafetyControlService(self.store, self.audit)
         if transition == "pause":
             snapshot = safety.pause(new_run_id(), reason, source="telegram")
@@ -262,6 +301,51 @@ class TelegramOperatorCommandRouter:
         text = f"Safety state changed: {snapshot.state.value}\nreason: {snapshot.reason}"
         self._answer(callback, f"{transition} confirmed.")
         self._edit_callback_message(callback, text)
+        self._record(command, chat_id, user_id, username, "confirmed")
+        return True
+
+    def _confirm_clear_halt(
+        self,
+        callback: Mapping[str, Any],
+        command: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+        reason: str,
+    ) -> bool:
+        # Mirrors the `maestro clear-halt` CLI: recovery preflight first
+        # (every health check except safety_state itself must not fail),
+        # then the guarded state transition.
+        report = HealthService(self.config, self.store).run()
+        blocking_checks = [
+            check.name
+            for check in report.checks
+            if check.status == "fail" and check.name != "safety_state"
+        ]
+        if blocking_checks:
+            self._answer(callback, "Recovery preflight failed.")
+            self._edit_callback_message(
+                callback,
+                "Clear-halt blocked by failing health checks: " + ", ".join(blocking_checks),
+            )
+            self._record(command, chat_id, user_id, username, "preflight_failed")
+            return True
+        try:
+            snapshot = SafetyControlService(self.store, self.audit).clear_halt(
+                new_run_id(),
+                reason,
+                source="telegram",
+            )
+        except ValueError as exc:
+            self._answer(callback, "Clear-halt failed.")
+            self._edit_callback_message(callback, f"Clear-halt failed: {exc}")
+            self._record(command, chat_id, user_id, username, "failed")
+            return True
+        self._answer(callback, "clear-halt confirmed.")
+        self._edit_callback_message(
+            callback,
+            f"Safety state changed: {snapshot.state.value}\nreason: {snapshot.reason}",
+        )
         self._record(command, chat_id, user_id, username, "confirmed")
         return True
 
@@ -295,8 +379,7 @@ class TelegramOperatorCommandRouter:
         for position in positions:
             item = _mapping(position)
             lines.append(
-                f"{item.get('symbol')}: {item.get('bucket_id')} "
-                f"{_number(item.get('quantity'))}"
+                f"{item.get('symbol')}: {item.get('bucket_id')} {_number(item.get('quantity'))}"
             )
         reply_markup = None
         if not payload.get("approved"):
@@ -473,7 +556,6 @@ class TelegramOperatorCommandRouter:
         self._record("/modify", chat_id, user_id, username, "approved")
         return True
 
-
     def _process_cash_flow_callback(
         self,
         callback: Mapping[str, Any],
@@ -485,25 +567,25 @@ class TelegramOperatorCommandRouter:
         parts = action.split(":")
         transition = parts[1] if len(parts) > 1 else ""
         valid_callback = (
-            len(parts) == 3
-            and parts[0] == "cash-flow"
-            and transition in {"approve", "ignore"}
-        ) or (
-            len(parts) == 4
-            and parts[0] == "cash-flow"
-            and transition == "assign"
-        )
+            len(parts) == 3 and parts[0] == "cash-flow" and transition in {"approve", "ignore"}
+        ) or (len(parts) == 4 and parts[0] == "cash-flow" and transition in {"assign", "asg"})
         if not valid_callback:
             self._answer(callback, "This cash-flow proposal is no longer active.")
             self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
             return True
         proposal_id = parts[2]
-        assigned_strategy_id = parts[3] if transition == "assign" else None
         proposal = self._load_pending_cash_flow_proposal(proposal_id)
         if proposal is None:
             self._answer(callback, "This cash-flow proposal is no longer active.")
             self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
             return True
+        assigned_strategy_id = None
+        if transition in {"assign", "asg"}:
+            assigned_strategy_id = _assigned_strategy_id_from_token(proposal, parts[3])
+            if assigned_strategy_id is None:
+                self._answer(callback, "This cash-flow proposal is no longer active.")
+                self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
+                return True
         if transition == "ignore":
             self._save_cash_flow_proposal_ack(proposal_id, "ignored", user_id, username)
             self._answer(callback, "Cash-flow allocation ignored.")
@@ -562,7 +644,6 @@ class TelegramOperatorCommandRouter:
         )
         return True
 
-
     def _process_funding_callback(
         self,
         callback: Mapping[str, Any],
@@ -619,13 +700,11 @@ class TelegramOperatorCommandRouter:
         username: str | None,
     ) -> bool:
         parts = action.split(":", 3)
-        valid = (
-            len(parts) == 3 and parts[0] == "budget" and parts[1] == "cancel"
-        ) or (
+        valid = (len(parts) == 3 and parts[0] == "budget" and parts[1] == "cancel") or (
             len(parts) == 4
             and parts[0] == "budget"
-            and parts[1] == "select"
-            and parts[3] in {"min", "recommended", "full"}
+            and parts[1] in {"select", "sel"}
+            and parts[3] in BUDGET_SELECTION_KEYS
         )
         if not valid:
             self._answer(callback, "This budget request is no longer active.")
@@ -883,18 +962,10 @@ class TelegramOperatorCommandRouter:
                 payload,
             )
 
-
     def _send_voluntary_deposit_allocation_proposal(self, chat_id: int) -> None:
         proposal = self._build_voluntary_deposit_proposal()
         if proposal is None:
             return
-        save_audited_system_event(
-            self.store,
-            self.audit,
-            new_run_id(),
-            "strategy_cash_flow_proposal",
-            proposal,
-        )
         lines = [
             "Unattributed deposit detected",
             f"proposal_id: {proposal['proposal_id']}",
@@ -909,10 +980,19 @@ class TelegramOperatorCommandRouter:
                 f"- {_telegram_strategy_display_name(allocation['strategy_id'])}: "
                 f"{amount} {proposal['currency']}"
             )
+        # Send before saving: the proposal-exists dedup check means a proposal
+        # saved without a delivered message would never be offered again.
         self._send(
             chat_id,
             "\n".join(lines),
             reply_markup=_cash_flow_proposal_markup(proposal),
+        )
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "strategy_cash_flow_proposal",
+            proposal,
         )
 
     def _build_voluntary_deposit_proposal(self) -> dict[str, Any] | None:
@@ -1045,7 +1125,6 @@ class TelegramOperatorCommandRouter:
                 **extra,
             },
         )
-
 
     def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id") or "")
@@ -1247,7 +1326,6 @@ class TelegramOperatorCommandRouter:
             lines.append(f"approval_run_id: {signal['approval_run_id']}")
         self._send(chat_id, "\n".join(lines))
 
-
     def _generate_strategy_signal(self, chat_id: int, command: str) -> None:
         if self.signal_config_path is None:
             self._send(chat_id, "Signal generation requires telegram-operator --signal-config.")
@@ -1292,6 +1370,133 @@ class TelegramOperatorCommandRouter:
                 ]
             ),
         )
+
+    def _rebalance_usage(self, chat_id: int) -> None:
+        if self.signal_config_path is None:
+            self._send(chat_id, "Manual rebalance requires telegram-operator --signal-config.")
+            return
+        signal_config = load_config(self.signal_config_path)
+        commands = [
+            f"/{_primary_rebalance_command(strategy.id)} - "
+            f"{_telegram_strategy_display_name(strategy.id)}"
+            for strategy in signal_config.strategies
+            if strategy.enabled and strategy.signal_enabled
+        ]
+        if not commands:
+            self._send(chat_id, "No signal-enabled strategies available for manual rebalance.")
+            return
+        self._send(
+            chat_id,
+            "\n".join(
+                [
+                    "Manual rebalance commands",
+                    *commands,
+                    "",
+                    "Runs the daily signal + approval pipeline immediately.",
+                    "Live orders still require Telegram approval.",
+                ]
+            ),
+        )
+
+    def _request_manual_rebalance(self, chat_id: int, command: str) -> None:
+        if self.signal_config_path is None:
+            self._send(chat_id, "Manual rebalance requires telegram-operator --signal-config.")
+            return
+        try:
+            signal_config = load_config(self.signal_config_path)
+            strategy_id = _strategy_id_for_rebalance_command(command, signal_config)
+            if strategy_id is None:
+                raise ValueError(f"Unknown rebalance command: {command}")
+            unit = _rebalance_unit_for_strategy(strategy_id)
+            if unit is None:
+                raise ValueError(
+                    f"No systemd unit mapped for strategy {strategy_id}; set "
+                    f"{REBALANCE_UNITS_ENV} in the telegram-operator environment, e.g. "
+                    f'"{strategy_id}=maestro-symphony-signal-kr.service"'
+                )
+        except ValueError as exc:
+            self._send(
+                chat_id,
+                "\n".join(
+                    [
+                        "Manual rebalance failed",
+                        f"command: {command}",
+                        f"message: {exc}",
+                    ]
+                ),
+            )
+            return
+        self._send(
+            chat_id,
+            "\n".join(
+                [
+                    f"Confirm manual rebalance for {_telegram_strategy_display_name(strategy_id)}.",
+                    f"unit: {unit}",
+                    "This runs the daily signal + approval pipeline now.",
+                    "Live orders still require Telegram approval, and this bot",
+                    "pauses while approval polling is active.",
+                ]
+            ),
+            reply_markup=_rebalance_markup(strategy_id),
+        )
+
+    def _process_rebalance_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        command = "/rebalance"
+        parts = action.split(":")
+        if len(parts) != 3 or parts[1] != "approve" or not parts[2]:
+            self._answer(callback, "This command is no longer active.")
+            self._record(command, chat_id, user_id, username, "stale_callback")
+            return True
+        strategy_id = parts[2]
+        display_name = _telegram_strategy_display_name(strategy_id)
+        unit = _rebalance_unit_for_strategy(strategy_id)
+        if unit is None:
+            self._answer(callback, "Rebalance unit not configured.")
+            self._edit_callback_message(
+                callback,
+                f"Manual rebalance failed: no systemd unit mapped for {strategy_id}. "
+                f"Set {REBALANCE_UNITS_ENV} in the telegram-operator environment.",
+            )
+            self._record(command, chat_id, user_id, username, "failed")
+            return True
+        try:
+            _start_systemd_unit(unit)
+        except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+            self._answer(callback, "Manual rebalance failed.")
+            self._edit_callback_message(
+                callback,
+                "\n".join(
+                    [
+                        f"Manual rebalance failed: {display_name}",
+                        f"unit: {unit}",
+                        f"message: {exc}",
+                    ]
+                ),
+            )
+            self._record(command, chat_id, user_id, username, "failed")
+            return True
+        self._answer(callback, "Manual rebalance triggered.")
+        self._edit_callback_message(
+            callback,
+            "\n".join(
+                [
+                    f"Manual rebalance triggered: {display_name}",
+                    f"unit: {unit}",
+                    f"confirmed_by: {username or user_id}",
+                    "This bot pauses while approval polling is active;",
+                    "approve the order prompt when it arrives.",
+                ]
+            ),
+        )
+        self._record(command, chat_id, user_id, username, "confirmed")
+        return True
 
     def _account(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
@@ -1434,6 +1639,26 @@ class TelegramOperatorCommandRouter:
             reply_markup=_confirmation_markup("pause"),
         )
 
+    def _clear_halt(self, chat_id: int) -> None:
+        current = SafetyControlService(self.store, self.audit).current_state()
+        if current.state != SafetyState.HALTED:
+            self._send(
+                chat_id,
+                f"Safety state is {current.state.value}; clear-halt only applies to halted.",
+            )
+            return
+        self._send(
+            chat_id,
+            "\n".join(
+                [
+                    "Confirm clear-halt. This re-enables live approval execution.",
+                    f"halt reason: {current.reason}",
+                    "Recovery preflight (health checks) runs before the state change.",
+                ]
+            ),
+            reply_markup=_confirmation_markup("clear-halt"),
+        )
+
     def _kill_switch(self, chat_id: int) -> None:
         self._send(
             chat_id,
@@ -1493,9 +1718,7 @@ class TelegramOperatorCommandRouter:
                 account,
                 instrument_currencies,
             ).items():
-                positions_market_value[currency] = (
-                    positions_market_value.get(currency, 0.0) + value
-                )
+                positions_market_value[currency] = positions_market_value.get(currency, 0.0) + value
         return {
             "cash": cash,
             "positions_market_value": positions_market_value,
@@ -1555,12 +1778,7 @@ class TelegramOperatorCommandRouter:
                 symbol = position.get("symbol")
                 name = position.get("name")
                 currency = _position_currency(position, instrument_currencies)
-                if (
-                    isinstance(symbol, str)
-                    and isinstance(name, str)
-                    and name
-                    and currency == "KRW"
-                ):
+                if isinstance(symbol, str) and isinstance(name, str) and name and currency == "KRW":
                     labels[symbol] = f"{symbol} {name}"
         return labels
 
@@ -1590,8 +1808,14 @@ class TelegramOperatorCommandRouter:
         if not isinstance(callback_id, str):
             return
         answer_callback_query = getattr(self.client, "answer_callback_query", None)
-        if callable(answer_callback_query):
+        if not callable(answer_callback_query):
+            return
+        try:
             answer_callback_query(callback_id, text)
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            # Telegram rejects answers to old callbacks (e.g. after operator
+            # downtime); the command result must still be processed.
+            return
 
     def _edit_callback_message(self, callback: Mapping[str, Any], text: str) -> None:
         message = callback.get("message")
@@ -1628,6 +1852,20 @@ class TelegramOperatorCommandRouter:
             new_run_id(),
             SystemEventType.TELEGRAM_COMMAND,
             payload,
+        )
+
+    def _record_update_failure(self, update_id: object, exc: Exception) -> None:
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            SystemEventType.TELEGRAM_COMMAND,
+            {
+                "status": "error",
+                "update_id": update_id if isinstance(update_id, int) else None,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:500],
+            },
         )
 
     def _latest_attribution_event(self, account_id: str) -> dict[str, Any] | None:
@@ -1748,7 +1986,10 @@ def _cash_flow_proposal_markup(proposal: Mapping[str, Any]) -> dict[str, Any]:
             },
         ]
     ]
-    for allocation in proposal.get("allocations") or []:
+    # Assign buttons carry the allocation index instead of the strategy id:
+    # strategy ids pushed the callback_data past Telegram's 64-byte limit,
+    # which made the whole sendMessage call fail.
+    for index, allocation in enumerate(proposal.get("allocations") or []):
         strategy_id = str(_mapping(allocation).get("strategy_id") or "")
         if not strategy_id:
             continue
@@ -1757,13 +1998,33 @@ def _cash_flow_proposal_markup(proposal: Mapping[str, Any]) -> dict[str, Any]:
                 {
                     "text": f"Assign {_telegram_strategy_display_name(strategy_id)}",
                     "callback_data": (
-                        f"{OPERATOR_CALLBACK_PREFIX}cash-flow:assign:"
-                        f"{proposal_id}:{strategy_id}"
+                        f"{OPERATOR_CALLBACK_PREFIX}cash-flow:asg:{proposal_id}:{index}"
                     ),
                 }
             ]
         )
     return {"inline_keyboard": keyboard}
+
+
+def _assigned_strategy_id_from_token(
+    proposal: Mapping[str, Any],
+    token: str,
+) -> str | None:
+    """Resolve an assign-callback token to a strategy id.
+
+    New callbacks carry the allocation index; callbacks from messages sent
+    before the 64-byte callback_data fix carry the strategy id itself.
+    """
+    allocations = [_mapping(row) for row in proposal.get("allocations") or []]
+    if token.isdigit():
+        index = int(token)
+        if index >= len(allocations):
+            return None
+        strategy_id = str(allocations[index].get("strategy_id") or "")
+        return strategy_id or None
+    if any(row.get("strategy_id") == token for row in allocations):
+        return token
+    return None
 
 
 def _mask_identifier(value: object) -> str:
@@ -1903,10 +2164,7 @@ def _broker_snapshot_account_id(row: Mapping[str, Any]) -> str:
     payload = _mapping(row.get("payload"))
     account = _mapping(payload.get("account"))
     return str(
-        row.get("account_id")
-        or payload.get("account_id")
-        or account.get("account_id")
-        or ""
+        row.get("account_id") or payload.get("account_id") or account.get("account_id") or ""
     )
 
 
@@ -2060,38 +2318,86 @@ def telegram_bot_commands(signal_config: MaestroConfig | None = None) -> list[di
     for strategy in signal_config.strategies:
         if not strategy.enabled or not strategy.signal_enabled:
             continue
-        command = _primary_signal_command(strategy.id)
-        if command in seen:
-            continue
-        seen.add(command)
-        commands.append(
-            {
-                "command": command,
-                "description": f"Generate {_strategy_display_name(strategy.id)} signal",
-            }
-        )
+        display_name = _telegram_strategy_display_name(strategy.id)
+        for command, description in (
+            (_primary_signal_command(strategy.id), f"Generate {display_name} signal"),
+            (
+                _primary_rebalance_command(strategy.id),
+                f"Run {display_name} manual rebalance",
+            ),
+        ):
+            if command in seen:
+                continue
+            seen.add(command)
+            commands.append({"command": command, "description": description})
     return commands
 
 
 def _strategy_id_for_signal_command(command: str, config: MaestroConfig) -> str | None:
     command_name = command.removeprefix("/")
+    matches = {_primary_signal_command(strategy.id): strategy.id for strategy in config.strategies}
+    return matches.get(command_name)
+
+
+def _primary_signal_command(strategy_id: str) -> str:
+    return f"signal_{_strategy_command_stem(strategy_id)}"
+
+
+def _primary_rebalance_command(strategy_id: str) -> str:
+    return f"rebalance_{_strategy_command_stem(strategy_id)}"
+
+
+def _strategy_command_stem(strategy_id: str) -> str:
+    slug = _telegram_strategy_command_slug(strategy_id) or _telegram_command_slug(strategy_id)
+    if slug.endswith("_us"):
+        slug = slug.removesuffix("_us")
+    return slug
+
+
+def _strategy_id_for_rebalance_command(command: str, config: MaestroConfig) -> str | None:
+    command_name = command.removeprefix("/")
     matches = {
-        name: strategy.id
+        _primary_rebalance_command(strategy.id): strategy.id
         for strategy in config.strategies
-        for name in _signal_command_names(strategy.id)
+        if strategy.enabled and strategy.signal_enabled
     }
     return matches.get(command_name)
 
 
-def _signal_command_names(strategy_id: str) -> list[str]:
-    return [_primary_signal_command(strategy_id)]
+def _rebalance_units_from_env() -> dict[str, str]:
+    units: dict[str, str] = {}
+    for item in os.getenv(REBALANCE_UNITS_ENV, "").split(","):
+        strategy_id, _, unit = item.partition("=")
+        if strategy_id.strip() and unit.strip():
+            units[strategy_id.strip()] = unit.strip()
+    return units
 
 
-def _primary_signal_command(strategy_id: str) -> str:
-    slug = _telegram_strategy_command_slug(strategy_id) or _telegram_command_slug(strategy_id)
-    if slug.endswith("_us"):
-        slug = slug.removesuffix("_us")
-    return f"signal_{slug}"
+def _rebalance_unit_for_strategy(strategy_id: str) -> str | None:
+    return _rebalance_units_from_env().get(strategy_id)
+
+
+def _start_systemd_unit(unit: str) -> None:
+    subprocess.run(
+        ["systemctl", "start", "--no-block", unit],
+        check=True,
+        capture_output=True,
+        timeout=30,
+    )
+
+
+def _rebalance_markup(strategy_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve rebalance",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}rebalance:approve:{strategy_id}",
+                }
+            ],
+            [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
+        ]
+    }
 
 
 def _telegram_command_slug(value: str) -> str:
@@ -2108,10 +2414,6 @@ def _telegram_command_slug(value: str) -> str:
             previous_underscore = False
         slug.append(next_char)
     return "".join(slug).strip("_")
-
-
-def _strategy_display_name(strategy_id: str) -> str:
-    return _telegram_strategy_display_name(strategy_id)
 
 
 __all__ = ["TelegramOperatorCommandRouter", "telegram_bot_commands"]

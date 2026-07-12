@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -202,6 +202,85 @@ def test_yahoo_provider_rejects_malformed_payload():
 
     with pytest.raises(ValueError, match="Malformed Yahoo payload"):
         provider.get_data([request()])
+
+
+def _bar_row(timestamp: datetime, **overrides: Any) -> dict[str, Any]:
+    row = {
+        "timestamp": timestamp.isoformat(),
+        "open": 100.0,
+        "high": 102.0,
+        "low": 99.0,
+        "close": 101.0,
+        "volume": 1000,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_yahoo_provider_drops_malformed_forming_bar():
+    now = datetime.now(UTC)
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                _bar_row(now - timedelta(days=2), close=103.0, high=104.0),
+                _bar_row(now - timedelta(days=1), close=104.0, high=105.0),
+                # Still-forming current-session bar with inconsistent OHLC.
+                _bar_row(now - timedelta(hours=6), low=105.0, close=101.0, high=106.0),
+            ]
+        }
+    )
+    provider = YahooDataProvider(client=client, stale_after_seconds=604800)
+
+    payload = provider.get_data([request(data_type="ohlcv", lookback=3)]).data["SPY"]
+
+    assert len(payload["bars"]) == 2
+    assert payload["latest_price"]["price"] == 104.0
+    assert payload["is_stale"] is False
+    assert any("Dropped malformed forming bar for SPY" in w for w in payload["warnings"])
+
+
+def test_yahoo_provider_rejects_malformed_completed_bar():
+    now = datetime.now(UTC)
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                _bar_row(now - timedelta(days=3), close=103.0, high=104.0),
+                # Completed bar (older than the forming window) stays fail-closed.
+                _bar_row(now - timedelta(days=2), low=105.0, close=101.0, high=106.0),
+            ]
+        }
+    )
+    provider = YahooDataProvider(client=client)
+
+    with pytest.raises(ValueError, match="Malformed Yahoo payload for SPY"):
+        provider.get_data([request(data_type="ohlcv", lookback=2)])
+
+
+def test_yahoo_provider_rejects_malformed_forming_bar_before_last_row():
+    now = datetime.now(UTC)
+    client = FakeYahooClient(
+        {
+            "SPY": [
+                _bar_row(now - timedelta(hours=12), low=105.0, close=101.0, high=106.0),
+                _bar_row(now - timedelta(hours=6), close=104.0, high=105.0),
+            ]
+        }
+    )
+    provider = YahooDataProvider(client=client)
+
+    with pytest.raises(ValueError, match="Malformed Yahoo payload for SPY"):
+        provider.get_data([request(data_type="ohlcv", lookback=2)])
+
+
+def test_yahoo_provider_fails_when_only_bar_is_malformed_forming_bar():
+    now = datetime.now(UTC)
+    client = FakeYahooClient(
+        {"SPY": [_bar_row(now - timedelta(hours=6), low=105.0, close=101.0, high=106.0)]}
+    )
+    provider = YahooDataProvider(client=client)
+
+    with pytest.raises(ValueError, match="No Yahoo data for symbol: SPY"):
+        provider.get_data([request(lookback=1)])
 
 
 def test_yahoo_provider_marks_stale_payloads():

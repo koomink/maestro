@@ -132,8 +132,10 @@ approval:
   default_decision: expired
   timeout_seconds: 300
   telegram_bot_token_env: TELEGRAM_BOT_TOKEN
-  telegram_allowed_chat_ids: []
-  whitelisted_user_ids: []
+  telegram_allowed_chat_ids:
+    - 123456789
+  whitelisted_user_ids:
+    - 123456789
   telegram_poll_interval_seconds: 1.0
 
 kis:

@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -166,6 +166,24 @@ class LiveExecutionGateService:
             "close": market_session.close,
             **({"exchange_code": exchange_code} if exchange_code else {}),
         }
+        if open_time > close_time:
+            if not (local_time >= open_time or local_time < close_time):
+                return {"reason": "outside_market_session", **payload}
+            session_start_date = (
+                local_now.date()
+                if local_time >= open_time
+                else local_now.date() - timedelta(days=1)
+            )
+            session_start_date_text = session_start_date.isoformat()
+            if session_start_date.weekday() not in market_session.weekdays:
+                return {"reason": "market_weekday_closed", **payload}
+            if session_start_date_text in market_session.holidays:
+                return {
+                    "reason": "market_holiday_closed",
+                    "date": session_start_date_text,
+                    **payload,
+                }
+            return None
         if local_now.weekday() not in market_session.weekdays:
             return {"reason": "market_weekday_closed", **payload}
         if local_date in market_session.holidays:
@@ -194,12 +212,28 @@ class LiveExecutionGateService:
                 "message": result.get("message"),
             }
 
-        lifecycle_order_ids = {
-            str(row["payload"].get("order_id"))
-            for row in self.state_store.list_system_events_by_type(
-                SystemEventType.LIVE_ORDER_LIFECYCLE, limit=1000
-            )
-        }
+        intent_rows = self.state_store.list_system_events_by_type(
+            "live_order_submit_intent",
+            limit=1000,
+        )
+        for row in intent_rows:
+            if int(row["id"]) <= completed_after_event_id:
+                continue
+            payload = row["payload"]
+            intent_duplicate_key = str(payload.get("duplicate_key") or "")
+            if intent_duplicate_key.startswith("intent:"):
+                result_duplicate_key = intent_duplicate_key.removeprefix("intent:")
+                if not self.state_store.duplicate_key_exists(result_duplicate_key):
+                    request = payload.get("request", {})
+                    return {
+                        "reason": "live_order_intent_without_result",
+                        "intent_event_id": row["id"],
+                        "order_id": request.get("order_id"),
+                    }
+
+        lifecycle_order_ids = self.state_store.list_order_ids_for_event_type(
+            str(SystemEventType.LIVE_ORDER_LIFECYCLE)
+        )
         for row in self.state_store.list_system_events_by_type(
             SystemEventType.LIVE_ORDER_RESULT, limit=1000
         ):
@@ -245,15 +279,27 @@ class LiveExecutionGateService:
         )
         existing_count = 0
         existing_notional_by_currency: dict[Currency, float] = {}
-        for row in self.state_store.list_system_events_in_range(
-            SystemEventType.LIVE_ORDER_RESULT, start_utc=start_utc, end_utc=end_utc
+        for event_type in (
+            SystemEventType.LIVE_ORDER_RESULT,
+            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+            SystemEventType.LIVE_ORDER_HALT,
         ):
-            payload = row["payload"]
-            existing_count += 1
-            currency = self._event_currency(payload)
-            existing_notional_by_currency[currency] = existing_notional_by_currency.get(
-                currency, 0.0
-            ) + float(payload.get("notional", 0.0))
+            for row in self.state_store.list_system_events_in_range(
+                event_type,
+                start_utc=start_utc,
+                end_utc=end_utc,
+            ):
+                payload = row["payload"]
+                if (
+                    event_type == SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED
+                    and "submitted_date" not in payload
+                ):
+                    continue
+                existing_count += 1
+                currency = self._event_currency(payload)
+                existing_notional_by_currency[currency] = existing_notional_by_currency.get(
+                    currency, 0.0
+                ) + float(payload.get("notional", 0.0))
 
         proposed_notional_by_currency: dict[Currency, float] = {}
         limits = self.config.execution.live_order_limits
@@ -274,9 +320,9 @@ class LiveExecutionGateService:
                     "order_notional": order.notional,
                     "max_live_order_notional": max_order_notional,
                 }
-            proposed_notional_by_currency[currency] = proposed_notional_by_currency.get(
-                currency, 0.0
-            ) + order.notional
+            proposed_notional_by_currency[currency] = (
+                proposed_notional_by_currency.get(currency, 0.0) + order.notional
+            )
 
         for currency, proposed_notional in proposed_notional_by_currency.items():
             max_daily_notional = limits.max_daily_notional_for(currency)
@@ -440,9 +486,7 @@ class LiveExecutionGateService:
             issues.extend(self._daily_loss_risk_issues(latest["payload"]))
         if not issues:
             return None
-        latest_ids = sorted(
-            {int(snapshot["id"]) for snapshot in snapshots_by_account.values()}
-        )
+        latest_ids = sorted({int(snapshot["id"]) for snapshot in snapshots_by_account.values()})
         return {
             "reason": "broker_risk_failed",
             "broker_snapshot_ids": latest_ids,
@@ -708,9 +752,7 @@ def _infer_single_broker_currency(account: dict[str, Any]) -> Currency | None:
     positions = account.get("positions")
     if isinstance(positions, list):
         currencies = {
-            str(position.get("currency"))
-            for position in positions
-            if position.get("currency")
+            str(position.get("currency")) for position in positions if position.get("currency")
         }
         if len(currencies) == 1:
             return Currency(next(iter(currencies)))

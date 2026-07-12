@@ -161,7 +161,7 @@ def test_target_rebalance_orders_are_rounded_to_instrument_contract():
                 min_order_quantity=1,
                 min_order_notional=1,
             )
-        ]
+        ],
     )
     state = PortfolioState(cash=1_000, positions={})
     target = PortfolioTarget(
@@ -224,14 +224,7 @@ def test_target_rebalance_scales_non_sleeve_buys_to_cash_after_fee_buffer():
 
 def test_live_contribution_duplicate_ignores_rejected_order_intent(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
-    order_payload = {
-        "order_id": "ord-live-rejected",
-        "metadata": {
-            "order_generation_mode": "buy_only_contribution",
-            "contribution_month": "2026-05",
-            "contribution_sleeve": "KRW",
-        },
-    }
+    order_payload = _contribution_order_payload("ord-live-rejected")
     store.save_order("run-1", "ord-live-rejected", order_payload)
     store.save_system_event(
         "run-1",
@@ -243,21 +236,56 @@ def test_live_contribution_duplicate_ignores_rejected_order_intent(tmp_path):
             "applied_fills": [],
         },
     )
+    store.save_system_event(
+        "run-1",
+        "live_order_result",
+        {
+            "request": {"order_id": "ord-live-rejected"},
+            "result": {"status": "rejected"},
+        },
+    )
 
     assert store.monthly_contribution_order_exists("2026-05", "KRW") is True
     assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is False
 
 
+def test_live_contribution_duplicate_counts_open_lifecycle(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = _contribution_order_payload("ord-live-open")
+    store.save_order("run-1", "ord-live-open", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-open",
+            "final_status": "open",
+            "applied_fills": [],
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
+
+
+def test_live_contribution_duplicate_counts_live_result_without_lifecycle(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = _contribution_order_payload("ord-live-result-only")
+    store.save_order("run-1", "ord-live-result-only", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_result",
+        {
+            "request": {"order_id": "ord-live-result-only"},
+            "result": {"status": "accepted_by_broker"},
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
+
+
 def test_live_contribution_duplicate_counts_filled_lifecycle(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
-    order_payload = {
-        "order_id": "ord-live-filled",
-        "metadata": {
-            "order_generation_mode": "buy_only_contribution",
-            "contribution_month": "2026-05",
-            "contribution_sleeve": "KRW",
-        },
-    }
+    order_payload = _contribution_order_payload("ord-live-filled")
     store.save_order("run-1", "ord-live-filled", order_payload)
     store.save_system_event(
         "run-1",
@@ -266,6 +294,42 @@ def test_live_contribution_duplicate_counts_filled_lifecycle(tmp_path):
             "run_id": "run-1",
             "order_id": "ord-live-filled",
             "final_status": "filled",
+            "applied_fills": [],
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
+
+
+def test_live_contribution_duplicate_counts_applied_fills(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = _contribution_order_payload("ord-live-partial")
+    store.save_order("run-1", "ord-live-partial", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-partial",
+            "final_status": "failed",
+            "applied_fills": [{"broker_order_id": "KIS-1"}],
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
+
+
+def test_live_contribution_duplicate_blocks_unclassified_lifecycle_status(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = _contribution_order_payload("ord-live-unclassified")
+    store.save_order("run-1", "ord-live-unclassified", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-unclassified",
+            "final_status": "created",
             "applied_fills": [],
         },
     )
@@ -341,6 +405,17 @@ def _target() -> PortfolioTarget:
         allocation_sleeves={"KRW": {LEV: 0.60, DIV: 0.40}},
         source_strategy_ids=["tranquillo"],
     )
+
+
+def _contribution_order_payload(order_id: str) -> dict:
+    return {
+        "order_id": order_id,
+        "metadata": {
+            "order_generation_mode": "buy_only_contribution",
+            "contribution_month": "2026-05",
+            "contribution_sleeve": "KRW",
+        },
+    }
 
 
 def _instruments() -> list[TradableInstrument]:

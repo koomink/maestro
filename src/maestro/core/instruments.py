@@ -24,6 +24,7 @@ class TradableInstrument(BaseModel):
     broker: str
     broker_product: BrokerProduct
     broker_symbol: str = Field(min_length=1)
+    broker_symbols: dict[str, str] = Field(default_factory=dict)
     exchange_code: ExchangeCode | None = None
     quantity_step: float = Field(gt=0)
     price_tick: float = Field(gt=0)

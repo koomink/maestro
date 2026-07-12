@@ -30,7 +30,7 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
     pagination_error_context = "KIS domestic read-only pagination"
 
     def get_account_snapshot(self) -> KISAccountSnapshot:
-        positions, cash_balance = self._fetch_balance()
+        positions, cash_balance, daily_pnl = self._fetch_balance()
         buying_power = self.get_buying_power()
         return KISAccountSnapshot(
             account_id=self.credentials.account_id,
@@ -40,12 +40,14 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
             positions=positions,
             cash_balance=cash_balance,
             buying_power_detail=buying_power,
+            daily_pnl=daily_pnl,
+            daily_pnl_by_currency={"KRW": daily_pnl} if daily_pnl is not None else None,
             fetched_at=utc_now(),
             source="kis_rest_readonly",
         )
 
     def get_positions(self) -> list[KISPosition]:
-        positions, _ = self._fetch_balance()
+        positions, _, _ = self._fetch_balance()
         return positions
 
     def get_buying_power(
@@ -100,7 +102,7 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
     def get_unfilled_orders(self) -> list[KISOrderSummary]:
         return self._fetch_order_summaries(ccld_dvsn="02")
 
-    def _fetch_balance(self) -> tuple[list[KISPosition], KISCashBalance]:
+    def _fetch_balance(self) -> tuple[list[KISPosition], KISCashBalance, float | None]:
         payload = self._get(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             self._tr_id(real="TTTC8434R", demo="VTTC8434R"),
@@ -139,7 +141,11 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
             total_asset_value=_optional_first_float(summary, "tot_evlu_amt", "nass_amt"),
             withdrawable_cash=_optional_first_float(summary, "dnca_tot_amt", "nxdy_excc_amt"),
         )
-        return positions, cash_balance
+        # asst_icdc_amt (자산증감액) is today's total-asset change versus the
+        # previous trading day — the closest daily-PnL figure the KIS balance
+        # API reports at account level (KRW).
+        daily_pnl = _optional_first_float(summary, "asst_icdc_amt")
+        return positions, cash_balance, daily_pnl
 
     def _fetch_order_summaries(self, ccld_dvsn: str) -> list[KISOrderSummary]:
         today = date.today().strftime("%Y%m%d")

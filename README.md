@@ -829,8 +829,9 @@ Paper approval and real-data paper variants are covered by test fixtures rather
 than operator-facing example configs. For the Telegram approval MVP, set
 `TELEGRAM_BOT_TOKEN`, `MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS`, and
 `MAESTRO_TELEGRAM_WHITELISTED_USER_IDS` in the Maestro operator environment.
-Per-config `telegram_allowed_chat_ids` and
-`whitelisted_user_ids` remain optional overrides for rehearsals.
+In `live_approval` mode with Telegram approval, chat IDs and whitelisted user
+IDs are required at config load time, either from those shared env vars or from
+per-config `telegram_allowed_chat_ids` and `whitelisted_user_ids` overrides.
 Maestro sends the order proposal through the Bot API and `run-once` blocks while
 polling for inline approve/reject button callbacks. Manual typed
 `approve <approval_id>` / `reject <approval_id>` replies are ignored. Webhooks,
@@ -1034,8 +1035,8 @@ maestro dashboard --env-file /etc/maestro/maestro.env --config configs/live_read
 ```
 
 The dashboard is read-only and served by one FastAPI process with a built
-Vite/React frontend. The active frontend source is `dashboard_frontend/`; the
-older `dashboard_frontend_next/` tree is retained as legacy source. It opens as a
+Vite/React frontend. The active frontend source is `dashboard_frontend/` (the
+older, unused `dashboard_frontend_next/` prototype tree was removed). It opens as a
 dense terminal-style operator dashboard with Portfolio, Maestro, Virtuoso,
 Research, and a toggleable Console drawer. The backend exposes read-model JSON
 endpoints over persisted state; it does not expose trading/admin controls.

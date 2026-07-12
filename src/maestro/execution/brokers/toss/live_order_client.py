@@ -1,5 +1,6 @@
 import hashlib
 import re
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -51,6 +52,13 @@ class TossLiveOrderClient(
         self.config = config
         self.account_seq = _resolve_account_seq(config)
         self.instruments = {instrument.symbol: instrument for instrument in instruments or []}
+        self._broker_symbol_to_canonical: dict[str, str] = {}
+        for instrument in instruments or []:
+            try:
+                broker_symbol = instrument.symbol_for_broker("toss")
+            except Exception:
+                continue
+            self._broker_symbol_to_canonical[broker_symbol] = instrument.symbol
         self.transport = transport or TossRestTransport(
             base_url=config.base_url or "https://openapi.tossinvest.com",
             access_token_provider=TossAuthManager(config).access_token,
@@ -134,7 +142,12 @@ class TossLiveOrderClient(
             f"/api/v1/orders/{broker_order_id.broker_order_id}",
             account_seq=self.account_seq,
         )
-        return _status_snapshot(broker_order_id, _result_dict(response), response)
+        return _status_snapshot(
+            broker_order_id,
+            _result_dict(response),
+            response,
+            canonical_symbol=self._canonical_symbol,
+        )
 
     def get_open_orders(self, symbol: str | None = None) -> list[LiveOrderStatusSnapshot]:
         params = {"status": "OPEN"}
@@ -151,7 +164,14 @@ class TossLiveOrderClient(
             if not isinstance(order, dict):
                 continue
             broker_order = self._broker_order("", str(order.get("orderId") or ""))
-            output.append(_status_snapshot(broker_order, order, {"result": order}))
+            output.append(
+                _status_snapshot(
+                    broker_order,
+                    order,
+                    {"result": order},
+                    canonical_symbol=self._canonical_symbol,
+                )
+            )
         return output
 
     def modify_order(self, request: LiveOrderModifyRequest) -> LiveOrderModifyResult:
@@ -230,12 +250,18 @@ class TossLiveOrderClient(
             else canonical_symbol
         )
 
+    def _canonical_symbol(self, broker_symbol: str) -> str:
+        return self._broker_symbol_to_canonical.get(broker_symbol, broker_symbol)
+
 
 def _status_snapshot(
     broker_order: BrokerOrderId,
     order: dict[str, Any],
     raw: dict[str, Any],
+    *,
+    canonical_symbol: Callable[[str], str] = lambda symbol: symbol,
 ) -> LiveOrderStatusSnapshot:
+    symbol = canonical_symbol(str(order.get("symbol") or ""))
     raw_status = str(order.get("status") or "")
     status = {
         "PENDING": OrderStatus.OPEN,
@@ -260,7 +286,7 @@ def _status_snapshot(
         fills.append(
             FillEvent(
                 broker_order_id=broker_order.broker_order_id,
-                symbol=str(order.get("symbol") or ""),
+                symbol=symbol,
                 quantity=filled_quantity,
                 price=average_price,
                 filled_at=filled_at,
@@ -273,7 +299,7 @@ def _status_snapshot(
         broker_order=broker_order,
         status=status,
         checked_at=utc_now().isoformat(),
-        symbol=str(order.get("symbol") or "") or None,
+        symbol=symbol or None,
         side=side,
         partial_fill=PartialFillSummary(
             ordered_quantity=ordered_quantity,

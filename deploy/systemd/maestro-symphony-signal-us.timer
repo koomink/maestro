@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Maestro Symphony US signal workflow during the US market session
+
+[Timer]
+OnCalendar=Mon..Fri 09:40:00 America/New_York
+Persistent=true
+Unit=maestro-symphony-signal-us.service
+
+[Install]
+WantedBy=timers.target

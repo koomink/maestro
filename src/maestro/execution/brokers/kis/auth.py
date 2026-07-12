@@ -1,4 +1,7 @@
+import fcntl
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -114,6 +117,26 @@ class KISAuthManager:
         if cached is not None and cached.is_valid():
             return cached
 
+        if self.config.token_cache_path is not None:
+            lock_path = Path(f"{self.config.token_cache_path}.lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            with lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    cached = self._read_cached_token()
+                    if cached is not None and cached.is_valid():
+                        return cached
+                    if self.transport is None:
+                        raise ValueError(
+                            "KIS access token is unavailable. Set the configured access token "
+                            "environment variable or provide a token-capable transport."
+                        )
+                    token = self._issue_access_token()
+                    self._write_cached_token(token)
+                    return token
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
         if self.transport is None:
             raise ValueError(
                 "KIS access token is unavailable. Set the configured access token "
@@ -214,7 +237,18 @@ class KISAuthManager:
             "access_token": token.access_token,
             "expires_at": token.expires_at.isoformat() if token.expires_at else None,
         }
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            handle.write(json.dumps(payload))
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
         path.chmod(0o600)
 
     def _account_id(self) -> str | None:

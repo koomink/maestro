@@ -36,7 +36,10 @@ def load_strategy(
             "Strategy requires unsupported Maestro SDK contract version "
             f"{manifest.sdk_contract_version}"
         )
-    if run_mode not in manifest.supported_modes:
+    # live_readonly never executes strategies (config validation enforces
+    # order_posture=disabled), so supported_modes gating only applies to modes
+    # in which the strategy would actually produce actionable signals.
+    if run_mode != RunMode.LIVE_READONLY and run_mode not in manifest.supported_modes:
         raise PluginLoadError(f"Strategy {config.id} does not support Maestro run mode {run_mode}")
     if run_mode == RunMode.LIVE_APPROVAL and not manifest.can_run_live:
         raise PluginLoadError(f"Strategy {config.id} manifest does not allow live execution")

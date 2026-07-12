@@ -21,6 +21,16 @@ class PortfolioManager:
         }
 
     def build_target(self, results: list[TargetAllocationResult]) -> PortfolioTarget:
+        sleeve_results = [result for result in results if result.allocation_sleeves]
+        plain_results = [
+            result for result in results if not result.allocation_sleeves and result.allocations
+        ]
+        if sleeve_results and plain_results:
+            raise ValueError(
+                "Cannot combine sleeve and non-sleeve strategy results in one portfolio target: "
+                f"sleeves={[result.strategy_id for result in sleeve_results]} "
+                f"plain={[result.strategy_id for result in plain_results]}"
+            )
         if any(result.allocation_sleeves for result in results):
             return self._build_sleeve_target(results)
         combined: dict[str, float] = {}

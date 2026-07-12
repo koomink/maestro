@@ -9,6 +9,7 @@ from maestro.config.broker import BrokerAccountConfig
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
 from maestro.core.enums import SafetyState
+from maestro.core.ids import new_run_id
 from maestro.dashboard.actions import build_signal_freshness
 from maestro.execution.brokers.readonly import (
     BrokerAccountSnapshot,
@@ -104,8 +105,6 @@ class CrescendoTelegramSignalStrategy(_TelegramStaticStrategy):
     strategy_id = "crescendo_us"
 
 
-
-
 def test_telegram_operator_signal_command_generates_strategy_signal_for_dashboard(tmp_path):
     readonly_config_path = _telegram_config_path(tmp_path)
     signal_config_path = _telegram_signal_config_path(tmp_path)
@@ -196,6 +195,136 @@ def test_telegram_operator_signal_command_rejects_signal_disabled_strategy(tmp_p
 
     assert "Signal generation failed" in client.sent_messages[-1]["text"]
     assert "Strategy is not signal-enabled: fugue" in client.sent_messages[-1]["text"]
+
+
+def _rebalance_router(tmp_path):
+    readonly_config_path = _telegram_config_path(tmp_path)
+    signal_config_path = _telegram_signal_config_path(tmp_path)
+    config = load_config(readonly_config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+        signal_config_path=signal_config_path,
+    )
+    return router, client, store
+
+
+def test_telegram_rebalance_command_requests_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "MAESTRO_REBALANCE_UNITS",
+        "tranquillo=maestro-symphony-signal-kr.service,"
+        "crescendo_us=maestro-symphony-signal-us.service",
+    )
+    router, client, _ = _rebalance_router(tmp_path)
+
+    assert router.process_update(message_update("/rebalance_tranquillo"))
+
+    message = client.sent_messages[-1]
+    assert "Confirm manual rebalance for Tranquillo." in message["text"]
+    assert "unit: maestro-symphony-signal-kr.service" in message["text"]
+    callbacks = [
+        button["callback_data"]
+        for row in message["reply_markup"]["inline_keyboard"]
+        for button in row
+    ]
+    assert "operator:rebalance:approve:tranquillo" in callbacks
+    assert "operator:cancel" in callbacks
+
+
+def test_telegram_rebalance_command_fails_without_unit_mapping(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAESTRO_REBALANCE_UNITS", raising=False)
+    router, client, _ = _rebalance_router(tmp_path)
+
+    assert router.process_update(message_update("/rebalance_tranquillo"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "Manual rebalance failed" in text
+    assert "MAESTRO_REBALANCE_UNITS" in text
+
+
+def test_telegram_rebalance_command_rejects_unknown_strategy(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAESTRO_REBALANCE_UNITS", "tranquillo=unit-a.service")
+    router, client, _ = _rebalance_router(tmp_path)
+
+    assert router.process_update(message_update("/rebalance_unknown"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "Manual rebalance failed" in text
+    assert "Unknown rebalance command: /rebalance_unknown" in text
+
+
+def test_telegram_rebalance_callback_starts_mapped_systemd_unit(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAESTRO_REBALANCE_UNITS", "crescendo_us=maestro-symphony-signal-us.service")
+    started_units = []
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers._start_systemd_unit",
+        started_units.append,
+    )
+    router, client, store = _rebalance_router(tmp_path)
+
+    assert router.process_update(callback_update("operator:rebalance:approve:crescendo_us"))
+
+    assert started_units == ["maestro-symphony-signal-us.service"]
+    assert client.answered_callbacks[-1]["text"] == "Manual rebalance triggered."
+    edited = client.edited_messages[-1]["text"]
+    assert "Manual rebalance triggered: Crescendo" in edited
+    assert "unit: maestro-symphony-signal-us.service" in edited
+    recorded = store.list_system_events_by_type("telegram_command")[0]["payload"]
+    assert recorded["command"] == "/rebalance"
+    assert recorded["status"] == "confirmed"
+
+
+def test_telegram_rebalance_callback_reports_systemd_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAESTRO_REBALANCE_UNITS", "tranquillo=maestro-symphony-signal-kr.service")
+
+    def failing_start(unit):
+        raise FileNotFoundError("systemctl not found")
+
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers._start_systemd_unit",
+        failing_start,
+    )
+    router, client, _ = _rebalance_router(tmp_path)
+
+    assert router.process_update(callback_update("operator:rebalance:approve:tranquillo"))
+
+    assert "Manual rebalance failed: Tranquillo" in client.edited_messages[-1]["text"]
+
+
+def test_telegram_rebalance_callback_without_unit_mapping_fails_safely(tmp_path, monkeypatch):
+    monkeypatch.delenv("MAESTRO_REBALANCE_UNITS", raising=False)
+    router, client, _ = _rebalance_router(tmp_path)
+
+    assert router.process_update(callback_update("operator:rebalance:approve:tranquillo"))
+
+    assert "no systemd unit mapped for tranquillo" in client.edited_messages[-1]["text"]
+
+
+def test_telegram_rebalance_usage_lists_available_commands(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAESTRO_REBALANCE_UNITS", "tranquillo=unit-a.service")
+    router, client, _ = _rebalance_router(tmp_path)
+
+    assert router.process_update(message_update("/rebalance"))
+
+    text = client.sent_messages[-1]["text"]
+    assert "Manual rebalance commands" in text
+    assert "/rebalance_tranquillo - Tranquillo" in text
+    assert "/rebalance_crescendo - Crescendo" in text
+
+
+def test_telegram_bot_commands_include_rebalance_commands(tmp_path):
+    signal_config = load_config(_telegram_signal_config_path(tmp_path))
+
+    commands = {item["command"] for item in telegram_bot_commands(signal_config)}
+
+    assert "rebalance_tranquillo" in commands
+    assert "rebalance_crescendo" in commands
+    assert "signal_tranquillo" in commands
 
 
 def test_telegram_operator_funding_complete_regenerates_signal_and_creates_approval(tmp_path):
@@ -375,8 +504,7 @@ def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target
     assert "Strategy cash-flow allocation recorded" in client.edited_messages[-1]["text"]
     cash_flow_events = store.list_system_events_by_type("strategy_cash_flow", limit=10)
     amounts_by_strategy = {
-        event["payload"]["strategy_id"]: event["payload"]["amount"]
-        for event in cash_flow_events
+        event["payload"]["strategy_id"]: event["payload"]["amount"] for event in cash_flow_events
     }
     assert amounts_by_strategy == {"tranquillo": 600_000.0, "crescendo_us": 400_000.0}
     ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
@@ -428,10 +556,14 @@ def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp
     proposal_id = proposal_events[0]["payload"]["proposal_id"]
     markup = client.sent_messages[-1]["reply_markup"]
     callback_buttons = [button for row in markup["inline_keyboard"] for button in row]
-    assert any(button["text"] == "Assign Crescendo" for button in callback_buttons)
+    assign_button = next(
+        button for button in callback_buttons if button["text"] == "Assign Crescendo"
+    )
+    assert assign_button["callback_data"] == f"operator:cash-flow:asg:{proposal_id}:1"
+    for button in callback_buttons:
+        assert len(button["callback_data"].encode("utf-8")) <= 64
 
-    callback_data = f"operator:cash-flow:assign:{proposal_id}:crescendo_us"
-    assert router.process_update(callback_update(callback_data))
+    assert router.process_update(callback_update(assign_button["callback_data"]))
 
     assert client.answered_callbacks[-1]["text"] == "Cash-flow allocation assigned."
     cash_flow_events = store.list_system_events_by_type("strategy_cash_flow", limit=10)
@@ -443,6 +575,110 @@ def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp
     ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
     assert ack_events[0]["payload"]["status"] == "assigned"
     assert ack_events[0]["payload"]["assigned_strategy_id"] == "crescendo_us"
+
+
+def test_telegram_operator_accepts_legacy_strategy_id_assign_callback(tmp_path):
+    config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "run_pending_proposal",
+        "strategy_cash_flow_proposal",
+        {
+            "proposal_id": "run_pending_proposal",
+            "status": "pending",
+            "account_id": "paper_cash",
+            "amount": 1_000_000.0,
+            "currency": "KRW",
+            "allocations": [
+                {"strategy_id": "tranquillo", "execution_sleeve": "core", "amount": 600_000.0},
+                {
+                    "strategy_id": "crescendo_us",
+                    "execution_sleeve": "satellite",
+                    "amount": 400_000.0,
+                },
+            ],
+        },
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    callback_data = "operator:cash-flow:assign:run_pending_proposal:crescendo_us"
+    assert router.process_update(callback_update(callback_data))
+
+    assert client.answered_callbacks[-1]["text"] == "Cash-flow allocation assigned."
+    ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
+    assert ack_events[0]["payload"]["assigned_strategy_id"] == "crescendo_us"
+
+
+def test_telegram_operator_processes_callback_when_answer_fails(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    class StaleAnswerTelegramClient(FakeTelegramClient):
+        def answer_callback_query(self, callback_query_id: str, text: str) -> dict[str, Any]:
+            raise RuntimeError("Bad Request: query is too old")
+
+    client = StaleAnswerTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(callback_update("operator:confirm:pause"))
+
+    assert "Safety state changed" in client.edited_messages[-1]["text"]
+
+
+def test_telegram_operator_poll_once_advances_offset_past_failing_update(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    class FlakySendTelegramClient(FakeTelegramClient):
+        def __init__(self, updates: list[dict[str, Any]]) -> None:
+            super().__init__(updates)
+            self.send_failures_remaining = 1
+
+        def send_message(
+            self,
+            chat_id: int,
+            text: str,
+            reply_markup: dict[str, Any] | None = None,
+        ) -> dict[str, Any]:
+            if self.send_failures_remaining > 0:
+                self.send_failures_remaining -= 1
+                raise RuntimeError("Telegram Bot API returned not ok for method: sendMessage")
+            return super().send_message(chat_id, text, reply_markup)
+
+    client = FlakySendTelegramClient(
+        [
+            message_update("/help", update_id=7),
+            message_update("/help", update_id=8),
+        ]
+    )
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.poll_once(offset=None, timeout_seconds=0) == 9
+
+    assert len(client.sent_messages) == 1
+    error_events = [
+        row
+        for row in store.list_system_events_by_type("telegram_command", limit=10)
+        if row["payload"].get("status") == "error"
+    ]
+    assert len(error_events) == 1
+    assert error_events[0]["payload"]["update_id"] == 7
 
 
 def test_telegram_operator_funding_callback_rejects_unauthorized_user(tmp_path):
@@ -498,13 +734,50 @@ def test_telegram_operator_budget_callback_records_selected_budget(tmp_path):
         client=client,
     )
 
-    assert router.process_update(callback_update("operator:budget:select:budget_req_1:full"))
+    # New short-form callback as generated by budget_request_reply_markup.
+    assert router.process_update(callback_update("operator:budget:sel:budget_req_1:f"))
 
     assert client.answered_callbacks[-1]["text"] == "Budget selected."
     events = store.list_system_events_by_type("contribution_budget_request_decision", limit=10)
     assert events[0]["payload"]["request_id"] == "budget_req_1"
     assert events[0]["payload"]["selected_budget"] == 8_000_000.0
     assert events[0]["payload"]["status"] == "selected"
+
+
+def test_telegram_operator_budget_callback_accepts_legacy_select_format(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event(
+        "signal_old",
+        "contribution_budget_request",
+        {
+            "request_id": "budget_req_1",
+            "source_signal_run_id": "signal_old",
+            "strategy_ids": ["tranquillo"],
+            "account_id": "kis_isa",
+            "execution_sleeve": "tranquillo_isa",
+            "currency": "KRW",
+            "available_cash": 8_000_000.0,
+            "min_monthly_budget": 1_660_000.0,
+            "recommended_budget": 4_000_000.0,
+            "selectable_max_budget": 8_000_000.0,
+            "month_key": "2026-06",
+            "status": "pending",
+        },
+    )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(callback_update("operator:budget:select:budget_req_1:full"))
+
+    assert client.answered_callbacks[-1]["text"] == "Budget selected."
+    events = store.list_system_events_by_type("contribution_budget_request_decision", limit=10)
+    assert events[0]["payload"]["selected_budget"] == 8_000_000.0
 
 
 def test_telegram_operator_budget_direct_amount_rejects_out_of_range(tmp_path):
@@ -539,9 +812,7 @@ def test_telegram_operator_budget_direct_amount_rejects_out_of_range(tmp_path):
     assert router.process_update(message_update("/budget budget_req_2 9000000"))
 
     assert "Budget amount out of range" in client.sent_messages[-1]["text"]
-    assert (
-        store.list_system_events_by_type("contribution_budget_request_decision", limit=10) == []
-    )
+    assert store.list_system_events_by_type("contribution_budget_request_decision", limit=10) == []
 
 
 def test_telegram_operator_read_commands_send_state_responses(tmp_path):
@@ -725,8 +996,18 @@ def test_telegram_operator_currency_breakdown_excludes_disabled_account(tmp_path
         "whitelisted_user_ids": [100],
     }
     raw["accounts"] = [
-        {"id": "kis_ps", "broker": "kis", "enabled": True, "broker_products": ["kis_domestic_stock"]},
-        {"id": "kis_mock", "broker": "kis", "enabled": False, "broker_products": ["kis_domestic_stock"]},
+        {
+            "id": "kis_ps",
+            "broker": "kis",
+            "enabled": True,
+            "broker_products": ["kis_domestic_stock"],
+        },
+        {
+            "id": "kis_mock",
+            "broker": "kis",
+            "enabled": False,
+            "broker_products": ["kis_domestic_stock"],
+        },
     ]
     config_path = tmp_path / "telegram_currency_breakdown.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -1408,6 +1689,102 @@ def test_telegram_operator_pause_and_kill_switch_require_confirmation(tmp_path):
     assert "confirmed" in statuses
 
 
+def test_telegram_clear_halt_requires_confirmation_and_recovers(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    safety = SafetyControlService(store, audit)
+    safety.halt(new_run_id(), "test halt for telegram recovery")
+
+    assert router.process_update(message_update("/clear_halt"))
+    confirm_message = client.sent_messages[-1]
+    assert "Confirm clear-halt" in confirm_message["text"]
+    assert "halt reason: test halt for telegram recovery" in confirm_message["text"]
+    assert confirm_message["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == (
+        "operator:confirm:clear-halt"
+    )
+    assert safety.current_state().state == SafetyState.HALTED
+
+    assert router.process_update(callback_update("operator:confirm:clear-halt"))
+
+    assert safety.current_state().state == SafetyState.ACTIVE
+    assert client.edited_messages[-1]["text"].startswith("Safety state changed: active")
+    statuses = [
+        event["payload"]["status"]
+        for event in store.list_system_events_by_type("telegram_command", limit=10)
+    ]
+    assert "confirmed" in statuses
+
+
+def test_telegram_clear_halt_rejected_when_not_halted(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+
+    assert router.process_update(message_update("/clear_halt"))
+
+    message = client.sent_messages[-1]
+    assert "Safety state is active; clear-halt only applies to halted." in message["text"]
+    assert message["reply_markup"] is None
+
+
+def test_telegram_clear_halt_callback_cannot_release_kill_switch(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    safety = SafetyControlService(store, audit)
+    safety.kill_switch(new_run_id(), "emergency stop")
+
+    assert router.process_update(callback_update("operator:confirm:clear-halt"))
+
+    assert safety.current_state().state == SafetyState.KILLED
+    assert "Clear-halt failed:" in client.edited_messages[-1]["text"]
+
+
+def test_telegram_clear_halt_callback_blocked_by_failing_preflight(tmp_path, monkeypatch):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    safety = SafetyControlService(store, audit)
+    safety.halt(new_run_id(), "test halt")
+    store.save_system_event(new_run_id(), "broker_reconciliation", {"passed": False})
+
+    assert router.process_update(callback_update("operator:confirm:clear-halt"))
+
+    assert safety.current_state().state == SafetyState.HALTED
+    edited = client.edited_messages[-1]["text"]
+    assert "Clear-halt blocked by failing health checks:" in edited
+    assert "reconciliation" in edited
+
+
 def test_telegram_operator_adopts_account_attribution_once(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -1434,8 +1811,7 @@ def test_telegram_operator_adopts_account_attribution_once(tmp_path):
     assert callback_data == "operator:attribution:approve:toss_brokerage"
     assert router.process_update(callback_update(callback_data))
     assert (
-        store.load_latest_system_event("account_attribution_adopted")["payload"]["approved"]
-        is True
+        store.load_latest_system_event("account_attribution_adopted")["payload"]["approved"] is True
     )
 
     assert router.process_update(callback_update(callback_data))
@@ -1877,7 +2253,6 @@ def _telegram_buy_only_config_path(
     return config_path
 
 
-
 def _telegram_voluntary_deposit_config_path(tmp_path) -> Path:
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["portfolio"]["initial_cash"] = 1_000_000
@@ -1939,6 +2314,7 @@ def _telegram_voluntary_deposit_config_path(tmp_path) -> Path:
     config_path = tmp_path / "telegram_voluntary_deposit.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
 
 def _telegram_live_readonly_config_path(tmp_path) -> Path:
     raw = yaml.safe_load(Path("tests/fixtures/configs/live_readonly_mock.yaml").read_text())

@@ -8,7 +8,7 @@ from maestro.execution.live_order_models import (
 )
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
-from maestro.state.events import SystemEventType, save_audited_system_event
+from maestro.state.events import SystemEventType
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -23,79 +23,83 @@ class PartialFillReconciliationService:
         self.audit_logger = audit_logger
 
     def reconcile_latest(self, run_id: str, *, limit: int = 1000) -> FillReconciliationResult:
-        current_state = self.state_store.load_latest_portfolio_state()
-        next_state = current_state.model_copy(deep=True)
-        applied_by_order = self._load_applied_watermarks()
-        applied_fills: list[AppliedFill] = []
-        skipped_fills: list[SkippedFill] = []
+        with self.state_store.writer_lock("fill_reconciliation"):
+            with self.state_store.live_order_lock("fill_reconciliation"):
+                current_state = self.state_store.load_latest_portfolio_state()
+                next_state = current_state.model_copy(deep=True)
+                applied_by_order = self._load_applied_watermarks()
+                applied_fills: list[AppliedFill] = []
+                skipped_fills: list[SkippedFill] = []
 
-        rows = self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_STATUS, limit=limit
-        )
-        for row in reversed(rows):
-            snapshot = LiveOrderStatusSnapshot.model_validate(row["payload"])
-            applied_fill, skipped_fill = _fill_delta(snapshot, applied_by_order)
-            if skipped_fill is not None:
-                skipped_fills.append(skipped_fill)
-                continue
-            if applied_fill is None:
-                continue
-            _apply_fill(next_state, applied_fill)
-            attribution_context = self._attribution_context(applied_fill.broker_order_id)
-            if attribution_context is not None:
-                account_id, bucket_id = attribution_context
-                AccountAttributionReconciliationService(
-                    self.state_store,
-                    self.audit_logger,
-                ).apply_maestro_fill(
-                    run_id=run_id,
-                    account_id=account_id,
-                    bucket_id=bucket_id,
-                    symbol=applied_fill.symbol,
-                    side=applied_fill.side.value,
-                    quantity=applied_fill.quantity,
-                    fill_key=(
-                        f"{applied_fill.broker_order_id}:"
-                        f"{applied_fill.cumulative_filled_quantity}"
-                    ),
+                rows = self.state_store.list_system_events_by_type(
+                    SystemEventType.LIVE_ORDER_STATUS, limit=limit
                 )
-            applied_by_order[applied_fill.broker_order_id] = (
-                applied_fill.cumulative_filled_quantity,
-                applied_fill.cumulative_filled_notional,
-            )
-            applied_fills.append(applied_fill)
+                for row in reversed(rows):
+                    snapshot = LiveOrderStatusSnapshot.model_validate(row["payload"])
+                    applied_fill, skipped_fill = _fill_delta(snapshot, applied_by_order)
+                    if skipped_fill is not None:
+                        skipped_fills.append(skipped_fill)
+                        continue
+                    if applied_fill is None:
+                        continue
+                    _apply_fill(next_state, applied_fill)
+                    attribution_context = self._attribution_context(applied_fill.broker_order_id)
+                    if attribution_context is not None:
+                        account_id, bucket_id = attribution_context
+                        AccountAttributionReconciliationService(
+                            self.state_store,
+                            self.audit_logger,
+                        ).apply_maestro_fill(
+                            run_id=run_id,
+                            account_id=account_id,
+                            bucket_id=bucket_id,
+                            symbol=applied_fill.symbol,
+                            side=applied_fill.side.value,
+                            quantity=applied_fill.quantity,
+                            fill_key=(
+                                f"{applied_fill.broker_order_id}:"
+                                f"{applied_fill.cumulative_filled_quantity}"
+                            ),
+                        )
+                    applied_by_order[applied_fill.broker_order_id] = (
+                        applied_fill.cumulative_filled_quantity,
+                        applied_fill.cumulative_filled_notional,
+                    )
+                    applied_fills.append(applied_fill)
 
-        if applied_fills:
-            self.state_store.save_portfolio_snapshot(run_id, next_state)
+                result = FillReconciliationResult(
+                    run_id=run_id,
+                    checked_at=utc_now().isoformat(),
+                    applied_fills=applied_fills,
+                    skipped_fills=skipped_fills,
+                    portfolio_updated=bool(applied_fills),
+                    cash=next_state.cash,
+                    positions=next_state.positions,
+                )
+                payload = result.model_dump(mode="json")
+                watermarks = {
+                    fill.broker_order_id: (
+                        fill.cumulative_filled_quantity,
+                        fill.cumulative_filled_notional,
+                    )
+                    for fill in applied_fills
+                }
+                self.state_store.apply_fill_reconciliation(
+                    run_id,
+                    next_state,
+                    watermarks,
+                    payload,
+                )
 
-        result = FillReconciliationResult(
-            run_id=run_id,
-            checked_at=utc_now().isoformat(),
-            applied_fills=applied_fills,
-            skipped_fills=skipped_fills,
-            portfolio_updated=bool(applied_fills),
-            cash=next_state.cash,
-            positions=next_state.positions,
-        )
-        payload = result.model_dump(mode="json")
-        save_audited_system_event(
-            self.state_store,
-            self.audit_logger,
-            run_id,
-            SystemEventType.FILL_RECONCILIATION,
-            payload,
-        )
+        self.audit_logger.log(run_id, str(SystemEventType.FILL_RECONCILIATION), payload)
         return result
 
     def _attribution_context(self, broker_order_id: str) -> tuple[str, str] | None:
-        for row in self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_RESULT,
-            limit=2000,
+        for row in self.state_store.list_system_events_by_broker_order_id(
+            broker_order_id,
+            str(SystemEventType.LIVE_ORDER_RESULT),
         ):
             payload = row["payload"]
-            result_order = payload.get("result", {}).get("broker_order", {})
-            if result_order.get("broker_order_id") != broker_order_id:
-                continue
             request = payload.get("request", {})
             account_id = str(request.get("account_id") or "")
             bucket_id = str(request.get("sleeve") or "")
@@ -109,20 +113,8 @@ class PartialFillReconciliationService:
         return None
 
     def _load_applied_watermarks(self) -> dict[str, tuple[float, float]]:
-        applied: dict[str, tuple[float, float]] = {}
-        rows = self.state_store.list_system_events_by_type(
-            SystemEventType.FILL_RECONCILIATION, limit=1000
-        )
-        for row in reversed(rows):
-            for item in row["payload"].get("applied_fills", []):
-                broker_order_id = str(item.get("broker_order_id") or "")
-                if not broker_order_id:
-                    continue
-                applied[broker_order_id] = (
-                    float(item.get("cumulative_filled_quantity", 0.0)),
-                    float(item.get("cumulative_filled_notional", 0.0)),
-                )
-        return applied
+        self.state_store.seed_fill_watermarks_from_events()
+        return self.state_store.load_fill_watermarks()
 
 
 def _fill_delta(

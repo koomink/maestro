@@ -5,6 +5,7 @@ import yaml
 from maestro.config.loader import load_config
 from maestro.config.models import UniversePolicyConfig
 from maestro.core.enums import AssetType, BrokerProduct, Currency, ExchangeCode, MarketRegion
+from maestro.datahub.mock_provider import MockDataHub
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.sdk import CandidateInstrumentRequest, DataRequest, StrategyManifest
 from maestro.universe import DynamicUniverseService, InstrumentResolver
@@ -251,6 +252,98 @@ def test_run_once_records_dynamic_universe_evaluations(tmp_path, monkeypatch):
     strategy_events = event["payload"]["strategies"]["sample_static_allocation"]
     assert strategy_events[0]["status"] == "research_only"
     assert event["payload"]["approved_symbols"] == []
+
+
+def test_run_signal_accepts_dynamic_universe_tradable_symbol(tmp_path, monkeypatch):
+    import sample_static_allocation.strategy as strategy_module
+
+    original_manifest = strategy_module.SampleStaticAllocationStrategy.manifest
+
+    def manifest_with_dynamic_universe(self):
+        manifest = original_manifest(self)
+        return manifest.model_copy(
+            update={
+                "supports_dynamic_universe": True,
+                "max_candidate_symbols": 1,
+            }
+        )
+
+    def build_candidate_requests(self, context):
+        del self, context
+        return [
+            CandidateInstrumentRequest(
+                symbol="SPY",
+                asset_type=AssetType.ETF,
+                intended_use="tradable",
+                currency=Currency.USD,
+                region=MarketRegion.US,
+                broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+                exchange_code=ExchangeCode.NASD,
+                reason="temporary tactical sleeve",
+            )
+        ]
+
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "manifest",
+        manifest_with_dynamic_universe,
+    )
+    monkeypatch.setattr(
+        strategy_module.SampleStaticAllocationStrategy,
+        "build_candidate_requests",
+        build_candidate_requests,
+    )
+    monkeypatch.setitem(MockDataHub._prices, "SPY", 400.0)
+    raw = _dynamic_signal_raw(tmp_path)
+    raw["strategies"][0]["config"]["allocations"] = {"CASH": 0.5, "SPY": 0.5}
+    config_path = tmp_path / "paper_dynamic_signal.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    orchestrator = MaestroOrchestrator(load_config(config_path))
+    summary = orchestrator.run_signal()
+
+    signal = orchestrator.state_store.load_signal_package(summary.signal_run_id)
+    event = orchestrator.state_store.list_system_events_by_type("dynamic_universe_evaluation")[0]
+    assert signal["strategy_results"][0]["allocations"]["SPY"] == 0.5
+    assert event["run_id"] == summary.signal_run_id
+    assert event["payload"]["approved_symbols"] == ["SPY"]
+
+
+def test_run_signal_without_dynamic_universe_keeps_existing_behavior(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    config_path = tmp_path / "paper.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+
+    orchestrator = MaestroOrchestrator(load_config(config_path))
+    summary = orchestrator.run_signal()
+
+    assert summary.loaded_strategies == ["sample_static_allocation"]
+    assert summary.orders_preview_count == 2
+    assert orchestrator.state_store.list_system_events_by_type("dynamic_universe_evaluation") == []
+
+
+def _dynamic_signal_raw(tmp_path):
+    raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["universe"] = {
+        "policy": {
+            "allowed_asset_types": ["stock", "etf", "domestic_etf", "us_etf"],
+            "allowed_regions": ["US"],
+            "allowed_currencies": ["USD"],
+            "allowed_broker_products": ["kis_overseas_stock"],
+            "allowed_exchange_codes": ["NASD", "NYSE", "AMEX"],
+            "denied_symbols": [],
+            "denied_asset_tags": [],
+            "max_new_symbols_per_run": 1,
+            "require_operator_approval_for_tradable": False,
+            "require_broker_tradability_check": False,
+            "require_data_freshness_check": False,
+        }
+    }
+    return raw
 
 
 def _tradable(symbol: str) -> CandidateInstrumentRequest:

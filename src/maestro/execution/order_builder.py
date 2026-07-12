@@ -1,6 +1,6 @@
 import calendar
-import math
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from maestro.config.execution import ExecutionConfig
@@ -69,6 +69,7 @@ class OrderBuilder:
                         quantity=abs(delta_value) / prices[symbol],
                         price=prices[symbol],
                         notional=abs(delta_value),
+                        order_type=self.config.allowed_order_type,
                         currency=instrument.currency if instrument else None,
                         broker_product=instrument.broker_product if instrument else None,
                     )
@@ -92,6 +93,7 @@ class OrderBuilder:
                     quantity=quantity,
                     price=order_price,
                     notional=notional,
+                    order_type=self.config.allowed_order_type,
                     currency=instrument.currency if instrument else None,
                     broker_product=instrument.broker_product if instrument else None,
                 )
@@ -128,11 +130,7 @@ class OrderBuilder:
                 dict.fromkeys(
                     [
                         *allocations.keys(),
-                        *(
-                            symbol
-                            for symbol in symbols
-                            if current_state.positions.get(symbol, 0.0)
-                        ),
+                        *(symbol for symbol in symbols if current_state.positions.get(symbol, 0.0)),
                     ]
                 )
             )
@@ -150,18 +148,24 @@ class OrderBuilder:
                     continue
                 side = OrderSide.BUY if delta_value > 0 else OrderSide.SELL
                 instrument = self.instruments.get(symbol)
-                quantity = self._order_quantity(symbol, abs(delta_value) / prices[symbol])
-                if quantity <= 0:
+                order_price = self._order_price(symbol, prices[symbol])
+                if order_price <= 0:
                     continue
-                notional = quantity * prices[symbol]
+                quantity = self._order_quantity(symbol, abs(delta_value) / order_price)
+                min_quantity = instrument.min_order_quantity if instrument else 0.0
+                notional = quantity * order_price
+                min_notional = instrument.min_order_notional if instrument else 0.0
+                if quantity <= 0 or quantity < min_quantity or notional < min_notional:
+                    continue
                 sleeve_orders.append(
                     OrderIntent(
                         order_id=new_order_id(),
                         symbol=symbol,
                         side=side,
                         quantity=quantity,
-                        price=prices[symbol],
+                        price=order_price,
                         notional=notional,
+                        order_type=self.config.allowed_order_type,
                         currency=instrument.currency if instrument else None,
                         sleeve=sleeve_name,
                         broker_product=instrument.broker_product if instrument else None,
@@ -245,8 +249,8 @@ class OrderBuilder:
         instrument = self.instruments.get(symbol)
         if instrument is None:
             return raw_quantity
-        steps = int(raw_quantity / instrument.quantity_step)
-        return steps * instrument.quantity_step
+        steps = int(Decimal(str(raw_quantity)) / Decimal(str(instrument.quantity_step)))
+        return float(Decimal(steps) * Decimal(str(instrument.quantity_step)))
 
     def _build_buy_only_contribution_orders(
         self,
@@ -306,6 +310,7 @@ class OrderBuilder:
                     quantity=quantity,
                     price=order_price,
                     notional=notional,
+                    order_type=self.config.allowed_order_type,
                     currency=instrument.currency if instrument else contribution.currency,
                     sleeve=contribution.sleeve,
                     broker_product=instrument.broker_product if instrument else None,
@@ -391,8 +396,8 @@ class OrderBuilder:
         instrument = self.instruments.get(symbol)
         if instrument is None:
             return raw_price
-        ticks = math.floor(raw_price / instrument.price_tick)
-        return ticks * instrument.price_tick
+        ticks = int(Decimal(str(raw_price)) / Decimal(str(instrument.price_tick)))
+        return float(Decimal(ticks) * Decimal(str(instrument.price_tick)))
 
     def _is_contribution_due(self, as_of: datetime | None) -> bool:
         local_date = self._local_date(as_of)

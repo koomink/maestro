@@ -3,7 +3,9 @@ import json
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 import typer
 import yaml
@@ -45,7 +47,10 @@ from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
 from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
-from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.orchestration.orchestrator import (
+    MaestroOrchestrator,
+    signal_contract_fingerprint_diff,
+)
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.scaffold import create_virtuoso_app_scaffold
@@ -62,6 +67,7 @@ CONFIG_OPTION = typer.Option(
     envvar=CONFIG_ENV_VAR,
     help=f"Path to operator config. Defaults to ${CONFIG_ENV_VAR}.",
 )
+T = TypeVar("T")
 
 
 def _load_dotenv() -> None:
@@ -139,10 +145,28 @@ def _profile_datahub_providers(maestro_config: MaestroConfig) -> str:
 
 
 @app.command("run-once")
-def run_once(config: Path | None = CONFIG_OPTION) -> None:
+def run_once(
+    config: Path | None = CONFIG_OPTION,
+    stop_telegram_operator: bool = typer.Option(
+        True,
+        "--stop-telegram-operator/--keep-telegram-operator",
+        help="Stop the polling Telegram operator while approval polling is active.",
+    ),
+    telegram_operator_service: str = typer.Option(
+        "maestro-telegram-operator.service",
+        "--telegram-operator-service",
+        envvar="MAESTRO_TELEGRAM_OPERATOR_SERVICE",
+    ),
+) -> None:
     maestro_config, identity = _load_operator_config(config)
+    if maestro_config.approval.provider != "telegram":
+        stop_telegram_operator = False
     try:
-        summary = MaestroOrchestrator(maestro_config, config_identity=identity).run_once()
+        summary = _with_telegram_operator_stopped(
+            stop_telegram_operator,
+            telegram_operator_service,
+            lambda: MaestroOrchestrator(maestro_config, config_identity=identity).run_once(),
+        )
     except Exception as exc:
         _send_run_once_failure_notification(maestro_config, exc)
         raise
@@ -170,10 +194,27 @@ def run_signal(config: Path | None = CONFIG_OPTION) -> None:
 def approve_signal(
     config: Path | None = CONFIG_OPTION,
     signal_run_id: str = typer.Option(..., "--signal-run-id"),
+    stop_telegram_operator: bool = typer.Option(
+        True,
+        "--stop-telegram-operator/--keep-telegram-operator",
+        help="Stop the polling Telegram operator while approval polling is active.",
+    ),
+    telegram_operator_service: str = typer.Option(
+        "maestro-telegram-operator.service",
+        "--telegram-operator-service",
+        envvar="MAESTRO_TELEGRAM_OPERATOR_SERVICE",
+    ),
 ) -> None:
-    maestro_config, identity = _load_operator_config(config)
-    summary = MaestroOrchestrator(maestro_config, config_identity=identity).approve_signal(
-        signal_run_id,
+    def run_approval():
+        maestro_config, identity = _load_operator_config(config)
+        return MaestroOrchestrator(maestro_config, config_identity=identity).approve_signal(
+            signal_run_id,
+        )
+
+    summary = _with_telegram_operator_stopped(
+        stop_telegram_operator,
+        telegram_operator_service,
+        run_approval,
     )
     typer.echo(
         f"signal_run_id={summary.signal_run_id} run_id={summary.run_id} "
@@ -211,12 +252,22 @@ def daily_signal_approval(
         "--telegram-operator-service",
         envvar="MAESTRO_TELEGRAM_OPERATOR_SERVICE",
     ),
+    strategy_ids: str | None = typer.Option(
+        None,
+        "--strategy-ids",
+        help=(
+            "Comma-separated strategy ids to scope the daily signal run, "
+            "e.g. per-market schedules that run KR and US strategies in "
+            "their own market sessions."
+        ),
+    ),
     lock_path: Path = typer.Option(
         Path("/tmp/maestro-symphony-signal.lock"),
         "--lock-path",
         envvar="MAESTRO_SIGNAL_LOCK_PATH",
     ),
 ) -> None:
+    selected_strategy_ids = _parse_strategy_ids(strategy_ids)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         try:
@@ -231,6 +282,7 @@ def daily_signal_approval(
                 approval_config=approval_config,
                 stop_telegram_operator=stop_telegram_operator,
                 telegram_operator_service=telegram_operator_service,
+                strategy_ids=selected_strategy_ids,
             )
         except Exception as exc:
             failure_config = signal_config or approval_config or readonly_config
@@ -240,6 +292,15 @@ def daily_signal_approval(
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _parse_strategy_ids(strategy_ids: str | None) -> list[str] | None:
+    if strategy_ids is None:
+        return None
+    parsed = [item.strip() for item in strategy_ids.split(",") if item.strip()]
+    if not parsed:
+        raise typer.BadParameter("--strategy-ids requires at least one strategy id")
+    return parsed
+
+
 def _run_daily_signal_approval(
     *,
     readonly_config: Path | None,
@@ -247,15 +308,26 @@ def _run_daily_signal_approval(
     approval_config: Path | None,
     stop_telegram_operator: bool,
     telegram_operator_service: str,
+    strategy_ids: list[str] | None = None,
 ) -> None:
     readonly_maestro_config, readonly_identity = _load_operator_config(readonly_config)
     _refresh_daily_readonly(readonly_maestro_config, readonly_identity)
 
     signal_maestro_config, signal_identity = _load_operator_config(signal_config)
+    approval_maestro_config, approval_identity = _load_operator_config(approval_config)
+    contract_diff_keys = signal_contract_fingerprint_diff(
+        signal_maestro_config,
+        approval_maestro_config,
+    )
+    if contract_diff_keys:
+        raise ValueError(
+            "signal/approval config contract mismatch: " + ", ".join(contract_diff_keys)
+        )
+
     signal_summary = MaestroOrchestrator(
         signal_maestro_config,
         config_identity=signal_identity,
-    ).run_signal()
+    ).run_signal(strategy_ids=strategy_ids)
     typer.echo(
         f"symphony_daily status=signal_completed "
         f"signal_run_id={signal_summary.signal_run_id} "
@@ -286,31 +358,21 @@ def _run_daily_signal_approval(
             )
         else:
             typer.echo(
-                f"symphony_daily status=no_action "
-                f"signal_run_id={signal_summary.signal_run_id}"
+                f"symphony_daily status=no_action signal_run_id={signal_summary.signal_run_id}"
             )
         return
 
-    telegram_stopped = False
-    try:
-        if stop_telegram_operator:
-            _systemctl("stop", telegram_operator_service)
-            telegram_stopped = True
-        approval_maestro_config, approval_identity = _load_operator_config(approval_config)
-        approval_summary = MaestroOrchestrator(
+    def run_approval():
+        return MaestroOrchestrator(
             approval_maestro_config,
             config_identity=approval_identity,
         ).approve_signal(signal_summary.signal_run_id)
-    finally:
-        if telegram_stopped:
-            try:
-                _systemctl("start", telegram_operator_service)
-            except subprocess.CalledProcessError as exc:
-                typer.echo(
-                    "symphony_daily status=warn "
-                    f"reason=telegram_operator_restart_failed service={telegram_operator_service} "
-                    f"returncode={exc.returncode}"
-                )
+
+    approval_summary = _with_telegram_operator_stopped(
+        stop_telegram_operator,
+        telegram_operator_service,
+        run_approval,
+    )
     typer.echo(
         f"symphony_daily status=approval_completed "
         f"signal_run_id={approval_summary.signal_run_id} "
@@ -325,9 +387,7 @@ def _refresh_daily_readonly(
     identity: ConfigIdentity,
 ) -> None:
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
-        typer.echo(
-            f"symphony_daily readonly=skipped reason=mode mode={maestro_config.mode.value}"
-        )
+        typer.echo(f"symphony_daily readonly=skipped reason=mode mode={maestro_config.mode.value}")
         return
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
@@ -539,6 +599,34 @@ def _systemctl(action: str, service: str) -> None:
     subprocess.run(["systemctl", action, service], check=True)
 
 
+def _with_telegram_operator_stopped(stop: bool, service: str, fn: Callable[[], T]) -> T:
+    stopped = False
+    try:
+        if stop:
+            try:
+                _systemctl("stop", service)
+                stopped = True
+            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+                returncode = getattr(exc, "returncode", "missing")
+                typer.echo(
+                    "symphony_approve status=warn "
+                    f"reason=telegram_operator_stop_failed service={service} "
+                    f"returncode={returncode}"
+                )
+        return fn()
+    finally:
+        if stopped:
+            try:
+                _systemctl("start", service)
+            except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+                returncode = getattr(exc, "returncode", "missing")
+                typer.echo(
+                    "symphony_approve status=warn "
+                    f"reason=telegram_operator_restart_failed service={service} "
+                    f"returncode={returncode}"
+                )
+
+
 def _send_run_once_success_notification(maestro_config: MaestroConfig, summary) -> None:
     strategies = ", ".join(summary.loaded_strategies) if summary.loaded_strategies else "none"
     base_currency = maestro_config.portfolio.base_currency
@@ -665,6 +753,13 @@ def profile_diff(
         "runtime_fingerprint_changed="
         + str(left_identity.runtime_fingerprint != right_identity.runtime_fingerprint).lower()
     )
+    signal_contract_diff_keys = signal_contract_fingerprint_diff(left_config, right_config)
+    typer.echo(
+        "signal_contract_fingerprint_changed="
+        + str(bool(signal_contract_diff_keys)).lower()
+    )
+    if signal_contract_diff_keys:
+        typer.echo("signal_contract_diff_keys=" + ",".join(signal_contract_diff_keys))
 
 
 @app.command("profile-validate")
@@ -838,7 +933,7 @@ def telegram_operator(
             typer.echo(f"telegram_operator status=ok offset={offset or 'none'}")
             if once:
                 return
-        except (RuntimeError, TimeoutError) as exc:
+        except (RuntimeError, TimeoutError, ValueError) as exc:
             typer.echo(f"telegram_operator status=warn message={exc}")
             if once:
                 raise typer.Exit(1) from exc
@@ -1283,6 +1378,29 @@ def clear_halt(
     typer.echo(f"state={current.state.value} reason={current.reason}")
 
 
+@app.command("release-kill")
+def release_kill(
+    config: Path | None = CONFIG_OPTION,
+    reason: str = typer.Option(..., "--reason"),
+    confirm: str = typer.Option(..., "--confirm"),
+) -> None:
+    if confirm != "RELEASE-KILL":
+        raise typer.BadParameter("release-kill requires --confirm RELEASE-KILL")
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    report = HealthService(maestro_config, store).run()
+    blocking_checks = [
+        check for check in report.checks if check.status == "fail" and check.name != "safety_state"
+    ]
+    if blocking_checks:
+        names = ",".join(check.name for check in blocking_checks)
+        typer.echo(f"recovery_preflight_failed checks={names}")
+        raise typer.Exit(1)
+    current = SafetyControlService(store, audit).release_kill(new_run_id(), reason)
+    typer.echo(f"state={current.state.value} reason={current.reason}")
+
+
 @app.command("kis-sync")
 def kis_sync(config: Path | None = CONFIG_OPTION) -> None:
     maestro_config, identity = _load_operator_config(config)
@@ -1332,9 +1450,7 @@ def fx_refresh(
     maestro_config, identity = _load_operator_config(config)
     store = _state_store(maestro_config, identity)
     try:
-        result = ConfiguredFXRefreshService(maestro_config, store).refresh_from_config(
-            force=force
-        )
+        result = ConfiguredFXRefreshService(maestro_config, store).refresh_from_config(force=force)
     except Exception as exc:
         raise typer.BadParameter(f"fx-refresh failed: {exc}") from exc
     if result.status == "skipped":
@@ -1342,8 +1458,7 @@ def fx_refresh(
         return
     rate = result.rates.get("USD/KRW")
     typer.echo(
-        f"fx_refresh={result.status} source={result.source} USD/KRW={rate} "
-        f"as_of={result.as_of}"
+        f"fx_refresh={result.status} source={result.source} USD/KRW={rate} as_of={result.as_of}"
     )
 
 
@@ -1740,8 +1855,8 @@ def _personal_operator_config(output: Path) -> dict:
             "default_decision": "expired",
             "timeout_seconds": 300,
             "telegram_bot_token_env": "TELEGRAM_BOT_TOKEN",
-            "telegram_allowed_chat_ids": [],
-            "whitelisted_user_ids": [],
+            "telegram_allowed_chat_ids": [123456789],
+            "whitelisted_user_ids": [123456789],
             "telegram_poll_interval_seconds": 1.0,
         },
         "kis": {

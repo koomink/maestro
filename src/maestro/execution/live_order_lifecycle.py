@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from time import sleep
+from time import monotonic, sleep
 from typing import TYPE_CHECKING, Any
 
 from maestro.approval.models import ApprovalDecision
@@ -98,7 +98,15 @@ class LiveOrderLifecycleService:
             max_polls_reached = False
             poll_count = 0
             final_status = submitted_order.status
+            poll_started_at = monotonic()
             for poll_index in range(self.config.order_status_max_polls):
+                if (
+                    self.config.order_status_terminal_timeout_seconds > 0
+                    and monotonic() - poll_started_at
+                    > self.config.order_status_terminal_timeout_seconds
+                ):
+                    max_polls_reached = True
+                    break
                 if poll_index > 0:
                     self._sleep_between_polls()
                 poll_count += 1
@@ -199,6 +207,8 @@ class LiveOrderLifecycleService:
                 "Live order lifecycle failed.",
                 broker_order_id,
             )
+            if submitted_order is not None and submitted_order.broker_order is not None:
+                self._persist_recovery_required_after_submit(request, submitted_order, exc)
             result = self._result(
                 request=request,
                 final_status=OrderStatus.FAILED,
@@ -233,7 +243,46 @@ class LiveOrderLifecycleService:
         )
         notifications.append(event)
         if self.notification_client is not None:
-            self.notification_client.notify(event)
+            try:
+                self.notification_client.notify(event)
+            except Exception as exc:
+                save_audited_system_event(
+                    self.state_store,
+                    self.audit_logger,
+                    run_id,
+                    "live_order_notification_failed",
+                    {
+                        "order_id": order_id,
+                        "status": status.value,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
+
+    def _persist_recovery_required_after_submit(
+        self,
+        request: LiveOrderRequest,
+        submitted_order: LiveOrderResult,
+        exc: Exception,
+    ) -> None:
+        broker_order = submitted_order.broker_order
+        if broker_order is None:
+            return
+        save_audited_system_event(
+            self.state_store,
+            self.audit_logger,
+            request.run_id,
+            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+            {
+                "reason": "lifecycle_exception_after_submit",
+                "order_id": request.order_id,
+                "request": {"order_id": request.order_id},
+                "result": {
+                    "broker_order": broker_order.model_dump(mode="json"),
+                    "message": str(exc),
+                },
+            },
+        )
 
     def _sleep_between_polls(self) -> None:
         if self.config.order_status_poll_interval_seconds <= 0:
@@ -290,14 +339,9 @@ class LiveOrderLifecycleService:
         )
 
     def _lifecycle_summary_exists(self, run_id: str, order_id: str) -> bool:
-        rows = self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_LIFECYCLE, limit=1000
+        return self.state_store.system_event_exists(
+            str(SystemEventType.LIVE_ORDER_LIFECYCLE), order_id, run_id=run_id
         )
-        for row in rows:
-            payload = row["payload"]
-            if payload.get("run_id") == run_id and payload.get("order_id") == order_id:
-                return True
-        return False
 
 
 _TERMINAL_LIFECYCLE_STATUSES = {

@@ -62,9 +62,13 @@ class ApprovalManager:
         if self.config.provider == "telegram":
             if self.run_mode not in {RunMode.PAPER, RunMode.LIVE_APPROVAL}:
                 raise ValueError("Telegram approval requires paper or live_approval mode")
+            if self.run_mode == RunMode.LIVE_APPROVAL and not self.config.whitelisted_user_ids:
+                raise ValueError("Telegram approval whitelist is required in live_approval mode")
+            # HTTP request timeout, not the approval expiry: the service polls
+            # with short getUpdates calls until config.timeout_seconds elapses.
             client = self.telegram_client or TelegramBotAPIClient(
                 token_env=self.config.telegram_bot_token_env,
-                timeout_seconds=self.config.timeout_seconds,
+                timeout_seconds=10.0,
             )
             service = TelegramApprovalService(
                 client=client,

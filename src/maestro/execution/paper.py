@@ -63,8 +63,6 @@ class PaperExecutionEngine:
                 next_state.cash_by_currency[currency] = (
                     next_state.cash_by_currency.get(currency, 0.0) - signed_notional
                 )
-                if currency == "KRW":
-                    next_state.cash = next_state.cash_by_currency[currency]
             else:
                 next_state.cash -= signed_notional
             next_state.positions[order.symbol] = (
@@ -72,6 +70,8 @@ class PaperExecutionEngine:
             )
             if is_cash_symbol(order.symbol):
                 next_state.positions.pop(order.symbol, None)
+        if next_state.cash_by_currency:
+            next_state.cash = sum(next_state.cash_by_currency.values())
         results = [
             ExecutionResult(
                 order_id=order.order_id,

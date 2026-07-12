@@ -411,11 +411,46 @@ def test_kis_rest_client_normalizes_readonly_responses(monkeypatch):
     assert snapshot.positions[0].symbol == "005930"
     assert snapshot.positions[0].currency == "KRW"
     assert snapshot.positions[0].market_value == 140_000
+    assert snapshot.daily_pnl == -56_000.0
+    assert snapshot.daily_pnl_by_currency == {"KRW": -56_000.0}
     assert prices == {"005930": 71000.0, "CASH": 1.0}
     assert fills[0].status == "filled"
     assert unfilled[0].status == "open"
     assert all(call["method"] == "GET" for call in transport.calls)
     assert not any("/order-cash" in call["url"] for call in transport.calls)
+
+
+def test_kis_all_cash_account_snapshot_still_reports_account_level_daily_pnl(monkeypatch):
+    """Regression test for the daily live_approval `broker_pnl_unavailable`
+    halt: an all-cash KIS account has no positions to derive PnL from, so the
+    snapshot must carry the account-level daily PnL (`asst_icdc_amt`) for the
+    daily-loss gate to evaluate."""
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+    )
+
+    class AllCashKISTransport(FakeKISTransport):
+        def request(self, method, url, **kwargs):
+            payload = super().request(method, url, **kwargs)
+            if url.endswith("/inquire-balance"):
+                payload = dict(payload)
+                payload["output1"] = []
+            return payload
+
+    client = KISRestReadOnlyClient(config, transport=AllCashKISTransport())
+    snapshot = client.get_account_snapshot()
+
+    assert snapshot.positions == []
+    assert snapshot.daily_pnl == -56_000.0
+    assert snapshot.daily_pnl_by_currency == {"KRW": -56_000.0}
 
 
 def test_kis_token_expiry_without_timezone_is_interpreted_as_seoul_time():
@@ -1508,6 +1543,7 @@ class FakeKISTransport:
                         "dnca_tot_amt": "1000000",
                         "tot_evlu_amt": "1140000",
                         "nxdy_excc_amt": "1000000",
+                        "asst_icdc_amt": "-56000",
                     }
                 ],
             }

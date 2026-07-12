@@ -157,6 +157,41 @@ def test_currency_daily_notional_limit_blocks_only_exceeded_currency(tmp_path):
     assert blocks[0]["max_daily_live_notional"] == 1_000.0
 
 
+def test_daily_limit_gate_counts_live_order_halt_notional(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"USD": 10_000},
+            "max_daily_notional_by_currency": {"USD": 1_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    store = StateStore(str(tmp_path / "halt_daily_state.db"), initial_cash=10_000.0)
+    store.save_system_event(
+        "run_halt",
+        "live_order_halt",
+        {
+            "submitted_date": date.today().isoformat(),
+            "notional": 200.0,
+            "request": {"currency": "USD"},
+        },
+    )
+    service = LiveExecutionGateService(
+        config,
+        store,
+        AuditLogger(str(tmp_path / "halt_daily_audit.jsonl")),
+    )
+
+    blocks = service.evaluate(
+        "run_halt_daily",
+        [_order("usd_order", "USD_ETF", Currency.USD, 900.0)],
+        [],
+    )
+
+    assert [block["reason"] for block in blocks] == ["daily_notional_exceeded"]
+    assert blocks[0]["existing_notional"] == 200.0
+
+
 def test_currency_max_order_limit_blocks_exceeded_order_currency(tmp_path):
     config = _currency_limit_config(
         tmp_path,
@@ -411,6 +446,163 @@ def test_market_session_uses_exchange_specific_session_for_krx_orders(
 
     blocks = service.evaluate(
         "run_krx_market",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
+        [],
+    )
+
+    assert not [block for block in blocks if block.get("event_type") == "market_session_halt"]
+
+
+def test_overnight_market_session_allows_before_midnight(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.execution.market_session.required = True
+    config.execution.market_session.timezone = "Asia/Seoul"
+    config.execution.market_session.open = "17:30"
+    config.execution.market_session.close = "06:00"
+    config.execution.market_session.weekdays = [1]
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "overnight_before_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "overnight_before_audit.jsonl")),
+        now_fn=lambda: datetime(2026, 7, 7, 14, 0, tzinfo=UTC),
+    )
+
+    blocks = service.evaluate(
+        "run_overnight_before",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
+        [],
+    )
+
+    assert not [block for block in blocks if block.get("event_type") == "market_session_halt"]
+
+
+def test_overnight_market_session_uses_start_weekday_after_midnight(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.execution.market_session.required = True
+    config.execution.market_session.timezone = "Asia/Seoul"
+    config.execution.market_session.open = "17:30"
+    config.execution.market_session.close = "06:00"
+    config.execution.market_session.weekdays = [1]
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "overnight_after_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "overnight_after_audit.jsonl")),
+        now_fn=lambda: datetime(2026, 7, 7, 18, 0, tzinfo=UTC),
+    )
+
+    blocks = service.evaluate(
+        "run_overnight_after",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
+        [],
+    )
+
+    assert not [block for block in blocks if block.get("event_type") == "market_session_halt"]
+
+
+def test_overnight_market_session_blocks_between_sessions(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.execution.market_session.required = True
+    config.execution.market_session.timezone = "Asia/Seoul"
+    config.execution.market_session.open = "17:30"
+    config.execution.market_session.close = "06:00"
+    config.execution.market_session.weekdays = [1]
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "overnight_outside_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "overnight_outside_audit.jsonl")),
+        now_fn=lambda: datetime(2026, 7, 8, 3, 0, tzinfo=UTC),
+    )
+
+    blocks = service.evaluate(
+        "run_overnight_outside",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
+        [],
+    )
+
+    market_blocks = [
+        block for block in blocks if block.get("event_type") == "market_session_halt"
+    ]
+    assert market_blocks[0]["reason"] == "outside_market_session"
+
+
+def test_overnight_market_session_uses_start_date_for_holidays(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.execution.market_session.required = True
+    config.execution.market_session.timezone = "Asia/Seoul"
+    config.execution.market_session.open = "17:30"
+    config.execution.market_session.close = "06:00"
+    config.execution.market_session.weekdays = [1]
+    config.execution.market_session.holidays = ["2026-07-07"]
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "overnight_holiday_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "overnight_holiday_audit.jsonl")),
+        now_fn=lambda: datetime(2026, 7, 7, 18, 0, tzinfo=UTC),
+    )
+
+    blocks = service.evaluate(
+        "run_overnight_holiday",
+        [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
+        [],
+    )
+
+    market_blocks = [
+        block for block in blocks if block.get("event_type") == "market_session_halt"
+    ]
+    assert market_blocks[0]["reason"] == "market_holiday_closed"
+    assert market_blocks[0]["date"] == "2026-07-07"
+
+
+def test_day_market_session_still_allows_intraday(tmp_path):
+    config = _currency_limit_config(
+        tmp_path,
+        live_order_limits={
+            "max_order_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_notional_by_currency": {"KRW": 10_000_000},
+            "max_daily_order_count": 10,
+        },
+    )
+    config.execution.market_session.required = True
+    config.execution.market_session.timezone = "UTC"
+    config.execution.market_session.open = "09:30"
+    config.execution.market_session.close = "16:00"
+    service = LiveExecutionGateService(
+        config,
+        StateStore(str(tmp_path / "day_market_state.db"), initial_cash=10_000.0),
+        AuditLogger(str(tmp_path / "day_market_audit.jsonl")),
+        now_fn=lambda: datetime(2026, 5, 11, 14, 0, tzinfo=UTC),
+    )
+
+    blocks = service.evaluate(
+        "run_day_market",
         [_order("krw_order", "KRW_ETF", Currency.KRW, 1_000_000.0)],
         [],
     )
@@ -932,6 +1124,146 @@ def test_incomplete_live_order_lifecycle_blocks_next_live_approval_order(tmp_pat
     assert summary.orders_created == 0
     event = orchestrator.state_store.list_system_events_by_type("live_order_recovery_halt")[0]
     assert event["payload"]["reason"] == "live_order_lifecycle_incomplete"
+
+
+def test_live_order_lifecycle_gate_recognizes_completed_order_beyond_legacy_scan_limit(tmp_path):
+    orchestrator = _live_orchestrator(tmp_path)
+    _save_passed_reconciliation(orchestrator.state_store)
+    request = _live_order_request("ord_lifecycle_complete")
+    result = LiveOrderResult(
+        order_id=request.order_id,
+        status=OrderStatus.FILLED,
+        broker_order=BrokerOrderId(
+            broker="fake",
+            broker_order_id="broker:ord_lifecycle_complete",
+            order_id=request.order_id,
+            submitted_at=utc_now().isoformat(),
+        ),
+    )
+    orchestrator.state_store.save_system_event(
+        "run_prior",
+        "live_order_result",
+        {
+            "request": request.model_dump(mode="json"),
+            "result": result.model_dump(mode="json"),
+            "duplicate_key": request.duplicate_key,
+            "notional": request.notional,
+            "submitted_date": date.today().isoformat(),
+        },
+    )
+    orchestrator.state_store.save_system_event(
+        "run_prior",
+        "live_order_lifecycle",
+        {
+            "run_id": "run_prior",
+            "order_id": request.order_id,
+            "final_status": "filled",
+            "checked_at": utc_now().isoformat(),
+        },
+    )
+    for index in range(1100):
+        orchestrator.state_store.save_system_event(
+            "run_filler",
+            "live_order_lifecycle",
+            {
+                "run_id": "run_filler",
+                "order_id": f"ord_filler_{index}",
+                "final_status": "filled",
+                "checked_at": utc_now().isoformat(),
+            },
+        )
+
+    summary = orchestrator.run_once()
+
+    assert summary.orders_created > 0
+    assert orchestrator.state_store.list_system_events_by_type("live_order_recovery_halt") == []
+
+
+def test_recovery_gate_blocks_unknown_submit_response_event(tmp_path):
+    orchestrator = _live_orchestrator(tmp_path)
+    _save_passed_reconciliation(orchestrator.state_store)
+    request = _live_order_request("ord_unknown_submit")
+    result = LiveOrderResult(
+        order_id=request.order_id,
+        status=OrderStatus.HALTED,
+        message=(
+            "Live order halted because broker returned an unknown order state; "
+            "operator recovery is required."
+        ),
+        raw={
+            "broker_payload": {"status": "mystery"},
+            "recovery_required": True,
+            "reason": "unknown_broker_submit_response",
+        },
+    )
+    orchestrator.state_store.save_system_event(
+        "run_prior",
+        "live_order_recovery_required",
+        {
+            "reason": "unknown_broker_submit_response",
+            "order_id": request.order_id,
+            "request": request.model_dump(mode="json"),
+            "result": result.model_dump(mode="json"),
+        },
+    )
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate(
+        "run_gate",
+        [_order("ord_next", "MOCK_ETF_A", Currency.KRW, 100_000.0)],
+        [],
+    )
+
+    recovery_blocks = [
+        block for block in blocks if block["event_type"] == "live_order_recovery_halt"
+    ]
+    assert recovery_blocks[0]["reason"] == "live_order_recovery_required"
+    assert recovery_blocks[0]["order_id"] == request.order_id
+
+
+def test_recovery_gate_blocks_lifecycle_exception_after_submit_event(tmp_path):
+    orchestrator = _live_orchestrator(tmp_path)
+    _save_passed_reconciliation(orchestrator.state_store)
+    request = _live_order_request("ord_lifecycle_exception")
+    broker_order = BrokerOrderId(
+        broker="fake",
+        broker_order_id="broker:ord_lifecycle_exception",
+        order_id=request.order_id,
+        submitted_at=utc_now().isoformat(),
+    )
+    orchestrator.state_store.save_system_event(
+        "run_prior",
+        "live_order_recovery_required",
+        {
+            "reason": "lifecycle_exception_after_submit",
+            "order_id": request.order_id,
+            "request": {"order_id": request.order_id},
+            "result": {
+                "broker_order": broker_order.model_dump(mode="json"),
+                "message": "status polling failed",
+            },
+        },
+    )
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate(
+        "run_gate",
+        [_order("ord_next", "MOCK_ETF_A", Currency.KRW, 100_000.0)],
+        [],
+    )
+
+    recovery_blocks = [
+        block for block in blocks if block["event_type"] == "live_order_recovery_halt"
+    ]
+    assert recovery_blocks[0]["reason"] == "live_order_recovery_required"
+    assert recovery_blocks[0]["order_id"] == request.order_id
+    assert recovery_blocks[0]["broker_order_id"] == "broker:ord_lifecycle_exception"
 
 
 def test_recovery_completion_allows_live_approval_after_prior_ambiguous_order(tmp_path):

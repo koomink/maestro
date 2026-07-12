@@ -23,6 +23,7 @@ def test_prices_from_bundle_supports_old_and_new_payload_shapes():
 def test_apply_fx_prices_converts_only_usd_instruments_for_krw_portfolio():
     orchestrator = object.__new__(MaestroOrchestrator)
     orchestrator.config = SimpleNamespace(
+        mode="paper",
         portfolio=SimpleNamespace(base_currency="KRW"),
         universe=SimpleNamespace(
             instruments=[
@@ -36,7 +37,7 @@ def test_apply_fx_prices_converts_only_usd_instruments_for_krw_portfolio():
     )
     prices = {"SPY": 100.0, "005930": 70000.0, "CASH_KRW": 1.0}
 
-    result = orchestrator._apply_fx_prices(prices)
+    result = orchestrator._apply_fx_prices("run_test", prices)
 
     assert result == {"SPY": 135000.0, "005930": 70000.0, "CASH_KRW": 1.0}
     assert prices == {"SPY": 100.0, "005930": 70000.0, "CASH_KRW": 1.0}
@@ -45,32 +46,35 @@ def test_apply_fx_prices_converts_only_usd_instruments_for_krw_portfolio():
 def test_apply_fx_prices_leaves_prices_unchanged_for_non_krw_portfolio():
     orchestrator = object.__new__(MaestroOrchestrator)
     orchestrator.config = SimpleNamespace(
+        mode="paper",
         portfolio=SimpleNamespace(base_currency="USD"),
-        universe=SimpleNamespace(
-            instruments=[SimpleNamespace(symbol="SPY", currency="USD")]
-        ),
+        universe=SimpleNamespace(instruments=[SimpleNamespace(symbol="SPY", currency="USD")]),
     )
     orchestrator.fx_service = SimpleNamespace(
         refresh_from_config=lambda: SimpleNamespace(rates={"USD/KRW": 1350.0})
     )
     prices = {"SPY": 100.0}
 
-    assert orchestrator._apply_fx_prices(prices) == {"SPY": 100.0}
+    assert orchestrator._apply_fx_prices("run_test", prices) == {"SPY": 100.0}
 
 
 def test_apply_fx_prices_leaves_prices_unchanged_when_fx_refresh_fails():
     orchestrator = object.__new__(MaestroOrchestrator)
     orchestrator.config = SimpleNamespace(
+        mode="paper",
         portfolio=SimpleNamespace(base_currency="KRW"),
-        universe=SimpleNamespace(
-            instruments=[SimpleNamespace(symbol="SPY", currency="USD")]
-        ),
+        universe=SimpleNamespace(instruments=[SimpleNamespace(symbol="SPY", currency="USD")]),
     )
 
     def fail_refresh():
         raise RuntimeError("FX unavailable")
 
     orchestrator.fx_service = SimpleNamespace(refresh_from_config=fail_refresh)
+    events = []
+    orchestrator._record_event = lambda run_id, event_type, payload: events.append(
+        (run_id, event_type, payload)
+    )
     prices = {"SPY": 100.0}
 
-    assert orchestrator._apply_fx_prices(prices) == {"SPY": 100.0}
+    assert orchestrator._apply_fx_prices("run_test", prices) == {"SPY": 100.0}
+    assert events[0][1] == "fx_conversion_warning"

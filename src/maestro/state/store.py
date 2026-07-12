@@ -1,6 +1,7 @@
 import fcntl
 import json
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,8 +23,7 @@ class StateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self.live_order_lock_path = self.path.with_suffix(self.path.suffix + ".live.lock")
-        self._writer_lock_depth = 0
-        self._live_order_lock_depth = 0
+        self._lock_depths = threading.local()
         self.initial_cash = float(initial_cash or 0.0)
         self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
         self._init_db()
@@ -52,11 +52,19 @@ class StateStore:
                 ")"
             )
             columns = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(portfolio_snapshots)").fetchall()
+                row[1] for row in conn.execute("PRAGMA table_info(portfolio_snapshots)").fetchall()
             }
             if "account_id" not in columns:
                 conn.execute("ALTER TABLE portfolio_snapshots ADD COLUMN account_id TEXT")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS fill_watermarks "
+                "("
+                "broker_order_id TEXT PRIMARY KEY, "
+                "cumulative_quantity REAL NOT NULL, "
+                "cumulative_notional REAL NOT NULL, "
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS strategy_runs "
                 "("
@@ -77,6 +85,25 @@ class StateStore:
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
+            order_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()
+            }
+            orders_contribution_columns_are_new = "contribution_month" not in order_columns
+            if "contribution_month" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN contribution_month TEXT")
+            if "contribution_sleeve" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN contribution_sleeve TEXT")
+            if "execution_sleeve" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN execution_sleeve TEXT")
+            if "account_id" not in order_columns:
+                conn.execute("ALTER TABLE orders ADD COLUMN account_id TEXT")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_orders_contribution "
+                "ON orders(contribution_month, contribution_sleeve) "
+                "WHERE contribution_month IS NOT NULL"
+            )
+            if orders_contribution_columns_are_new:
+                self._backfill_orders_contribution_columns(conn)
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS system_events "
                 "("
@@ -94,6 +121,9 @@ class StateStore:
                 conn.execute("ALTER TABLE system_events ADD COLUMN duplicate_key TEXT")
             if "broker_order_id" not in system_event_columns:
                 conn.execute("ALTER TABLE system_events ADD COLUMN broker_order_id TEXT")
+            order_id_column_is_new = "order_id" not in system_event_columns
+            if order_id_column_is_new:
+                conn.execute("ALTER TABLE system_events ADD COLUMN order_id TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_system_events_type_created "
                 "ON system_events(event_type, created_at)"
@@ -107,6 +137,12 @@ class StateStore:
                 "ON system_events(broker_order_id) WHERE broker_order_id IS NOT NULL"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_system_events_order_id "
+                "ON system_events(order_id) WHERE order_id IS NOT NULL"
+            )
+            if order_id_column_is_new:
+                self._backfill_system_event_order_ids(conn)
+            conn.execute(
                 "CREATE TABLE IF NOT EXISTS approvals "
                 "("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -115,6 +151,10 @@ class StateStore:
                 "payload TEXT NOT NULL, "
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_approval_id "
+                "ON approvals(approval_id)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS broker_account_snapshots "
@@ -168,6 +208,38 @@ class StateStore:
                 ")"
             )
 
+    def _backfill_orders_contribution_columns(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute("SELECT id, payload FROM orders").fetchall()
+        updates = []
+        for row_id, raw_payload in rows:
+            columns = _order_contribution_columns(json.loads(raw_payload))
+            if any(value is not None for value in columns):
+                updates.append((*columns, row_id))
+        if updates:
+            conn.executemany(
+                "UPDATE orders SET contribution_month = ?, contribution_sleeve = ?, "
+                "execution_sleeve = ?, account_id = ? WHERE id = ?",
+                updates,
+            )
+
+    def _backfill_system_event_order_ids(self, conn: sqlite3.Connection) -> None:
+        placeholders = ",".join("?" for _ in _ORDER_ID_BACKFILL_EVENT_TYPES)
+        rows = conn.execute(
+            "SELECT id, payload FROM system_events "
+            f"WHERE event_type IN ({placeholders}) AND order_id IS NULL",
+            _ORDER_ID_BACKFILL_EVENT_TYPES,
+        ).fetchall()
+        updates = []
+        for row_id, raw_payload in rows:
+            order_id = _system_event_order_id(json.loads(raw_payload))
+            if order_id is not None:
+                updates.append((order_id, row_id))
+        if updates:
+            conn.executemany(
+                "UPDATE system_events SET order_id = ? WHERE id = ?",
+                updates,
+            )
+
     @contextmanager
     def writer_lock(
         self,
@@ -176,7 +248,7 @@ class StateStore:
         timeout_seconds: float = 10.0,
     ) -> Any:
         del owner
-        if self._writer_lock_depth > 0:
+        if getattr(self._lock_depths, "writer", 0) > 0:
             yield
             return
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,11 +262,11 @@ class StateStore:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(f"State writer lock is busy: {self.lock_path}") from exc
                     time.sleep(0.1)
-            self._writer_lock_depth += 1
+            self._lock_depths.writer = getattr(self._lock_depths, "writer", 0) + 1
             try:
                 yield
             finally:
-                self._writer_lock_depth -= 1
+                self._lock_depths.writer -= 1
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
@@ -205,7 +277,7 @@ class StateStore:
         timeout_seconds: float = 30.0,
     ) -> Any:
         del owner
-        if self._live_order_lock_depth > 0:
+        if getattr(self._lock_depths, "live_order", 0) > 0:
             yield
             return
         self.live_order_lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,11 +293,11 @@ class StateStore:
                             f"Live order lock is busy: {self.live_order_lock_path}"
                         ) from exc
                     time.sleep(0.1)
-            self._live_order_lock_depth += 1
+            self._lock_depths.live_order = getattr(self._lock_depths, "live_order", 0) + 1
             try:
                 yield
             finally:
-                self._live_order_lock_depth -= 1
+                self._lock_depths.live_order -= 1
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def validate_config_identity(self, identity: ConfigIdentity) -> None:
@@ -301,6 +373,69 @@ class StateStore:
     def save_system_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self._insert("system_events", run_id, event_type, payload)
 
+    def load_fill_watermarks(self) -> dict[str, tuple[float, float]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT broker_order_id, cumulative_quantity, cumulative_notional "
+                "FROM fill_watermarks"
+            ).fetchall()
+        return {str(row[0]): (float(row[1]), float(row[2])) for row in rows}
+
+    def seed_fill_watermarks_from_events(self) -> None:
+        if self.load_fill_watermarks():
+            return
+        with self.writer_lock("seed_fill_watermarks_from_events"):
+            with self._connect() as conn:
+                existing = conn.execute("SELECT 1 FROM fill_watermarks LIMIT 1").fetchone()
+                if existing is not None:
+                    return
+                rows = conn.execute(
+                    "SELECT payload FROM system_events WHERE event_type = ? ORDER BY id ASC",
+                    ("fill_reconciliation",),
+                ).fetchall()
+                watermarks: dict[str, tuple[float, float]] = {}
+                for row in rows:
+                    payload = json.loads(row[0])
+                    for item in payload.get("applied_fills", []):
+                        broker_order_id = str(item.get("broker_order_id") or "")
+                        if not broker_order_id:
+                            continue
+                        watermarks[broker_order_id] = (
+                            float(item.get("cumulative_filled_quantity", 0.0)),
+                            float(item.get("cumulative_filled_notional", 0.0)),
+                        )
+                self._upsert_fill_watermarks(conn, watermarks)
+
+    def apply_fill_reconciliation(
+        self,
+        run_id: str,
+        state: PortfolioState,
+        watermarks: dict[str, tuple[float, float]],
+        event_payload: dict[str, Any],
+    ) -> None:
+        payload_json = json.dumps(event_payload, default=str)
+        with self.writer_lock("apply_fill_reconciliation"):
+            with self._connect() as conn:
+                if event_payload.get("portfolio_updated"):
+                    conn.execute(
+                        "INSERT INTO portfolio_snapshots "
+                        "(run_id, account_id, payload) VALUES (?, ?, ?)",
+                        (run_id, None, json.dumps(state.model_dump(mode="json"), default=str)),
+                    )
+                self._upsert_fill_watermarks(conn, watermarks)
+                conn.execute(
+                    "INSERT INTO system_events "
+                    "(run_id, event_type, payload, duplicate_key, broker_order_id) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        "fill_reconciliation",
+                        payload_json,
+                        _system_event_duplicate_key(event_payload),
+                        _system_event_broker_order_id(event_payload),
+                    ),
+                )
+
     def save_signal_package(self, signal_run_id: str, payload: dict[str, Any]) -> None:
         payload_with_id = dict(payload)
         payload_with_id["signal_run_id"] = signal_run_id
@@ -341,7 +476,10 @@ class StateStore:
     def save_approval(self, run_id: str, approval_id: str, payload: dict[str, Any]) -> None:
         if self.approval_exists(approval_id):
             raise ValueError(f"Approval decision already exists: {approval_id}")
-        self._insert("approvals", run_id, approval_id, payload)
+        try:
+            self._insert("approvals", run_id, approval_id, payload)
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"Approval decision already exists: {approval_id}") from exc
 
     def approval_exists(self, approval_id: str) -> bool:
         with self._connect() as conn:
@@ -434,23 +572,18 @@ class StateStore:
         execution_sleeve: str | None = None,
         account_id: str | None = None,
     ) -> bool:
+        query = "SELECT 1 FROM orders WHERE contribution_month = ? AND contribution_sleeve = ?"
+        params: list[Any] = [month_key, sleeve]
+        if execution_sleeve is not None:
+            query += " AND execution_sleeve = ?"
+            params.append(execution_sleeve)
+        if account_id is not None:
+            query += " AND account_id = ?"
+            params.append(account_id)
+        query += " LIMIT 1"
         with self._connect() as conn:
-            rows = conn.execute("SELECT payload FROM orders ORDER BY id DESC").fetchall()
-        for row in rows:
-            payload = json.loads(row[0])
-            metadata = payload.get("metadata", {})
-            if (
-                metadata.get("order_generation_mode") == "buy_only_contribution"
-                and metadata.get("contribution_month") == month_key
-                and metadata.get("contribution_sleeve") == sleeve
-                and _metadata_matches_scope(
-                    metadata,
-                    execution_sleeve=execution_sleeve,
-                    account_id=account_id,
-                )
-            ):
-                return True
-        return False
+            row = conn.execute(query, params).fetchone()
+        return row is not None
 
     def monthly_live_contribution_order_exists(
         self,
@@ -460,6 +593,7 @@ class StateStore:
         execution_sleeve: str | None = None,
         account_id: str | None = None,
     ) -> bool:
+        retryable_statuses = {"rejected", "canceled", "failed"}
         contribution_order_ids = self._monthly_contribution_order_ids(
             month_key,
             sleeve,
@@ -468,14 +602,22 @@ class StateStore:
         )
         if not contribution_order_ids:
             return False
-        lifecycle_rows = self.list_system_events_by_type("live_order_lifecycle", limit=1000)
-        for row in lifecycle_rows:
-            payload = row["payload"]
-            if payload.get("order_id") not in contribution_order_ids:
+        seen_in_lifecycle: set[str] = set()
+        for order_id in contribution_order_ids:
+            lifecycle_rows = self._list_system_events_by_order_id("live_order_lifecycle", order_id)
+            if not lifecycle_rows:
                 continue
-            if payload.get("applied_fills"):
+            seen_in_lifecycle.add(order_id)
+            for row in lifecycle_rows:
+                payload = row["payload"]
+                if payload.get("applied_fills"):
+                    return True
+                final_status = str(payload.get("final_status") or "").lower()
+                if final_status in retryable_statuses:
+                    continue
                 return True
-            if str(payload.get("final_status") or "").lower() == "filled":
+        for order_id in contribution_order_ids - seen_in_lifecycle:
+            if self._list_system_events_by_order_id("live_order_result", order_id):
                 return True
         return False
 
@@ -487,23 +629,23 @@ class StateStore:
         execution_sleeve: str | None = None,
         account_id: str | None = None,
     ) -> set[str]:
+        query = (
+            "SELECT order_id, payload FROM orders "
+            "WHERE contribution_month = ? AND contribution_sleeve = ?"
+        )
+        params: list[Any] = [month_key, sleeve]
+        if execution_sleeve is not None:
+            query += " AND execution_sleeve = ?"
+            params.append(execution_sleeve)
+        if account_id is not None:
+            query += " AND account_id = ?"
+            params.append(account_id)
         with self._connect() as conn:
-            rows = conn.execute("SELECT order_id, payload FROM orders ORDER BY id DESC").fetchall()
+            rows = conn.execute(query, params).fetchall()
         order_ids = set()
         for order_id, raw_payload in rows:
             payload = json.loads(raw_payload)
-            metadata = payload.get("metadata", {})
-            if (
-                metadata.get("order_generation_mode") == "buy_only_contribution"
-                and metadata.get("contribution_month") == month_key
-                and metadata.get("contribution_sleeve") == sleeve
-                and _metadata_matches_scope(
-                    metadata,
-                    execution_sleeve=execution_sleeve,
-                    account_id=account_id,
-                )
-            ):
-                order_ids.add(str(payload.get("order_id") or order_id))
+            order_ids.add(str(payload.get("order_id") or order_id))
         return order_ids
 
     def list_system_events(self, limit: int = 10) -> list[dict[str, Any]]:
@@ -571,6 +713,72 @@ class StateStore:
                 (broker_order_id,),
             ).fetchone()
         return row is not None
+
+    def system_event_exists(
+        self,
+        event_type: str,
+        order_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> bool:
+        query = "SELECT 1 FROM system_events WHERE event_type = ? AND order_id = ?"
+        params: list[Any] = [event_type, order_id]
+        if run_id is not None:
+            query += " AND run_id = ?"
+            params.append(run_id)
+        query += " LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        return row is not None
+
+    def list_order_ids_for_event_type(self, event_type: str) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT order_id FROM system_events "
+                "WHERE event_type = ? AND order_id IS NOT NULL",
+                (event_type,),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def list_system_events_by_broker_order_id(
+        self,
+        broker_order_id: str,
+        event_type: str,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM system_events WHERE broker_order_id = ? AND event_type = ? "
+                "ORDER BY id DESC",
+                (broker_order_id, event_type),
+            ).fetchall()
+
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            output.append(item)
+        return output
+
+    def _list_system_events_by_order_id(
+        self,
+        event_type: str,
+        order_id: str,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM system_events WHERE event_type = ? AND order_id = ? "
+                "ORDER BY id DESC",
+                (event_type, order_id),
+            ).fetchall()
+
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            output.append(item)
+        return output
 
     def load_latest_system_event(self, event_type: str) -> dict[str, Any] | None:
         rows = self.list_system_events_by_type(event_type, limit=1)
@@ -642,21 +850,25 @@ class StateStore:
                         (run_id, secondary, payload_json),
                     )
                 elif table == "orders":
+                    contribution_columns = _order_contribution_columns(payload)
                     conn.execute(
-                        "INSERT INTO orders (run_id, order_id, payload) VALUES (?, ?, ?)",
-                        (run_id, secondary, payload_json),
+                        "INSERT INTO orders "
+                        "(run_id, order_id, payload, contribution_month, contribution_sleeve, "
+                        "execution_sleeve, account_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, secondary, payload_json, *contribution_columns),
                     )
                 elif table == "system_events":
                     conn.execute(
                         "INSERT INTO system_events "
-                        "(run_id, event_type, payload, duplicate_key, broker_order_id) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        "(run_id, event_type, payload, duplicate_key, broker_order_id, order_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             run_id,
                             secondary,
                             payload_json,
                             _system_event_duplicate_key(payload),
                             _system_event_broker_order_id(payload),
+                            _system_event_order_id(payload),
                         ),
                     )
                 elif table == "approvals":
@@ -693,6 +905,27 @@ class StateStore:
                     "value = excluded.value, updated_at = CURRENT_TIMESTAMP",
                     (key, payload_json),
                 )
+
+    def _upsert_fill_watermarks(
+        self,
+        conn: sqlite3.Connection,
+        watermarks: dict[str, tuple[float, float]],
+    ) -> None:
+        if not watermarks:
+            return
+        conn.executemany(
+            "INSERT INTO fill_watermarks "
+            "(broker_order_id, cumulative_quantity, cumulative_notional, updated_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(broker_order_id) DO UPDATE SET "
+            "cumulative_quantity = excluded.cumulative_quantity, "
+            "cumulative_notional = excluded.cumulative_notional, "
+            "updated_at = CURRENT_TIMESTAMP",
+            [
+                (broker_order_id, values[0], values[1])
+                for broker_order_id, values in watermarks.items()
+            ],
+        )
 
     def _list_rows(self, table: str, limit: int) -> list[dict[str, Any]]:
         allowed_tables = {
@@ -740,6 +973,27 @@ def _system_event_broker_order_id(payload: dict[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+_ORDER_ID_BACKFILL_EVENT_TYPES = (
+    "live_order_lifecycle",
+    "live_order_result",
+    "live_order_recovery_required",
+    "live_order_submit_intent",
+    "live_order_halt",
+)
+
+
+def _system_event_order_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("order_id")
+    if value:
+        return str(value)
+    request = payload.get("request")
+    if isinstance(request, dict):
+        value = request.get("order_id")
+        if value:
+            return str(value)
+    return None
+
+
 def _same_state_config_identity(existing: dict[str, str], current: dict[str, str]) -> bool:
     existing_state_fingerprint = existing.get("state_fingerprint")
     if existing_state_fingerprint is None:
@@ -747,14 +1001,24 @@ def _same_state_config_identity(existing: dict[str, str], current: dict[str, str
     return existing_state_fingerprint == current.get("state_fingerprint")
 
 
-def _metadata_matches_scope(
-    metadata: dict,
-    *,
-    execution_sleeve: str | None,
-    account_id: str | None,
-) -> bool:
-    if execution_sleeve is not None and metadata.get("execution_sleeve") != execution_sleeve:
-        return False
-    if account_id is not None and metadata.get("account_id") != account_id:
-        return False
-    return True
+def _order_contribution_columns(
+    payload: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None]:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        return None, None, None, None
+    contribution_month = None
+    contribution_sleeve = None
+    if metadata.get("order_generation_mode") == "buy_only_contribution":
+        month = metadata.get("contribution_month")
+        sleeve = metadata.get("contribution_sleeve")
+        contribution_month = str(month) if month is not None else None
+        contribution_sleeve = str(sleeve) if sleeve is not None else None
+    execution_sleeve = metadata.get("execution_sleeve")
+    account_id = metadata.get("account_id")
+    return (
+        contribution_month,
+        contribution_sleeve,
+        str(execution_sleeve) if execution_sleeve is not None else None,
+        str(account_id) if account_id is not None else None,
+    )

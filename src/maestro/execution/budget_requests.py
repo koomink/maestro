@@ -75,6 +75,18 @@ def contribution_available_cash(config: ExecutionConfig, state: PortfolioState) 
     return max(0.0, cash) * max(0.0, 1.0 - config.live_order_limits.fee_buffer_pct)
 
 
+# Telegram limits callback_data to 64 bytes, so buttons carry the short keys;
+# the long keys stay accepted for updates from previously sent messages.
+BUDGET_SELECTION_KEYS = {
+    "m": "min",
+    "r": "recommended",
+    "f": "full",
+    "min": "min",
+    "recommended": "recommended",
+    "full": "full",
+}
+
+
 def selected_budget_from_request(
     request: ContributionBudgetRequest | dict[str, Any],
     selection: str,
@@ -84,11 +96,12 @@ def selected_budget_from_request(
         if isinstance(request, ContributionBudgetRequest)
         else request
     )
-    if selection == "min":
+    normalized = BUDGET_SELECTION_KEYS.get(selection)
+    if normalized == "min":
         return float(payload["min_monthly_budget"])
-    if selection == "recommended":
+    if normalized == "recommended":
         return float(payload["recommended_budget"])
-    if selection == "full":
+    if normalized == "full":
         return float(payload["selectable_max_budget"])
     raise ValueError("Unknown budget selection")
 
@@ -140,24 +153,26 @@ def budget_request_reply_markup(
     )
     request_id = str(payload.get("request_id") or "")
     currency = str(payload.get("currency") or "")
+    # "sel" plus single-character selection keys keep the callback_data within
+    # Telegram's 64-byte limit for full-length request ids (budget_<32 hex>).
     return {
         "inline_keyboard": [
             [
                 {
                     "text": "최소 " + _money(payload.get("min_monthly_budget"), currency),
-                    "callback_data": f"operator:budget:select:{request_id}:min",
+                    "callback_data": f"operator:budget:sel:{request_id}:m",
                 }
             ],
             [
                 {
                     "text": "추천 " + _money(payload.get("recommended_budget"), currency),
-                    "callback_data": f"operator:budget:select:{request_id}:recommended",
+                    "callback_data": f"operator:budget:sel:{request_id}:r",
                 }
             ],
             [
                 {
                     "text": "전액 " + _money(payload.get("selectable_max_budget"), currency),
-                    "callback_data": f"operator:budget:select:{request_id}:full",
+                    "callback_data": f"operator:budget:sel:{request_id}:f",
                 }
             ],
             [{"text": "취소", "callback_data": f"operator:budget:cancel:{request_id}"}],

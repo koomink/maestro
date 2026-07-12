@@ -5,6 +5,7 @@ import yaml
 from pydantic import ValidationError
 
 from maestro.config.loader import load_config
+from maestro.core.clock import utc_now
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.sdk import (
     BaseStrategyPlugin,
@@ -216,7 +217,7 @@ def test_tranquillo_multi_account_budget_decision_can_exceed_legacy_max(
             "execution_sleeve": "tranquillo_isa",
             "currency": "KRW",
             "selected_budget": 8_000_000,
-            "month_key": "2026-06",
+            "month_key": utc_now().strftime("%Y-%m"),
         },
     )
 
@@ -226,9 +227,7 @@ def test_tranquillo_multi_account_budget_decision_can_exceed_legacy_max(
     isa_orders = [order for order in signal["orders_preview"] if order["account_id"] == "kis_isa"]
     assert signal["budget_requests"] == []
     assert sum(order["notional"] for order in isa_orders) == pytest.approx(8_000_000)
-    assert sum(order["notional"] for order in signal["orders_preview"]) == pytest.approx(
-        8_500_000
-    )
+    assert sum(order["notional"] for order in signal["orders_preview"]) == pytest.approx(8_500_000)
 
 
 def _multi_account_config(

@@ -113,6 +113,57 @@ def test_kill_switch_cannot_be_reset_by_resume(tmp_path):
     assert safety.current_state().state == SafetyState.KILLED
 
 
+def test_release_kill_transitions_to_active_with_audit_event(tmp_path):
+    config = load_config(_paper_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    safety = SafetyControlService(store, audit)
+
+    killed = safety.kill_switch(new_run_id(), "operator kill")
+    current = safety.release_kill(new_run_id(), "operator reviewed")
+
+    events = store.list_system_events_by_type("safety_kill_released")
+    assert current.state == SafetyState.ACTIVE
+    assert events[0]["payload"]["reason"] == "operator reviewed"
+    assert events[0]["payload"]["source"] == "cli"
+    assert events[0]["payload"]["previous_reason"] == "operator kill"
+    assert events[0]["payload"]["killed_at"] == killed.created_at
+    assert "safety_kill_released" in audit.path.read_text()
+
+
+def test_release_kill_does_not_record_release_event_if_transition_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    config = load_config(_paper_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    safety = SafetyControlService(store, audit)
+    safety.kill_switch(new_run_id(), "operator kill")
+
+    def fail_transition(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("transition failed")
+
+    monkeypatch.setattr(safety, "_transition", fail_transition)
+
+    with pytest.raises(RuntimeError, match="transition failed"):
+        safety.release_kill(new_run_id(), "operator reviewed")
+
+    assert store.list_system_events_by_type("safety_kill_released") == []
+
+
+def test_release_kill_requires_killed_state(tmp_path):
+    config = load_config(_paper_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    safety = SafetyControlService(store, audit)
+
+    with pytest.raises(ValueError, match="requires current state to be killed"):
+        safety.release_kill(new_run_id(), "operator reviewed")
+
+    assert safety.current_state().state == SafetyState.ACTIVE
+
+
 def test_clear_halt_requires_halted_state_and_reason(tmp_path):
     config = load_config(_paper_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -187,6 +238,56 @@ def test_clear_halt_cli_allows_recovery_when_only_safety_state_is_failed(tmp_pat
     result = CliRunner().invoke(
         app,
         ["clear-halt", "--config", str(config_path), "--reason", "operator reviewed"],
+    )
+
+    assert result.exit_code == 0
+    assert "state=active" in result.output
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.ACTIVE
+
+
+def test_release_kill_cli_rejects_bad_confirmation_and_keeps_state(tmp_path):
+    config_path = _paper_config_path(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    SafetyControlService(store, audit).kill_switch(new_run_id(), "operator kill")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "release-kill",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator reviewed",
+            "--confirm",
+            "RELEASE_KILL",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "release-kill requires --confirm RELEASE-KILL" in result.output
+    assert SafetyControlService(store, audit).current_state().state == SafetyState.KILLED
+
+
+def test_release_kill_cli_allows_recovery_when_only_safety_state_is_failed(tmp_path):
+    config_path = _paper_config_path(tmp_path)
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    SafetyControlService(store, audit).kill_switch(new_run_id(), "operator kill")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "release-kill",
+            "--config",
+            str(config_path),
+            "--reason",
+            "operator reviewed",
+            "--confirm",
+            "RELEASE-KILL",
+        ],
     )
 
     assert result.exit_code == 0

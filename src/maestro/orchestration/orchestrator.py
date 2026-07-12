@@ -42,7 +42,10 @@ from maestro.execution.funding_requests import (
     build_contribution_funding_request,
     contribution_available_cash,
 )
-from maestro.execution.live_order_factory import build_live_approval_dependencies
+from maestro.execution.live_order_factory import (
+    LiveApprovalDependencies,
+    build_live_approval_dependencies,
+)
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
     LiveOrderClient,
@@ -139,7 +142,10 @@ class MaestroOrchestrator:
         self.registry = PluginRegistry.from_configs(signal_strategies, run_mode=config.mode)
         self.datahub: BaseDataProvider = build_data_provider(config.datahub)
         self.portfolio_manager = PortfolioManager(signal_strategies)
-        self.risk_manager = RiskManager(config.portfolio.allowed_symbols)
+        self.risk_manager = RiskManager(
+            config.portfolio.allowed_symbols,
+            max_position_weight=config.risk.max_position_weight,
+        )
         self.execution = build_execution_engine(
             config.execution,
             instruments=config.universe.instruments,
@@ -192,19 +198,30 @@ class MaestroOrchestrator:
                     "Unknown or disabled signal strategy id(s): " + ", ".join(sorted(unknown))
                 )
         broker_snapshot_refs = self._broker_snapshot_refs()
+        dynamic_symbols = self._evaluate_dynamic_universe(signal_run_id, current_state)
+        run_allowed_symbols = set(self.config.portfolio.allowed_symbols) | dynamic_symbols
+        risk_manager = (
+            RiskManager(
+                sorted(run_allowed_symbols),
+                max_position_weight=self.config.risk.max_position_weight,
+            )
+            if dynamic_symbols
+            else self.risk_manager
+        )
         valid_results, data_requests_by_strategy, data_quality_issues, prices = (
             self._collect_strategy_results(
                 signal_run_id,
                 current_state,
                 strategy_ids=selected_strategy_ids or None,
+                allowed_symbols=run_allowed_symbols,
             )
         )
         native_prices = self._enrich_sleeve_prices(prices)
-        valuation_prices = self._apply_fx_prices(native_prices)
+        valuation_prices = self._apply_fx_prices(signal_run_id, native_prices)
         target, risk_decision, order_targets = self._build_account_scoped_targets(
             signal_run_id,
             valid_results,
-            self.risk_manager,
+            risk_manager,
             current_state,
             valuation_prices,
         )
@@ -372,6 +389,7 @@ class MaestroOrchestrator:
             )
         self._validate_signal_package_for_approval(package)
         self._validate_signal_approval_gates(run_id, approval_orders, package)
+        self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
 
         risk_violations = package.get("risk_decision", {}).get("violations", [])
         current_state = self.state_store.load_latest_portfolio_state()
@@ -454,7 +472,6 @@ class MaestroOrchestrator:
 
         approval_status = _combined_approval_status(approval_statuses)
         self.state_store.save_portfolio_snapshot(run_id, next_state)
-        self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
         self.state_store.save_system_event(
             run_id,
             "signal_approval_completed",
@@ -477,8 +494,7 @@ class MaestroOrchestrator:
         run_id = new_run_id()
         current_state = self._load_run_portfolio_state(run_id)
         valid_results: list[TargetAllocationResult] = []
-        strategy_ids = self.registry.strategy_ids
-        data_requests_by_strategy = {}
+        data_requests_by_strategy: dict[str, Any] = {}
         data_quality_issues: list[dict[str, Any]] = []
         prices = self._initial_prices()
 
@@ -490,58 +506,25 @@ class MaestroOrchestrator:
             )
             dynamic_symbols = self._evaluate_dynamic_universe(run_id, current_state)
             run_allowed_symbols = set(self.config.portfolio.allowed_symbols) | dynamic_symbols
-            validator = SignalValidator.with_universe_boundaries(
-                tradable_symbols=run_allowed_symbols,
-                research_only_symbols=set(self.config.universe.research_symbols),
-                strategy_ids=strategy_ids,
-            )
             risk_manager = (
-                RiskManager(sorted(run_allowed_symbols)) if dynamic_symbols else self.risk_manager
+                RiskManager(
+                    sorted(run_allowed_symbols),
+                    max_position_weight=self.config.risk.max_position_weight,
+                )
+                if dynamic_symbols
+                else self.risk_manager
             )
-            for loaded in self.registry.strategies:
-                context = self._strategy_context(run_id, loaded, current_state)
-                requests = loaded.plugin.build_data_requests(context)
-                strategy_data_requests = {
-                    "prefetch": [request.model_dump(mode="json") for request in requests],
-                    "runtime": {"requests": [], "bundles": [], "errors": []},
-                }
-                data_requests_by_strategy[loaded.config.id] = strategy_data_requests
-                data_bundle = self.datahub.get_data(requests)
-                data_quality_issues.extend(collect_data_quality_issues(data_bundle))
-                prices.update(prices_from_bundle(data_bundle))
-                runtime = StrategyRuntime(self.datahub.get_data, context=context)
-                try:
-                    raw_result = loaded.plugin.run_with_runtime(data_bundle, context, runtime)
-                finally:
-                    strategy_data_requests["runtime"] = runtime.audit_payload()
-                for runtime_bundle in runtime.bundles:
-                    data_quality_issues.extend(collect_data_quality_issues(runtime_bundle))
-                    prices.update(prices_from_bundle(runtime_bundle))
-                result = normalize_strategy_result(
-                    raw_result,
-                    loaded.config.signal_to_allocation,
-                )
-                validation = validator.validate(result)
-                strategy_run_payload = {
-                    "account_id": self._strategy_account_id(loaded.config.id),
-                    "result": result.model_dump(mode="json"),
-                    "validation": {"ok": validation.ok, "errors": validation.errors},
-                }
-                if isinstance(raw_result, StrategySignalResult):
-                    strategy_run_payload["source_signal"] = raw_result.model_dump(mode="json")
-                self.state_store.save_strategy_run(
+            valid_results, data_requests_by_strategy, data_quality_issues, prices = (
+                self._collect_strategy_results(
                     run_id,
-                    loaded.config.id,
-                    strategy_run_payload,
+                    current_state,
+                    allowed_symbols=run_allowed_symbols,
+                    data_requests_by_strategy=data_requests_by_strategy,
                 )
-                if not validation.ok:
-                    raise ValueError(
-                        f"Invalid strategy result for {loaded.config.id}: {validation.errors}"
-                    )
-                valid_results.append(result)
+            )
 
             native_prices = self._enrich_sleeve_prices(prices)
-            valuation_prices = self._apply_fx_prices(native_prices)
+            valuation_prices = self._apply_fx_prices(run_id, native_prices)
             target, risk_decision, order_targets = self._build_account_scoped_targets(
                 run_id,
                 valid_results,
@@ -812,6 +795,8 @@ class MaestroOrchestrator:
         current_state: PortfolioState,
         *,
         strategy_ids: set[str] | None = None,
+        allowed_symbols: set[str] | None = None,
+        data_requests_by_strategy: dict[str, Any] | None = None,
     ) -> tuple[
         list[TargetAllocationResult],
         dict[str, Any],
@@ -819,12 +804,15 @@ class MaestroOrchestrator:
         dict[str, float],
     ]:
         valid_results: list[TargetAllocationResult] = []
-        data_requests_by_strategy = {}
+        # Caller-supplied accumulator so run_once can include partially collected
+        # request audit data in its run_once_failed event when a strategy raises.
+        if data_requests_by_strategy is None:
+            data_requests_by_strategy = {}
         data_quality_issues: list[dict[str, Any]] = []
         prices = self._initial_prices()
         validator_strategy_ids = strategy_ids or self.registry.strategy_ids
         validator = SignalValidator.with_universe_boundaries(
-            tradable_symbols=set(self.config.portfolio.allowed_symbols),
+            tradable_symbols=allowed_symbols or set(self.config.portfolio.allowed_symbols),
             research_only_symbols=set(self.config.universe.research_symbols),
             strategy_ids=validator_strategy_ids,
         )
@@ -1024,22 +1012,54 @@ class MaestroOrchestrator:
                 return instrument.currency
         return self.config.portfolio.base_currency
 
-    def _apply_fx_prices(self, prices: dict[str, float]) -> dict[str, float]:
+    def _apply_fx_prices(self, run_id: str, prices: dict[str, float]) -> dict[str, float]:
         """Convert USD prices to KRW using FX rates."""
         converted_prices = dict(prices)
-        if self.config.portfolio.base_currency == "KRW":
-            try:
-                fx_result = self.fx_service.refresh_from_config()
-                usd_to_krw = float(fx_result.rates.get("USD/KRW", 1.0))
-            except Exception:
-                return converted_prices
+        if self.config.portfolio.base_currency != "KRW":
+            return converted_prices
 
-            for symbol, price in prices.items():
-                if symbol.startswith("CASH_"):
-                    continue
-                currency = self._currency_for_symbol(symbol)
-                if currency == "USD":
-                    converted_prices[symbol] = price * usd_to_krw
+        usd_symbols = [
+            symbol
+            for symbol in prices
+            if not symbol.startswith("CASH_") and self._currency_for_symbol(symbol) == "USD"
+        ]
+        if not usd_symbols:
+            return converted_prices
+
+        def handle_unavailable_rate(reason: str, exc: Exception) -> dict[str, float]:
+            payload = {
+                "reason": reason,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc).strip("'"),
+                "symbols": sorted(usd_symbols),
+            }
+            if self.config.mode == RunMode.LIVE_APPROVAL:
+                self._record_event(run_id, "fx_conversion_halt", payload)
+                raise RuntimeError(
+                    f"FX rate unavailable for USD->KRW conversion: {reason}"
+                ) from exc
+            self._record_event(run_id, "fx_conversion_warning", payload)
+            return converted_prices
+
+        try:
+            fx_result = self.fx_service.refresh_from_config()
+        except Exception as exc:
+            return handle_unavailable_rate("refresh_failed", exc)
+
+        if "USD/KRW" not in fx_result.rates:
+            return handle_unavailable_rate("missing_rate", KeyError("USD/KRW"))
+        try:
+            usd_to_krw = float(fx_result.rates["USD/KRW"])
+        except Exception as exc:
+            return handle_unavailable_rate("invalid_rate", exc)
+        if usd_to_krw <= 0:
+            return handle_unavailable_rate(
+                "non_positive_rate",
+                ValueError("USD/KRW must be positive"),
+            )
+
+        for symbol in usd_symbols:
+            converted_prices[symbol] = prices[symbol] * usd_to_krw
 
         return converted_prices
 
@@ -1307,7 +1327,13 @@ class MaestroOrchestrator:
         if signal_contract_fingerprint:
             current_contract_fingerprint = _signal_contract_fingerprint(self.config)
             if signal_contract_fingerprint != current_contract_fingerprint:
-                raise ValueError("Signal package config runtime mismatch")
+                raise ValueError(
+                    "Signal package config runtime mismatch: "
+                    f"signal_fingerprint={str(signal_contract_fingerprint)[:8]} "
+                    f"current_fingerprint={current_contract_fingerprint[:8]}; "
+                    "run 'maestro profile-diff --left <signal-config> "
+                    "--right <approval-config>' to inspect"
+                )
         else:
             signal_fingerprint = package.get("config_runtime_fingerprint")
             current_fingerprint = (
@@ -1674,19 +1700,23 @@ class MaestroOrchestrator:
             )
 
         lifecycle_results = []
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies] = {}
         for order in armed_orders:
-            dependencies = build_live_approval_dependencies(
-                self.config,
-                self.state_store,
-                self.audit,
-                live_order_client=self.live_order_client,
-                status_client=self.live_order_status_client,
-                broker_reconciliation_service=self.broker_reconciliation_service,
-                notification_client=self.live_order_notification_client,
-                telegram_client=self.telegram_client,
-                account_id=order.account_id,
-                signal_run_id=signal_run_id,
-            )
+            dependencies = dependencies_by_account.get(order.account_id)
+            if dependencies is None:
+                dependencies = build_live_approval_dependencies(
+                    self.config,
+                    self.state_store,
+                    self.audit,
+                    live_order_client=self.live_order_client,
+                    status_client=self.live_order_status_client,
+                    broker_reconciliation_service=self.broker_reconciliation_service,
+                    notification_client=self.live_order_notification_client,
+                    telegram_client=self.telegram_client,
+                    account_id=order.account_id,
+                    signal_run_id=signal_run_id,
+                )
+                dependencies_by_account[order.account_id] = dependencies
             request = LiveOrderRequest(
                 order_id=order.order_id,
                 symbol=order.symbol,
@@ -1696,7 +1726,11 @@ class MaestroOrchestrator:
                 order_type=OrderType.LIMIT,
                 approval_id=approval_id,
                 run_id=run_id,
-                duplicate_key=f"{run_id}:{order.order_id}",
+                duplicate_key=(
+                    f"{signal_run_id}:{order.order_id}"
+                    if signal_run_id
+                    else f"{run_id}:{order.order_id}"
+                ),
                 currency=order.currency,
                 sleeve=order.sleeve,
                 account_id=order.account_id,
@@ -1725,7 +1759,11 @@ class MaestroOrchestrator:
                 order_type=OrderType.LIMIT,
                 approval_id=approval_id,
                 run_id=run_id,
-                duplicate_key=f"{run_id}:{order.order_id}",
+                duplicate_key=(
+                    f"{signal_run_id}:{order.order_id}"
+                    if signal_run_id
+                    else f"{run_id}:{order.order_id}"
+                ),
                 currency=order.currency,
                 sleeve=order.sleeve,
                 account_id=order.account_id,
@@ -2576,6 +2614,32 @@ class MaestroOrchestrator:
 
 
 def _signal_contract_fingerprint(config: MaestroConfig) -> str:
+    payload = _signal_contract_payload(config)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return sha256(encoded).hexdigest()
+
+
+def signal_contract_fingerprint_diff(left: MaestroConfig, right: MaestroConfig) -> list[str]:
+    left_payload = _signal_contract_payload(left)
+    right_payload = _signal_contract_payload(right)
+    changed: list[str] = []
+    for key in sorted(set(left_payload) | set(right_payload)):
+        left_value = left_payload.get(key)
+        right_value = right_payload.get(key)
+        if _canonical_json(left_value) == _canonical_json(right_value):
+            continue
+        if isinstance(left_value, dict) and isinstance(right_value, dict):
+            for child_key in sorted(set(left_value) | set(right_value)):
+                if _canonical_json(left_value.get(child_key)) != _canonical_json(
+                    right_value.get(child_key)
+                ):
+                    changed.append(f"{key}.{child_key}")
+            continue
+        changed.append(key)
+    return changed
+
+
+def _signal_contract_payload(config: MaestroConfig) -> dict[str, Any]:
     payload = config.model_dump(mode="json")
     payload.pop("approval", None)
     execution = dict(payload.get("execution") or {})
@@ -2583,8 +2647,11 @@ def _signal_contract_fingerprint(config: MaestroConfig) -> str:
     execution.pop("live_order_enabled", None)
     execution.pop("live_order_dry_run", None)
     payload["execution"] = execution
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return sha256(encoded).hexdigest()
+    return payload
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
 def _combined_approval_status(statuses: list[str]) -> str:

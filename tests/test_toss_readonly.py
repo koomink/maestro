@@ -116,6 +116,22 @@ def test_toss_payloads_normalize_to_broker_snapshot():
     assert snapshot.account.positions[1].quantity == 1.5
     assert snapshot.account.positions[1].currency == "USD"
     assert snapshot.account.total_value == 12_200_278.55
+    assert snapshot.account.daily_pnl_by_currency is None
+
+
+def test_toss_daily_profit_loss_normalizes_to_daily_pnl_by_currency():
+    snapshot = toss_snapshot_from_payloads(
+        account={"accountNo": "12345678901", "accountSeq": 7, "accountType": "BROKERAGE"},
+        holdings={
+            "dailyProfitLoss": {"krw": "-15000", "usd": "1.50", "totalKrw": None},
+            "items": [],
+        },
+        buying_power={"currency": "KRW", "cashBuyingPower": "5000000"},
+        fetched_at=datetime(2026, 6, 9, tzinfo=UTC),
+    )
+
+    assert snapshot.account.positions == []
+    assert snapshot.account.daily_pnl_by_currency == {"KRW": -15_000.0, "USD": 1.5}
 
 
 def test_toss_readonly_client_fetches_account_snapshot_with_account_header():
@@ -358,9 +374,10 @@ def test_attribution_aware_readonly_service_reconciles_stored_snapshot(tmp_path)
 
     rows = store.list_account_attribution_snapshots()
     assert rows[0]["payload"]["bucket_id"] == "crescendo_us"
-    assert rows[0]["payload"]["broker_snapshot_id"] == store.load_latest_broker_account_snapshot()[
-        "id"
-    ]
+    assert (
+        rows[0]["payload"]["broker_snapshot_id"]
+        == store.load_latest_broker_account_snapshot()["id"]
+    )
 
 
 def test_readonly_factory_routes_kis_and_toss_accounts(tmp_path):
@@ -379,14 +396,14 @@ def test_readonly_factory_routes_kis_and_toss_accounts(tmp_path):
         state=StateConfig(sqlite_path=str(tmp_path / "state.db")),
         audit=AuditConfig(jsonl_path=str(tmp_path / "audit.jsonl")),
         accounts=[
-                BrokerAccountConfig(
-                    id="kis_mock",
-                    broker="kis",
-                    provider="mock",
-                    account_id="MOCK-ACCOUNT",
-                    broker_products=["kis_domestic_stock"],
-                    enabled=True,
-                ),
+            BrokerAccountConfig(
+                id="kis_mock",
+                broker="kis",
+                provider="mock",
+                account_id="MOCK-ACCOUNT",
+                broker_products=["kis_domestic_stock"],
+                enabled=True,
+            ),
             BrokerAccountConfig(
                 id="toss_brokerage",
                 broker="toss",

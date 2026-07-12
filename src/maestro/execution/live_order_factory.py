@@ -289,9 +289,11 @@ def _build_notification_client(
 ) -> LiveOrderNotificationClient | None:
     if config.approval.provider != "telegram":
         return None
+    # HTTP request timeout; approval.timeout_seconds is the approval expiry
+    # and would let a hung connection block order notifications for hours.
     client = telegram_client or TelegramBotAPIClient(
         token_env=config.approval.telegram_bot_token_env,
-        timeout_seconds=config.approval.timeout_seconds,
+        timeout_seconds=10.0,
     )
     return TelegramLiveOrderNotificationClient(
         client=client,

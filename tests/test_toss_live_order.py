@@ -1,5 +1,15 @@
 from maestro.config.broker import BrokerAccountConfig
-from maestro.core.enums import Currency, OrderSide, OrderStatus, OrderType
+from maestro.core.enums import (
+    AssetType,
+    BrokerProduct,
+    Currency,
+    ExchangeCode,
+    MarketRegion,
+    OrderSide,
+    OrderStatus,
+    OrderType,
+)
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.toss.live_order_client import TossLiveOrderClient
 from maestro.execution.live_order_models import (
     BrokerOrderRequest,
@@ -98,6 +108,62 @@ def test_toss_order_status_normalizes_partial_fill():
     assert status.partial_fill.filled_quantity == 1.0
     assert status.partial_fill.remaining_quantity == 1.0
     assert status.partial_fill.average_fill_price == 185.25
+
+
+def test_toss_order_status_maps_broker_symbol_to_canonical():
+    transport = RecordingTransport(
+        {
+            ("GET", "/api/v1/orders/TOSS-1"): {
+                "result": {
+                    "orderId": "TOSS-1",
+                    "symbol": "TOSS_AAPL",
+                    "side": "BUY",
+                    "status": "FILLED",
+                    "quantity": "2",
+                    "orderedAt": "2026-06-19T09:30:00+09:00",
+                    "execution": {
+                        "filledQuantity": "2",
+                        "averageFilledPrice": "185.25",
+                        "filledAmount": "370.5",
+                        "filledAt": "2026-06-19T09:31:00+09:00",
+                    },
+                }
+            }
+        }
+    )
+    client = TossLiveOrderClient(_account(), instruments=[_instrument()], transport=transport)
+
+    status = client.get_order_status(client._broker_order("ord_live_1", "TOSS-1"))
+
+    assert status.symbol == "AAPL"
+    assert status.fills[0].symbol == "AAPL"
+
+
+def test_toss_order_status_keeps_unmapped_symbol():
+    transport = RecordingTransport(
+        {
+            ("GET", "/api/v1/orders/TOSS-1"): {
+                "result": {
+                    "orderId": "TOSS-1",
+                    "symbol": "UNMAPPED",
+                    "side": "BUY",
+                    "status": "FILLED",
+                    "quantity": "1",
+                    "execution": {
+                        "filledQuantity": "1",
+                        "averageFilledPrice": "10",
+                        "filledAmount": "10",
+                    },
+                }
+            }
+        }
+    )
+    client = TossLiveOrderClient(_account(), instruments=[_instrument()], transport=transport)
+
+    status = client.get_order_status(client._broker_order("ord_live_1", "TOSS-1"))
+
+    assert status.symbol == "UNMAPPED"
+    assert status.fills[0].symbol == "UNMAPPED"
 
 
 def test_toss_modify_and_cancel_track_replacement_order_ids():
@@ -200,6 +266,23 @@ def _live_request() -> LiveOrderRequest:
         run_id="run_1",
         currency=Currency.USD,
         account_id="toss_brokerage",
+    )
+
+
+def _instrument() -> TradableInstrument:
+    return TradableInstrument(
+        symbol="AAPL",
+        name="Apple",
+        asset_type=AssetType.STOCK,
+        region=MarketRegion.US,
+        currency=Currency.USD,
+        broker="toss",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+        broker_symbol="AAPL",
+        broker_symbols={"toss": "TOSS_AAPL"},
+        exchange_code=ExchangeCode.NASD,
+        quantity_step=1,
+        price_tick=0.01,
     )
 
 

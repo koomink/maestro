@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -5,14 +6,28 @@ import yaml
 from sample_static_allocation.strategy import SampleStaticAllocationStrategy
 from typer.testing import CliRunner
 
-from maestro.cli import _send_signal_funding_request_notifications, app
+from maestro.approval.models import ApprovalDecision, ApprovalRequest
+from maestro.cli import _run_daily_signal_approval, _send_signal_funding_request_notifications, app
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.core.clock import utc_now
+from maestro.core.enums import OrderSide, OrderStatus
 from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnlySnapshot
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.live_orders import (
+    BrokerOrderId,
+    LiveOrderClient,
+    LiveOrderRequest,
+    LiveOrderResult,
+    LiveOrderStatusClient,
+    LiveOrderStatusSnapshot,
+    PartialFillSummary,
+)
 from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
-from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.orchestration.orchestrator import (
+    MaestroOrchestrator,
+    signal_contract_fingerprint_diff,
+)
 from maestro.safety.controls import SafetyControlService
 from maestro.sdk import (
     BaseStrategyPlugin,
@@ -27,13 +42,17 @@ from maestro.state.store import StateStore
 
 class SecondStaticAllocationStrategy(SampleStaticAllocationStrategy):
     def manifest(self):
-        return super().manifest().model_copy(
-            update={"strategy_id": "second_static", "name": "Second Static Allocation"}
+        return (
+            super()
+            .manifest()
+            .model_copy(update={"strategy_id": "second_static", "name": "Second Static Allocation"})
         )
 
     def run(self, data_bundle, context):
-        return super().run(data_bundle, context).model_copy(
-            update={"strategy_id": context.strategy_id}
+        return (
+            super()
+            .run(data_bundle, context)
+            .model_copy(update={"strategy_id": context.strategy_id})
         )
 
 
@@ -222,13 +241,65 @@ def test_approve_signal_propagates_signal_run_id_to_live_order_events(monkeypatc
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
     events = store.list_system_events_by_type("live_order_dry_run", limit=10)
     assert events
-    assert {event["payload"]["signal_run_id"] for event in events} == {
+    assert {event["payload"]["signal_run_id"] for event in events} == {signal_summary.signal_run_id}
+    assert {event["payload"]["request"]["signal_run_id"] for event in events} == {
         signal_summary.signal_run_id
     }
-    assert {
-        event["payload"]["request"]["signal_run_id"] for event in events
-    } == {signal_summary.signal_run_id}
     assert approval_summary.orders_created == 2
+
+
+def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _live_signal_config(tmp_path, "approved")
+    config.execution.order_posture = "armed"
+    config.execution.live_order_enabled = True
+    config.execution.live_order_dry_run = False
+    config.strategies[0].order_posture = "armed"
+    config.strategies[0].config["allocations"] = {"CASH": 0.7, "MOCK_ETF_A": 0.3}
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_system_event("run_reconcile", "broker_reconciliation", {"passed": True})
+    live_client = CountingLiveOrderClient()
+    first = MaestroOrchestrator(
+        config,
+        live_order_client=live_client,
+        live_order_status_client=FilledStatusClient(),
+        broker_reconciliation_service=PassingBrokerReconciliation(),
+    )
+    first.approval_manager = ApprovingTelegramApprovalManager()
+    first.state_store.mark_signal_package_consumed = lambda signal_run_id, run_id: None
+
+    first.approve_signal(signal_summary.signal_run_id)
+
+    assert live_client.submit_count == 1
+    second = MaestroOrchestrator(
+        config,
+        live_order_client=live_client,
+        live_order_status_client=FilledStatusClient(),
+        broker_reconciliation_service=PassingBrokerReconciliation(),
+    )
+    second.approval_manager = ApprovingTelegramApprovalManager()
+    second.approve_signal(signal_summary.signal_run_id)
+
+    assert live_client.submit_count == 1
+    lifecycle_events = store.list_system_events_by_type("live_order_lifecycle", limit=10)
+    assert lifecycle_events[0]["payload"]["final_status"] == "failed"
+    assert (
+        lifecycle_events[0]["payload"]["failed_reason"] == "Duplicate live order request rejected"
+    )
+
+
+def test_approve_signal_consumes_package_before_approval_request_failure(tmp_path):
+    config = _paper_approval_config(tmp_path, "approved")
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    orchestrator = MaestroOrchestrator(config)
+    orchestrator.approval_manager = FailingApprovalManager()
+
+    with pytest.raises(RuntimeError, match="approval manager failed"):
+        orchestrator.approve_signal(signal_summary.signal_run_id)
+
+    with pytest.raises(ValueError, match="Signal package already consumed"):
+        MaestroOrchestrator(config).approve_signal(signal_summary.signal_run_id)
 
 
 def test_approve_signal_excludes_disabled_posture_orders_from_approval(tmp_path):
@@ -293,6 +364,123 @@ def test_approve_signal_rejects_unknown_signal_run_id(tmp_path):
         MaestroOrchestrator(config).approve_signal("signal_missing")
 
 
+def test_signal_contract_fingerprint_diff_reports_market_session(tmp_path):
+    left_path = _paper_approval_config_path(tmp_path, "approved", filename="left.yaml")
+    right_path = _paper_approval_config_path(tmp_path, "approved", filename="right.yaml")
+    right_raw = yaml.safe_load(right_path.read_text())
+    right_raw["execution"]["market_session"] = {
+        "required": True,
+        "timezone": "America/New_York",
+        "open": "09:30",
+        "close": "16:00",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
+    right_path.write_text(yaml.safe_dump(right_raw))
+
+    diff_keys = signal_contract_fingerprint_diff(load_config(left_path), load_config(right_path))
+
+    assert "execution.market_session" in diff_keys
+
+
+def test_signal_contract_fingerprint_diff_is_empty_for_identical_config(tmp_path):
+    config = _paper_approval_config(tmp_path, "approved")
+
+    assert signal_contract_fingerprint_diff(config, config) == []
+
+
+def test_profile_diff_cli_reports_signal_contract_fingerprint_changed(tmp_path):
+    left_path = _paper_approval_config_path(tmp_path, "approved", filename="left_profile.yaml")
+    right_path = _paper_approval_config_path(tmp_path, "approved", filename="right_profile.yaml")
+
+    result = CliRunner().invoke(
+        app,
+        ["profile-diff", "--left", str(left_path), "--right", str(right_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "signal_contract_fingerprint_changed=false" in result.output
+
+
+def test_profile_diff_cli_reports_signal_contract_diff_keys(tmp_path):
+    left_path = _paper_approval_config_path(tmp_path, "approved", filename="left_profile.yaml")
+    right_path = _paper_approval_config_path(tmp_path, "approved", filename="right_profile.yaml")
+    right_raw = yaml.safe_load(right_path.read_text())
+    right_raw["execution"]["market_session"] = {
+        "required": True,
+        "timezone": "America/New_York",
+        "open": "09:30",
+        "close": "16:00",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
+    right_path.write_text(yaml.safe_dump(right_raw))
+
+    result = CliRunner().invoke(
+        app,
+        ["profile-diff", "--left", str(left_path), "--right", str(right_path)],
+    )
+
+    assert result.exit_code == 0
+    assert "signal_contract_fingerprint_changed=true" in result.output
+    assert "signal_contract_diff_keys=execution.market_session" in result.output
+
+
+def test_daily_signal_approval_preflights_signal_contract_before_signal_run(
+    tmp_path,
+    monkeypatch,
+):
+    readonly = _paper_approval_config(tmp_path, "approved")
+    signal_path = _paper_approval_config_path(tmp_path, "approved", filename="daily_signal.yaml")
+    approval_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="daily_approval.yaml",
+    )
+    approval_raw = yaml.safe_load(approval_path.read_text())
+    approval_raw["execution"]["market_session"] = {
+        "required": True,
+        "timezone": "America/New_York",
+        "open": "09:30",
+        "close": "16:00",
+        "weekdays": [0, 1, 2, 3, 4],
+        "holidays": [],
+    }
+    approval_path.write_text(yaml.safe_dump(approval_raw))
+    signal = load_config(signal_path)
+    approval = load_config(approval_path)
+    created_orchestrators = []
+
+    class FakeOrchestrator:
+        def __init__(self, *args, **kwargs):
+            created_orchestrators.append((args, kwargs))
+
+        def run_signal(self):
+            raise AssertionError("run_signal should not execute on contract mismatch")
+
+    configs = [readonly, signal, approval]
+
+    def fake_load_operator_config(path):
+        del path
+        config = configs.pop(0)
+        return config, None
+
+    monkeypatch.setattr("maestro.cli._load_operator_config", fake_load_operator_config)
+    monkeypatch.setattr("maestro.cli._refresh_daily_readonly", lambda config, identity: None)
+    monkeypatch.setattr("maestro.cli.MaestroOrchestrator", FakeOrchestrator)
+
+    with pytest.raises(ValueError, match="signal/approval config contract mismatch"):
+        _run_daily_signal_approval(
+            readonly_config=Path("readonly.yaml"),
+            signal_config=Path("signal.yaml"),
+            approval_config=Path("approval.yaml"),
+            stop_telegram_operator=False,
+            telegram_operator_service="maestro-telegram-operator.service",
+        )
+
+    assert created_orchestrators == []
+
+
 def test_run_signal_and_approve_signal_cli(tmp_path):
     config_path = _paper_approval_config_path(tmp_path, "approved")
 
@@ -310,12 +498,139 @@ def test_run_signal_and_approve_signal_cli(tmp_path):
             str(config_path),
             "--signal-run-id",
             signal_run_id,
+            "--keep-telegram-operator",
         ],
     )
 
     assert approval_result.exit_code == 0
     assert f"signal_run_id={signal_run_id}" in approval_result.output
     assert "orders=2" in approval_result.output
+
+
+def test_approve_signal_cli_stops_telegram_operator_by_default(tmp_path, monkeypatch):
+    config_path = _paper_approval_config_path(tmp_path, "approved")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "maestro.cli._systemctl",
+        lambda action, service: calls.append((action, service)),
+    )
+
+    signal_result = CliRunner().invoke(app, ["run-signal", "--config", str(config_path)])
+    signal_run_id = signal_result.output.split("signal_run_id=", 1)[1].split()[0]
+    approval_result = CliRunner().invoke(
+        app,
+        [
+            "approve-signal",
+            "--config",
+            str(config_path),
+            "--signal-run-id",
+            signal_run_id,
+            "--telegram-operator-service",
+            "maestro-test-telegram.service",
+        ],
+    )
+
+    assert approval_result.exit_code == 0
+    assert "orders=2" in approval_result.output
+    assert calls == [
+        ("stop", "maestro-test-telegram.service"),
+        ("start", "maestro-test-telegram.service"),
+    ]
+
+
+def test_approve_signal_cli_keep_telegram_operator_does_not_call_systemctl(
+    tmp_path,
+    monkeypatch,
+):
+    config_path = _paper_approval_config_path(tmp_path, "approved")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "maestro.cli._systemctl",
+        lambda action, service: calls.append((action, service)),
+    )
+
+    signal_result = CliRunner().invoke(app, ["run-signal", "--config", str(config_path)])
+    signal_run_id = signal_result.output.split("signal_run_id=", 1)[1].split()[0]
+    approval_result = CliRunner().invoke(
+        app,
+        [
+            "approve-signal",
+            "--config",
+            str(config_path),
+            "--signal-run-id",
+            signal_run_id,
+            "--keep-telegram-operator",
+        ],
+    )
+
+    assert approval_result.exit_code == 0
+    assert "orders=2" in approval_result.output
+    assert calls == []
+
+
+def test_approve_signal_cli_continues_when_telegram_operator_stop_fails(
+    tmp_path, monkeypatch
+):
+    config_path = _paper_approval_config_path(tmp_path, "approved")
+    calls: list[tuple[str, str]] = []
+
+    def fail_stop(action: str, service: str) -> None:
+        calls.append((action, service))
+        if action == "stop":
+            raise subprocess.CalledProcessError(returncode=1, cmd=["systemctl", action, service])
+
+    monkeypatch.setattr("maestro.cli._systemctl", fail_stop)
+
+    signal_result = CliRunner().invoke(app, ["run-signal", "--config", str(config_path)])
+    signal_run_id = signal_result.output.split("signal_run_id=", 1)[1].split()[0]
+    approval_result = CliRunner().invoke(
+        app,
+        [
+            "approve-signal",
+            "--config",
+            str(config_path),
+            "--signal-run-id",
+            signal_run_id,
+        ],
+    )
+
+    assert approval_result.exit_code == 0
+    assert "symphony_approve status=warn reason=telegram_operator_stop_failed" in (
+        approval_result.output
+    )
+    assert "orders=2" in approval_result.output
+    assert calls == [("stop", "maestro-telegram-operator.service")]
+
+
+def test_approve_signal_cli_continues_when_systemctl_is_missing(tmp_path, monkeypatch):
+    config_path = _paper_approval_config_path(tmp_path, "approved")
+    calls: list[tuple[str, str]] = []
+
+    def missing_systemctl(action: str, service: str) -> None:
+        calls.append((action, service))
+        raise FileNotFoundError("systemctl")
+
+    monkeypatch.setattr("maestro.cli._systemctl", missing_systemctl)
+
+    signal_result = CliRunner().invoke(app, ["run-signal", "--config", str(config_path)])
+    signal_run_id = signal_result.output.split("signal_run_id=", 1)[1].split()[0]
+    approval_result = CliRunner().invoke(
+        app,
+        [
+            "approve-signal",
+            "--config",
+            str(config_path),
+            "--signal-run-id",
+            signal_run_id,
+        ],
+    )
+
+    assert approval_result.exit_code == 0
+    assert "symphony_approve status=warn reason=telegram_operator_stop_failed" in (
+        approval_result.output
+    )
+    assert "orders=2" in approval_result.output
+    assert calls == [("stop", "maestro-telegram-operator.service")]
 
 
 def test_daily_signal_approval_cli_sends_summary_and_approves_actionable_signal(
@@ -376,6 +691,94 @@ def test_daily_signal_approval_cli_sends_summary_and_approves_actionable_signal(
     text = fake_clients[0].sent_messages[0]["text"]
     assert "Maestro daily signal summary" in text
     assert "action_required: true" in text
+
+
+def test_daily_signal_approval_cli_scopes_signal_run_to_strategy_ids(tmp_path, monkeypatch):
+    readonly_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="readonly_scoped.yaml",
+    )
+    signal_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="signal_scoped.yaml",
+        identity_group="daily_signal_scoped",
+    )
+    approval_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="approval_scoped.yaml",
+        identity_group="daily_signal_scoped",
+    )
+    captured: dict[str, object] = {}
+    original_run_signal = MaestroOrchestrator.run_signal
+
+    def capturing_run_signal(self, strategy_ids=None):
+        captured["strategy_ids"] = strategy_ids
+        return original_run_signal(self, strategy_ids=strategy_ids)
+
+    monkeypatch.setattr(MaestroOrchestrator, "run_signal", capturing_run_signal)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "daily-signal-approval",
+            "--readonly-config",
+            str(readonly_path),
+            "--signal-config",
+            str(signal_path),
+            "--approval-config",
+            str(approval_path),
+            "--strategy-ids",
+            "sample_static_allocation",
+            "--keep-telegram-operator",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["strategy_ids"] == ["sample_static_allocation"]
+    assert "symphony_daily status=signal_completed" in result.output
+
+
+def test_daily_signal_approval_cli_rejects_unknown_strategy_ids(tmp_path):
+    readonly_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="readonly_unknown.yaml",
+    )
+    signal_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="signal_unknown.yaml",
+        identity_group="daily_signal_unknown",
+    )
+    approval_path = _paper_approval_config_path(
+        tmp_path,
+        "approved",
+        filename="approval_unknown.yaml",
+        identity_group="daily_signal_unknown",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "daily-signal-approval",
+            "--readonly-config",
+            str(readonly_path),
+            "--signal-config",
+            str(signal_path),
+            "--approval-config",
+            str(approval_path),
+            "--strategy-ids",
+            "does_not_exist",
+            "--keep-telegram-operator",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ValueError)
+    assert "Unknown or disabled signal strategy id" in str(result.exception)
 
 
 def test_daily_signal_approval_cli_sends_failure_briefing_when_readonly_refresh_fails(
@@ -698,11 +1101,15 @@ def test_approve_signal_rejects_config_runtime_mismatch(monkeypatch, tmp_path):
         config_identity=signal_identity,
     ).run_signal()
 
-    with pytest.raises(ValueError, match="config runtime mismatch"):
+    with pytest.raises(ValueError, match="config runtime mismatch") as exc_info:
         MaestroOrchestrator(
             approval_config,
             config_identity=approval_identity,
         ).approve_signal(signal_summary.signal_run_id)
+    message = str(exc_info.value)
+    assert "signal_fingerprint=" in message
+    assert "current_fingerprint=" in message
+    assert "maestro profile-diff --left <signal-config> --right <approval-config>" in message
 
 
 def test_approve_signal_rejects_account_mapping_mismatch(monkeypatch, tmp_path):
@@ -876,10 +1283,104 @@ class FakeTelegramClient:
         self.sent_messages = []
 
     def send_message(self, chat_id: int, text: str, reply_markup=None):
-        self.sent_messages.append(
-            {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
-        )
+        self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"ok": True}
+
+
+class CountingLiveOrderClient(LiveOrderClient):
+    def __init__(self) -> None:
+        self.submit_count = 0
+        self.requests: list[LiveOrderRequest] = []
+
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        self.submit_count += 1
+        self.requests.append(request)
+        return LiveOrderResult(
+            order_id=request.order_id,
+            status=OrderStatus.ACCEPTED_BY_BROKER,
+            broker_order=BrokerOrderId(
+                broker="kis",
+                broker_order_id=f"KIS-{self.submit_count}",
+                order_id=request.order_id,
+                submitted_at=utc_now().isoformat(),
+            ),
+        )
+
+
+class FilledStatusClient(LiveOrderStatusClient):
+    def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
+        return LiveOrderStatusSnapshot(
+            broker_order=broker_order_id,
+            status=OrderStatus.FILLED,
+            checked_at=utc_now().isoformat(),
+            symbol="MOCK_ETF_A",
+            side=OrderSide.BUY,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=1.0,
+                filled_quantity=1.0,
+                remaining_quantity=0.0,
+                average_fill_price=100.0,
+                fill_count=1,
+            ),
+            raw_status=OrderStatus.FILLED.value,
+        )
+
+
+class PassingBrokerReconciliation:
+    def reconcile_latest(self) -> ReconciliationResult:
+        return ReconciliationResult(
+            run_id=new_run_id(),
+            passed=True,
+            checked_at=utc_now().isoformat(),
+            issues=[],
+            tolerances={
+                "cash_tolerance": 0.0,
+                "position_quantity_tolerance": 0.0,
+                "value_tolerance": 0.0,
+            },
+        )
+
+
+class ApprovingTelegramApprovalManager:
+    def request_approval(
+        self,
+        run_id: str,
+        orders,
+        risk_violations,
+        source_strategy_ids=None,
+    ) -> tuple[ApprovalRequest, ApprovalDecision, str]:
+        del risk_violations
+        request = ApprovalRequest(
+            approval_id=f"appr_{run_id}",
+            run_id=run_id,
+            created_at=utc_now(),
+            expires_at=utc_now(),
+            channel="telegram",
+            source_strategy_ids=list(source_strategy_ids or []),
+            order_count=len(orders),
+            estimated_notional=sum(order.notional for order in orders),
+            proposed_orders=[order.model_dump(mode="json") for order in orders],
+        )
+        decision = ApprovalDecision(
+            approval_id=request.approval_id,
+            run_id=run_id,
+            status="approved",
+            decided_at=utc_now(),
+            decided_by="telegram:fake",
+        )
+        return request, decision, "approved"
+
+
+class FailingApprovalManager:
+    def request_approval(
+        self,
+        run_id: str,
+        orders,
+        risk_violations,
+        source_strategy_ids=None,
+    ) -> tuple[ApprovalRequest | None, ApprovalDecision | None, str | None]:
+        del run_id, orders, risk_violations, source_strategy_ids
+        raise RuntimeError("approval manager failed")
 
 
 def _live_signal_config(tmp_path, decision):
