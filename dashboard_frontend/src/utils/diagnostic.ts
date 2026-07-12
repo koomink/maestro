@@ -1,6 +1,4 @@
-import type { DashboardSnapshot, Metric } from "../types";
-import { firstValue } from "./data";
-import { formatValue } from "./format";
+import type { DashboardSnapshot } from "../types";
 import { trustSummary } from "./trust";
 
 type TabName = "Portfolio" | "Maestro" | "Virtuoso" | "Research";
@@ -31,15 +29,4 @@ export function buildDiagnosticContext(
     `state_path: ${snapshot.header.state_path}`,
     `audit_path: ${snapshot.header.audit_path}`,
   ].join("\n");
-}
-
-export function strategyMetrics(strategy: DashboardSnapshot["virtuoso_apps"]["strategies"][number]): Metric[] {
-  const enabled = String(firstValue(strategy.operation.find((row) => row.item === "Enabled") || {}, ["value"]) ?? "false");
-  return [
-    { label: "State", value: enabled, tone: enabled === "true" ? "success" : "warning" },
-    { label: "Latest Run", value: strategy.runs[0]?.created_at || "n/a" },
-    { label: "Book Value", value: strategy.summary.book_value ?? "n/a" },
-    { label: "Cumulative Return", value: strategy.summary.cumulative_return ?? "n/a" },
-    { label: "Drawdown", value: strategy.summary.drawdown ?? "n/a", tone: "warning" },
-  ];
 }

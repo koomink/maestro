@@ -1,10 +1,19 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import type { DashboardSnapshot } from "../types";
+import type { DashboardSnapshot, Row } from "../types";
 import { filterByPeriod } from "../utils/data";
-import { formatValue } from "../utils/format";
-import { type Period, periods } from "../viewModel";
+import { formatPercent, formatValue } from "../utils/format";
+import {
+  accountDisplayLabel,
+  buildAccountValuePie,
+  convertValue,
+  fxRate,
+  latestByKey,
+  numeric,
+} from "../utils/portfolioMatrix";
+import { appName, type Period, periods } from "../viewModel";
 import {
   CompactTable,
+  DonutChart,
   MetricRows,
   Panel,
   Segmented,
@@ -36,12 +45,7 @@ export function PortfolioTab({
         title="Portfolio Value / Return / Cash Flow"
         aside={<Segmented values={periods} value={period} onChange={setPeriod} />}
       >
-        <TerminalChart
-          title="Portfolio Value"
-          rows={rows}
-          yKey={yKey}
-          markers={investment.performance_snapshot.series.total_portfolio}
-        />
+        <TerminalChart title="Portfolio Value" rows={rows} yKey={yKey} />
       </Panel>
       <Panel title="AI Summary" aside={<StatusPill tone="primary">Read-only</StatusPill>}>
         <div className="ai-copy">
@@ -50,14 +54,153 @@ export function PortfolioTab({
         </div>
         <MetricRows metrics={snapshot.system_verdict.capital_summary.slice(0, 5)} />
       </Panel>
-      <Panel className="span-2" title="Account / App Performance Matrix">
-        <CompactTable rows={[...investment.account_performance, ...investment.strategy_attribution]} limit={8} />
-      </Panel>
-      <Panel title="Holdings / Positions">
-        <CompactTable rows={investment.broker_positions.length ? investment.broker_positions : investment.portfolio} limit={8} />
-      </Panel>
+      <div className="portfolio-matrix-row">
+        <Panel title="Account Matrix">
+          <AccountMatrixPanel displayCurrency={displayCurrency} investment={investment} />
+        </Panel>
+        <Panel title="App Matrix">
+          <AppMatrixPanel displayCurrency={displayCurrency} snapshot={snapshot} />
+        </Panel>
+        <Panel title="Holdings / Positions">
+          <CompactTable
+            columns={["account_id", "symbol", "name", "quantity", "average_price", "current_price"]}
+            dense
+            limit={14}
+            rows={investment.broker_positions.length ? investment.broker_positions : investment.portfolio}
+          />
+        </Panel>
+      </div>
     </section>
   );
+}
+
+function AccountMatrixPanel({
+  displayCurrency,
+  investment,
+}: {
+  displayCurrency: "KRW" | "USD";
+  investment: DashboardSnapshot["investment_console"];
+}) {
+  const accountRows = latestByKey(investment.account_performance, (row) => row.account_id).map((row) => ({
+    account: accountDisplayLabel(row.account_id),
+    currency: row.currency,
+    value: row.total_value,
+    cash: row.cash,
+    exposure: row.positions_market_value,
+    return: formatPercent(row.cumulative_return),
+    drawdown: formatPercent(row.drawdown),
+  }));
+  const { slices: accountPie, excludedCount, omittedCount } = useMemo(
+    () => buildAccountValuePie(investment.account_performance, displayCurrency, investment.fx_snapshot),
+    [investment.account_performance, investment.fx_snapshot, displayCurrency],
+  );
+  const pieTotal = accountPie.reduce((sum, slice) => sum + slice.value, 0);
+  return (
+    <div className="matrix-panel-body">
+      <DonutChart
+        centerLabel="by account"
+        centerValue={pieTotal > 0 ? `${formatValue(pieTotal)} ${displayCurrency}` : "n/a"}
+        slices={accountPie}
+      />
+      <PieNote excludedCount={excludedCount} omittedCount={omittedCount} unit="account" />
+      <CompactTable
+        columns={["account", "currency", "value", "cash", "exposure", "return", "drawdown"]}
+        dense
+        limit={6}
+        rows={accountRows}
+      />
+    </div>
+  );
+}
+
+function AppMatrixPanel({
+  displayCurrency,
+  snapshot,
+}: {
+  displayCurrency: "KRW" | "USD";
+  snapshot: DashboardSnapshot;
+}) {
+  const fxSnapshot = snapshot.investment_console.fx_snapshot;
+  const accountCurrencyByAccountId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const account of snapshot.investment_console.broker_account_overview.accounts) {
+      const accountId = account.account_id;
+      if (accountId != null && account.currency != null) {
+        map.set(String(accountId), String(account.currency));
+      }
+    }
+    return map;
+  }, [snapshot.investment_console.broker_account_overview.accounts]);
+  const accountIdByStrategyId = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const app of snapshot.workflow_pipelines.apps) {
+      if (app.account_id != null) {
+        map.set(app.strategy_id, String(app.account_id));
+      }
+    }
+    return map;
+  }, [snapshot.workflow_pipelines.apps]);
+
+  const { slices: pieSlices, excludedCount, omittedCount } = useMemo(() => {
+    let excluded = 0;
+    let omitted = 0;
+    const slices: { label: string; value: number }[] = [];
+    for (const strategy of snapshot.virtuoso_apps.strategies) {
+      const bookValue = numeric(strategy.summary.book_value);
+      const accountId = accountIdByStrategyId.get(strategy.strategy_id);
+      const currency = accountId ? accountCurrencyByAccountId.get(accountId) : undefined;
+      const converted = convertValue(bookValue, currency, displayCurrency, fxSnapshot);
+      if (converted == null) {
+        excluded += 1;
+        continue;
+      }
+      if (converted <= 0) {
+        omitted += 1;
+        continue;
+      }
+      slices.push({ label: appName(strategy.strategy_id), value: converted });
+    }
+    return { slices, excludedCount: excluded, omittedCount: omitted };
+  }, [snapshot.virtuoso_apps.strategies, accountIdByStrategyId, accountCurrencyByAccountId, displayCurrency, fxSnapshot]);
+  const pieTotal = pieSlices.reduce((sum, slice) => sum + slice.value, 0);
+  const tableRows: Row[] = snapshot.virtuoso_apps.strategies.map((strategy) => {
+    const accountId = accountIdByStrategyId.get(strategy.strategy_id);
+    return {
+      strategy: appName(strategy.strategy_id),
+      currency: (accountId ? accountCurrencyByAccountId.get(accountId) : undefined) ?? "n/a",
+      value: strategy.summary.book_value,
+      return: formatPercent(strategy.summary.cumulative_return),
+      period: formatPercent(strategy.summary.period_return),
+      drawdown: formatPercent(strategy.summary.drawdown),
+    };
+  });
+  return (
+    <div className="matrix-panel-body">
+      <DonutChart
+        centerLabel="by app"
+        centerValue={pieTotal > 0 ? `${formatValue(pieTotal)} ${displayCurrency}` : "n/a"}
+        slices={pieSlices}
+      />
+      <PieNote excludedCount={excludedCount} omittedCount={omittedCount} unit="app" />
+      <CompactTable
+        columns={["strategy", "currency", "value", "return", "period", "drawdown"]}
+        dense
+        limit={6}
+        rows={tableRows}
+      />
+    </div>
+  );
+}
+
+function PieNote({ excludedCount, omittedCount, unit }: { excludedCount: number; omittedCount: number; unit: string }) {
+  if (excludedCount <= 0 && omittedCount <= 0) {
+    return null;
+  }
+  const parts = [
+    excludedCount > 0 ? `${excludedCount} ${unit}(s) excluded — FX unavailable.` : null,
+    omittedCount > 0 ? `${omittedCount} ${unit}(s) omitted — no positive value.` : null,
+  ].filter(Boolean);
+  return <p className="muted-copy">{parts.join(" ")}</p>;
 }
 
 function PortfolioPulse({ displayCurrency, snapshot }: { displayCurrency: "KRW" | "USD"; snapshot: DashboardSnapshot }) {
@@ -327,45 +470,6 @@ function displayConvertedMoney(
   return rate == null ? "n/a" : displayMoney(value * rate, targetCurrency);
 }
 
-function fxRate(
-  sourceCurrency: "KRW" | "USD",
-  targetCurrency: "KRW" | "USD",
-  fxSnapshot: Record<string, unknown>,
-) {
-  if (sourceCurrency === targetCurrency) {
-    return 1;
-  }
-  const rates = isRecord(fxSnapshot.rates) ? fxSnapshot.rates : {};
-  const direct = findRate(rates, sourceCurrency, targetCurrency);
-  if (direct != null) {
-    return direct;
-  }
-  const inverse = findRate(rates, targetCurrency, sourceCurrency);
-  if (inverse != null && inverse !== 0) {
-    return 1 / inverse;
-  }
-  const usdKrwRate = numeric(fxSnapshot.rate);
-  if (usdKrwRate == null || usdKrwRate === 0) {
-    return null;
-  }
-  return sourceCurrency === "USD" && targetCurrency === "KRW" ? usdKrwRate : 1 / usdKrwRate;
-}
-
-function findRate(rates: Record<string, unknown>, sourceCurrency: string, targetCurrency: string) {
-  const keys = [
-    `${sourceCurrency}/${targetCurrency}`,
-    `${sourceCurrency}${targetCurrency}`,
-    `${sourceCurrency.toLowerCase()}_${targetCurrency.toLowerCase()}`,
-  ];
-  for (const key of keys) {
-    const rate = numeric(rates[key]);
-    if (rate != null) {
-      return rate;
-    }
-  }
-  return null;
-}
-
 function portfolioBaseCurrency(snapshot: DashboardSnapshot): "KRW" | "USD" | null {
   const candidates = [
     snapshot.investment_console.broker_summary.currency,
@@ -381,15 +485,6 @@ function portfolioBaseCurrency(snapshot: DashboardSnapshot): "KRW" | "USD" | nul
     }
   }
   return "KRW";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function numeric(value: unknown) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function cashExposureRatio(cash: number | null, exposure: number | null) {

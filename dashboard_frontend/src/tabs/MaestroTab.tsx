@@ -6,6 +6,11 @@ import { MaestroOntology } from "../components/MaestroOntology";
 
 export function MaestroTab({ openApp, snapshot }: { openApp: (strategyId: string) => void; snapshot: DashboardSnapshot }) {
   const trust = trustSummary(snapshot);
+  const brokerSummary = snapshot.investment_console.broker_account_overview.summary;
+  const freshAccounts = Number(brokerSummary.fresh_accounts);
+  const configuredAccounts = Number(brokerSummary.configured_accounts);
+  const brokerSyncKnown = Number.isFinite(freshAccounts) && Number.isFinite(configuredAccounts);
+  const signalFreshness = snapshot.virtuoso_apps.signal_freshness.overall;
   return (
     <section className="tab-grid maestro-grid">
       <Panel title="Ops Left" aside={<StatusPill tone="warning">Readonly</StatusPill>}>
@@ -14,8 +19,12 @@ export function MaestroTab({ openApp, snapshot }: { openApp: (strategyId: string
             { label: "Mode", value: snapshot.header.mode },
             { label: "Freshness", value: trust.freshness, tone: trust.freshnessTone },
             { label: "Reconciliation", value: trust.reconciliation, tone: trust.reconciliationTone },
-            { label: "Signal Routes", value: "inspect" },
-            { label: "Broker Sync", value: "active", tone: "success" },
+            { label: "Signals", value: signalFreshness, tone: toneFromValue(signalFreshness) },
+            {
+              label: "Broker Sync",
+              value: brokerSyncKnown ? `${freshAccounts}/${configuredAccounts} fresh` : "n/a",
+              tone: brokerSyncKnown && freshAccounts === configuredAccounts ? "success" : "warning",
+            },
           ]}
         />
       </Panel>
@@ -29,8 +38,11 @@ export function MaestroTab({ openApp, snapshot }: { openApp: (strategyId: string
         </div>
         <MetricRows
           metrics={[
-            { label: "Telegram", value: "gated", tone: "warning" },
-            { label: "Execution", value: snapshot.header.order_posture, tone: "warning" },
+            {
+              label: "Execution",
+              value: snapshot.header.order_posture,
+              tone: snapshot.header.order_posture === "armed" ? "warning" : "success",
+            },
             { label: "Published State", value: snapshot.operator_home.status, tone: toneFromValue(snapshot.operator_home.status) },
           ]}
         />

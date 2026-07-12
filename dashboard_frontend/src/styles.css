@@ -383,7 +383,15 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 
 .portfolio-grid {
   grid-template-columns: 360px minmax(540px, 1fr) 315px;
-  grid-template-rows: minmax(410px, 1.3fr) minmax(190px, 0.7fr);
+  grid-template-rows: minmax(420px, 1fr) minmax(420px, 1fr);
+}
+
+.portfolio-matrix-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 1.2fr);
+  gap: 8px;
+  min-height: 0;
 }
 
 .maestro-grid,
@@ -707,6 +715,93 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   font-size: 8px;
 }
 
+/* ═══════════════════════════════════════════════
+   MATRIX PANELS (Account / App) — donut + table
+   ═══════════════════════════════════════════════ */
+.matrix-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  min-height: 0;
+}
+.matrix-panel-body .table-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.donut-chart {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+.donut-chart svg {
+  width: 84px;
+  height: 84px;
+  flex: 0 0 auto;
+}
+.donut-slice {
+  stroke: var(--bg);
+  stroke-width: 1;
+  transition: opacity 0.15s;
+}
+.donut-slice:hover {
+  opacity: 0.82;
+}
+.donut-empty {
+  fill: none;
+  stroke: rgba(255,255,255,0.08);
+  stroke-width: 16;
+}
+.donut-center-value {
+  fill: var(--text);
+  font: 800 10px var(--mono);
+}
+.donut-center-label {
+  fill: var(--faint);
+  font: 600 7px var(--mono);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.donut-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-family: var(--mono);
+  font-size: 9px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.donut-legend li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+}
+.donut-legend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+.donut-legend span {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.donut-legend b {
+  color: var(--text);
+  flex: 0 0 auto;
+}
+.donut-legend-empty {
+  color: var(--faint);
+}
+
 
 /* ═══════════════════════════════════════════════
    STATUS PILLS
@@ -868,6 +963,17 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   border-collapse: collapse;
   font-family: var(--mono);
   font-size: 10px;
+}
+
+/* Tighter variant for panels packing several metric columns into a third of
+   the viewport width (Account/App Matrix, Holdings) — cuts padding/font so
+   more columns fit before the table needs to scroll horizontally. */
+.terminal-table.dense {
+  font-size: 9px;
+}
+.terminal-table.dense th,
+.terminal-table.dense td {
+  padding: 4px 6px;
 }
 
 .terminal-table th,
@@ -1756,6 +1862,11 @@ input:focus-visible,
   }
 
   .span-2 { grid-column: auto; }
+
+  .portfolio-matrix-row {
+    grid-column: auto;
+    grid-template-columns: 1fr;
+  }
 
   .terminal-panel {
     min-height: 260px;

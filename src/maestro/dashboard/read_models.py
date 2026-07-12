@@ -740,93 +740,70 @@ def build_broker_snapshot_history_table(
     return rows
 
 
+def _account_currency_aware_total(
+    account: dict[str, Any],
+    positions: list[dict[str, Any]],
+    payload: dict[str, Any],
+    fx_snapshot: dict[str, Any],
+    display_currency: str,
+) -> tuple[float | None, str, float | None]:
+    """Returns (total_value, currency_label, cash) for one account snapshot.
+
+    Single-currency accounts pass through unconverted (no FX dependency, and
+    labeled with their OWN currency) — only a genuinely mixed-currency
+    account (e.g. Toss holding both KRW cash and USD-listed positions under
+    one account, with no broker-reported aggregate) needs FX to combine its
+    components into one number; that case is labeled `display_currency`.
+    """
+    value_components = _account_value_components(
+        account, positions, payload, default_currency=display_currency
+    )
+    cash_components = _account_cash_components(account, payload, default_currency=display_currency)
+    if len(value_components) <= 1:
+        currency = next(iter(value_components), display_currency)
+        return value_components.get(currency), currency, cash_components.get(currency)
+    total_value = _convert_components(value_components, display_currency, fx_snapshot)
+    cash = _convert_components(cash_components, display_currency, fx_snapshot)
+    return total_value, display_currency, cash
+
+
 def build_account_performance_table(
     store: StateStore,
+    config: MaestroConfig | None = None,
     limit: int = 100,
+    display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
-    source_rows = store.list_broker_account_snapshots(limit=limit)
+    disabled_ids = _disabled_native_account_ids(config)
+    source_rows = [
+        row
+        for row in store.list_broker_account_snapshots(limit=limit)
+        if _broker_snapshot_account_id(row) not in disabled_ids
+    ]
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    fx_snapshot = build_fx_rate_snapshot_card(store)
+    # Performance state (first/previous/peak value) is tracked PER ACCOUNT —
+    # a shared/global state across interleaved multi-account rows would
+    # compare one account's snapshot against a different account's previous
+    # value or peak, producing a nonsensical "drawdown" (e.g. a small
+    # cash-only account showing -96% simply because a much larger account's
+    # peak got attributed to it).
+    state_by_account: dict[str, dict[str, Any]] = {}
     rows = []
-    first_value = None
-    previous_value = None
-    peak_value = None
-    cumulative_cash_flow = 0.0
 
     for row in reversed(source_rows):
         payload = _mapping(row.get("payload"))
         account = _mapping(payload.get("account"))
         positions = _positions(account)
-        total_value = _account_total_value(account, positions)
-        cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
-        period_return = None
-        if previous_value is not None and previous_value > 0 and total_value is not None:
-            period_return = (total_value - previous_value - cash_flow) / previous_value
-        if first_value is None and total_value is not None:
-            first_value = total_value
-        elif total_value is not None:
-            cumulative_cash_flow += cash_flow
-        cumulative_return = None
-        if first_value is not None and first_value > 0 and total_value is not None:
-            cumulative_return = (total_value - first_value - cumulative_cash_flow) / first_value
-        if total_value is not None:
-            peak_value = total_value if peak_value is None else max(peak_value, total_value)
-        drawdown = _safe_weight(total_value, peak_value)
-        if drawdown is not None:
-            drawdown -= 1.0
-
-        reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
-        rows.append(
-            {
-                "created_at": row.get("created_at"),
-                "run_id": row.get("run_id"),
-                "account_id": row.get("account_id") or account.get("account_id"),
-                "currency": _snapshot_currency(account, payload),
-                "total_value": total_value,
-                "cash": _float_or_none(account.get("cash")),
-                "positions_market_value": sum(
-                    _position_market_value(position) for position in positions
-                ),
-                "realized_pnl": _first_float(
-                    account,
-                    payload,
-                    ("realized_pnl", "realized_profit_loss", "realized_profit"),
-                ),
-                "unrealized_pnl": _account_unrealized_pnl(account, positions),
-                "fees": _first_float(account, payload, ("fees", "fee", "commission")),
-                "cash_flow": cash_flow,
-                "period_return": _round_ratio(period_return),
-                "daily_return": _round_ratio(period_return),
-                "cumulative_return": _round_ratio(cumulative_return),
-                "drawdown": _round_ratio(drawdown),
-                "reconciliation_status": _reconciliation_status(reconciliation),
-                "reconciliation_created_at": (reconciliation or {}).get("created_at"),
-                "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
-                "source": account.get("source") or payload.get("source"),
-            }
+        account_id = str(row.get("account_id") or account.get("account_id") or "")
+        total_value, currency, cash = _account_currency_aware_total(
+            account, positions, payload, fx_snapshot, display_currency
         )
-        if total_value is not None:
-            previous_value = total_value
-    return list(reversed(rows))
-
-
-def build_currency_sleeve_performance_table(
-    store: StateStore,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    source_rows = store.list_broker_account_snapshots(limit=limit)
-    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
-    state_by_currency: dict[str, dict[str, Any]] = {}
-    rows = []
-
-    for row in reversed(source_rows):
-        payload = _mapping(row.get("payload"))
-        account = _mapping(payload.get("account"))
-        positions = _positions(account)
-        currency = _snapshot_currency(account, payload)
-        total_value = _account_total_value(account, positions)
+        positions_market_value = (
+            total_value - cash if total_value is not None and cash is not None else None
+        )
         cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
-        state = state_by_currency.setdefault(
-            currency,
+        state = state_by_account.setdefault(
+            account_id,
             {
                 "first_value": None,
                 "previous_value": None,
@@ -835,24 +812,125 @@ def build_currency_sleeve_performance_table(
             },
         )
         performance = _advance_performance_state(state, total_value, cash_flow)
+
         reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
         rows.append(
             {
                 "created_at": row.get("created_at"),
                 "run_id": row.get("run_id"),
+                "account_id": account_id,
                 "currency": currency,
-                "account_id": row.get("account_id") or account.get("account_id"),
                 "total_value": total_value,
-                "cash": _float_or_none(account.get("cash")),
+                "cash": cash,
+                "positions_market_value": positions_market_value,
+                "realized_pnl": _first_float(
+                    account,
+                    payload,
+                    ("realized_pnl", "realized_profit_loss", "realized_profit"),
+                ),
+                "unrealized_pnl": _account_unrealized_pnl(account, positions),
+                "fees": _first_float(account, payload, ("fees", "fee", "commission")),
                 "cash_flow": cash_flow,
                 "period_return": performance["period_return"],
                 "daily_return": performance["period_return"],
                 "cumulative_return": performance["cumulative_return"],
                 "drawdown": performance["drawdown"],
                 "reconciliation_status": _reconciliation_status(reconciliation),
+                "reconciliation_created_at": (reconciliation or {}).get("created_at"),
+                "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
                 "source": account.get("source") or payload.get("source"),
             }
         )
+    return list(reversed(rows))
+
+
+def build_currency_sleeve_performance_table(
+    store: StateStore,
+    config: MaestroConfig | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Per-currency-sleeve performance, one row per currency per run.
+
+    Splits each account's cash+positions by their OWN currency via
+    `_account_value_components` rather than labeling the whole account with
+    one currency (`_snapshot_currency`) — brokers such as Toss report a
+    single account mixing KRW and USD-listed instruments with no
+    pre-aggregated per-currency total, so a naive whole-account label would
+    silently fold a USD sleeve into the KRW row (or vice versa) and make
+    that sleeve appear to not exist at all.
+    """
+    disabled_ids = _disabled_native_account_ids(config)
+    source_rows = [
+        row
+        for row in store.list_broker_account_snapshots(limit=limit)
+        if _broker_snapshot_account_id(row) not in disabled_ids
+    ]
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in reversed(source_rows):
+        group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
+        grouped.setdefault(group_key, []).append(row)
+
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    state_by_currency: dict[str, dict[str, Any]] = {}
+    rows: list[dict[str, Any]] = []
+    latest_by_account: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    for group_rows in grouped.values():
+        for row in group_rows:
+            account_id = _broker_snapshot_account_id(row)
+            if account_id:
+                latest_by_account[account_id] = row
+
+        component_values: dict[str, float] = {}
+        component_cash: dict[str, float] = {}
+        component_cash_flows: dict[str, float] = {}
+        created_at = group_rows[-1].get("created_at")
+        run_id = group_rows[-1].get("run_id")
+        reconciliation_statuses = []
+        for row in latest_by_account.values():
+            payload = _mapping(row.get("payload"))
+            account = _mapping(payload.get("account"))
+            positions = _positions(account)
+            for currency, value in _account_value_components(account, positions, payload).items():
+                component_values[currency] = component_values.get(currency, 0.0) + value
+            for currency, value in _account_cash_components(account, payload).items():
+                component_cash[currency] = component_cash.get(currency, 0.0) + value
+            reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
+            reconciliation_statuses.append(_reconciliation_status(reconciliation))
+        for row in group_rows:
+            payload = _mapping(row.get("payload"))
+            account = _mapping(payload.get("account"))
+            currency = _snapshot_currency(account, payload)
+            cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
+            component_cash_flows[currency] = component_cash_flows.get(currency, 0.0) + cash_flow
+
+        combined_reconciliation = _combined_reconciliation_status(reconciliation_statuses)
+        for currency, total_value in component_values.items():
+            state = state_by_currency.setdefault(
+                currency,
+                {
+                    "first_value": None,
+                    "previous_value": None,
+                    "peak_value": None,
+                    "cumulative_cash_flow": 0.0,
+                },
+            )
+            cash_flow = component_cash_flows.get(currency, 0.0)
+            performance = _advance_performance_state(state, total_value, cash_flow)
+            rows.append(
+                {
+                    "created_at": created_at,
+                    "run_id": run_id,
+                    "currency": currency,
+                    "total_value": total_value,
+                    "cash": component_cash.get(currency),
+                    "cash_flow": cash_flow,
+                    "period_return": performance["period_return"],
+                    "daily_return": performance["period_return"],
+                    "cumulative_return": performance["cumulative_return"],
+                    "drawdown": performance["drawdown"],
+                    "reconciliation_status": combined_reconciliation,
+                }
+            )
     return list(reversed(rows))
 
 
@@ -2225,6 +2303,23 @@ def _account_value_components(
         currency = str(position.get("currency") or cash_currency)
         components[currency] = components.get(currency, 0.0) + _position_market_value(position)
     return components
+
+
+def _account_cash_components(
+    account: dict[str, Any],
+    payload: dict[str, Any],
+    default_currency: str = "KRW",
+) -> dict[str, float]:
+    """Cash-only counterpart to `_account_value_components` (no positions)."""
+    account_currency = _snapshot_currency(account, payload)
+    if account_currency == "UNKNOWN":
+        account_currency = default_currency
+    cash_balance = _mapping(account.get("cash_balance"))
+    cash_currency = str(cash_balance.get("currency") or account_currency)
+    cash = _float_or_none(account.get("cash"))
+    if cash is None:
+        return {}
+    return {cash_currency: cash}
 
 
 def _account_unrealized_pnl(

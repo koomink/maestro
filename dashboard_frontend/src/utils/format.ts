@@ -53,6 +53,18 @@ export function formatValue(value: unknown): string {
   return kstTimestamp || String(value);
 }
 
+export function formatPercent(value: unknown, digits = 2): string {
+  if (value === null || value === undefined || value === "") {
+    return "n/a";
+  }
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return "n/a";
+  }
+  const pct = parsed * 100;
+  return `${pct > 0 ? "+" : ""}${pct.toFixed(digits)}%`;
+}
+
 export function formatReadableCell(value: unknown): string {
   if (typeof value === "object" && value !== null) {
     return "summary available";
@@ -60,6 +72,16 @@ export function formatReadableCell(value: unknown): string {
   return formatValue(value);
 }
 
+const HUMANIZE_ACRONYMS = new Set(["cagr", "mdd", "fx", "pnl", "krw", "usd", "roi", "irr", "twr", "mwr"]);
+
 export function humanize(value: string): string {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  return value
+    .replaceAll("_", " ")
+    .split(" ")
+    .map((word) =>
+      HUMANIZE_ACRONYMS.has(word.toLowerCase())
+        ? word.toUpperCase()
+        : word.charAt(0).toUpperCase() + word.slice(1),
+    )
+    .join(" ");
 }

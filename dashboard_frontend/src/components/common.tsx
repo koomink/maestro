@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import type { Metric, Row, Tone } from "../types";
-import { chartPoints, columnsFor, firstValue } from "../utils/data";
+import { chartPoints, columnsFor, dateTime, firstValue } from "../utils/data";
 import { formatValue, humanize } from "../utils/format";
 import { relativeTime, useNow } from "../utils/hooks";
 import { toneClass, toneGlyph } from "../viewModel";
@@ -101,14 +101,28 @@ function isNumericColumn(rows: Row[], column: string): boolean {
       continue;
     }
     populated += 1;
-    if (typeof value === "number" || (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)))) {
+    const text = typeof value === "string" ? value.trim() : "";
+    const isNumericLike =
+      typeof value === "number" ||
+      (text !== "" && Number.isFinite(Number(text.endsWith("%") ? text.slice(0, -1) : text)));
+    if (isNumericLike) {
       numeric += 1;
     }
   }
   return populated > 0 && numeric / populated >= 0.6;
 }
 
-export function CompactTable({ rows, limit = 8, columns }: { rows: Row[]; limit?: number; columns?: string[] }) {
+export function CompactTable({
+  columns,
+  dense = false,
+  limit = 8,
+  rows,
+}: {
+  columns?: string[];
+  dense?: boolean;
+  limit?: number;
+  rows: Row[];
+}) {
   const limitedRows = rows.slice(0, limit);
   const tableColumns = columns || columnsFor(limitedRows).slice(0, 6);
   if (!limitedRows.length) {
@@ -117,7 +131,7 @@ export function CompactTable({ rows, limit = 8, columns }: { rows: Row[]; limit?
   const numericColumns = new Set(tableColumns.filter((column) => isNumericColumn(limitedRows, column)));
   return (
     <div className="table-scroll">
-      <table className="terminal-table">
+      <table className={dense ? "terminal-table dense" : "terminal-table"}>
         <thead>
           <tr>
             {tableColumns.map((column) => (
@@ -142,14 +156,42 @@ export function CompactTable({ rows, limit = 8, columns }: { rows: Row[]; limit?
   );
 }
 
+function markerPoints(rows: Row[], points: ReturnType<typeof chartPoints>, xKey: string, yKey: string, markers: Row[]) {
+  const plottedRows = rows.slice().reverse().filter((row) => Number.isFinite(Number(row[yKey])));
+  const rowTimes = plottedRows.map((row) => dateTime(row[xKey]));
+  if (!markers.length || !points.length || rowTimes.every((time) => !Number.isFinite(time))) {
+    return [];
+  }
+  return markers
+    .map((marker) => {
+      const markerTime = dateTime(firstValue(marker, ["effective_at", "created_at", "as_of", "timestamp", xKey]));
+      if (!Number.isFinite(markerTime)) return null;
+      let nearestIndex = 0;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      rowTimes.forEach((rowTime, index) => {
+        if (!Number.isFinite(rowTime)) return;
+        const distance = Math.abs(rowTime - markerTime);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestIndex = index;
+        }
+      });
+      const point = points[nearestIndex];
+      return point ? { ...point, marker } : null;
+    })
+    .filter((p): p is ReturnType<typeof chartPoints>[number] & { marker: Row } => Boolean(p));
+}
+
 export function TerminalChart({
   title,
   rows,
+  xKey = "created_at",
   yKey,
   markers = [],
 }: {
   title: string;
   rows: Row[];
+  xKey?: string;
   yKey: string;
   markers?: Row[];
 }) {
@@ -185,16 +227,13 @@ export function TerminalChart({
         <path className="chart-area" d={areaPath} fill={`url(#fill-${title.replace(/\W+/g, "-")})`} />
         <path className="chart-line-shadow" d={linePath} />
         <path className="chart-line" d={linePath} />
-        {markers.slice(0, 8).map((marker, index) => {
-          const point = points[Math.min(points.length - 1, Math.floor((index / Math.max(markers.length - 1, 1)) * (points.length - 1)))];
-          return (
-            <g className="cash-flow-marker" key={index}>
-              <line x1={point.x} x2={point.x} y1="44" y2="200" />
-              <circle cx={point.x} cy={point.y} r="4.5" />
-              <title>{formatValue(marker.amount ?? marker.value ?? marker.created_at)}</title>
-            </g>
-          );
-        })}
+        {markerPoints(rows, points, xKey, yKey, markers).slice(0, 12).map((point, index) => (
+          <g className="cash-flow-marker" key={index}>
+            <line x1={point.x} x2={point.x} y1="44" y2="200" />
+            <circle cx={point.x} cy={point.y} r="4.5" />
+            <title>{formatValue(point.marker.amount ?? point.marker.value)}</title>
+          </g>
+        ))}
         <circle className="chart-dot" cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="5" />
       </svg>
     </div>
@@ -220,6 +259,91 @@ export function SummaryPill({ label, value }: { label: string; value: string }) 
     <div className="summary-pill">
       <b>{label}</b>
       <span>{value}</span>
+    </div>
+  );
+}
+
+export type PieSlice = { label: string; value: number };
+
+const DONUT_PALETTE = ["var(--cyan)", "var(--green)", "var(--amber)", "var(--blue)", "var(--violet)", "var(--red)"];
+
+function polarPoint(cx: number, cy: number, r: number, angleDeg: number) {
+  const angle = ((angleDeg - 90) * Math.PI) / 180;
+  return { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
+}
+
+function donutSlicePath(cx: number, cy: number, outerR: number, innerR: number, startAngle: number, endAngle: number) {
+  const clampedEnd = Math.min(endAngle, startAngle + 359.99);
+  const outerStart = polarPoint(cx, cy, outerR, startAngle);
+  const outerEnd = polarPoint(cx, cy, outerR, clampedEnd);
+  const innerEnd = polarPoint(cx, cy, innerR, clampedEnd);
+  const innerStart = polarPoint(cx, cy, innerR, startAngle);
+  const largeArc = clampedEnd - startAngle > 180 ? 1 : 0;
+  return [
+    `M ${outerStart.x} ${outerStart.y}`,
+    `A ${outerR} ${outerR} 0 ${largeArc} 1 ${outerEnd.x} ${outerEnd.y}`,
+    `L ${innerEnd.x} ${innerEnd.y}`,
+    `A ${innerR} ${innerR} 0 ${largeArc} 0 ${innerStart.x} ${innerStart.y}`,
+    "Z",
+  ].join(" ");
+}
+
+/** Compact donut chart with a text legend; used for account/app proportion breakdowns. */
+export function DonutChart({
+  centerLabel,
+  centerValue,
+  size = 108,
+  slices,
+  thickness = 20,
+}: {
+  centerLabel?: string;
+  centerValue?: string;
+  size?: number;
+  slices: PieSlice[];
+  thickness?: number;
+}) {
+  const total = slices.reduce((sum, slice) => sum + Math.max(0, slice.value), 0);
+  const cx = size / 2;
+  const cy = size / 2;
+  const outerR = size / 2 - 2;
+  const innerR = outerR - thickness;
+  let angle = 0;
+  const arcs = total > 0
+    ? slices
+        .filter((slice) => slice.value > 0)
+        .map((slice, index) => {
+          const span = (slice.value / total) * 360;
+          const path = donutSlicePath(cx, cy, outerR, innerR, angle, angle + span);
+          angle += span;
+          return { slice, path, color: DONUT_PALETTE[index % DONUT_PALETTE.length] };
+        })
+    : [];
+
+  return (
+    <div className="donut-chart">
+      <svg viewBox={`0 0 ${size} ${size}`} role="img" aria-label={centerLabel || "Proportion breakdown"}>
+        {arcs.length === 0 ? (
+          <circle className="donut-empty" cx={cx} cy={cy} r={(outerR + innerR) / 2} />
+        ) : (
+          arcs.map(({ color, path, slice }) => (
+            <path className="donut-slice" d={path} fill={color} key={slice.label}>
+              <title>{`${slice.label}: ${formatValue(slice.value)} (${((slice.value / total) * 100).toFixed(1)}%)`}</title>
+            </path>
+          ))
+        )}
+        {centerValue && <text className="donut-center-value" textAnchor="middle" x={cx} y={cy - 2}>{centerValue}</text>}
+        {centerLabel && <text className="donut-center-label" textAnchor="middle" x={cx} y={cy + 13}>{centerLabel}</text>}
+      </svg>
+      <ul className="donut-legend">
+        {arcs.length === 0 && <li className="donut-legend-empty">No data</li>}
+        {arcs.map(({ color, slice }) => (
+          <li key={slice.label}>
+            <i style={{ background: color }} />
+            <span title={slice.label}>{slice.label}</span>
+            <b>{((slice.value / total) * 100).toFixed(0)}%</b>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

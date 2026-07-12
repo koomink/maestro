@@ -8,23 +8,6 @@ export async function fetchSnapshot(currency: "KRW" | "USD"): Promise<DashboardS
   return (await response.json()) as DashboardSnapshot;
 }
 
-export async function loadSnapshot(
-  currency: "KRW" | "USD",
-  setSnapshot: (snapshot: DashboardSnapshot) => void,
-  setLoading: (loading: boolean) => void,
-  setError: (error: string | null) => void,
-) {
-  setLoading(true);
-  setError(null);
-  try {
-    setSnapshot(await fetchSnapshot(currency));
-  } catch (error) {
-    setError(error instanceof Error ? error.message : "Unknown dashboard error");
-  } finally {
-    setLoading(false);
-  }
-}
-
 export async function refreshDashboardState(): Promise<DashboardRefreshResponse> {
   const response = await fetch("/api/dashboard/refresh", { method: "POST" });
   if (!response.ok) {

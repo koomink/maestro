@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fetchSnapshot, generateStrategySignal, refreshDashboardState } from "./api/snapshot";
 import { ConsoleDrawer } from "./components/ConsoleDrawer";
 import { RelativeTime, ShellMessage } from "./components/common";
@@ -39,6 +39,15 @@ export function App() {
     strategyId: "",
     tone: "neutral",
   });
+  const refreshMessageTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (refreshMessageTimer.current != null) {
+        window.clearTimeout(refreshMessageTimer.current);
+      }
+    };
+  }, []);
 
   // Self-healing snapshot polling: load on mount, then refresh on an interval.
   // On failure we keep the last good snapshot and retry with backoff, so a
@@ -97,23 +106,40 @@ export function App() {
   }, [displayCurrency]);
 
   useEffect(() => {
-    if (!snapshot || selectedRunId) {
+    if (!snapshot) {
       return;
     }
-    const firstRunId = String(snapshot.audit_trail.run_index[0]?.run_id || "");
-    if (firstRunId) {
-      setSelectedRunId(firstRunId);
+    const stillExists = selectedRunId
+      ? snapshot.audit_trail.run_index.some((row) => String(row.run_id) === selectedRunId)
+      : false;
+    if (!stillExists) {
+      setSelectedRunId(String(snapshot.audit_trail.run_index[0]?.run_id || ""));
     }
   }, [selectedRunId, snapshot]);
 
   async function handleRefresh() {
+    // A pending hide-timer from an earlier refresh must not erase this run's
+    // outcome message.
+    if (refreshMessageTimer.current != null) {
+      window.clearTimeout(refreshMessageTimer.current);
+      refreshMessageTimer.current = null;
+    }
     setRefreshAction({ busy: true, message: "Updating…", tone: "primary" });
     try {
-      await refreshDashboardState();
+      const result = await refreshDashboardState();
       setSnapshot(await fetchSnapshot(displayCurrency));
       setError(null);
       setLastUpdatedAt(Date.now());
-      setRefreshAction({ busy: false, message: "", tone: "success" });
+      const overall = result.signal_freshness?.overall || "unknown";
+      setRefreshAction({
+        busy: false,
+        message: `Synced ${result.accounts_synced} account(s) · signals ${overall}`,
+        tone: overall === "fresh" ? "success" : "warning",
+      });
+      refreshMessageTimer.current = window.setTimeout(() => {
+        refreshMessageTimer.current = null;
+        setRefreshAction((prev) => (prev.busy ? prev : { ...prev, message: "" }));
+      }, 8000);
     } catch (refreshError) {
       setRefreshAction({ busy: false, message: errorMessage(refreshError, "Dashboard refresh failed"), tone: "danger" });
     }

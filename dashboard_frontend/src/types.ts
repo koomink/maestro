@@ -1,4 +1,4 @@
-export type Tone = "success" | "warning" | "danger" | "primary" | "neutral" | string;
+export type Tone = "success" | "warning" | "danger" | "primary" | "neutral";
 
 export type Metric = {
   label: string;

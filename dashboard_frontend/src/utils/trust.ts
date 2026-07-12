@@ -71,5 +71,11 @@ export function evidenceSummaries(snapshot: DashboardSnapshot, query: string): R
   if (!needle) {
     return rows;
   }
-  return rows.filter((row) => JSON.stringify(row).toLowerCase().includes(needle));
+  return rows.filter((row) =>
+    Object.values(row)
+      .map((v) => String(v ?? ""))
+      .join(" ")
+      .toLowerCase()
+      .includes(needle),
+  );
 }

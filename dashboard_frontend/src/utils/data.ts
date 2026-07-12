@@ -16,7 +16,7 @@ export function filterByPeriod(rows: Row[], period: Period): Row[] {
   const newest = Math.max(...datedRows.map((item) => item.time));
   const cutoff = newest - days * 24 * 60 * 60 * 1000;
   const filtered = datedRows.filter((item) => item.time >= cutoff).map((item) => item.row);
-  return filtered.length ? filtered : rows;
+  return filtered;
 }
 
 export function chartPoints(rows: Row[], key: string) {
@@ -79,6 +79,10 @@ export function dateTime(value: unknown): number {
   if (!value) {
     return Number.NaN;
   }
-  const time = new Date(String(value)).getTime();
+  let text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(text)) {
+    text = text.replace(" ", "T") + "Z";
+  }
+  const time = new Date(text).getTime();
   return Number.isFinite(time) ? time : Number.NaN;
 }

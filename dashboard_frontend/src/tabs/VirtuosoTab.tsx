@@ -73,7 +73,7 @@ export function VirtuosoTab({
                     { label: "Intent", value: rowValue(selected.runs[0], ["signal_action", "action", "status"]) },
                     { label: "Account", value: snapshot.workflow_pipelines.apps.find((app) => app.strategy_id === selected.strategy_id)?.account_id || "n/a" },
                     { label: "Run", value: selected.runs[0]?.run_id || signal?.latest_signal_run_id || "n/a" },
-                    { label: "Gate", value: snapshot.header.order_posture, tone: "warning" },
+                    { label: "Gate", value: snapshot.header.order_posture, tone: snapshot.header.order_posture === "armed" ? "warning" : "success" },
                   ]}
                 />
               </Panel>

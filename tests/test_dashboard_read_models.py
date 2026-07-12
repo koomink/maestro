@@ -866,6 +866,74 @@ def test_disabled_account_excluded_from_totals_when_config_is_supplied(tmp_path)
     assert unfiltered_summary["total_value"] == 15_000_000.0
 
 
+def test_disabled_account_excluded_from_account_and_currency_sleeve_tables(tmp_path):
+    """Same disabled-account leak as above, but for the per-account and
+    per-currency-sleeve performance tables that back the Portfolio tab's
+    Account Matrix. These builders historically never accepted a config and
+    so never filtered disabled accounts at all.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    config = type(
+        "Config",
+        (),
+        {
+            "accounts": [
+                BrokerAccountConfig(
+                    id="kis_mock",
+                    broker="kis",
+                    enabled=False,
+                    broker_products=["kis_overseas_stock"],
+                ),
+                BrokerAccountConfig(
+                    id="kis_ps",
+                    broker="kis",
+                    enabled=True,
+                    broker_products=["kis_overseas_stock"],
+                ),
+            ],
+        },
+    )()
+    store.save_broker_account_snapshot(
+        "run_disabled",
+        "kis_mock",
+        {
+            "account_id": "kis_mock",
+            "account": {
+                "account_id": "MOCK-BROKER",
+                "currency": "KRW",
+                "cash": 10_000_000.0,
+                "total_value": 10_000_000.0,
+                "positions": [],
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_enabled",
+        "kis_ps",
+        {
+            "account_id": "kis_ps",
+            "account": {
+                "account_id": "PS-BROKER",
+                "currency": "KRW",
+                "cash": 5_000_000.0,
+                "total_value": 5_000_000.0,
+                "positions": [],
+            },
+        },
+    )
+
+    account_rows = build_account_performance_table(store, config)
+    assert all(row["account_id"] != "kis_mock" for row in account_rows)
+    assert [row["account_id"] for row in account_rows] == ["kis_ps"]
+
+    currency_rows = build_currency_sleeve_performance_table(store, config)
+    assert sum(row["total_value"] for row in currency_rows) == 5_000_000.0
+
+    # Without config: unfiltered, backward-compatible behavior is preserved.
+    unfiltered_account_rows = build_account_performance_table(store)
+    assert {row["account_id"] for row in unfiltered_account_rows} == {"kis_mock", "kis_ps"}
+
+
 def test_account_performance_table_tracks_returns_drawdown_and_reconciliation(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     snapshots = [
@@ -1052,6 +1120,91 @@ def test_currency_sleeve_performance_preserves_currencies_separately(tmp_path):
     assert latest_by_currency["KRW"]["total_value"] == 950_000.0
     assert latest_by_currency["KRW"]["period_return"] == -0.05
     assert latest_by_currency["KRW"]["cumulative_return"] == -0.05
+
+
+def test_currency_sleeve_performance_splits_single_mixed_currency_account(tmp_path):
+    """Regression test: a broker (e.g. Toss) can report ONE account holding
+    both KRW cash and a USD-listed position with no pre-aggregated total.
+    Labeling the whole account with a single currency (as
+    build_currency_sleeve_performance_table used to) folds the USD sleeve
+    into the KRW row, making the USD sleeve appear to not exist even though
+    Portfolio Pulse's separately-computed "USD Assets" shows it correctly.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_1",
+        "toss_brokerage",
+        {
+            "account": {
+                "account_id": "toss_brokerage",
+                "currency": "KRW",
+                "cash": 500_000.0,
+                "positions": [
+                    {
+                        "symbol": "QQQ",
+                        "currency": "USD",
+                        "quantity": 10.0,
+                        "current_price": 500.0,
+                    }
+                ],
+            }
+        },
+    )
+
+    rows = build_currency_sleeve_performance_table(store)
+    by_currency = {row["currency"]: row for row in rows}
+
+    assert set(by_currency) == {"KRW", "USD"}
+    assert by_currency["KRW"]["total_value"] == 500_000.0
+    assert by_currency["USD"]["total_value"] == 5_000.0
+
+
+def test_account_performance_drawdown_is_not_contaminated_across_accounts(tmp_path):
+    """Regression test: build_account_performance_table used to track ONE
+    shared first/previous/peak-value state across ALL accounts' snapshots
+    interleaved together, instead of one state per account. A small
+    cash-only account sitting flat at its own value would show a huge fake
+    "drawdown" purely because a much larger, unrelated account's peak value
+    got compared against it.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    # A big account whose value swings a lot...
+    for run_id, total_value in [("run_1", 10_000_000.0), ("run_2", 12_000_000.0)]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "big_account",
+            {
+                "account": {
+                    "account_id": "big_account",
+                    "currency": "KRW",
+                    "cash": total_value,
+                    "total_value": total_value,
+                    "positions": [],
+                }
+            },
+        )
+    # ...interleaved with a small account that never changes at all.
+    for run_id in ["run_1", "run_2"]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "small_account",
+            {
+                "account": {
+                    "account_id": "small_account",
+                    "currency": "KRW",
+                    "cash": 500_000.0,
+                    "total_value": 500_000.0,
+                    "positions": [],
+                }
+            },
+        )
+
+    rows = build_account_performance_table(store)
+    latest_by_account = {row["account_id"]: row for row in rows[:2]}
+
+    assert latest_by_account["small_account"]["total_value"] == 500_000.0
+    assert latest_by_account["small_account"]["drawdown"] == 0.0
+    assert latest_by_account["small_account"]["cumulative_return"] == 0.0
 
 
 def test_total_portfolio_performance_marks_missing_fx_for_mixed_currency(tmp_path):

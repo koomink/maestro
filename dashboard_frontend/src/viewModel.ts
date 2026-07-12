@@ -1,6 +1,6 @@
 import type { DashboardSnapshot, Metric, Row, Tone } from "./types";
 import { firstValue } from "./utils/data";
-import { formatValue, humanize } from "./utils/format";
+import { formatPercent, formatValue, humanize } from "./utils/format";
 import { toneFromValue } from "./utils/tone";
 
 export const tabs = ["Portfolio", "Maestro", "Virtuoso", "Research"] as const;
@@ -38,7 +38,7 @@ export function toneGlyph(tone?: Tone): string {
 export function appName(strategyId: string) {
   const known: Record<string, string> = {
     tranquillo: "Tranquillo",
-    crescendo_us: "Crescendo",
+    crescendo_us: "Crescendo US",
     crescendo: "Crescendo",
     fugue: "Fugue",
   };
@@ -70,10 +70,16 @@ export function latestSignal(snapshot: DashboardSnapshot, strategyId: string) {
 export function strategyMetrics(strategy: Strategy): Metric[] {
   const latest = strategy.performance_snapshot?.latest || {};
   const quality = strategy.performance_snapshot?.quality?.status || "missing";
+  const ret = latest.cumulative_return ?? strategy.summary.cumulative_return;
+  const retNum = Number(ret);
   return [
     { label: "Signal", value: latestSignalLabel(strategy), tone: toneFromValue(latestSignalLabel(strategy)) },
     { label: "Current Value", value: latest.current_value ?? strategy.summary.current_value ?? strategy.summary.book_value ?? "n/a" },
-    { label: "Return", value: latest.cumulative_return ?? strategy.summary.cumulative_return ?? "n/a", tone: "success" },
+    {
+      label: "Return",
+      value: ret == null ? "n/a" : formatPercent(ret),
+      tone: !Number.isFinite(retNum) ? "neutral" : retNum > 0 ? "success" : retNum < 0 ? "danger" : "neutral",
+    },
     { label: "Evidence", value: quality, tone: toneFromValue(quality) },
   ];
 }

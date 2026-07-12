@@ -114,7 +114,12 @@ export function TopChrome({
         <TickerCell label="Cash" value={metricValue(snapshot.investment_console.metrics, "Broker Cash", "n/a")} delta="ready" />
         <TickerCell label="Freshness" value={trust.freshness} delta="signals" tone={trust.freshnessTone} />
         <TickerCell label="Recon" value={trust.reconciliation} delta="state" tone={trust.reconciliationTone} />
-        <TickerCell label="Gate" value={snapshot.header.order_posture} delta={snapshot.read_only ? "locked" : "active"} tone={snapshot.read_only ? "warning" : "success"} />
+        <TickerCell
+          label="Gate"
+          value={snapshot.header.order_posture}
+          delta={snapshot.read_only ? "read-only" : "active"}
+          tone={snapshot.header.order_posture === "armed" ? "warning" : "success"}
+        />
         <TickerCell label="Config" value={String(configFingerprint).slice(0, 8)} delta="op" />
         <TickerCell label="Research" value={`${researchRows} rows`} delta="read model" />
       </section>

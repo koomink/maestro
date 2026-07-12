@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
-import type { DashboardSnapshot, Tone } from "../types";
+import type { DashboardSnapshot } from "../types";
+import { dateTime } from "../utils/data";
 import { humanize } from "../utils/format";
+import { usePrefersReducedMotion } from "../utils/hooks";
 import { toneFromValue } from "../utils/tone";
 import { appName, toneClass } from "../viewModel";
 
 // ─── Ontology Map — Enhanced Visual Components ───
 
 function relativeTime(dateStr: unknown): string {
-  if (!dateStr) return "—";
-  const ms = Date.now() - new Date(String(dateStr)).getTime();
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  const s = Math.floor(ms / 1000);
+  const t = dateTime(dateStr);
+  if (!Number.isFinite(t)) return "—";
+  const s = Math.floor((Date.now() - t) / 1000);
+  if (s < 0) return "just now";
   if (s < 60) return "just now";
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ago`;
@@ -311,17 +313,6 @@ function OntologyNodeCard({
   );
 }
 
-function EdgePill({ text, tone, x, y }: { text: string; tone: Tone; x: number; y: number }) {
-  return (
-    <g transform={`translate(${x} ${y})`}>
-      <rect className={`edge-pill ${toneClass(tone)}`} width="110" height="19" rx={4} ry={4} />
-      <text className="onto-micro" x="8" y="13">
-        {text}
-      </text>
-    </g>
-  );
-}
-
 export function MaestroOntology({
   openApp,
   snapshot,
@@ -343,7 +334,7 @@ export function MaestroOntology({
   const apps = snapshot.workflow_pipelines.apps;
   const strategies = snapshot.virtuoso_apps.strategies;
   const freshness = snapshot.virtuoso_apps.signal_freshness;
-  const attribution = snapshot.investment_console.strategy_attribution;
+  const reducedMotion = usePrefersReducedMotion();
   const mode =
     snapshot.read_only || snapshot.header.mode.includes("readonly")
       ? "readonly"
@@ -351,10 +342,16 @@ export function MaestroOntology({
         ? "signal"
         : "approval";
 
+  const accountIdByStrategyId = new Map<string, string>();
+  for (const app of apps) {
+    if (app.account_id != null) {
+      accountIdByStrategyId.set(app.strategy_id, String(app.account_id));
+    }
+  }
+
   // ── Derive per-strategy data ──
   const strategyData = strategies.map((s) => {
     const signal = freshness.strategies.find((f) => f.strategy_id === s.strategy_id);
-    const attr = attribution.find((a) => String(a.strategy_id) === s.strategy_id);
     const perf = s.performance
       .map((p) => Number(p.current_value))
       .filter(Number.isFinite)
@@ -363,14 +360,15 @@ export function MaestroOntology({
     const retLabel =
       ret != null ? `${Number(ret) >= 0 ? "+" : ""}${(Number(ret) * 100).toFixed(1)}%` : undefined;
     const signalStatus = signal?.status || "missing";
+    const bookValueRaw = Number(s.summary.book_value);
     return {
       strategyId: s.strategy_id,
       displayName:
         apps.find((a) => a.strategy_id === s.strategy_id)?.display_name || humanize(s.strategy_id),
-      accountId: apps.find((a) => a.strategy_id === s.strategy_id)?.account_id,
+      accountId: accountIdByStrategyId.get(s.strategy_id),
       signalStatus,
       signalAt: signal?.latest_signal_at,
-      weight: Number(attr?.weight) || 0,
+      bookValue: Number.isFinite(bookValueRaw) ? bookValueRaw : null,
       perf,
       retLabel,
       tone:
@@ -381,13 +379,33 @@ export function MaestroOntology({
             : signalStatus === "missing"
               ? "warning"
               : "danger",
-      enabled: s.operation.some((o) => String(o.value).toLowerCase() === "true"),
+      enabled: String(s.operation.find((o) => o.item === "Enabled")?.value).toLowerCase() === "true",
     };
   });
 
-  const primary = strategyData[0];
-  const second = strategyData[1];
-  const third = strategyData[2];
+  const totalBookValue = strategyData.reduce((sum, s) => sum + (s.bookValue ?? 0), 0);
+  const visibleStrategies = strategyData.slice(0, 3);
+
+  const accounts = snapshot.investment_console.broker_account_overview.accounts;
+  const visibleAccounts = accounts.slice(0, 4);
+  const accountSlotById = new Map<string, number>();
+  visibleAccounts.forEach((acc, index) => {
+    if (acc.account_id != null) {
+      accountSlotById.set(String(acc.account_id), index);
+    }
+  });
+
+  const brokerSummary = snapshot.investment_console.broker_account_overview.summary;
+  const freshAccounts = Number(brokerSummary.fresh_accounts);
+  const configuredAccounts = Number(brokerSummary.configured_accounts);
+  const brokerSyncKnown = Number.isFinite(freshAccounts) && Number.isFinite(configuredAccounts);
+  const kisRestTone = brokerSyncKnown && freshAccounts === configuredAccounts ? "success" : "warning";
+  const kisRestMeta = brokerSyncKnown ? `${freshAccounts}/${configuredAccounts} fresh` : "sync status unknown";
+
+  const healthCheck = (needle: string) =>
+    snapshot.operator_cockpit.health_checks.find((r) => String(r.check || "").toLowerCase().includes(needle));
+  const marketCheck = healthCheck("market");
+  const macroCheck = healthCheck("macro") || healthCheck("fred");
 
   // ── Layout constants ──
   // ViewBox 720×455. Columns sized to fill most of the available width.
@@ -403,33 +421,45 @@ export function MaestroOntology({
     gateW: 140,
   };
 
+  const acctEntryY = (slot: number) => 30 + slot * 78 + 34;
+  // The first strategy card is tall (sparkline, 120px); the rest are compact
+  // (68px) so up to three cards stay inside the 320px lane band without
+  // overlapping — OntologyNodeCard inflates any card with a sparkline to 120px.
+  const strategySlotY = (index: number) => (index === 0 ? 28 : 160 + (index - 1) * 80);
+  const strategySlotHeight = (index: number) => (index === 0 ? 120 : 68);
+  const virtExitY = (index: number) => strategySlotY(index) + (index === 0 ? 60 : 34);
+
   // ── Edge paths ──
   const edgePaths: Record<string, string> = {
     dataMarket: `M${COL.dataX + COL.dataW} 60 H${COL.virtX}`,
     dataMacro: `M${COL.dataX + COL.dataW} 137 H${COL.virtX}`,
     dataNarrative: `M${COL.dataX + COL.dataW} 207 H${COL.virtX}`,
-    primaryToAccount: `M${COL.virtX + COL.virtW} 82 H${COL.acctX}`,
-    secondToAccount: `M${COL.virtX + COL.virtW} 196 H${COL.acctX - 12} V191 H${COL.acctX}`,
-    thirdToAccount: `M${COL.virtX + COL.virtW} 285 H${COL.acctX - 12} V260 H${COL.acctX}`,
-    // KIS REST → right → enters Accounts from left
-    kisRestToAccounts: `M${COL.dataX + COL.dataW} 387 H${COL.acctX - 22} V75 H${COL.acctX}`,
-    // Accounts right side → Operating Gate
-    primaryAccountToGate: `M${COL.acctX + COL.acctW} 63 H${COL.gateX}`,
-    // Accounts right side → State/Audit
-    accountToState: `M${COL.acctX + COL.acctW} 100 H${COL.gateX - 12} V387 H${COL.gateX}`,
   };
+  visibleStrategies.forEach((s, index) => {
+    const accountId = s.accountId;
+    const slot = accountId != null ? accountSlotById.get(accountId) : undefined;
+    if (slot === undefined) {
+      return;
+    }
+    edgePaths[`strategyToAccount-${index}`] =
+      `M${COL.virtX + COL.virtW} ${virtExitY(index)} H${COL.acctX - 12} V${acctEntryY(slot)} H${COL.acctX}`;
+  });
+  if (visibleAccounts.length > 0) {
+    // KIS REST → right → enters Accounts from left
+    edgePaths.kisRestToAccounts = `M${COL.dataX + COL.dataW} 387 H${COL.acctX - 22} V${acctEntryY(0)} H${COL.acctX}`;
+    // Accounts right side → Operating Gate
+    edgePaths.primaryAccountToGate = `M${COL.acctX + COL.acctW} 46 H${COL.gateX}`;
+    // Accounts right side → State/Audit
+    edgePaths.accountToState = `M${COL.acctX + COL.acctW} 82 H${COL.gateX - 12} V387 H${COL.gateX}`;
+  }
 
   function isOnActivePath(edgeKey: string): boolean {
     if (!activeStrategyId) return false;
-    if (activeStrategyId === primary?.strategyId) {
-      return ["dataMarket", "dataMacro", "primaryToAccount", "primaryAccountToGate", "accountToState"].includes(edgeKey);
-    }
-    if (activeStrategyId === second?.strategyId) {
-      return ["dataMarket", "dataMacro", "secondToAccount"].includes(edgeKey);
-    }
-    if (activeStrategyId === third?.strategyId) {
-      return ["dataMarket", "dataMacro", "thirdToAccount"].includes(edgeKey);
-    }
+    const index = visibleStrategies.findIndex((s) => s.strategyId === activeStrategyId);
+    if (index < 0) return false;
+    if (edgeKey === "dataMarket" || edgeKey === "dataMacro") return true;
+    if (edgeKey === `strategyToAccount-${index}`) return true;
+    if (index === 0 && (edgeKey === "primaryAccountToGate" || edgeKey === "accountToState")) return true;
     return false;
   }
 
@@ -452,12 +482,15 @@ export function MaestroOntology({
   function getTooltipData(nodeId: string): Record<string, string> {
     const sd = strategyData.find((s) => s.strategyId === nodeId);
     if (sd) {
-      return {
+      const data: Record<string, string> = {
         Signal: sd.signalStatus,
         Return: sd.retLabel || "n/a",
-        Weight: `${(sd.weight * 100).toFixed(1)}%`,
-        Updated: relativeTime(sd.signalAt),
       };
+      if (sd.bookValue != null && totalBookValue > 0) {
+        data.Weight = `${((sd.bookValue / totalBookValue) * 100).toFixed(1)}%`;
+      }
+      data.Updated = relativeTime(sd.signalAt);
+      return data;
     }
     if (nodeId === "gate") {
       return { Posture: snapshot.header.order_posture, Mode: mode, Telegram: "gated" };
@@ -467,9 +500,14 @@ export function MaestroOntology({
       const acc = snapshot.investment_console.broker_account_overview.accounts.find(
         (a) => String(a.account_id) === accId,
       );
-      return { Status: String(acc?.status || "available"), Updated: relativeTime(acc?.created_at) };
+      return { Status: String(acc?.status || "missing"), Updated: relativeTime(acc?.created_at) };
     }
-    if (nodeId === "market" || nodeId === "macro") return { Feed: "active", Status: "fresh" };
+    if (nodeId === "market") {
+      return { Status: String(marketCheck?.status || "unknown"), Note: String(marketCheck?.message || "n/a") };
+    }
+    if (nodeId === "macro") {
+      return { Status: String(macroCheck?.status || "unknown"), Note: String(macroCheck?.message || "n/a") };
+    }
     return { Status: "operational" };
   }
 
@@ -586,6 +624,7 @@ export function MaestroOntology({
                   color={color}
                   count={active ? 4 : 3}
                   duration={type === "state" ? 5 : key === "kisRestToAccounts" ? 4.5 : 3.5}
+                  paused={reducedMotion}
                 />
               )}
             </g>
@@ -613,15 +652,21 @@ export function MaestroOntology({
           </g>
         )}
 
-        {/* ── Edge Pills ── */}
-        <EdgePill x={320} y={72} text="BUY-ONLY CONTRIB" tone="primary" />
-        <EdgePill x={320} y={187} text="TARGET ALLOC" tone="warning" />
-        <EdgePill x={320} y={278} text="TARGET ALLOC" tone="neutral" />
-
         {/* ── Attention Ripples ── */}
-        {second && second.signalStatus === "missing" && second.enabled && (
-          <AttentionRipple cx={COL.virtX + COL.virtW / 2} cy={196} color="var(--amber)" />
-        )}
+        {!reducedMotion &&
+          visibleStrategies.map(
+            (s, index) =>
+              index > 0 &&
+              s.signalStatus === "missing" &&
+              s.enabled && (
+                <AttentionRipple
+                  key={s.strategyId}
+                  cx={COL.virtX + COL.virtW / 2}
+                  cy={strategySlotY(index) + 34}
+                  color="var(--amber)"
+                />
+              ),
+          )}
 
         {/* ── Init highlight flash ── */}
         {initHighlight && hasAttentionNodes && (
@@ -632,13 +677,12 @@ export function MaestroOntology({
         <OntologyNodeCard
           id="market"
           title="Market"
-          meta="Yahoo Finance"
-          tone="success"
+          meta={marketCheck ? "Yahoo Finance" : "no health check"}
+          tone={marketCheck ? toneFromValue(marketCheck.status) : "neutral"}
           x={COL.dataX}
           y={30}
           width={COL.dataW}
           height={60}
-          timeLabel={relativeTime(snapshot.operator_cockpit.health_checks[0]?.updated_at)}
           hovered={hoveredNodeId === "market"}
           activePath={!!activeStrategyId}
           onHover={handleNodeHover}
@@ -647,13 +691,12 @@ export function MaestroOntology({
         <OntologyNodeCard
           id="macro"
           title="Macro"
-          meta="FRED Economic"
-          tone="success"
+          meta={macroCheck ? "FRED Economic" : "no health check"}
+          tone={macroCheck ? toneFromValue(macroCheck.status) : "neutral"}
           x={COL.dataX}
           y={105}
           width={COL.dataW}
           height={60}
-          timeLabel={relativeTime(snapshot.operator_cockpit.health_checks[2]?.updated_at)}
           hovered={hoveredNodeId === "macro"}
           activePath={!!activeStrategyId}
           onHover={handleNodeHover}
@@ -675,127 +718,65 @@ export function MaestroOntology({
         />
 
         {/* ── VIRTUOSO column — Strategy nodes ── */}
-        {primary && (
+        {visibleStrategies.map((s, index) => (
           <OntologyNodeCard
-            id={primary.strategyId}
-            title={primary.displayName}
-            meta={primary.enabled ? "selected app" : "disabled"}
-            tone={primary.tone}
+            key={s.strategyId}
+            id={s.strategyId}
+            title={s.displayName}
+            meta={index === 0 ? (s.enabled ? "selected app" : "disabled") : `signal ${s.signalStatus}`}
+            tone={s.enabled ? s.tone : "neutral"}
             x={COL.virtX}
-            y={28}
+            y={strategySlotY(index)}
             width={COL.virtW}
-            height={120}
-            sparklineData={primary.perf}
-            returnLabel={primary.retLabel}
-            tags={primary.enabled ? ["ON", primary.signalStatus === "fresh" ? "FRESH" : "STALE"] : []}
-            timeLabel={relativeTime(primary.signalAt)}
-            onClick={() => handleStrategyClick(primary.strategyId)}
-            hovered={hoveredNodeId === primary.strategyId}
-            activePath={activeStrategyId === primary.strategyId}
+            height={strategySlotHeight(index)}
+            sparklineData={index === 0 ? s.perf : undefined}
+            returnLabel={s.retLabel}
+            tags={index === 0 && s.enabled ? ["ON", s.signalStatus === "fresh" ? "FRESH" : "STALE"] : []}
+            attentionCount={index > 0 && s.enabled && s.signalStatus !== "fresh" ? 1 : 0}
+            faded={!s.enabled}
+            timeLabel={relativeTime(s.signalAt)}
+            onClick={() => handleStrategyClick(s.strategyId)}
+            hovered={hoveredNodeId === s.strategyId}
+            activePath={activeStrategyId === s.strategyId}
             onHover={handleNodeHover}
             onLeave={handleNodeLeave}
           />
-        )}
-        {second && (
-          <OntologyNodeCard
-            id={second.strategyId}
-            title={second.displayName}
-            meta={`signal ${second.signalStatus}`}
-            tone={second.tone}
-            x={COL.virtX}
-            y={157}
-            width={COL.virtW}
-            height={100}
-            sparklineData={second.perf}
-            returnLabel={second.retLabel}
-            attentionCount={second.enabled && second.signalStatus !== "fresh" ? 1 : 0}
-            timeLabel={relativeTime(second.signalAt)}
-            onClick={() => handleStrategyClick(second.strategyId)}
-            hovered={hoveredNodeId === second.strategyId}
-            activePath={activeStrategyId === second.strategyId}
-            onHover={handleNodeHover}
-            onLeave={handleNodeLeave}
-          />
-        )}
-        {third && (
-          <OntologyNodeCard
-            id={third.strategyId}
-            title={third.displayName}
-            meta={third.enabled ? "enabled" : "disabled"}
-            tone={third.enabled ? third.tone : "neutral"}
-            x={COL.virtX}
-            y={265}
-            width={COL.virtW}
-            height={68}
-            sparklineData={third.perf.length >= 2 ? third.perf : undefined}
-            returnLabel={third.retLabel}
-            faded={!third.enabled}
-            timeLabel={relativeTime(third.signalAt)}
-            onClick={() => handleStrategyClick(third.strategyId)}
-            hovered={hoveredNodeId === third.strategyId}
-            activePath={activeStrategyId === third.strategyId}
-            onHover={handleNodeHover}
-            onLeave={handleNodeLeave}
-          />
+        ))}
+        {strategyData.length > 3 && (
+          <text className="onto-micro" x={COL.virtX + 8} y={332}>
+            +{strategyData.length - 3} more apps
+          </text>
         )}
 
         {/* ── ACCOUNTS column ── */}
-        <OntologyNodeCard
-          id={`account-${primary?.accountId || "KIS_mock"}`}
-          title={primary?.accountId || "KIS_mock"}
-          meta="primary target"
-          tone="success"
-          x={COL.acctX}
-          y={30}
-          width={COL.acctW}
-          height={75}
-          tags={["SYNCED"]}
-          timeLabel={relativeTime(snapshot.investment_console.broker_snapshot.created_at)}
-          hovered={hoveredNodeId === `account-${primary?.accountId || "KIS_mock"}`}
-          activePath={activeStrategyId === primary?.strategyId}
-          onHover={handleNodeHover}
-          onLeave={handleNodeLeave}
-        />
-        <OntologyNodeCard
-          id="account-KIS_ps"
-          title="KIS_ps"
-          meta="available account"
-          tone="neutral"
-          x={COL.acctX}
-          y={118}
-          width={COL.acctW}
-          height={52}
-          hovered={hoveredNodeId === "account-KIS_ps"}
-          onHover={handleNodeHover}
-          onLeave={handleNodeLeave}
-        />
-        <OntologyNodeCard
-          id={`account-${second?.accountId || "DEV_sandbox"}`}
-          title={second?.accountId || "DEV_sandbox"}
-          meta="dev target"
-          tone="warning"
-          x={COL.acctX}
-          y={180}
-          width={COL.acctW}
-          height={55}
-          hovered={hoveredNodeId === `account-${second?.accountId || "DEV_sandbox"}`}
-          activePath={activeStrategyId === second?.strategyId}
-          onHover={handleNodeHover}
-          onLeave={handleNodeLeave}
-        />
-        <OntologyNodeCard
-          id="account-KIS_brokerage"
-          title="KIS_brokerage"
-          meta="readonly account"
-          tone="neutral"
-          x={COL.acctX}
-          y={245}
-          width={COL.acctW}
-          height={50}
-          hovered={hoveredNodeId === "account-KIS_brokerage"}
-          onHover={handleNodeHover}
-          onLeave={handleNodeLeave}
-        />
+        {visibleAccounts.map((acc, index) => {
+          const accountId = String(acc.account_id ?? `account-${index}`);
+          const nodeId = `account-${accountId}`;
+          return (
+            <OntologyNodeCard
+              key={nodeId}
+              id={nodeId}
+              title={accountId}
+              meta={`${String(acc.broker ?? "")} · ${String(acc.environment ?? "")}`}
+              tone={acc.tone as string}
+              x={COL.acctX}
+              y={30 + index * 78}
+              width={COL.acctW}
+              height={68}
+              tags={[String(acc.status ?? "").toUpperCase()]}
+              timeLabel={relativeTime(acc.created_at)}
+              hovered={hoveredNodeId === nodeId}
+              activePath={accountIdByStrategyId.get(activeStrategyId || "") === accountId}
+              onHover={handleNodeHover}
+              onLeave={handleNodeLeave}
+            />
+          );
+        })}
+        {accounts.length > 4 && (
+          <text className="onto-micro" x={COL.acctX + 8} y={355}>
+            +{accounts.length - 4} more accounts
+          </text>
+        )}
 
         {/* ── GATE column ── */}
         <OntologyNodeCard
@@ -809,7 +790,7 @@ export function MaestroOntology({
           height={95}
           tags={["GATED", "AUDIT"]}
           hovered={hoveredNodeId === "gate"}
-          activePath={activeStrategyId === primary?.strategyId}
+          activePath={activeStrategyId === visibleStrategies[0]?.strategyId}
           onHover={handleNodeHover}
           onLeave={handleNodeLeave}
         />
@@ -818,8 +799,8 @@ export function MaestroOntology({
         <OntologyNodeCard
           id="kis-rest"
           title="KIS REST"
-          meta="readonly sync"
-          tone="success"
+          meta={kisRestMeta}
+          tone={kisRestTone}
           x={COL.dataX}
           y={365}
           width={COL.dataW}
@@ -843,15 +824,19 @@ export function MaestroOntology({
         />
 
         {/* ── Connection dots on Accounts ── */}
-        <circle cx={COL.acctX} cy={75} r={3} fill="var(--green)" opacity={0.5}>
-          <animate attributeName="opacity" values="0.3;0.7;0.3" dur="3s" repeatCount="indefinite" />
-        </circle>
-        <circle cx={COL.acctX + COL.acctW} cy={63} r={3} fill="var(--amber)" opacity={0.5}>
-          <animate attributeName="opacity" values="0.3;0.7;0.3" dur="3s" repeatCount="indefinite" />
-        </circle>
-        <circle cx={COL.acctX + COL.acctW} cy={100} r={3} fill="var(--green)" opacity={0.5}>
-          <animate attributeName="opacity" values="0.3;0.7;0.3" dur="3s" repeatCount="indefinite" begin="0.5s" />
-        </circle>
+        {visibleAccounts.length > 0 && (
+          <>
+            <circle cx={COL.acctX} cy={acctEntryY(0)} r={3} fill="var(--green)" opacity={0.5}>
+              <animate attributeName="opacity" values="0.3;0.7;0.3" dur="3s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={COL.acctX + COL.acctW} cy={46} r={3} fill="var(--amber)" opacity={0.5}>
+              <animate attributeName="opacity" values="0.3;0.7;0.3" dur="3s" repeatCount="indefinite" />
+            </circle>
+            <circle cx={COL.acctX + COL.acctW} cy={82} r={3} fill="var(--green)" opacity={0.5}>
+              <animate attributeName="opacity" values="0.3;0.7;0.3" dur="3s" repeatCount="indefinite" begin="0.5s" />
+            </circle>
+          </>
+        )}
 
         {/* ── Legend ── */}
         <g transform="translate(8 442)">
