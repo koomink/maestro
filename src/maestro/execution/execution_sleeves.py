@@ -106,13 +106,22 @@ def _scope_state(
     scope: ExecutionScopeDraft,
     allocated_cash: float,
 ) -> PortfolioState:
-    symbols = set(_target_symbols(scope.target))
-    source_positions = scope.attributed_positions or current_state.positions
-    positions = {
-        symbol: quantity
-        for symbol, quantity in source_positions.items()
-        if symbol in symbols
-    }
+    if scope.attributed_positions is not None:
+        # Attributed positions are already scoped to this sleeve's bucket; keep
+        # them all so holdings outside today's target can still be sold when the
+        # strategy rotates.
+        positions = {
+            symbol: quantity
+            for symbol, quantity in scope.attributed_positions.items()
+            if quantity
+        }
+    else:
+        symbols = set(_target_symbols(scope.target))
+        positions = {
+            symbol: quantity
+            for symbol, quantity in current_state.positions.items()
+            if symbol in symbols
+        }
     cash_by_currency = (
         {scope.currency_sleeve: allocated_cash}
         if scope.currency_sleeve and current_state.cash_by_currency
@@ -132,9 +141,18 @@ def _scope_position_value(
     prices: dict[str, float],
 ) -> float:
     total = 0.0
-    positions = scope.attributed_positions or current_state.positions
+    if scope.attributed_positions is not None:
+        for symbol, quantity in scope.attributed_positions.items():
+            if not quantity:
+                continue
+            if symbol not in prices:
+                raise ValueError(
+                    f"execution sleeve value requires a price for attributed position: {symbol}"
+                )
+            total += quantity * prices[symbol]
+        return total
     for symbol in _target_symbols(target):
-        total += positions.get(symbol, 0.0) * prices[symbol]
+        total += current_state.positions.get(symbol, 0.0) * prices[symbol]
     return total
 
 

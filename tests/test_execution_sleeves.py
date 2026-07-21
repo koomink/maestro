@@ -133,6 +133,50 @@ def test_cash_rebalance_uses_attributed_positions_for_scope_value():
     assert allocated[0].state.positions == {"QQQ": 4}
 
 
+def test_rotated_attributed_positions_survive_scope_state_and_generate_sells():
+    state = PortfolioState(
+        cash=0,
+        cash_by_currency={"USD": 0, "KRW": 100},
+        positions={"QQQ": 5, "EEM": 10, "GOOG": 3},
+    )
+    target = PortfolioTarget(
+        timestamp=datetime(2026, 7, 13, tzinfo=UTC),
+        allocations={},
+        allocation_sleeves={"USD": {"BIL": 0.5, "SPY": 0.5}},
+        source_strategy_ids=["crescendo_us"],
+    )
+    prices = {"QQQ": 100.0, "EEM": 10.0, "GOOG": 50.0, "BIL": 10.0, "SPY": 100.0}
+
+    allocated = allocate_cash_rebalanced_scope_states(
+        current_state=state,
+        scopes=[
+            ExecutionScopeDraft(
+                account_id="toss_brokerage",
+                execution_sleeve="crescendo_us",
+                currency_sleeve="USD",
+                target_weight=0.7,
+                target=target,
+                attributed_positions={"QQQ": 5, "EEM": 10},
+            )
+        ],
+        prices=prices,
+    )[0]
+
+    assert allocated.state.positions == {"QQQ": 5, "EEM": 10}
+    assert allocated.current_value == pytest.approx(600.0)
+
+    builder = OrderBuilder(
+        currency_sleeves={
+            "USD": {"symbols": ["QQQ", "EEM", "BIL", "SPY"], "cash_symbol": "CASH_USD"}
+        },
+    )
+    orders = builder.build_orders(allocated.state, allocated.target, prices)
+
+    sides = {(order.side.value, order.symbol) for order in orders}
+    assert ("sell", "QQQ") in sides
+    assert ("sell", "EEM") in sides
+
+
 @pytest.mark.parametrize(
     ("manual_quantity", "expected_allocated_cash"),
     [
