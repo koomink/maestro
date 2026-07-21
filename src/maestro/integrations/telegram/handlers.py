@@ -22,6 +22,7 @@ from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.dashboard.actions import generate_strategy_signal
 from maestro.dashboard.read_models import (
     build_approvals_table,
+    build_broker_account_overview,
     build_broker_account_summary,
     build_health_summary,
     build_latest_signal_package_card,
@@ -59,6 +60,7 @@ from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
+from maestro.ops.readonly_refresh import refresh_readonly_accounts
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
@@ -82,7 +84,8 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("status", "Show Maestro status summary"),
     ("health", "Show health checks"),
     ("signal", "Show latest Symphony signal package"),
-    ("account", "Refresh and show broker account snapshot"),
+    ("account", "Show stored broker account freshness"),
+    ("account_refresh", "Refresh broker account: /account_refresh [account_id]"),
     ("portfolio", "Show Maestro portfolio state"),
     ("apps", "Show configured strategy apps"),
     ("orders", "Show recent orders"),
@@ -161,6 +164,10 @@ class TelegramOperatorCommandRouter:
             return True
         if command == "/retry_order":
             self._process_retry_order_command(text, chat_id, user_id, username)
+            return True
+        if command == "/account_refresh":
+            self._process_account_refresh(text, chat_id)
+            self._record(command, chat_id, user_id, username, "handled")
             return True
 
         handler = {
@@ -1798,46 +1805,60 @@ class TelegramOperatorCommandRouter:
         return True
 
     def _account(self, chat_id: int) -> None:
-        refresh_error: Exception | None = None
-        try:
-            if self._has_readonly_broker_accounts():
-                self._send(chat_id, "Broker account snapshot: refreshing")
-            self._refresh_broker_snapshot()
-        except (RuntimeError, TimeoutError, ValueError) as exc:
-            refresh_error = exc
+        overview = build_broker_account_overview(self.config, self.store)
         account = build_broker_account_summary(self.store, self.config)
         if account["created_at"] is None:
-            if refresh_error is not None:
-                self._send(chat_id, f"Broker account snapshot refresh failed: {refresh_error}")
-                return
             self._send(chat_id, "Broker account snapshot: none")
             return
         currency = self._broker_currency_breakdowns()
-        lines = []
-        if refresh_error is not None:
-            lines.extend(
-                [
-                    f"Broker account snapshot refresh failed: {refresh_error}",
-                    "Showing latest stored broker snapshot.",
-                ]
+        lines = [
+            "Broker account snapshot (stored)",
+            f"created_at: {_operator_time(account['created_at'], self.config)}",
+            f"account_id: {_mask_identifier(account['account_id'])}",
+            f"total_value: {_money_by_currency(currency['total_value'])}",
+            f"cash: {_money_by_currency(currency['cash'])}",
+            f"positions_market_value: {_money_by_currency(currency['positions_market_value'])}",
+            f"positions: {account['positions_count']}",
+            f"source: {account['source'] or 'unknown'}",
+        ]
+        for account in overview["accounts"]:
+            age = account.get("age_seconds")
+            limit = account.get("max_age_seconds")
+            age_label = "missing" if age is None else _compact_age(float(age)) + " ago"
+            limit_label = "n/a" if limit is None else _compact_age(float(limit))
+            lines.append(
+                f"{account['account_id']}: {account['status']} · "
+                f"{age_label} · limit {limit_label}"
             )
-        lines.extend(
-            [
-                "Broker account snapshot",
-                f"created_at: {_operator_time(account['created_at'], self.config)}",
-                f"account_id: {_mask_identifier(account['account_id'])}",
-                f"total_value: {_money_by_currency(currency['total_value'])}",
-                f"cash: {_money_by_currency(currency['cash'])}",
-                f"positions_market_value: {_money_by_currency(currency['positions_market_value'])}",
-                f"positions: {account['positions_count']}",
-                f"source: {account['source'] or 'unknown'}",
-            ]
-        )
-        self._send(
-            chat_id,
-            "\n".join(lines),
-        )
+            if account.get("last_refresh_error"):
+                lines.append(f"  last error: {account['last_refresh_error']}")
+        self._send(chat_id, "\n".join(lines))
         self._send_voluntary_deposit_allocation_proposal(chat_id)
+
+    def _process_account_refresh(self, text: str, chat_id: int) -> None:
+        parts = text.split()
+        account_ids = [parts[1]] if len(parts) > 1 else None
+        try:
+            report = refresh_readonly_accounts(
+                self.config,
+                None,
+                account_ids=account_ids,
+                source="telegram",
+                state_store=self.store,
+                audit_logger=self.audit,
+            )
+        except ValueError as exc:
+            self._send(chat_id, f"Account refresh rejected: {exc}")
+            return
+        lines = ["Broker account refresh"]
+        for result in report.results:
+            lines.append(
+                f"{result.account_id}: {result.status} · retries {result.retry_count}"
+            )
+            if result.error_message:
+                lines.append(f"  error: {result.error_message}")
+        self._send(chat_id, "\n".join(lines))
+        self._account(chat_id)
 
     def _portfolio(self, chat_id: int) -> None:
         refresh_error: Exception | None = None
@@ -2876,6 +2897,14 @@ def _telegram_command_slug(value: str) -> str:
             previous_underscore = False
         slug.append(next_char)
     return "".join(slug).strip("_")
+
+
+def _compact_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    return f"{seconds / 3600:.1f}h"
 
 
 __all__ = ["TelegramOperatorCommandRouter", "telegram_bot_commands"]

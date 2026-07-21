@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -27,6 +27,7 @@ from maestro.execution.live_orders import (
     LiveOrderRequest,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.ops.readonly_refresh import refresh_readonly_accounts
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -111,6 +112,140 @@ def test_kis_cli_sync_fetches_each_configured_kis_account(tmp_path):
     assert "account_id=kis_isa broker_account_id=MOCK-ISA" in result.output
     assert "account_id=kis_brokerage broker_account_id=MOCK-BROKERAGE" in result.output
     assert "accounts_synced=2" in result.output
+
+
+def test_readonly_refresh_continues_after_one_account_failure(monkeypatch, tmp_path):
+    config = _two_account_readonly_config(tmp_path)
+
+    class Service:
+        def __init__(self, account_id, store):
+            self.account_id = account_id
+            self.store = store
+
+        def fetch_and_store_snapshot(self, symbols, run_id=None):
+            del symbols
+            if self.account_id == "kis_isa":
+                raise ValueError("cash mismatch")
+            self.store.save_broker_account_snapshot(
+                run_id or "run",
+                self.account_id,
+                {
+                    "account_id": self.account_id,
+                    "account": {
+                        "account_id": "MOCK-TOSS",
+                        "cash": 100.0,
+                        "buying_power": 100.0,
+                        "positions": [],
+                        "fetched_at": datetime.now(UTC).isoformat(),
+                        "source": "fixture",
+                    },
+                },
+            )
+
+    monkeypatch.setattr(
+        "maestro.ops.readonly_refresh.build_broker_readonly_service",
+        lambda config, store, audit, account_id: Service(account_id, store),
+    )
+
+    report = refresh_readonly_accounts(config, None, source="test", attempts=1)
+
+    assert [result.account_id for result in report.results] == ["kis_isa", "toss_brokerage"]
+    assert report.results[0].snapshot_id is None
+    assert report.results[1].snapshot_id is not None
+    assert len(StateStore(config.state.sqlite_path, 0).list_broker_account_snapshots()) == 1
+
+
+def test_readonly_refresh_retries_timeout_but_not_business_error(monkeypatch, tmp_path):
+    config = _two_account_readonly_config(tmp_path)
+    calls = {"kis_isa": 0, "toss_brokerage": 0}
+
+    class Service:
+        def __init__(self, account_id):
+            self.account_id = account_id
+
+        def fetch_and_store_snapshot(self, symbols, run_id=None):
+            del symbols, run_id
+            calls[self.account_id] += 1
+            if self.account_id == "kis_isa" and calls[self.account_id] == 1:
+                raise TimeoutError("timed out")
+            raise ValueError("HTTP 400 business error")
+
+    monkeypatch.setattr(
+        "maestro.ops.readonly_refresh.build_broker_readonly_service",
+        lambda config, store, audit, account_id: Service(account_id),
+    )
+    monkeypatch.setattr("maestro.ops.readonly_refresh.time.sleep", lambda seconds: None)
+
+    refresh_readonly_accounts(config, None, source="test", attempts=3)
+
+    assert calls == {"kis_isa": 2, "toss_brokerage": 1}
+
+
+def test_readonly_refresh_cache_boundary_uses_configured_age(monkeypatch, tmp_path):
+    config = _two_account_readonly_config(tmp_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_broker_account_snapshot(
+        "baseline",
+        "kis_isa",
+        {"account_id": "kis_isa", "account": {"account_id": "MOCK-ISA"}},
+    )
+    row = store.load_latest_broker_account_snapshot()
+    store.save_system_event(
+        "baseline",
+        "broker_reconciliation",
+        {
+            "passed": True,
+            "broker_snapshot_id": row["id"],
+            "account_results": [
+                {
+                    "account_id": "kis_isa",
+                    "passed": True,
+                    "broker_snapshot_id": row["id"],
+                }
+            ],
+        },
+    )
+    created_at = datetime.fromisoformat(row["created_at"]).replace(tzinfo=UTC)
+    calls = 0
+
+    class Service:
+        def fetch_and_store_snapshot(self, symbols, run_id=None):
+            nonlocal calls
+            del symbols, run_id
+            calls += 1
+            raise ValueError("forced refresh")
+
+    monkeypatch.setattr(
+        "maestro.ops.readonly_refresh.build_broker_readonly_service",
+        lambda *args, **kwargs: Service(),
+    )
+    monkeypatch.setattr(
+        "maestro.ops.readonly_refresh.utc_now",
+        lambda: created_at + timedelta(seconds=900),
+    )
+    cached = refresh_readonly_accounts(
+        config,
+        None,
+        account_ids=["kis_isa"],
+        source="signal",
+        max_snapshot_age_seconds=900,
+    )
+    monkeypatch.setattr(
+        "maestro.ops.readonly_refresh.utc_now",
+        lambda: created_at + timedelta(seconds=901),
+    )
+    stale = refresh_readonly_accounts(
+        config,
+        None,
+        account_ids=["kis_isa"],
+        source="signal",
+        max_snapshot_age_seconds=900,
+        attempts=1,
+    )
+
+    assert cached.results[0].status == "cached"
+    assert stale.results[0].status == "quarantined"
+    assert calls == 1
 
 
 def test_kis_cli_sync_reports_missing_credentials_without_traceback(monkeypatch, tmp_path):
@@ -1514,6 +1649,35 @@ def _live_readonly_config(tmp_path):
     config_path = tmp_path / "source_live_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return load_config(config_path)
+
+
+def _two_account_readonly_config(tmp_path):
+    config = _live_readonly_config(tmp_path)
+    raw = config.model_dump(mode="json")
+    raw["kis"]["enabled"] = False
+    raw["accounts"] = [
+        {
+            "id": "kis_isa",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK-ISA",
+            "broker_products": ["kis_domestic_stock"],
+        },
+        {
+            "id": "toss_brokerage",
+            "broker": "kis",
+            "environment": "real",
+            "enabled": True,
+            "provider": "mock",
+            "account_id": "MOCK-TOSS",
+            "broker_products": ["kis_overseas_stock"],
+        },
+    ]
+    path = tmp_path / "two_account.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return load_config(path)
 
 
 def _instrument(symbol: str, asset_type: str) -> dict:

@@ -792,7 +792,7 @@ def test_daily_signal_approval_cli_rejects_unknown_strategy_ids(tmp_path):
     assert "Unknown or disabled signal strategy id" in str(result.exception)
 
 
-def test_daily_signal_approval_cli_sends_failure_briefing_when_readonly_refresh_fails(
+def test_daily_signal_approval_does_not_refresh_unrelated_readonly_profile(
     tmp_path,
     monkeypatch,
 ):
@@ -859,17 +859,12 @@ def test_daily_signal_approval_cli_sends_failure_briefing_when_readonly_refresh_
         ],
     )
 
-    assert result.exit_code != 0
-    assert "readonly refresh failed for account kis_mock" in result.output
-    assert "telegram_daily_failure=sent chats=1" in result.output
-    assert fake_clients
-    text = fake_clients[0].sent_messages[0]["text"]
-    assert "Maestro daily briefing failed" in text
-    assert "stage: readonly_refresh" in text
-    assert "readonly refresh failed for account kis_mock" in text
+    assert result.exit_code == 0, result.output
+    assert "readonly refresh failed" not in result.output
+    assert "telegram_daily_failure" not in result.output
 
 
-def test_daily_signal_approval_cli_sends_failure_briefing_when_reconciliation_fails(
+def test_daily_signal_approval_ignores_unrelated_readonly_reconciliation(
     tmp_path,
     monkeypatch,
 ):
@@ -943,15 +938,9 @@ def test_daily_signal_approval_cli_sends_failure_briefing_when_reconciliation_fa
         ],
     )
 
-    assert result.exit_code != 0
-    assert "reconciliation=failed issues=1" in result.output
-    assert "telegram_daily_failure=sent chats=1" in result.output
-    assert fake_clients
-    text = fake_clients[0].sent_messages[0]["text"]
-    assert "Maestro daily briefing failed" in text
-    assert "stage: reconciliation" in text
-    assert "cash_mismatch:CASH_KRW" in text
-    assert "Broker cash differs from Maestro cash." in text
+    assert result.exit_code == 0, result.output
+    assert "reconciliation=failed" not in result.output
+    assert "telegram_daily_failure" not in result.output
 
 
 def test_run_signal_uses_strategy_posture_when_signal_config_global_posture_disabled(

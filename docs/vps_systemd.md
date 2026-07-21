@@ -184,9 +184,13 @@ WantedBy=timers.target
 
 ## Example Symphony Read-only Refresh Timer
 
-Install `deploy/systemd/maestro-symphony-readonly.service` and
-`deploy/systemd/maestro-symphony-readonly.timer` to refresh all configured KIS
-accounts and run reconciliation against the shared Symphony state.
+Install the `maestro-symphony-readonly`, `-kr`, and `-us` service/timer pairs.
+The hourly timer observes all accounts with a 60-minute cache. The KR timer
+observes `kis_isa,kis_ps` every 15 minutes from 09:00 through 15:30 KST, and the
+US timer observes `toss_brokerage` every 15 minutes from 09:30 through 16:00
+America/New_York. Per-account locks collapse overlapping timer, Dashboard, and
+Telegram refreshes. Each account is refreshed and reconciled independently;
+one failure does not prevent the remaining accounts from being stored.
 
 ```ini
 [Unit]
@@ -198,17 +202,16 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/root/projects/Symphony/Maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG}
-ExecStartPost=/root/projects/Symphony/Maestro/.venv/bin/maestro reconcile --config ${MAESTRO_READONLY_CONFIG}
+ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG} --max-age-seconds 3599 --source timer_off_market
 TimeoutStartSec=300
 ```
 
 ```ini
 [Unit]
-Description=Run Maestro Symphony read-only refresh periodically
+Description=Run Maestro Symphony off-market read-only refresh hourly
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=hourly
 Persistent=true
 Unit=maestro-symphony-readonly.service
 
@@ -334,6 +337,8 @@ Reload systemd after installing unit files:
 sudo systemctl daemon-reload
 sudo systemctl enable --now maestro-heartbeat.timer
 sudo systemctl enable --now maestro-symphony-readonly.timer
+sudo systemctl enable --now maestro-symphony-readonly-kr.timer
+sudo systemctl enable --now maestro-symphony-readonly-us.timer
 sudo systemctl enable --now maestro-symphony-signal.timer
 ```
 

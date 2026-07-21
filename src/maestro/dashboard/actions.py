@@ -8,13 +8,9 @@ from typing import Any
 from maestro.config.loader import load_config_with_identity
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
-from maestro.core.ids import new_run_id
-from maestro.execution.brokers.readonly_factory import (
-    broker_readonly_accounts,
-    build_broker_readonly_services,
-)
+from maestro.execution.brokers.readonly_factory import broker_readonly_accounts
 from maestro.fx.service import ConfiguredFXRefreshService
-from maestro.monitoring.audit_logger import AuditLogger
+from maestro.ops.readonly_refresh import refresh_readonly_accounts
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state.store import StateStore
 
@@ -25,6 +21,7 @@ class DashboardRefreshResult:
     accounts_synced: int
     signal_freshness: dict[str, Any]
     fx_refresh: dict[str, Any]
+    account_results: list[dict[str, Any]]
 
     def as_payload(self) -> dict[str, Any]:
         return {
@@ -32,10 +29,14 @@ class DashboardRefreshResult:
             "accounts_synced": self.accounts_synced,
             "signal_freshness": self.signal_freshness,
             "fx_refresh": self.fx_refresh,
+            "account_results": self.account_results,
         }
 
 
-def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
+def refresh_dashboard_state(
+    config_path: str | Path,
+    account_ids: list[str] | None = None,
+) -> DashboardRefreshResult:
     config, identity = load_config_with_identity(config_path)
     store = StateStore(
         config.state.sqlite_path,
@@ -43,20 +44,17 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
         config.portfolio.cash_by_currency,
         config_identity=identity,
     )
-    audit = AuditLogger(config.audit.jsonl_path)
     accounts_synced = 0
+    account_results: list[dict[str, Any]] = []
     if config.mode in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
-        refresh_run_id = new_run_id()
-        for logical_account_id, service in build_broker_readonly_services(config, store, audit):
-            account_label = logical_account_id or "default_kis"
-            try:
-                service.fetch_and_store_snapshot(
-                    config.portfolio.allowed_symbols,
-                    run_id=refresh_run_id,
-                )
-            except ValueError as exc:
-                raise ValueError(f"Failed to refresh account {account_label}: {exc}") from exc
-            accounts_synced += 1
+        report = refresh_readonly_accounts(
+            config,
+            identity,
+            account_ids=account_ids,
+            source="dashboard",
+        )
+        account_results = [result.__dict__ for result in report.results]
+        accounts_synced = sum(result.snapshot_id is not None for result in report.results)
     return DashboardRefreshResult(
         status="ok",
         accounts_synced=accounts_synced,
@@ -65,6 +63,7 @@ def refresh_dashboard_state(config_path: str | Path) -> DashboardRefreshResult:
             max_age_seconds=config.approval.signal_max_age_seconds,
         ),
         fx_refresh=_refresh_fx_nonblocking(config, store),
+        account_results=account_results,
     )
 
 

@@ -270,6 +270,35 @@ class StateStore:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @contextmanager
+    def account_refresh_lock(
+        self,
+        account_id: str,
+        *,
+        timeout_seconds: float = 0.0,
+    ) -> Any:
+        safe_account_id = "".join(
+            character if character.isalnum() or character in {"-", "_"} else "_"
+            for character in account_id
+        )
+        lock_path = self.path.with_suffix(self.path.suffix + f".refresh-{safe_account_id}.lock")
+        deadline = time.monotonic() + timeout_seconds
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError as exc:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            f"Account refresh is already running: {account_id}"
+                        ) from exc
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
     def live_order_lock(
         self,
         owner: str,

@@ -132,19 +132,24 @@ chats.
 The multi-account operator workflow uses three configs:
 
 1. `symphony_readonly`
-   - Run on dashboard/Telegram refresh paths.
-   - Refresh all broker accounts and display broker truth.
+   - Run on observation timers and explicit Dashboard/Telegram refresh paths.
+   - `/account` reads stored state immediately; `/account_refresh [account_id]`
+     performs an explicit broker call.
+   - Refresh and reconcile accounts independently and display broker truth.
    - Run no Virtuoso strategies and create no approvals.
 2. `symphony_signal`
    - Run on a schedule, initially daily at 09:10 KST.
-   - Run Virtuoso strategies after refreshing broker truth.
+   - Derive required accounts from selected strategies. Reuse snapshots up to
+     15 minutes old; otherwise refresh only those accounts and fail closed only
+     for a required-account failure.
    - Persist a `signal_run_id` and expose `action_required`; skip approval when
      `action_required=false`.
    - Submit no broker orders.
 3. `symphony_approval`
    - Accept the `signal_run_id`.
    - Load the saved signal package and do not re-run strategies.
-   - Re-check freshness, reconciliation, safety state, limits, and approval
+   - Refresh required snapshots older than 5 minutes, reject materially changed
+     signal baselines, and re-check reconciliation, safety state, limits, and approval
      before any broker submit.
 
 Dashboard and Telegram interactions should mirror the same separation. Global
@@ -156,8 +161,9 @@ do not create approval requests or submit broker orders.
 
 The systemd wiring for this workflow is:
 
-- `maestro-symphony-readonly.timer`: periodic `kis-sync` and reconciliation
-  using `MAESTRO_READONLY_CONFIG`.
+- `maestro-symphony-readonly.timer`: hourly all-account observation.
+- `maestro-symphony-readonly-kr.timer` and `-us.timer`: market-session
+  account-scoped 15-minute observation.
 - `maestro-symphony-signal.timer`: weekday 09:10 Asia/Seoul and 09:40
   America/New_York orchestration using `maestro daily-signal-approval`.
 - The command sends a daily signal summary, creates approval requests only when

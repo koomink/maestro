@@ -155,9 +155,9 @@ def create_app(
         )
 
     @app.post("/api/dashboard/refresh")
-    def refresh() -> dict[str, object]:
+    def refresh(account_id: list[str] | None = None) -> dict[str, object]:
         try:
-            return refresh_dashboard_state(resolved_config).as_payload()
+            return refresh_dashboard_state(resolved_config, account_ids=account_id).as_payload()
         except ValueError as exc:
             raise dashboard_refresh_error(exc) from exc
 

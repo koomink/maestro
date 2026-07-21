@@ -1,0 +1,12 @@
+[Unit]
+Description=Observe Symphony Toss account every 15 minutes during US regular hours
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:30,45:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 10..15:00/15:00 America/New_York
+OnCalendar=Mon..Fri *-*-* 16:00:00 America/New_York
+Persistent=true
+Unit=maestro-symphony-readonly-us.service
+
+[Install]
+WantedBy=timers.target

@@ -47,6 +47,7 @@ from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
 from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
+from maestro.ops.readonly_refresh import latest_snapshot_for_account, refresh_readonly_accounts
 from maestro.orchestration.orchestrator import (
     MaestroOrchestrator,
     signal_contract_fingerprint_diff,
@@ -321,8 +322,9 @@ def _run_daily_signal_approval(
     strategy_ids: list[str] | None = None,
     contribution_override: bool = False,
 ) -> None:
-    readonly_maestro_config, readonly_identity = _load_operator_config(readonly_config)
-    _refresh_daily_readonly(readonly_maestro_config, readonly_identity)
+    # Account-scoped signal preflight is owned by MaestroOrchestrator.  Keeping it
+    # there also protects manual/API signal entry points from bypassing freshness.
+    _load_operator_config(readonly_config)
 
     signal_maestro_config, signal_identity = _load_operator_config(signal_config)
     approval_maestro_config, approval_identity = _load_operator_config(approval_config)
@@ -1425,40 +1427,65 @@ def release_kill(
 
 
 @app.command("kis-sync")
-def kis_sync(config: Path | None = CONFIG_OPTION) -> None:
+def kis_sync(
+    config: Path | None = CONFIG_OPTION,
+    account_ids: str | None = typer.Option(None, "--account-ids"),
+    max_age_seconds: int | None = typer.Option(None, "--max-age-seconds", min=0),
+    source: str = typer.Option("cli", "--source"),
+) -> None:
     maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("kis-sync requires mode=live_readonly or live_approval")
-    store = _state_store(maestro_config, identity)
-    audit = AuditLogger(maestro_config.audit.jsonl_path)
-    synced = []
+    selected = None
+    if account_ids is not None:
+        selected = [value.strip() for value in account_ids.split(",") if value.strip()]
+        if not selected:
+            raise typer.BadParameter("--account-ids requires at least one account id")
     try:
-        readonly_services = build_broker_readonly_services(maestro_config, store, audit)
-        if not readonly_services:
-            raise typer.BadParameter("kis-sync requires at least one enabled broker account")
-        for logical_account_id, service in readonly_services:
-            snapshot = service.fetch_and_store_snapshot(maestro_config.portfolio.allowed_symbols)
-            synced.append((logical_account_id, snapshot))
+        report = refresh_readonly_accounts(
+            maestro_config,
+            identity,
+            account_ids=selected,
+            source=source,
+            max_snapshot_age_seconds=max_age_seconds,
+        )
     except ValueError as exc:
         raise typer.BadParameter(f"kis-sync failed: {exc}") from exc
-    if len(synced) == 1 and synced[0][0] is None:
-        snapshot = synced[0][1]
+    store = _state_store(maestro_config, identity)
+    for result in report.results:
+        row = latest_snapshot_for_account(store, result.account_id)
+        payload = (row or {}).get("payload") or {}
+        broker_account_id = payload.get("broker_account_id") or (
+            payload.get("account") or {}
+        ).get("account_id")
         typer.echo(
-            f"account_id={snapshot.account.account_id} cash={snapshot.account.cash:.2f} "
-            f"buying_power={snapshot.account.buying_power:.2f} "
-            f"positions={len(snapshot.account.positions)} "
-            f"total_value={snapshot.account.total_value:.2f}"
+            f"account_id={result.account_id} broker_account_id={broker_account_id or 'none'} "
+            f"status={result.status} "
+            f"snapshot_id={result.snapshot_id or 'none'} "
+            f"age_seconds={result.age_seconds if result.age_seconds is not None else 'none'} "
+            f"retries={result.retry_count} "
+            f"reconciliation={result.reconciliation_passed}"
         )
-        return
-    for logical_account_id, snapshot in synced:
-        typer.echo(
-            f"account_id={logical_account_id} broker_account_id={snapshot.account.account_id} "
-            f"cash={snapshot.account.cash:.2f} "
-            f"buying_power={snapshot.account.buying_power:.2f} "
-            f"positions={len(snapshot.account.positions)} "
-            f"total_value={snapshot.account.total_value:.2f}"
+    synced_count = sum(result.snapshot_id is not None for result in report.results)
+    typer.echo(
+        f"accounts_selected={len(report.results)} "
+        f"accounts_synced={synced_count} "
+        f"accounts_failed={len(report.failed_account_ids)}"
+    )
+    missing_snapshots = [
+        result.account_id for result in report.results if result.snapshot_id is None
+    ]
+    if missing_snapshots:
+        errors = "; ".join(
+            result.error_message or result.error_type or "unknown error"
+            for result in report.results
+            if result.snapshot_id is None
         )
-    typer.echo(f"accounts_synced={len(synced)}")
+        raise typer.BadParameter(
+            "kis-sync failed before storing snapshot for account(s): "
+            + ", ".join(missing_snapshots)
+            + f": {errors}"
+        )
 
 
 @app.command("fx-refresh")

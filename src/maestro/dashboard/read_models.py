@@ -12,6 +12,7 @@ from maestro.core.time_display import (
 from maestro.dashboard.actions import build_signal_freshness
 from maestro.monitoring.health import HealthService
 from maestro.state.events import (
+    SystemEventType,
     missing_system_event_required_fields,
     required_system_event_fields,
 )
@@ -431,9 +432,17 @@ def build_broker_account_summary(
 
 
 def build_broker_account_overview(config: MaestroConfig, store: StateStore) -> dict[str, Any]:
-    max_age_seconds = config.reconciliation.max_age_seconds
+    max_age_seconds = config.reconciliation.observation_snapshot_max_age_seconds
     timezone = operator_timezone(config)
     latest_by_account: dict[str, dict[str, Any]] = {}
+    latest_refresh_by_account: dict[str, dict[str, Any]] = {}
+    for event in store.list_system_events_by_type(
+        SystemEventType.BROKER_READONLY_REFRESH,
+        limit=1000,
+    ):
+        account_id = str(_mapping(event.get("payload")).get("account_id") or "")
+        if account_id and account_id not in latest_refresh_by_account:
+            latest_refresh_by_account[account_id] = event
     for snapshot in store.list_broker_account_snapshots(limit=1000):
         payload = _mapping(snapshot.get("payload"))
         account = _mapping(payload.get("account"))
@@ -458,13 +467,15 @@ def build_broker_account_overview(config: MaestroConfig, store: StateStore) -> d
             latest_by_account.get(account.id),
             max_age_seconds,
             timezone,
+            latest_refresh_by_account.get(account.id),
         )
         for account in accounts
     ]
     fresh_count = sum(1 for row in rows if row["status"] == "fresh")
     stale_count = sum(1 for row in rows if row["status"] == "stale")
     missing_count = sum(1 for row in rows if row["status"] == "missing")
-    attention_count = stale_count + missing_count
+    quarantined_count = sum(1 for row in rows if row["status"] == "quarantined")
+    attention_count = stale_count + missing_count + quarantined_count
     totals_by_currency: dict[str, float] = {}
     latest_sync_at = None
     for row in rows:
@@ -493,6 +504,7 @@ def build_broker_account_overview(config: MaestroConfig, store: StateStore) -> d
         "fresh_accounts": fresh_count,
         "stale_accounts": stale_count,
         "missing_accounts": missing_count,
+        "quarantined_accounts": quarantined_count,
         "attention_accounts": attention_count,
         "total_value": total_value,
         "currency": currency,
@@ -535,7 +547,9 @@ def _broker_account_overview_row(
     snapshot: dict[str, Any] | None,
     max_age_seconds: int,
     timezone: str,
+    refresh_event: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    refresh_payload = _mapping((refresh_event or {}).get("payload"))
     if snapshot is None:
         return {
             "account_id": account_config.id,
@@ -555,6 +569,8 @@ def _broker_account_overview_row(
             "positions_count": 0,
             "source": None,
             "run_id": None,
+            "last_refresh_status": refresh_payload.get("status"),
+            "last_refresh_error": refresh_payload.get("error_message"),
         }
     payload = _mapping(snapshot.get("payload"))
     account = _mapping(payload.get("account"))
@@ -565,6 +581,8 @@ def _broker_account_overview_row(
         if age_seconds is None or (max_age_seconds > 0 and age_seconds > max_age_seconds)
         else "fresh"
     )
+    if refresh_payload.get("status") == "quarantined":
+        status = "quarantined"
     return {
         "account_id": account_config.id,
         "broker_account_id": payload.get("broker_account_id") or account.get("account_id"),
@@ -584,6 +602,8 @@ def _broker_account_overview_row(
         "positions_count": len(positions),
         "source": account.get("source") or payload.get("source"),
         "run_id": snapshot.get("run_id"),
+        "last_refresh_status": refresh_payload.get("status"),
+        "last_refresh_error": refresh_payload.get("error_message"),
     }
 
 

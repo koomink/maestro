@@ -1206,7 +1206,7 @@ def test_telegram_operator_account_displays_multi_account_currency_breakdowns(tm
     assert "source: broker_account_aggregate" in text
 
 
-def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp_path):
+def test_telegram_operator_account_returns_stored_snapshot_without_refresh(tmp_path):
     config = load_config(_telegram_live_readonly_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
     audit = AuditLogger(config.audit.jsonl_path)
@@ -1233,20 +1233,17 @@ def test_telegram_operator_account_refreshes_broker_snapshot_before_response(tmp
 
     assert router.process_update(message_update("/account"))
 
-    assert client.sent_messages[-2]["text"] == "Broker account snapshot: refreshing"
     text = client.sent_messages[-1]["text"]
-    assert "total_value: 10,000,000.00 KRW" in text
-    assert "cash: 5,000,000.00 KRW" in text
-    assert "positions_market_value: 5,000,000.00 KRW" in text
+    assert "Broker account snapshot (stored)" in text
+    assert "total_value: 12,345,678.00 unknown" in text
     assert "orderable_cash:" not in text
-    assert "source: kis_mock" in text
-    assert "12,345,678.00" not in text
+    assert "source: stale_fixture" in text
     latest = store.load_latest_broker_account_snapshot()
     assert latest is not None
-    assert latest["payload"]["account"]["source"] == "kis_mock"
+    assert latest["payload"]["account"]["source"] == "stale_fixture"
 
 
-def test_telegram_operator_account_shows_latest_snapshot_when_refresh_fails(
+def test_telegram_operator_account_does_not_call_broker_implicitly(
     tmp_path,
     monkeypatch,
 ):
@@ -1283,10 +1280,8 @@ def test_telegram_operator_account_shows_latest_snapshot_when_refresh_fails(
 
     assert router.process_update(message_update("/account"))
 
-    assert client.sent_messages[-2]["text"] == "Broker account snapshot: refreshing"
     text = client.sent_messages[-1]["text"]
-    assert "Broker account snapshot refresh failed: KIS request failed with HTTP 500" in text
-    assert "Showing latest stored broker snapshot." in text
+    assert "Broker account snapshot (stored)" in text
     assert "total_value: 12,345,678.00 unknown" in text
     assert "source: stored_fixture" in text
 

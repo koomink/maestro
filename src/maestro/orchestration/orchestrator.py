@@ -65,6 +65,11 @@ from maestro.execution.order_capacity import OrderCapacityBlock, OrderCapacitySe
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.ops.readonly_refresh import (
+    latest_snapshot_for_account,
+    refresh_readonly_accounts,
+    required_account_ids_for_strategies,
+)
 from maestro.orchestration.data_quality import (
     data_quality_issues as collect_data_quality_issues,
 )
@@ -217,7 +222,6 @@ class MaestroOrchestrator:
     ) -> SignalRunSummary:
         signal_run_id = new_signal_run_id()
         self._record_run_provenance(signal_run_id, "signal")
-        current_state = self._load_run_portfolio_state(signal_run_id)
         selected_strategy_ids = set(strategy_ids or [])
         if selected_strategy_ids:
             unknown = selected_strategy_ids - self.registry.strategy_ids
@@ -225,7 +229,41 @@ class MaestroOrchestrator:
                 raise ValueError(
                     "Unknown or disabled signal strategy id(s): " + ", ".join(sorted(unknown))
                 )
-        broker_snapshot_refs = self._broker_snapshot_refs()
+        required_account_ids = required_account_ids_for_strategies(
+            self.config,
+            selected_strategy_ids or None,
+        )
+        if self.config.mode == RunMode.LIVE_APPROVAL and required_account_ids:
+            bootstrap_account_ids = {
+                account_id
+                for account_id in required_account_ids
+                if self.state_store.load_latest_account_portfolio_state(account_id) is None
+            }
+            report = refresh_readonly_accounts(
+                self.config,
+                self.config_identity,
+                account_ids=required_account_ids,
+                source="signal_preflight",
+                max_snapshot_age_seconds=(
+                    self.config.reconciliation.signal_snapshot_max_age_seconds
+                ),
+                state_store=self.state_store,
+                audit_logger=self.audit,
+            )
+            blocking_account_ids = sorted(
+                set(report.failed_account_ids) - bootstrap_account_ids
+            )
+            if blocking_account_ids:
+                raise ValueError(
+                    "signal readonly preflight failed for required account(s): "
+                    + ", ".join(blocking_account_ids)
+                )
+        current_state = self._load_run_portfolio_state(
+            signal_run_id,
+            account_ids=required_account_ids or None,
+            use_cached_broker_snapshots=bool(required_account_ids),
+        )
+        broker_snapshot_refs = self._broker_snapshot_refs(required_account_ids)
         dynamic_symbols = self._evaluate_dynamic_universe(signal_run_id, current_state)
         run_allowed_symbols = set(self.config.portfolio.allowed_symbols) | dynamic_symbols
         risk_manager = (
@@ -362,6 +400,7 @@ class MaestroOrchestrator:
                 prices,
             ),
             "broker_snapshot_refs": broker_snapshot_refs,
+            "required_account_ids": required_account_ids,
             "prices": prices,
             "strategy_results": [result.model_dump(mode="json") for result in valid_results],
             "portfolio_target": target.model_dump(mode="json"),
@@ -444,6 +483,38 @@ class MaestroOrchestrator:
                 orders_created=0,
                 approval_status="not_required",
             )
+        signal_account_mappings = package.get("strategy_account_mappings")
+        if (
+            signal_account_mappings is not None
+            and signal_account_mappings != self._strategy_account_mappings()
+        ):
+            raise ValueError(
+                "Signal package account mapping mismatch: "
+                f"signal={signal_account_mappings} current={self._strategy_account_mappings()}"
+            )
+        baseline_refs = package.get("broker_snapshot_refs") or []
+        if self.config.mode == RunMode.LIVE_APPROVAL and baseline_refs:
+            self._validate_signal_broker_baseline(baseline_refs)
+        required_account_ids = [
+            str(account_id) for account_id in package.get("required_account_ids") or []
+        ]
+        if self.config.mode == RunMode.LIVE_APPROVAL and required_account_ids:
+            report = refresh_readonly_accounts(
+                self.config,
+                self.config_identity,
+                account_ids=required_account_ids,
+                source="approval_preflight",
+                max_snapshot_age_seconds=(
+                    self.config.reconciliation.approval_snapshot_max_age_seconds
+                ),
+                state_store=self.state_store,
+                audit_logger=self.audit,
+            )
+            if report.failed_account_ids:
+                raise ValueError(
+                    "approval readonly preflight failed for required account(s): "
+                    + ", ".join(report.failed_account_ids)
+                )
         self._validate_signal_package_for_approval(package)
         self._validate_signal_approval_preconditions(run_id, package)
         approval_orders, capacity_blocks = self._partition_orders_by_capacity(
@@ -1218,12 +1289,20 @@ class MaestroOrchestrator:
         }
         self._record_event(run_id, SystemEventType.RUN_PROVENANCE, payload)
 
-    def _load_run_portfolio_state(self, run_id: str) -> PortfolioState:
+    def _load_run_portfolio_state(
+        self,
+        run_id: str,
+        *,
+        account_ids: list[str] | None = None,
+        use_cached_broker_snapshots: bool = False,
+    ) -> PortfolioState:
         if self.config.mode != RunMode.LIVE_APPROVAL:
             return self.state_store.load_latest_portfolio_state()
         if not self.registry.strategies and self.state_store.has_portfolio_snapshot():
             return self.state_store.load_latest_portfolio_state()
-        live_account_ids = self._live_account_ids()
+        live_account_ids = account_ids or self._live_account_ids()
+        if use_cached_broker_snapshots and live_account_ids:
+            return self._load_cached_broker_portfolio_state(run_id, live_account_ids)
         if len(live_account_ids) > 1:
             return self._load_multi_account_live_portfolio_state(run_id, live_account_ids)
         baseline_account_id = self._single_live_account_id()
@@ -1280,6 +1359,53 @@ class MaestroOrchestrator:
         )
         self._auto_reconcile_live_baseline(run_id)
         return state
+
+    def _load_cached_broker_portfolio_state(
+        self,
+        run_id: str,
+        account_ids: list[str],
+    ) -> PortfolioState:
+        states: list[PortfolioState] = []
+        adopted: list[dict[str, Any]] = []
+        for account_id in account_ids:
+            row = latest_snapshot_for_account(self.state_store, account_id)
+            if row is None:
+                raise ValueError(f"missing broker snapshot for required account: {account_id}")
+            payload = row.get("payload") or {}
+            account = payload.get("account") or {}
+            state = portfolio_state_from_broker_account(
+                account,
+                allowed_symbols=self.config.portfolio.allowed_symbols,
+                universe=self.config.universe,
+            )
+            states.append(state)
+            self.state_store.save_portfolio_snapshot(run_id, state, account_id=account_id)
+            adopted.append(
+                {
+                    "account_id": account_id,
+                    "snapshot_id": row.get("id"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+        merged = _merge_portfolio_states(states)
+        self.state_store.save_portfolio_snapshot(run_id, merged)
+        self._record_event(
+            run_id,
+            SystemEventType.BROKER_SNAPSHOT_ADOPTED,
+            {"reason": "account-scoped signal preflight", "accounts": adopted},
+        )
+        reconciliation = BrokerReconciliationService(
+            self.config.reconciliation,
+            self.state_store,
+            self.audit,
+            account_ids=account_ids,
+        ).reconcile_latest(run_id=run_id)
+        if not reconciliation.passed:
+            raise ValueError(
+                "account-scoped broker baseline reconciliation failed: "
+                + ", ".join(account_ids)
+            )
+        return merged
 
     def _load_multi_account_live_portfolio_state(
         self,
@@ -1368,10 +1494,13 @@ class MaestroOrchestrator:
             account_ids=self._live_account_ids(),
         ).reconcile_latest(run_id=run_id)
 
-    def _broker_snapshot_refs(self) -> list[dict[str, Any]]:
+    def _broker_snapshot_refs(
+        self,
+        account_ids: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         if self.config.mode != RunMode.LIVE_APPROVAL:
             return []
-        expected_account_ids = set(self._live_account_ids())
+        expected_account_ids = set(account_ids or self._live_account_ids())
         if not expected_account_ids:
             return []
         refs_by_account: dict[str, dict[str, Any]] = {}
@@ -1462,7 +1591,10 @@ class MaestroOrchestrator:
                 raise ValueError("Signal package config runtime mismatch")
         if not package.get("datahub_evidence"):
             raise ValueError("Signal package missing DataHub evidence")
-        expected_account_ids = set(self._live_account_ids())
+        expected_account_ids = set(
+            str(account_id)
+            for account_id in package.get("required_account_ids") or self._live_account_ids()
+        )
         if not expected_account_ids:
             return
         refs = package.get("broker_snapshot_refs") or []
@@ -1477,12 +1609,13 @@ class MaestroOrchestrator:
         for ref in refs:
             created_at = _parse_signal_ref_time(str(ref.get("created_at") or ""))
             age_seconds = (now - created_at).total_seconds()
-            if age_seconds > self.config.reconciliation.max_age_seconds:
+            if age_seconds > self.config.reconciliation.signal_snapshot_max_age_seconds:
                 raise ValueError(
                     "Signal package stale broker snapshot: "
                     f"account_id={ref.get('account_id')} "
                     f"age_seconds={age_seconds:.0f} "
-                    f"max_age_seconds={self.config.reconciliation.max_age_seconds}"
+                    "max_age_seconds="
+                    f"{self.config.reconciliation.signal_snapshot_max_age_seconds}"
                 )
         self._validate_signal_broker_baseline(refs)
 

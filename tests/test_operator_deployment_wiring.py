@@ -131,6 +131,10 @@ echo "should not run"
 def test_symphony_systemd_units_wire_operator_configs_and_daily_cli():
     readonly_service = (SYSTEMD_DIR / "maestro-symphony-readonly.service").read_text()
     readonly_timer = (SYSTEMD_DIR / "maestro-symphony-readonly.timer").read_text()
+    readonly_kr_service = (SYSTEMD_DIR / "maestro-symphony-readonly-kr.service").read_text()
+    readonly_kr_timer = (SYSTEMD_DIR / "maestro-symphony-readonly-kr.timer").read_text()
+    readonly_us_service = (SYSTEMD_DIR / "maestro-symphony-readonly-us.service").read_text()
+    readonly_us_timer = (SYSTEMD_DIR / "maestro-symphony-readonly-us.timer").read_text()
     signal_service = (SYSTEMD_DIR / "maestro-symphony-signal.service").read_text()
     signal_timer = (SYSTEMD_DIR / "maestro-symphony-signal.timer").read_text()
     telegram_service = (SYSTEMD_DIR / "maestro-telegram-operator.service").read_text()
@@ -138,8 +142,12 @@ def test_symphony_systemd_units_wire_operator_configs_and_daily_cli():
 
     assert "EnvironmentFile=/etc/maestro/maestro.env" in readonly_service
     assert "kis-sync --config ${MAESTRO_READONLY_CONFIG}" in readonly_service
-    assert "reconcile --config ${MAESTRO_READONLY_CONFIG}" in readonly_service
-    assert "OnCalendar=*:0/15" in readonly_timer
+    assert "--max-age-seconds 3599" in readonly_service
+    assert "OnCalendar=hourly" in readonly_timer
+    assert "--account-ids kis_isa,kis_ps" in readonly_kr_service
+    assert "Asia/Seoul" in readonly_kr_timer
+    assert "--account-ids toss_brokerage" in readonly_us_service
+    assert "America/New_York" in readonly_us_timer
     assert "daily-signal-approval" in signal_service
     assert "--readonly-config ${MAESTRO_READONLY_CONFIG}" in signal_service
     assert "--signal-config ${MAESTRO_SIGNAL_CONFIG}" in signal_service

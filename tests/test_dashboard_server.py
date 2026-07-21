@@ -262,10 +262,10 @@ def test_dashboard_refresh_missing_credentials_mentions_env_file(monkeypatch, tm
 
     response = client.post("/api/dashboard/refresh")
 
-    assert response.status_code == 409
-    detail = response.json()["detail"]
-    assert detail["status"] == "dashboard_refresh_failed"
-    assert "--env-file /etc/maestro/maestro.env" in detail["message"]
+    assert response.status_code == 200
+    result = response.json()["account_results"][0]
+    assert result["status"] == "quarantined"
+    assert "KIS_MOCK_APP_KEY" in result["error_message"]
 
 
 def test_dashboard_reports_config_state_mismatch_as_readable_409(tmp_path):
@@ -341,6 +341,20 @@ def test_dashboard_refresh_syncs_accounts_without_running_strategies(monkeypatch
 
     def fake_fetch(self, symbols, run_id=None):
         calls.append({"symbols": list(symbols), "run_id": run_id})
+        self.state_store.save_broker_account_snapshot(
+            run_id,
+            self.logical_account_id,
+            {
+                "account_id": self.logical_account_id,
+                "account": {
+                    "account_id": FakeSnapshot.Account.account_id,
+                    "cash": 12.0,
+                    "buying_power": 12.0,
+                    "positions": [],
+                    "source": "fixture",
+                },
+            },
+        )
         return FakeSnapshot()
 
     monkeypatch.setattr(
@@ -420,7 +434,9 @@ def test_dashboard_refresh_records_fx_failure_without_failing(monkeypatch, tmp_p
     assert payload["fx_refresh"]["error_type"] == "ValueError"
 
 
-def test_dashboard_refresh_reports_action_errors_as_readable_409(monkeypatch, tmp_path):
+def test_dashboard_refresh_reports_account_errors_without_hiding_other_results(
+    monkeypatch, tmp_path
+):
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
 
     def fail_fetch(self, symbols, run_id=None):
@@ -453,12 +469,12 @@ def test_dashboard_refresh_reports_action_errors_as_readable_409(monkeypatch, tm
 
     response = client.post("/api/dashboard/refresh")
 
-    assert response.status_code == 409
-    payload = response.json()["detail"]
-    assert payload["status"] == "dashboard_refresh_failed"
-    assert payload["read_only"] is True
-    assert "Failed to refresh account kis_paper" in payload["message"]
-    assert "Missing KIS credential" in payload["message"]
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accounts_synced"] == 0
+    assert payload["account_results"][0]["account_id"] == "kis_paper"
+    assert payload["account_results"][0]["status"] == "quarantined"
+    assert "Missing KIS credential" in payload["account_results"][0]["error_message"]
 
 
 def test_generate_signal_requires_signal_config(tmp_path):

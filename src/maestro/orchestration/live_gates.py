@@ -58,7 +58,7 @@ class LiveExecutionGateService:
                 {"event_type": SystemEventType.MARKET_SESSION_HALT.value, **market_session_block}
             )
 
-        reconciliation_block = self._reconciliation_block()
+        reconciliation_block = self._reconciliation_block(orders)
         if reconciliation_block is not None:
             self._record_event(
                 run_id,
@@ -251,8 +251,66 @@ class LiveExecutionGateService:
                 }
         return None
 
-    def _reconciliation_block(self) -> dict[str, Any] | None:
+    def _reconciliation_block(
+        self,
+        orders: list[OrderIntent] | None = None,
+    ) -> dict[str, Any] | None:
         if not self.config.execution.require_reconciliation_pass:
+            return None
+        required_account_ids = {
+            str(order.account_id) for order in orders or [] if order.account_id is not None
+        }
+        if required_account_ids:
+            latest_by_account: dict[str, dict[str, Any]] = {}
+            events = self.state_store.list_system_events_by_type(
+                SystemEventType.BROKER_RECONCILIATION,
+                limit=max(100, len(required_account_ids) * 20),
+            )
+            for event in events:
+                for result in event["payload"].get("account_results") or []:
+                    account_id = str(result.get("account_id") or "")
+                    if account_id in required_account_ids and account_id not in latest_by_account:
+                        latest_by_account[account_id] = {
+                            "event": event,
+                            "result": result,
+                        }
+            missing = sorted(required_account_ids - set(latest_by_account))
+            if missing:
+                # Legacy single-account reconciliation events predate
+                # account_results. Preserve them only for a single required
+                # account; multi-account execution must have scoped evidence.
+                if len(required_account_ids) == 1 and events:
+                    latest = events[0]
+                    if latest["payload"].get("passed") is True:
+                        created_at = _parse_store_created_at(latest["created_at"])
+                        age_seconds = (self._now() - created_at).total_seconds()
+                        if age_seconds <= self.config.reconciliation.max_age_seconds:
+                            return None
+                    if latest["payload"].get("passed") is False:
+                        return {
+                            "reason": "failed_reconciliation",
+                            "account_id": next(iter(required_account_ids)),
+                            "reconciliation": latest["payload"],
+                        }
+                return {"reason": "missing_reconciliation", "account_ids": missing}
+            for account_id in sorted(required_account_ids):
+                item = latest_by_account[account_id]
+                if item["result"].get("passed") is not True:
+                    return {
+                        "reason": "failed_reconciliation",
+                        "account_id": account_id,
+                        "reconciliation": item["result"],
+                    }
+                created_at = _parse_store_created_at(item["event"]["created_at"])
+                age_seconds = (self._now() - created_at).total_seconds()
+                if age_seconds > self.config.reconciliation.max_age_seconds:
+                    return {
+                        "reason": "stale_reconciliation",
+                        "account_id": account_id,
+                        "created_at": item["event"]["created_at"],
+                        "age_seconds": age_seconds,
+                        "max_age_seconds": self.config.reconciliation.max_age_seconds,
+                    }
             return None
         latest = self.state_store.load_latest_system_event(SystemEventType.BROKER_RECONCILIATION)
         if latest is None:

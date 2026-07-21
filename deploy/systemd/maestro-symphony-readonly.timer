@@ -1,8 +1,8 @@
 [Unit]
-Description=Run Maestro Symphony read-only refresh periodically
+Description=Run Maestro Symphony off-market read-only refresh hourly
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=hourly
 Persistent=true
 Unit=maestro-symphony-readonly.service
 

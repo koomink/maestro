@@ -1,6 +1,6 @@
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
 import type { DashboardSnapshot, Row, Tone } from "../types";
-import { formatPercent, formatValue } from "../utils/format";
+import { formatAge, formatPercent, formatValue } from "../utils/format";
 import { useNow, usePrefersReducedMotion } from "../utils/hooks";
 import { toneFromValue } from "../utils/tone";
 import { trustSummary } from "../utils/trust";
@@ -184,7 +184,9 @@ function TickerCarousel({ accounts }: { accounts: Row[] }) {
         {accounts.map((acc, i) => {
           const accountId = formatValue(acc.account_id || "Account");
           const status = formatValue(acc.status || "synced");
-          const timestamp = rowValue(acc, ["created_at", "as_of"]);
+          const timestamp = acc.age_seconds == null
+            ? "missing"
+            : `${formatAge(Number(acc.age_seconds))} ago · limit ${formatAge(Number(acc.max_age_seconds))}`;
           const tone = toneFromValue(acc.status);
           return (
             <div

@@ -1,0 +1,11 @@
+[Unit]
+Description=Observe Symphony KR accounts every 15 minutes during KRX hours
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09..14:00/15:00 Asia/Seoul
+OnCalendar=Mon..Fri *-*-* 15:00,15,30:00 Asia/Seoul
+Persistent=true
+Unit=maestro-symphony-readonly-kr.service
+
+[Install]
+WantedBy=timers.target
