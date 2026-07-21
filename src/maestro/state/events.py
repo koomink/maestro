@@ -6,6 +6,7 @@ from maestro.state.store import StateStore
 
 
 class SystemEventType(StrEnum):
+    RUN_PROVENANCE = "run_provenance"
     MAESTRO_HEARTBEAT = "maestro_heartbeat"
     RUN_ONCE_COMPLETED = "run_once_completed"
     RUN_ONCE_FAILED = "run_once_failed"
@@ -41,6 +42,10 @@ class SystemEventType(StrEnum):
 
 
 SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    SystemEventType.RUN_PROVENANCE: (
+        "run_kind",
+        "deployment_source_fingerprint",
+    ),
     SystemEventType.MAESTRO_HEARTBEAT: ("mode", "source"),
     SystemEventType.RUN_ONCE_COMPLETED: ("orders_created", "total_value", "cash"),
     SystemEventType.RUN_ONCE_FAILED: ("error_type", "error_message"),

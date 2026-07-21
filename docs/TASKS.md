@@ -768,6 +768,8 @@
       suppress unchanged open notifications, and persist batch summaries
 - [x] Add KIS domestic native revision support plus account recovery for legacy
       order IDs and refreshed `/orders` modification examples
+- [x] Record audited run provenance for signal, approval, and `run_once` with
+      deployment commit/source hash and prepared/runtime config fingerprints
 
 ## Completed / Historical Notes
 

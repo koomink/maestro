@@ -224,6 +224,12 @@ writes through a writer lock. A future daemon architecture remains deferred
 until scheduling, approval polling, status polling, and recovery need one
 coordinated runtime.
 
+Every orchestration run (`run_once`, signal, and approval) also persists an
+audited `run_provenance` event. It records the deployed Git commit, whether the
+worktree was dirty at process start, a fingerprint of the exact source tree,
+and the prepared/runtime config fingerprints. This makes a run reproducible
+without placing config contents or secrets in state or audit logs.
+
 Maestro persists event timestamps in UTC for stable age checks. CLI, Telegram,
 health, and dashboard read-model surfaces convert those timestamps to the
 operator timezone from `execution.market_session.timezone` and include the

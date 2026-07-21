@@ -18,6 +18,7 @@ from maestro.config.multi_account_contributions import is_multi_account_contribu
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderType, RunMode
 from maestro.core.ids import new_run_id, new_signal_run_id
+from maestro.core.provenance import current_deployment_identity
 from maestro.core.symbols import is_cash_symbol
 from maestro.datahub.base import BaseDataProvider, build_data_provider
 from maestro.execution.base import OrderIntent
@@ -184,6 +185,7 @@ class MaestroOrchestrator:
         self.account_router = BrokerAccountRouter(config)
         self.fx_service = ConfiguredFXRefreshService(config, self.state_store)
         self.config_identity = config_identity
+        self.deployment_identity = current_deployment_identity()
         self.order_capacity_lookup = order_capacity_lookup
         self._order_capacity_clients: dict[str | None, Any] = {}
 
@@ -214,6 +216,7 @@ class MaestroOrchestrator:
         contribution_override: bool = False,
     ) -> SignalRunSummary:
         signal_run_id = new_signal_run_id()
+        self._record_run_provenance(signal_run_id, "signal")
         current_state = self._load_run_portfolio_state(signal_run_id)
         selected_strategy_ids = set(strategy_ids or [])
         if selected_strategy_ids:
@@ -423,6 +426,7 @@ class MaestroOrchestrator:
         ]
         approval_orders = self._orders_requiring_approval(orders)
         run_id = new_run_id()
+        self._record_run_provenance(run_id, "approval", signal_run_id=signal_run_id)
         if not approval_orders:
             self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
             self.state_store.save_system_event(
@@ -570,6 +574,7 @@ class MaestroOrchestrator:
 
     def _run_once_locked(self) -> RunOnceSummary:
         run_id = new_run_id()
+        self._record_run_provenance(run_id, "run_once")
         current_state = self._load_run_portfolio_state(run_id)
         valid_results: list[TargetAllocationResult] = []
         data_requests_by_strategy: dict[str, Any] = {}
@@ -1189,6 +1194,29 @@ class MaestroOrchestrator:
         payload: dict[str, Any],
     ) -> None:
         save_audited_system_event(self.state_store, self.audit, run_id, event_type, payload)
+
+    def _record_run_provenance(
+        self,
+        run_id: str,
+        run_kind: str,
+        *,
+        signal_run_id: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {
+            "run_kind": run_kind,
+            "signal_run_id": signal_run_id,
+            "deployment_commit": self.deployment_identity.commit,
+            "deployment_source_fingerprint": self.deployment_identity.source_fingerprint,
+            "deployment_dirty": self.deployment_identity.dirty,
+            "config_path": self.config_identity.path if self.config_identity else None,
+            "config_fingerprint": (
+                self.config_identity.fingerprint if self.config_identity else None
+            ),
+            "config_runtime_fingerprint": (
+                self.config_identity.runtime_fingerprint if self.config_identity else None
+            ),
+        }
+        self._record_event(run_id, SystemEventType.RUN_PROVENANCE, payload)
 
     def _load_run_portfolio_state(self, run_id: str) -> PortfolioState:
         if self.config.mode != RunMode.LIVE_APPROVAL:

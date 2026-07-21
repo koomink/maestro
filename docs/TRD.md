@@ -275,6 +275,14 @@ daemon-before safety boundary for CLI jobs plus Telegram/dashboard services.
 Operator status surfaces config identity plus state/audit paths so a running
 process can be checked against the intended deployment config.
 
+Each orchestration run writes a `run_provenance` system/audit event before
+loading portfolio state. The payload contains the Git commit, dirty-worktree
+flag, exact source-tree fingerprint, source config fingerprint, and canonical
+runtime config fingerprint. Signal, approval, and legacy `run_once` executions
+therefore remain attributable even when a later deployment changes code or
+operator configuration. Only hashes and paths are persisted, never config or
+secret values.
+
 `profile_stage` is derived from the validated config and can optionally be
 pinned in operator-local YAML. It separates promotion stage from `mode`:
 `paper`, `paper_real_data`, `live_readonly`, `live_approval_disabled`,
