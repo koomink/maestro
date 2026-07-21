@@ -152,7 +152,12 @@ def test_readonly_refresh_continues_after_one_account_failure(monkeypatch, tmp_p
     assert [result.account_id for result in report.results] == ["kis_isa", "toss_brokerage"]
     assert report.results[0].snapshot_id is None
     assert report.results[1].snapshot_id is not None
-    assert len(StateStore(config.state.sqlite_path, 0).list_broker_account_snapshots()) == 1
+    persisted = StateStore(config.state.sqlite_path, 0)
+    assert len(persisted.list_broker_account_snapshots()) == 1
+    provenance = persisted.list_system_events_by_type("run_provenance")[0]["payload"]
+    assert provenance["run_kind"] == "readonly_refresh"
+    assert provenance["deployment_commit"]
+    assert provenance["account_ids"] == ["kis_isa", "toss_brokerage"]
 
 
 def test_readonly_refresh_retries_timeout_but_not_business_error(monkeypatch, tmp_path):

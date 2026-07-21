@@ -10,6 +10,7 @@ from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.ids import new_run_id
+from maestro.core.provenance import current_deployment_identity
 from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.execution.brokers.readonly_factory import (
     broker_readonly_accounts,
@@ -99,6 +100,25 @@ def refresh_readonly_accounts(
     if unknown:
         raise ValueError("Unknown read-only account_id(s): " + ", ".join(unknown))
     run_id = new_run_id()
+    deployment = current_deployment_identity()
+    save_audited_system_event(
+        store,
+        audit,
+        run_id,
+        SystemEventType.RUN_PROVENANCE,
+        {
+            "run_kind": "readonly_refresh",
+            "signal_run_id": None,
+            "deployment_commit": deployment.commit,
+            "deployment_source_fingerprint": deployment.source_fingerprint,
+            "deployment_dirty": deployment.dirty,
+            "config_path": identity.path if identity else None,
+            "config_fingerprint": identity.fingerprint if identity else None,
+            "config_runtime_fingerprint": identity.runtime_fingerprint if identity else None,
+            "source": source,
+            "account_ids": selected,
+        },
+    )
     results = [
         _refresh_one_account(
             config,

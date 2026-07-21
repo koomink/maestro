@@ -7,6 +7,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from maestro.approval.models import ApprovalDecision
+from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
@@ -110,6 +111,7 @@ class TelegramOperatorCommandRouter:
         client: TelegramBotClient,
         signal_config_path: str | Path | None = None,
         approval_config_path: str | Path | None = None,
+        config_identity: ConfigIdentity | None = None,
     ) -> None:
         self.config = config
         self.store = store
@@ -117,6 +119,7 @@ class TelegramOperatorCommandRouter:
         self.client = client
         self.signal_config_path = Path(signal_config_path) if signal_config_path else None
         self.approval_config_path = Path(approval_config_path) if approval_config_path else None
+        self.config_identity = config_identity
 
     def process_update(self, update: Mapping[str, Any]) -> bool:
         callback = update.get("callback_query")
@@ -890,7 +893,7 @@ class TelegramOperatorCommandRouter:
         if assigned_strategy_id:
             allocation = next(
                 (row for row in allocations if row.get("strategy_id") == assigned_strategy_id),
-                None,
+                self.config_identity,
             )
             if allocation is None:
                 self._answer(callback, "This cash-flow proposal is no longer active.")

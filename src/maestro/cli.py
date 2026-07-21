@@ -949,6 +949,7 @@ def telegram_operator(
         ),
         signal_config_path=signal_config,
         approval_config_path=approval_config,
+        config_identity=identity,
     )
 
     offset = None
