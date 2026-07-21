@@ -455,6 +455,15 @@ also rechecks KIS buying power and max buy quantity with the actual limit price
 immediately before broker submit and rejects the order if KIS reports
 insufficient capacity.
 
+Before Telegram approval, Maestro applies the same account-routed broker
+capacity check to every live buy order. An order that exceeds current cash or
+maximum buy quantity is excluded without blocking valid orders for other
+accounts, and is persisted as `live_order_capacity_blocked`. The Telegram alert
+includes the planned and available quantity plus a
+`/retry_order <blocked_order_id> <quantity> [price]` example. A retry is limited
+to the original quantity, same trading date, fresh capacity and live gates, and
+always creates a new Telegram approval.
+
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
 and records `fill_reconciliation` system and audit events. Rejected, canceled,
@@ -479,6 +488,16 @@ until a terminal status or max polls, reconciles fills after every poll, runs
 broker reconciliation after fill updates when configured, emits operator
 notifications through `LiveOrderNotificationClient`, and records a
 `live_order_lifecycle` summary. Max polls do not auto-cancel.
+
+Multi-order approvals use `LiveOrderBatchLifecycleService`: all orders that pass
+their final pre-submit checks are submitted first, then accepted orders are
+polled together using the existing interval, poll-count, and timeout as one
+batch budget. Repeated unchanged `open` notifications are suppressed. The final
+Telegram summary shows requested, filled, and remaining quantities and provides
+`/modify <broker_order_id> <price> [quantity]` for open remainders. `/orders`
+refreshes current open/partial orders and prints the same command. KIS domestic
+modification uses its native revision endpoint after a fresh modifiable-quantity
+query; every modification still requires a separate Telegram approval.
 
 `MaestroOrchestrator.run_once()` remains paper-mode by default, but in
 `live_approval` mode it uses the existing proposal and approval path, converts

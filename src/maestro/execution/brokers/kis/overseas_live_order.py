@@ -79,6 +79,7 @@ class KISRestOverseasStockLiveOrderClient(
                 broker_order_org_no=broker_order_org_no,
                 order_id=request.order_id,
                 submitted_at=utc_now().isoformat(),
+                account_id=request.account_id,
                 broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
             )
         return LiveOrderResult(

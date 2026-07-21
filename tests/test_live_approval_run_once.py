@@ -17,6 +17,7 @@ from maestro.execution.brokers.kis.models import (
     KISReadOnlySnapshot,
 )
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.live_orders import (
     BrokerOrderId,
     BrokerReconciliationRunner,
@@ -744,6 +745,15 @@ class FakeLiveOrderClient(LiveOrderClient):
             order_id=request.order_id,
             status=OrderStatus.ACCEPTED_BY_BROKER,
             broker_order=_broker_order(request),
+        )
+
+    def get_buying_power(self, symbol, order_price):
+        return BrokerBuyingPower(
+            symbol=symbol,
+            order_price=order_price,
+            cash_buying_power=1_000_000_000,
+            max_buy_quantity=1_000_000,
+            source="test",
         )
 
 

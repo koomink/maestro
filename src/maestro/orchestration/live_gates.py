@@ -423,31 +423,43 @@ class LiveExecutionGateService:
         broker_validation = self.config.execution.broker_validation
         if not broker_validation.require_quote_validation:
             return None
-        latest = self.state_store.load_latest_broker_account_snapshot()
-        if latest is None:
+        # Quotes must come from the snapshot of the account each order trades
+        # in: the globally-latest snapshot belongs to whichever account was
+        # fetched last and does not carry quotes for other accounts' symbols.
+        snapshots_by_account = _latest_broker_snapshots_by_account(self.state_store, self.config)
+        if not snapshots_by_account:
             return {"reason": "missing_broker_snapshot"}
-        current_prices = latest["payload"].get("current_prices", {})
-        for order in orders:
-            quote = current_prices.get(order.symbol)
-            if quote is None:
-                return {"reason": "missing_broker_quote", "symbol": order.symbol}
-            quote_value = float(quote)
-            if quote_value <= 0:
-                return {
-                    "reason": "invalid_broker_quote",
-                    "symbol": order.symbol,
-                    "broker_quote": quote_value,
-                }
-            deviation = abs(order.price - quote_value) / quote_value
-            if deviation > broker_validation.max_quote_deviation_pct:
-                return {
-                    "reason": "broker_quote_deviation_exceeded",
-                    "symbol": order.symbol,
-                    "order_price": order.price,
-                    "broker_quote": quote_value,
-                    "deviation_pct": deviation,
-                    "max_deviation_pct": broker_validation.max_quote_deviation_pct,
-                }
+        account_router = BrokerAccountRouter(self.config)
+        for account_id, account_orders in _orders_by_account(orders).items():
+            latest = _snapshot_for_account(snapshots_by_account, account_router, account_id)
+            if latest is None:
+                return {"reason": "missing_broker_snapshot", "account_id": account_id}
+            current_prices = latest["payload"].get("current_prices", {})
+            for order in account_orders:
+                quote = current_prices.get(order.symbol)
+                if quote is None:
+                    return {
+                        "reason": "missing_broker_quote",
+                        "symbol": order.symbol,
+                        "account_id": account_id,
+                    }
+                quote_value = float(quote)
+                if quote_value <= 0:
+                    return {
+                        "reason": "invalid_broker_quote",
+                        "symbol": order.symbol,
+                        "broker_quote": quote_value,
+                    }
+                deviation = abs(order.price - quote_value) / quote_value
+                if deviation > broker_validation.max_quote_deviation_pct:
+                    return {
+                        "reason": "broker_quote_deviation_exceeded",
+                        "symbol": order.symbol,
+                        "order_price": order.price,
+                        "broker_quote": quote_value,
+                        "deviation_pct": deviation,
+                        "max_deviation_pct": broker_validation.max_quote_deviation_pct,
+                    }
         return None
 
     def _broker_risk_block(self, orders: list[OrderIntent]) -> dict[str, Any] | None:
@@ -512,15 +524,26 @@ class LiveExecutionGateService:
                     "issue_count": len(payload["issues"]),
                 }
             )
+        # Multi-account reconciliation records the max snapshot id at the top
+        # level and one id per account in account_results; an account snapshot
+        # counts as reconciled when it appears in either place.
+        reconciled_ids: set[int] = set()
         reconciled_snapshot_id = payload.get("broker_snapshot_id")
-        if reconciled_snapshot_id is None:
+        if reconciled_snapshot_id is not None:
+            reconciled_ids.add(int(reconciled_snapshot_id))
+        for entry in payload.get("account_results") or []:
+            entry_snapshot_id = entry.get("broker_snapshot_id")
+            if entry_snapshot_id is not None:
+                reconciled_ids.add(int(entry_snapshot_id))
+        if not reconciled_ids:
             issues.append({"reason": "broker_reconciliation_snapshot_unknown"})
-        elif int(reconciled_snapshot_id) != int(latest_snapshot["id"]):
+        elif int(latest_snapshot["id"]) not in reconciled_ids:
             issues.append(
                 {
                     "reason": "broker_snapshot_not_reconciled",
                     "latest_broker_snapshot_id": latest_snapshot["id"],
                     "reconciled_broker_snapshot_id": reconciled_snapshot_id,
+                    "reconciled_broker_snapshot_ids": sorted(reconciled_ids),
                 }
             )
         return issues

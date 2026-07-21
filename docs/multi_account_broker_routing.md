@@ -199,7 +199,14 @@ available cash after fee buffer, or a custom `/budget <request_id> <amount>`.
 The selected amount is saved as a budget decision, Maestro regenerates the
 signal, and any generated orders still require the normal approval flow.
 `max_monthly_budget` is kept only as a compatibility field and is not used as a
-cash cap.
+cash cap. The fee buffer is applied once when raw broker cash is converted to
+spendable contribution cash. Orders above the configured per-order notional cap
+are split into smaller orders; the resulting order set still fails closed if it
+would exceed the operator-owned daily notional or order-count limits.
+
+Contribution scheduling uses the selected market session's explicit `holidays`
+list in addition to weekdays. Operator profiles must refresh KRX holiday dates
+before each calendar year; an empty list does not infer Korean public holidays.
 
 Cash rebalance v1 only allocates available account cash across execution sleeves.
 It does not sell existing positions to force sleeve weights. If a sleeve is below

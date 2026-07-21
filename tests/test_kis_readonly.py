@@ -23,6 +23,7 @@ from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import (
     BrokerOrderId,
     LiveOrderCancelRequest,
+    LiveOrderModifyRequest,
     LiveOrderRequest,
 )
 from maestro.monitoring.audit_logger import AuditLogger
@@ -1312,6 +1313,121 @@ def test_kis_overseas_cancel_adapter_uses_verified_cancel_payload(monkeypatch):
     }
 
 
+def test_kis_domestic_modify_uses_verified_revision_payload(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+        broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
+    )
+    transport = FakeKISTransport()
+    client = KISRestDomesticStockLiveOrderClient(
+        config,
+        transport=transport,
+        instruments=_domestic_instruments(),
+    )
+    original = BrokerOrderId(
+        broker="kis",
+        broker_order_id="0002",
+        broker_order_org_no="91255",
+        order_id="ord_1",
+        submitted_at="2026-07-15T04:00:00+00:00",
+        account_id="kis_ps",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+    )
+
+    result = client.modify_order(
+        LiveOrderModifyRequest(
+            run_id="run_modify",
+            approval_id="appr_modify",
+            broker_order=original,
+            symbol="005930",
+            limit_price=71000,
+            quantity=2,
+        )
+    )
+
+    call = [
+        call
+        for call in transport.calls
+        if call["url"].endswith("/trading/order-rvsecncl")
+    ][0]
+    assert call["headers"]["tr_id"] == "TTTC0013U"
+    assert call["json_body"] == {
+        "CANO": "12345678",
+        "ACNT_PRDT_CD": "01",
+        "KRX_FWDG_ORD_ORGNO": "91255",
+        "ORGN_ODNO": "0002",
+        "ORD_DVSN": "00",
+        "RVSE_CNCL_DVSN_CD": "01",
+        "ORD_QTY": "2",
+        "ORD_UNPR": "71000",
+        "QTY_ALL_ORD_YN": "N",
+        "EXCG_ID_DVSN_CD": "KRX",
+    }
+    assert result.broker_order.account_id == "kis_ps"
+    assert result.broker_order.parent_broker_order_id == "0002"
+
+
+def test_kis_domestic_modify_omitted_quantity_revises_full_remainder(monkeypatch):
+    client = _kis_domestic_modify_client(monkeypatch, FakeKISTransport())
+
+    client.modify_order(
+        LiveOrderModifyRequest(
+            run_id="run_modify",
+            approval_id="appr_modify",
+            broker_order=_domestic_modifiable_broker_order(),
+            symbol="005930",
+            limit_price=71000,
+        )
+    )
+
+    call = [
+        call
+        for call in client.transport.calls
+        if call["url"].endswith("/trading/order-rvsecncl")
+    ][0]
+    assert call["json_body"]["ORD_QTY"] == "3"
+    assert call["json_body"]["QTY_ALL_ORD_YN"] == "Y"
+
+
+def _kis_domestic_modify_client(monkeypatch, transport):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    return KISRestDomesticStockLiveOrderClient(
+        KISConfig(
+            enabled=True,
+            provider="kis",
+            account_id="12345678-01",
+            app_key_env="TEST_KIS_APP_KEY",
+            app_secret_env="TEST_KIS_APP_SECRET",
+            access_token_env="TEST_KIS_ACCESS_TOKEN",
+            broker_products=[BrokerProduct.KIS_DOMESTIC_STOCK],
+        ),
+        transport=transport,
+        instruments=_domestic_instruments(),
+    )
+
+
+def _domestic_modifiable_broker_order():
+    return BrokerOrderId(
+        broker="kis",
+        broker_order_id="0002",
+        broker_order_org_no="91255",
+        order_id="ord_1",
+        submitted_at="2026-07-15T04:00:00+00:00",
+        account_id="kis_ps",
+        broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+    )
+
+
 def test_kis_live_order_client_normalizes_open_status(monkeypatch):
     client = _kis_live_order_client(monkeypatch, FakeKISTransport())
 
@@ -1490,6 +1606,23 @@ def _us_instruments() -> list[TradableInstrument]:
     ]
 
 
+def _domestic_instruments() -> list[TradableInstrument]:
+    return [
+        TradableInstrument(
+            symbol="005930",
+            asset_type="stock",
+            region="KR",
+            currency="KRW",
+            broker="kis",
+            broker_product="kis_domestic_stock",
+            broker_symbol="005930",
+            exchange_code="KRX",
+            quantity_step=1,
+            price_tick=1,
+        )
+    ]
+
+
 class FakeKISTransport:
     def __init__(
         self,
@@ -1554,6 +1687,18 @@ class FakeKISTransport:
                     "nrcvb_buy_amt": self.buying_power,
                     "nrcvb_buy_qty": self.max_buy_quantity,
                 },
+            }
+        if url.endswith("/inquire-psbl-rvsecncl"):
+            return {
+                "rt_cd": "0",
+                "output1": [
+                    {
+                        "odno": "0002",
+                        "ord_gno_brno": "91255",
+                        "psbl_qty": "3",
+                        "excg_id_dvsn_cd": "KRX",
+                    }
+                ],
             }
         if url.endswith("/inquire-price"):
             return {"rt_cd": "0", "output": {"stck_prpr": "71000"}}
@@ -1668,6 +1813,16 @@ class FakeKISTransport:
                     "KRX_FWDG_ORD_ORGNO": "KRX",
                     "ODNO": "0000000001",
                     "ORD_TMD": "090001",
+                },
+            }
+        if url.endswith("/trading/order-rvsecncl"):
+            return {
+                "rt_cd": "0",
+                "msg1": "revision accepted",
+                "output": {
+                    "KRX_FWDG_ORD_ORGNO": "91255",
+                    "ODNO": "0000000007",
+                    "ORD_TMD": "090003",
                 },
             }
         raise AssertionError(f"Unexpected KIS fake URL: {url}")

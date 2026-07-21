@@ -1976,6 +1976,39 @@ def test_telegram_operator_cli_rejects_placeholder_chat_ids(tmp_path):
     assert "replace placeholder 123456789" in result.output
 
 
+def test_retry_order_rejection_ack_prevents_duplicate_callback(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    proposal_id = "run_retry_1"
+    store.save_system_event(
+        proposal_id,
+        "live_order_retry_proposal",
+        {
+            "proposal_id": proposal_id,
+            "blocked_order_id": "ord_blocked_1",
+            "request": {"run_id": proposal_id},
+            "status": "pending",
+        },
+    )
+    update = callback_update(f"operator:retry-order:reject:{proposal_id}")
+
+    assert router.process_update(update)
+    assert router.process_update(update)
+
+    acknowledgements = store.list_system_events_by_type("live_order_retry_proposal_ack")
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0]["payload"]["status"] == "rejected"
+    assert client.answered_callbacks[-1]["text"] == "This retry proposal is no longer active."
+
+
 class FakeTelegramClient:
     def __init__(self, updates: list[dict[str, Any]] | None = None) -> None:
         self.updates = list(updates or [])

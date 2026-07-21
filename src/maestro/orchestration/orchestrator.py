@@ -1,5 +1,6 @@
 import json
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -26,6 +27,7 @@ from maestro.execution.broker_router import (
     UnsupportedBrokerOperation,
 )
 from maestro.execution.broker_state import portfolio_state_from_broker_account
+from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.brokers.readonly_factory import build_broker_readonly_service
 from maestro.execution.budget_requests import (
     ContributionBudgetRequest,
@@ -42,6 +44,10 @@ from maestro.execution.funding_requests import (
     build_contribution_funding_request,
     contribution_available_cash,
 )
+from maestro.execution.live_order_batch import (
+    BatchOrderDependencies,
+    LiveOrderBatchLifecycleService,
+)
 from maestro.execution.live_order_factory import (
     LiveApprovalDependencies,
     build_live_approval_dependencies,
@@ -54,6 +60,7 @@ from maestro.execution.live_orders import (
     LiveOrderRequest,
     LiveOrderStatusClient,
 )
+from maestro.execution.order_capacity import OrderCapacityBlock, OrderCapacityService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.monitoring.audit_logger import AuditLogger
@@ -100,6 +107,8 @@ class SignalRunSummary(BaseModel):
     loaded_strategies: list[str]
     action_required: bool
     orders_preview_count: int
+    contribution_override: bool = False
+    no_order_reasons: list[str] = []
 
 
 class SignalApprovalSummary(BaseModel):
@@ -136,6 +145,7 @@ class MaestroOrchestrator:
         broker_reconciliation_service: BrokerReconciliationRunner | None = None,
         telegram_client=None,
         config_identity: ConfigIdentity | None = None,
+        order_capacity_lookup: Callable[[OrderIntent], BrokerBuyingPower] | None = None,
     ) -> None:
         self.config = config
         signal_strategies = [strategy for strategy in config.strategies if strategy.signal_enabled]
@@ -174,20 +184,35 @@ class MaestroOrchestrator:
         self.account_router = BrokerAccountRouter(config)
         self.fx_service = ConfiguredFXRefreshService(config, self.state_store)
         self.config_identity = config_identity
+        self.order_capacity_lookup = order_capacity_lookup
+        self._order_capacity_clients: dict[str | None, Any] = {}
 
     def run_once(self) -> RunOnceSummary:
         with self.state_store.writer_lock("run_once"):
             return self._run_once_locked()
 
-    def run_signal(self, strategy_ids: list[str] | None = None) -> SignalRunSummary:
+    def run_signal(
+        self,
+        strategy_ids: list[str] | None = None,
+        *,
+        contribution_override: bool = False,
+    ) -> SignalRunSummary:
         with self.state_store.writer_lock("run_signal"):
-            return self._run_signal_locked(strategy_ids=strategy_ids)
+            return self._run_signal_locked(
+                strategy_ids=strategy_ids,
+                contribution_override=contribution_override,
+            )
 
     def approve_signal(self, signal_run_id: str) -> SignalApprovalSummary:
         with self.state_store.writer_lock("approve_signal"):
             return self._approve_signal_locked(signal_run_id)
 
-    def _run_signal_locked(self, *, strategy_ids: list[str] | None = None) -> SignalRunSummary:
+    def _run_signal_locked(
+        self,
+        *,
+        strategy_ids: list[str] | None = None,
+        contribution_override: bool = False,
+    ) -> SignalRunSummary:
         signal_run_id = new_signal_run_id()
         current_state = self._load_run_portfolio_state(signal_run_id)
         selected_strategy_ids = set(strategy_ids or [])
@@ -232,6 +257,7 @@ class MaestroOrchestrator:
         orders = []
         funding_requests: list[ContributionFundingRequest] = []
         budget_requests: list[ContributionBudgetRequest] = []
+        no_order_reasons: list[str] = []
         for order_scope in order_targets:
             scoped_execution = build_execution_engine(
                 order_scope.execution_config,
@@ -251,9 +277,20 @@ class MaestroOrchestrator:
                     scoped_execution,
                     order_generation_time,
                     contribution_already_executed=contribution_already_executed,
+                    contribution_override=contribution_override,
                 )
                 if budget_request is not None:
                     budget_requests.append(budget_request)
+                else:
+                    no_order_reasons.append(
+                        self._no_order_reason(
+                            order_scope,
+                            scoped_execution,
+                            order_generation_time,
+                            contribution_already_executed=contribution_already_executed,
+                            contribution_override=contribution_override,
+                        )
+                    )
                 continue
             account_orders = scoped_execution.propose_orders(
                 order_scope.state,
@@ -261,6 +298,7 @@ class MaestroOrchestrator:
                 valuation_prices,
                 as_of=order_generation_time,
                 contribution_already_executed=contribution_already_executed,
+                contribution_override=contribution_override,
             )
             if not account_orders:
                 funding_request = self._contribution_funding_request(
@@ -269,9 +307,20 @@ class MaestroOrchestrator:
                     scoped_execution,
                     order_generation_time,
                     contribution_already_executed=contribution_already_executed,
+                    contribution_override=contribution_override,
                 )
                 if funding_request is not None:
                     funding_requests.append(funding_request)
+                else:
+                    no_order_reasons.append(
+                        self._no_order_reason(
+                            order_scope,
+                            scoped_execution,
+                            order_generation_time,
+                            contribution_already_executed=contribution_already_executed,
+                            contribution_override=contribution_override,
+                        )
+                    )
             orders.extend(
                 self._apply_native_order_prices(
                     self._stamp_orders_with_account_id(
@@ -321,6 +370,8 @@ class MaestroOrchestrator:
             "budget_requests": [request.model_dump(mode="json") for request in budget_requests],
             "budget_requests_count": len(budget_requests),
             "action_required": bool(approval_orders) and not budget_requests,
+            "contribution_override": contribution_override,
+            "no_order_reasons": no_order_reasons,
         }
         payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(self.config)
         if self.config_identity is not None:
@@ -356,6 +407,8 @@ class MaestroOrchestrator:
             loaded_strategies=[result.strategy_id for result in valid_results],
             action_required=bool(approval_orders) and not budget_requests,
             orders_preview_count=len(orders),
+            contribution_override=contribution_override,
+            no_order_reasons=no_order_reasons,
         )
 
     def _approve_signal_locked(self, signal_run_id: str) -> SignalApprovalSummary:
@@ -388,6 +441,31 @@ class MaestroOrchestrator:
                 approval_status="not_required",
             )
         self._validate_signal_package_for_approval(package)
+        self._validate_signal_approval_preconditions(run_id, package)
+        approval_orders, capacity_blocks = self._partition_orders_by_capacity(
+            run_id,
+            approval_orders,
+            signal_run_id=signal_run_id,
+            package=package,
+        )
+        if not approval_orders:
+            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+            self.state_store.save_system_event(
+                run_id,
+                "signal_approval_completed",
+                {
+                    "signal_run_id": signal_run_id,
+                    "orders_created": 0,
+                    "approval_status": "capacity_blocked",
+                    "capacity_blocked_count": len(capacity_blocks),
+                },
+            )
+            return SignalApprovalSummary(
+                signal_run_id=signal_run_id,
+                run_id=run_id,
+                orders_created=0,
+                approval_status="capacity_blocked",
+            )
         self._validate_signal_approval_gates(run_id, approval_orders, package)
         self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
 
@@ -599,6 +677,13 @@ class MaestroOrchestrator:
                     data_quality_issues,
                     target,
                     risk_decision,
+                )
+            capacity_blocks = []
+            if not safety_state.blocks_live_execution:
+                approval_orders, capacity_blocks = self._partition_orders_by_capacity(
+                    run_id,
+                    approval_orders,
+                    signal_run_id=None,
                 )
             live_blocks = self._live_execution_blocks(
                 run_id,
@@ -1450,6 +1535,141 @@ class MaestroOrchestrator:
             reasons = ", ".join(str(block.get("reason")) for block in live_blocks)
             raise ValueError(f"Signal approval blocked by live execution gate: {reasons}")
 
+    def _validate_signal_approval_preconditions(
+        self,
+        run_id: str,
+        package: dict[str, Any],
+    ) -> None:
+        safety_state = self.safety.current_state()
+        if safety_state.blocks_live_execution:
+            self.safety.record_blocked_execution(
+                run_id,
+                self.config.mode.value,
+                safety_state,
+                "approve_signal",
+            )
+            raise ValueError(
+                "Signal approval safety state blocks live execution: "
+                f"state={safety_state.state.value}"
+            )
+        data_quality_issues = list(package.get("data_quality_issues") or [])
+        if data_quality_issues:
+            payload = {"issues": data_quality_issues, "mode": self.config.mode.value}
+            self._record_event(run_id, SystemEventType.STALE_DATA_HALT, payload)
+            self.safety.halt(
+                run_id,
+                "Signal approval blocked by production hardening gate.",
+                source="system",
+            )
+            raise ValueError("Signal approval blocked by live execution gate: stale_data")
+
+    def _partition_orders_by_capacity(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        *,
+        signal_run_id: str | None,
+        package: dict[str, Any] | None = None,
+    ) -> tuple[list[OrderIntent], list[OrderCapacityBlock]]:
+        if self.config.mode != RunMode.LIVE_APPROVAL or not orders:
+            return orders, []
+        armed = [order for order in orders if self._effective_order_posture(order) == "armed"]
+        if not armed:
+            return orders, []
+        service = OrderCapacityService(self.order_capacity_lookup or self._lookup_order_capacity)
+        accepted_armed, blocked = service.partition(armed)
+        accepted_ids = {order.order_id for order in accepted_armed}
+        accepted = [
+            order
+            for order in orders
+            if self._effective_order_posture(order) != "armed" or order.order_id in accepted_ids
+        ]
+        for item in blocked:
+            payload = item.model_dump(mode="json")
+            payload.update(
+                {
+                    "blocked_order_id": item.order.order_id,
+                    "signal_run_id": signal_run_id,
+                    "status": "pending",
+                    "config_signal_contract_fingerprint": (
+                        package or {}
+                    ).get("config_signal_contract_fingerprint"),
+                    "config_runtime_fingerprint": (package or {}).get(
+                        "config_runtime_fingerprint"
+                    ),
+                }
+            )
+            self._record_event(run_id, "live_order_capacity_blocked", payload)
+            self._notify_capacity_block(run_id, item)
+        return accepted, blocked
+
+    def _lookup_order_capacity(self, order: OrderIntent) -> BrokerBuyingPower:
+        if self.live_order_client is not None and hasattr(
+            self.live_order_client, "get_buying_power"
+        ):
+            return self.live_order_client.get_buying_power(order.symbol, order.price)
+
+        account_id = order.account_id
+        client = self._order_capacity_clients.get(account_id)
+        if client is None:
+            service = build_broker_readonly_service(
+                self.config,
+                self.state_store,
+                self.audit,
+                account_id=account_id,
+            )
+            while hasattr(service, "inner"):
+                service = service.inner
+            client = service.client
+            self._order_capacity_clients[account_id] = client
+        account = self.account_router.account(account_id)
+        broker = account.broker if account is not None else "kis"
+        instrument = self.config.universe.get(order.symbol)
+        symbol = instrument.symbol_for_broker(broker) if instrument is not None else order.symbol
+        return client.get_buying_power(symbol, order.price)
+
+    def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> None:
+        if self.telegram_client is None:
+            return
+        maximum = (
+            "unknown" if block.max_buy_quantity is None else f"{block.max_buy_quantity:g}"
+        )
+        retry_quantity = (
+            maximum
+            if block.max_buy_quantity is not None and block.max_buy_quantity > 0
+            else "<quantity>"
+        )
+        text = "\n".join(
+            [
+                "Maestro order blocked before approval",
+                f"order_id: {block.order.order_id}",
+                f"account_id: {block.order.account_id or 'default'}",
+                f"symbol: {block.order.symbol}",
+                f"planned_quantity: {block.requested_quantity:g}",
+                f"max_buy_quantity: {maximum}",
+                f"reason: {block.reason}",
+                "Submit a corrected standalone proposal with:",
+                (
+                    f"/retry_order {block.order.order_id} {retry_quantity} "
+                    f"{block.order.price:g}"
+                ),
+            ]
+        )
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            try:
+                self.telegram_client.send_message(chat_id, text)
+            except Exception as exc:
+                self._record_event(
+                    run_id,
+                    "live_order_notification_failed",
+                    {
+                        "order_id": block.order.order_id,
+                        "status": "capacity_blocked",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
+
     def _strategy_account_mappings(self) -> list[dict[str, Any]]:
         mappings = [
             {
@@ -1699,8 +1919,9 @@ class MaestroOrchestrator:
                 signal_run_id=signal_run_id,
             )
 
-        lifecycle_results = []
+        batch_items = []
         dependencies_by_account: dict[str | None, LiveApprovalDependencies] = {}
+        batch_notification_client = self.live_order_notification_client
         for order in armed_orders:
             dependencies = dependencies_by_account.get(order.account_id)
             if dependencies is None:
@@ -1717,6 +1938,8 @@ class MaestroOrchestrator:
                     signal_run_id=signal_run_id,
                 )
                 dependencies_by_account[order.account_id] = dependencies
+            if batch_notification_client is None:
+                batch_notification_client = dependencies.notification_client
             request = LiveOrderRequest(
                 order_id=order.order_id,
                 symbol=order.symbol,
@@ -1737,8 +1960,29 @@ class MaestroOrchestrator:
                 broker_product=order.broker_product,
                 signal_run_id=signal_run_id,
             )
-            lifecycle_results.append(dependencies.lifecycle_service.run(request, approval_decision))
-        return lifecycle_results, self.state_store.load_latest_portfolio_state()
+            batch_items.append(
+                (
+                    request,
+                    BatchOrderDependencies(
+                        safety_service=dependencies.safety_service,
+                        status_service=dependencies.status_service,
+                        fill_reconciliation_service=dependencies.fill_reconciliation_service,
+                        broker_reconciliation_service=(
+                            dependencies.broker_reconciliation_service
+                        ),
+                    ),
+                )
+            )
+        batch = LiveOrderBatchLifecycleService(
+            self.config.execution,
+            self.state_store,
+            self.audit,
+            batch_notification_client,
+        ).run(batch_items, approval_decision)
+        return (
+            [item.lifecycle for item in batch.items],
+            self.state_store.load_latest_portfolio_state(),
+        )
 
     def _record_live_order_dry_run(
         self,
@@ -1789,11 +2033,14 @@ class MaestroOrchestrator:
         as_of,
         *,
         contribution_already_executed: bool,
+        contribution_override: bool = False,
     ) -> ContributionFundingRequest | None:
         config = order_scope.execution_config
         if config.order_generation_mode != "buy_only_contribution":
             return None
-        if contribution_already_executed or not scoped_execution.contribution_is_due(as_of):
+        if contribution_already_executed:
+            return None
+        if not contribution_override and not scoped_execution.contribution_is_due(as_of):
             return None
         return build_contribution_funding_request(
             source_signal_run_id=signal_run_id,
@@ -1808,6 +2055,45 @@ class MaestroOrchestrator:
             expires_after_seconds=self.config.approval.signal_max_age_seconds,
         )
 
+    def _no_order_reason(
+        self,
+        order_scope: ScopedOrderTarget,
+        scoped_execution,
+        as_of,
+        *,
+        contribution_already_executed: bool,
+        contribution_override: bool,
+    ) -> str:
+        strategy_ids = ",".join(order_scope.target.source_strategy_ids) or "unknown"
+        account = order_scope.account_id or "default"
+        label = f"{strategy_ids}@{account}"
+        config = order_scope.execution_config
+        if config.order_generation_mode == "buy_only_contribution":
+            contribution = config.contribution
+            if not contribution.enabled:
+                return f"{label}: contribution disabled"
+            if contribution_already_executed:
+                month_key = scoped_execution.contribution_month_key(as_of)
+                return f"{label}: monthly contribution already executed for {month_key}"
+            if not contribution_override and not scoped_execution.contribution_is_due(as_of):
+                next_date = scoped_execution.next_contribution_date(as_of)
+                return (
+                    f"{label}: contribution not due until {next_date.isoformat()} "
+                    f"(buy_day {contribution.buy_day}); manual /rebalance overrides this"
+                )
+            available = scoped_execution.contribution_available_cash(order_scope.state)
+            if available < contribution.min_monthly_budget:
+                return (
+                    f"{label}: available cash {available:,.0f} {contribution.currency.value} "
+                    f"is below min_monthly_budget "
+                    f"{contribution.min_monthly_budget:,.0f}"
+                )
+            return f"{label}: contribution produced no orders (check instrument minimums)"
+        has_positions = any(order_scope.state.positions.values())
+        if not has_positions and order_scope.allocated_cash <= 0:
+            return f"{label}: sleeve has no attributed holdings and no available cash"
+        return f"{label}: holdings already at target or deltas below minimum order size"
+
     def _contribution_budget_request(
         self,
         signal_run_id: str,
@@ -1816,11 +2102,14 @@ class MaestroOrchestrator:
         as_of,
         *,
         contribution_already_executed: bool,
+        contribution_override: bool = False,
     ) -> ContributionBudgetRequest | None:
         config = order_scope.execution_config
         if config.order_generation_mode != "buy_only_contribution":
             return None
-        if contribution_already_executed or not scoped_execution.contribution_is_due(as_of):
+        if contribution_already_executed:
+            return None
+        if not contribution_override and not scoped_execution.contribution_is_due(as_of):
             return None
         return build_contribution_budget_request(
             source_signal_run_id=signal_run_id,
@@ -2022,6 +2311,7 @@ class MaestroOrchestrator:
                         execution_config,
                         selected_budget,
                     )
+                execution_config = self._execution_config_for_spendable_cash(execution_config)
                 scope_state = PortfolioState(
                     cash=state_cash,
                     cash_by_currency={contribution.currency.value: state_cash},
@@ -2255,6 +2545,14 @@ class MaestroOrchestrator:
         contribution = values["contribution"]
         contribution["monthly_budget"] = budget
         values["contribution"] = contribution
+        return ExecutionConfig.model_validate(values)
+
+    def _execution_config_for_spendable_cash(
+        self,
+        execution_config: ExecutionConfig,
+    ) -> ExecutionConfig:
+        values = execution_config.model_dump(mode="python")
+        values["live_order_limits"]["fee_buffer_pct"] = 0.0
         return ExecutionConfig.model_validate(values)
 
     def _latest_account_states(

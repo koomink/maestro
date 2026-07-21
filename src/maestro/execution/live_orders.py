@@ -1,3 +1,7 @@
+from maestro.execution.live_order_batch import (
+    BatchOrderDependencies,
+    LiveOrderBatchLifecycleService,
+)
 from maestro.execution.live_order_cancellation import LiveOrderCancellationService
 from maestro.execution.live_order_fills import PartialFillReconciliationService
 from maestro.execution.live_order_lifecycle import LiveOrderLifecycleService
@@ -7,6 +11,8 @@ from maestro.execution.live_order_models import (
     BrokerOrderRequest,
     FillEvent,
     FillReconciliationResult,
+    LiveOrderBatchItemResult,
+    LiveOrderBatchLifecycleResult,
     LiveOrderCancelRequest,
     LiveOrderCancelResult,
     LiveOrderLifecycleNotification,
@@ -36,6 +42,7 @@ from maestro.execution.live_order_workflow import LiveOrderWorkflowService
 
 __all__ = [
     "AppliedFill",
+    "BatchOrderDependencies",
     "BrokerOrderId",
     "BrokerOrderRequest",
     "BrokerReconciliationRunner",
@@ -48,6 +55,9 @@ __all__ = [
     "LiveOrderClient",
     "LiveOrderLifecycleNotification",
     "LiveOrderLifecycleResult",
+    "LiveOrderBatchItemResult",
+    "LiveOrderBatchLifecycleResult",
+    "LiveOrderBatchLifecycleService",
     "LiveOrderLifecycleService",
     "LiveOrderModifyClient",
     "LiveOrderModificationService",

@@ -34,6 +34,7 @@ class OrderBuilder:
         *,
         as_of: datetime | None = None,
         contribution_already_executed: bool = False,
+        contribution_override: bool = False,
     ) -> list[OrderIntent]:
         if self.config.order_generation_mode == "buy_only_contribution":
             return self._build_buy_only_contribution_orders(
@@ -42,6 +43,7 @@ class OrderBuilder:
                 prices,
                 as_of=as_of,
                 contribution_already_executed=contribution_already_executed,
+                contribution_override=contribution_override,
             )
         if target.allocation_sleeves:
             return self._build_sleeve_orders(current_state, target, prices)
@@ -260,11 +262,12 @@ class OrderBuilder:
         *,
         as_of: datetime | None,
         contribution_already_executed: bool,
+        contribution_override: bool = False,
     ) -> list[OrderIntent]:
         contribution = self.config.contribution
         if not contribution.enabled or contribution_already_executed:
             return []
-        if not self._is_contribution_due(as_of):
+        if not contribution_override and not self._is_contribution_due(as_of):
             return []
 
         allocations = self._contribution_allocations(target)
@@ -298,30 +301,73 @@ class OrderBuilder:
             quantity = self._order_quantity(symbol, budget / order_price)
             instrument = self.instruments.get(symbol)
             min_quantity = instrument.min_order_quantity if instrument else 0.0
-            notional = quantity * order_price
             min_notional = instrument.min_order_notional if instrument else 0.0
-            if quantity <= 0 or quantity < min_quantity or notional < min_notional:
+            quantities = self._split_contribution_quantity(symbol, quantity, order_price)
+            quantities = [
+                chunk_quantity
+                for chunk_quantity in quantities
+                if chunk_quantity >= min_quantity
+                and chunk_quantity * order_price >= min_notional
+            ]
+            if not quantities:
                 continue
-            orders.append(
-                OrderIntent(
-                    order_id=new_order_id(),
-                    symbol=symbol,
-                    side=OrderSide.BUY,
-                    quantity=quantity,
-                    price=order_price,
-                    notional=notional,
-                    order_type=self.config.allowed_order_type,
-                    currency=instrument.currency if instrument else contribution.currency,
-                    sleeve=contribution.sleeve,
-                    broker_product=instrument.broker_product if instrument else None,
-                    metadata={
-                        "order_generation_mode": "buy_only_contribution",
-                        "contribution_month": month_key,
-                        "contribution_sleeve": contribution.sleeve,
-                    },
+            for chunk_index, chunk_quantity in enumerate(quantities, start=1):
+                metadata = {
+                    "order_generation_mode": "buy_only_contribution",
+                    "contribution_month": month_key,
+                    "contribution_sleeve": contribution.sleeve,
+                }
+                if len(quantities) > 1:
+                    metadata.update(
+                        {
+                            "contribution_chunk_index": chunk_index,
+                            "contribution_chunk_count": len(quantities),
+                        }
+                    )
+                orders.append(
+                    OrderIntent(
+                        order_id=new_order_id(),
+                        symbol=symbol,
+                        side=OrderSide.BUY,
+                        quantity=chunk_quantity,
+                        price=order_price,
+                        notional=chunk_quantity * order_price,
+                        order_type=self.config.allowed_order_type,
+                        currency=instrument.currency if instrument else contribution.currency,
+                        sleeve=contribution.sleeve,
+                        broker_product=instrument.broker_product if instrument else None,
+                        metadata=metadata,
+                    )
                 )
-            )
         return orders
+
+    def _split_contribution_quantity(
+        self,
+        symbol: str,
+        quantity: float,
+        order_price: float,
+    ) -> list[float]:
+        if quantity <= 0:
+            return []
+        instrument = self.instruments.get(symbol)
+        currency = instrument.currency if instrument else self.config.contribution.currency
+        max_notional = self.config.live_order_limits.max_order_notional_for(currency)
+        if max_notional is None or max_notional <= 0 or quantity * order_price <= max_notional:
+            return [quantity]
+
+        max_chunk_quantity = self._order_quantity(symbol, max_notional / order_price)
+        if max_chunk_quantity <= 0:
+            return [quantity]
+        chunks: list[float] = []
+        remaining = quantity
+        while remaining > 0:
+            chunk = min(remaining, max_chunk_quantity)
+            chunk = self._order_quantity(symbol, chunk)
+            if chunk <= 0:
+                break
+            chunks.append(chunk)
+            remaining = self._order_quantity(symbol, remaining - chunk)
+        return chunks
 
     def _contribution_allocations(self, target: PortfolioTarget) -> dict[str, float]:
         contribution = self.config.contribution
@@ -410,6 +456,16 @@ class OrderBuilder:
 
     def contribution_is_due(self, as_of: datetime | None = None) -> bool:
         return self._is_contribution_due(as_of)
+
+    def next_contribution_date(self, as_of: datetime | None = None) -> date:
+        local_date = self._local_date(as_of)
+        effective = self._effective_contribution_date(local_date.year, local_date.month)
+        if local_date <= effective:
+            return effective
+        candidate = local_date
+        while not self._is_trading_day(candidate):
+            candidate += timedelta(days=1)
+        return candidate
 
     def contribution_available_cash(self, current_state: PortfolioState) -> float:
         return self._contribution_spend(current_state)

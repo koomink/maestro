@@ -74,6 +74,30 @@ def test_equal_weight_case_splits_contribution_by_target_weights():
     assert notionals == {LEV: 1_800_000.0, DIV: 1_200_000.0}
 
 
+def test_contribution_order_is_split_at_live_per_order_notional_limit():
+    builder = _builder(
+        live_order_limits={"max_order_notional_by_currency": {"KRW": 4_000_000}},
+        monthly_budget=8_000_000,
+        min_monthly_budget=1,
+    )
+    state = PortfolioState(
+        cash=8_000_000,
+        cash_by_currency={"KRW": 8_000_000},
+        positions={LEV: 100},
+    )
+
+    orders = builder.build_orders(
+        state,
+        _target(),
+        prices={LEV: 100_000.0, DIV: 10_000.0},
+        as_of=_dt(2026, 5, 15),
+    )
+
+    assert [order.notional for order in orders] == [4_000_000, 4_000_000]
+    assert [order.metadata["contribution_chunk_index"] for order in orders] == [1, 2]
+    assert {order.metadata["contribution_chunk_count"] for order in orders} == {2}
+
+
 def test_share_and_tick_rounding_leave_residual_cash():
     builder = _builder(monthly_budget=1_000, min_monthly_budget=1)
     state = PortfolioState(cash=1_000, cash_by_currency={"KRW": 1_000}, positions={})
@@ -109,6 +133,81 @@ def test_non_trading_buy_day_executes_on_next_business_day():
 
     assert sunday_orders == []
     assert monday_orders
+
+
+def test_krx_holiday_buy_day_executes_on_next_configured_trading_day():
+    builder = _builder(
+        buy_day=25,
+        market_session={
+            "timezone": "Asia/Seoul",
+            "weekdays": [0, 1, 2, 3, 4],
+            "holidays": ["2026-09-25"],
+        },
+    )
+    state = PortfolioState(cash=3_000_000, cash_by_currency={"KRW": 3_000_000}, positions={})
+
+    holiday_orders = builder.build_orders(
+        state,
+        _target(),
+        prices={LEV: 100_000.0, DIV: 10_000.0},
+        as_of=_dt(2026, 9, 25),
+    )
+    monday_orders = builder.build_orders(
+        state,
+        _target(),
+        prices={LEV: 100_000.0, DIV: 10_000.0},
+        as_of=_dt(2026, 9, 28),
+    )
+
+    assert holiday_orders == []
+    assert monday_orders
+
+
+def test_contribution_override_generates_orders_before_buy_day():
+    builder = _builder(buy_day=25)
+    state = PortfolioState(cash=3_000_000, cash_by_currency={"KRW": 3_000_000}, positions={})
+    as_of = _dt(2026, 7, 13)
+
+    scheduled_orders = builder.build_orders(
+        state,
+        _target(),
+        prices={LEV: 100_000.0, DIV: 10_000.0},
+        as_of=as_of,
+    )
+    override_orders = builder.build_orders(
+        state,
+        _target(),
+        prices={LEV: 100_000.0, DIV: 10_000.0},
+        as_of=as_of,
+        contribution_override=True,
+    )
+
+    assert scheduled_orders == []
+    assert override_orders
+    assert {order.side for order in override_orders} == {OrderSide.BUY}
+
+
+def test_contribution_override_still_skips_already_executed_month():
+    builder = _builder(buy_day=25)
+    state = PortfolioState(cash=3_000_000, cash_by_currency={"KRW": 3_000_000}, positions={})
+
+    orders = builder.build_orders(
+        state,
+        _target(),
+        prices={LEV: 100_000.0, DIV: 10_000.0},
+        as_of=_dt(2026, 7, 13),
+        contribution_already_executed=True,
+        contribution_override=True,
+    )
+
+    assert orders == []
+
+
+def test_next_contribution_date_reports_upcoming_buy_day():
+    builder = _builder(buy_day=25)
+
+    # 2026-07-25 is a Saturday; next_trading_day policy pushes to Monday 07-27.
+    assert builder.next_contribution_date(_dt(2026, 7, 13)).isoformat() == "2026-07-27"
 
 
 def test_duplicate_monthly_execution_does_not_create_another_contribution_order(tmp_path):
@@ -373,11 +472,28 @@ def test_budget_request_requires_buy_only_contribution_mode():
         )
 
 
-def _builder(**contribution_overrides) -> OrderBuilder:
-    return OrderBuilder(config=_config(**contribution_overrides), instruments=_instruments())
+def _builder(
+    *,
+    live_order_limits=None,
+    market_session=None,
+    **contribution_overrides,
+) -> OrderBuilder:
+    return OrderBuilder(
+        config=_config(
+            live_order_limits=live_order_limits,
+            market_session=market_session,
+            **contribution_overrides,
+        ),
+        instruments=_instruments(),
+    )
 
 
-def _config(**contribution_overrides) -> ExecutionConfig:
+def _config(
+    *,
+    live_order_limits=None,
+    market_session=None,
+    **contribution_overrides,
+) -> ExecutionConfig:
     contribution = {
         "enabled": True,
         "currency": "KRW",
@@ -393,8 +509,10 @@ def _config(**contribution_overrides) -> ExecutionConfig:
     return ExecutionConfig(
         engine="paper",
         order_generation_mode="buy_only_contribution",
-        market_session={"timezone": "Asia/Seoul", "weekdays": [0, 1, 2, 3, 4]},
+        market_session=market_session
+        or {"timezone": "Asia/Seoul", "weekdays": [0, 1, 2, 3, 4]},
         contribution=contribution,
+        live_order_limits=live_order_limits or {},
     )
 
 

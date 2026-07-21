@@ -193,6 +193,27 @@ def test_tranquillo_multi_account_isa_budget_request_blocks_isa_orders_only(
     assert requests[0]["selectable_max_budget"] == 8_000_000
 
 
+def test_multi_account_contribution_applies_fee_buffer_once(tmp_path):
+    config = _multi_account_config(
+        tmp_path,
+        isa_cash=2_000_000,
+        ps_cash=501_003,
+        isa_budget_request=True,
+        fee_buffer_pct=0.002,
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _save_account_snapshot(store, "kis_ps", cash=501_003, positions=[])
+    _save_account_snapshot(store, "kis_isa", cash=2_000_000, positions=[])
+
+    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["tranquillo"])
+
+    signal = store.load_signal_package(summary.signal_run_id)
+    ps_orders = [order for order in signal["orders_preview"] if order["account_id"] == "kis_ps"]
+    assert len(ps_orders) == 1
+    assert ps_orders[0]["notional"] == pytest.approx(500_000)
+    assert signal["budget_requests"][0]["available_cash"] == pytest.approx(1_996_000)
+
+
 def test_tranquillo_multi_account_budget_decision_can_exceed_legacy_max(
     tmp_path,
 ):
@@ -236,6 +257,7 @@ def _multi_account_config(
     isa_cash=2_000_000,
     ps_cash=500_000,
     isa_budget_request=False,
+    fee_buffer_pct=0.0,
 ):
     raw = _multi_account_raw(tmp_path)
     raw["state"]["sqlite_path"] = str(tmp_path / f"state_{isa_cash}_{ps_cash}.db")
@@ -249,6 +271,7 @@ def _multi_account_config(
         raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
             "budget_request"
         ] = {"enabled": True}
+    raw["execution"]["live_order_limits"] = {"fee_buffer_pct": fee_buffer_pct}
     config_path = tmp_path / f"multi_account_{isa_cash}_{ps_cash}.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return load_config(config_path)

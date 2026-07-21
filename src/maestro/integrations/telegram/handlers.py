@@ -1,15 +1,17 @@
 import os
 import subprocess
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from maestro.approval.models import ApprovalDecision
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import SafetyState
-from maestro.core.ids import new_run_id
+from maestro.core.enums import OrderStatus, OrderType, RunMode, SafetyState
+from maestro.core.ids import new_order_id, new_run_id
 from maestro.core.strategy_names import (
     strategy_command_slug as _telegram_strategy_command_slug,
 )
@@ -28,9 +30,12 @@ from maestro.dashboard.read_models import (
     build_safety_state_card,
     build_strategy_runs_table,
 )
+from maestro.execution.base import OrderIntent
+from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.readonly_factory import (
     broker_readonly_accounts,
+    build_broker_readonly_service,
     build_broker_readonly_services,
 )
 from maestro.execution.budget_requests import (
@@ -47,11 +52,14 @@ from maestro.execution.funding_requests import (
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_order_models import (
     LiveOrderModifyRequest,
+    LiveOrderRequest,
     LiveOrderStatusSnapshot,
 )
+from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
+from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
@@ -82,6 +90,7 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("budget", "Select a pending contribution budget: /budget <request_id> <amount>"),
     ("attribution", "Review account attribution: /attribution <account_id>"),
     ("modify", "Propose order modification: /modify <broker_order_id> <price> [quantity]"),
+    ("retry_order", "Retry a capacity-blocked order with a corrected quantity"),
     ("pause", "Confirm pause of live approval execution"),
     ("clear_halt", "Confirm recovery from a safety halt (runs preflight)"),
     ("kill_switch", "Confirm emergency live execution stop"),
@@ -149,6 +158,9 @@ class TelegramOperatorCommandRouter:
             return True
         if command == "/modify":
             self._process_modify_command(text, chat_id, user_id, username)
+            return True
+        if command == "/retry_order":
+            self._process_retry_order_command(text, chat_id, user_id, username)
             return True
 
         handler = {
@@ -270,6 +282,14 @@ class TelegramOperatorCommandRouter:
             )
         if action.startswith("modify:"):
             return self._process_modify_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("retry-order:"):
+            return self._process_retry_order_callback(
                 callback,
                 action,
                 chat_id,
@@ -440,6 +460,11 @@ class TelegramOperatorCommandRouter:
             self._send(chat_id, "Order status not found.")
             self._record("/modify", chat_id, user_id, username, "missing")
             return
+        status = self._status_with_resolved_account(status)
+        if status.broker_order.account_id is None:
+            self._send(chat_id, "Order account could not be resolved; modification is blocked.")
+            self._record("/modify", chat_id, user_id, username, "invalid")
+            return
         instrument = self.config.universe.get(status.symbol or "")
         if instrument is None:
             self._send(chat_id, "Order symbol is not in the configured universe.")
@@ -519,6 +544,22 @@ class TelegramOperatorCommandRouter:
             )
             if dependencies.modify_service is None:
                 raise ValueError("Configured broker does not support order modification")
+            dependencies.status_service.poll_order_status(
+                request.run_id,
+                request.broker_order,
+            )
+            fill_result = dependencies.fill_reconciliation_service.reconcile_latest(
+                request.run_id
+            )
+            if (
+                fill_result.applied_fills
+                and dependencies.broker_reconciliation_service is not None
+            ):
+                reconciliation = (
+                    dependencies.broker_reconciliation_service.reconcile_latest()
+                )
+                if reconciliation.passed is not True:
+                    raise ValueError("Broker reconciliation failed after latest fills")
             result = dependencies.modify_service.modify_order(
                 request,
                 ApprovalDecision(
@@ -555,6 +596,252 @@ class TelegramOperatorCommandRouter:
         )
         self._record("/modify", chat_id, user_id, username, "approved")
         return True
+
+    def _process_retry_order_command(
+        self,
+        text: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> None:
+        parts = text.strip().split()
+        if len(parts) not in {3, 4}:
+            self._send(chat_id, "Usage: /retry_order <blocked_order_id> <quantity> [price]")
+            self._record("/retry_order", chat_id, user_id, username, "invalid")
+            return
+        blocked = self._pending_capacity_block(parts[1])
+        if blocked is None:
+            self._send(chat_id, "Capacity-blocked order was not found or was already retried.")
+            self._record("/retry_order", chat_id, user_id, username, "missing")
+            return
+        config = self.config
+        if self.approval_config_path is not None:
+            config = load_config(self.approval_config_path)
+        try:
+            if config.mode != RunMode.LIVE_APPROVAL:
+                raise ValueError("retry orders require live_approval mode")
+            self._validate_retry_trading_date(blocked, config)
+            original = OrderIntent.model_validate(blocked["order"])
+            quantity = float(parts[2])
+            price = float(parts[3]) if len(parts) == 4 else original.price
+            if quantity <= 0 or quantity > original.quantity:
+                raise ValueError("retry quantity must be positive and no greater than planned")
+            proposal_id = new_run_id()
+            metadata = dict(original.metadata)
+            metadata["capacity_retry_of"] = original.order_id
+            order = original.model_copy(
+                update={
+                    "order_id": new_order_id(),
+                    "quantity": quantity,
+                    "price": price,
+                    "notional": quantity * price,
+                    "metadata": metadata,
+                }
+            )
+            capacity_service = OrderCapacityService(
+                lambda candidate: self._lookup_retry_capacity(config, candidate)
+            )
+            accepted, capacity_blocks = capacity_service.partition([order])
+            if capacity_blocks or not accepted:
+                reason = capacity_blocks[0].reason if capacity_blocks else "capacity unavailable"
+                raise ValueError(f"retry order is still blocked: {reason}")
+            gate_blocks = LiveExecutionGateService(config, self.store, self.audit).evaluate(
+                proposal_id,
+                [order],
+                [],
+            )
+            if gate_blocks:
+                reasons = ", ".join(str(item.get("reason")) for item in gate_blocks)
+                raise ValueError(f"retry order is blocked by live gate: {reasons}")
+            request = LiveOrderRequest(
+                order_id=order.order_id,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                limit_price=order.price,
+                order_type=OrderType.LIMIT,
+                approval_id=f"retry_{proposal_id}",
+                run_id=proposal_id,
+                duplicate_key=f"capacity-retry:{original.order_id}:{order.order_id}",
+                currency=order.currency,
+                sleeve=order.sleeve,
+                account_id=order.account_id,
+                broker_product=order.broker_product,
+                signal_run_id=blocked.get("signal_run_id"),
+            )
+        except (RuntimeError, TypeError, ValueError) as exc:
+            self._send(chat_id, f"Invalid retry order: {exc}")
+            self._record("/retry_order", chat_id, user_id, username, "invalid")
+            return
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            proposal_id,
+            "live_order_retry_proposal",
+            {
+                "proposal_id": proposal_id,
+                "blocked_order_id": original.order_id,
+                "order": order.model_dump(mode="json"),
+                "request": request.model_dump(mode="json"),
+                "status": "pending",
+                "created_at": utc_now().isoformat(),
+                "expires_at": (
+                    utc_now() + timedelta(seconds=config.approval.timeout_seconds)
+                ).isoformat(),
+            },
+        )
+        self._send(
+            chat_id,
+            "\n".join(
+                [
+                    "Capacity-blocked order retry proposal",
+                    f"blocked_order_id: {original.order_id}",
+                    f"new_order_id: {order.order_id}",
+                    f"account_id: {order.account_id or 'default'}",
+                    f"symbol: {order.symbol}",
+                    f"quantity: {order.quantity:g}",
+                    f"price: {order.price:g}",
+                ]
+            ),
+            reply_markup=_retry_order_markup(proposal_id),
+        )
+        self._record("/retry_order", chat_id, user_id, username, "proposed")
+
+    def _process_retry_order_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int | str,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] not in {"approve", "reject"}:
+            self._answer(callback, "This retry proposal is no longer active.")
+            return True
+        proposal = self._pending_retry_proposal(parts[2])
+        if proposal is None:
+            self._answer(callback, "This retry proposal is no longer active.")
+            self._record("/retry_order", chat_id, user_id, username, "stale_callback")
+            return True
+        if parts[1] == "reject":
+            self._ack_retry_proposal(proposal, "rejected", user_id)
+            self._answer(callback, "Retry order rejected.")
+            self._edit_callback_message(callback, "Retry order proposal rejected.")
+            self._record("/retry_order", chat_id, user_id, username, "rejected")
+            return True
+        request = LiveOrderRequest.model_validate(proposal["request"])
+        config = self.config
+        if self.approval_config_path is not None:
+            config = load_config(self.approval_config_path)
+        try:
+            if config.mode != RunMode.LIVE_APPROVAL:
+                raise ValueError("retry orders require live_approval mode")
+            order = OrderIntent.model_validate(proposal["order"])
+            accepted, capacity_blocks = OrderCapacityService(
+                lambda candidate: self._lookup_retry_capacity(config, candidate)
+            ).partition([order])
+            if capacity_blocks or not accepted:
+                reason = capacity_blocks[0].reason if capacity_blocks else "capacity unavailable"
+                raise ValueError(f"retry order is still blocked: {reason}")
+            gate_blocks = LiveExecutionGateService(config, self.store, self.audit).evaluate(
+                request.run_id,
+                [order],
+                [],
+            )
+            if gate_blocks:
+                reasons = ", ".join(str(item.get("reason")) for item in gate_blocks)
+                raise ValueError(f"retry order is blocked by live gate: {reasons}")
+            dependencies = build_live_approval_dependencies(
+                config,
+                self.store,
+                self.audit,
+                account_id=request.account_id,
+                telegram_client=self.client,
+                signal_run_id=request.signal_run_id,
+            )
+            decision = ApprovalDecision(
+                approval_id=request.approval_id,
+                run_id=request.run_id,
+                status="approved",
+                decided_at=utc_now(),
+                decided_by=f"telegram:{user_id}",
+            )
+            result = dependencies.lifecycle_service.run(request, decision)
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._ack_retry_proposal(proposal, "rejected", user_id, reason=str(exc))
+            self._answer(callback, f"Retry failed: {exc}")
+            self._record("/retry_order", chat_id, user_id, username, "failed")
+            return True
+        self._ack_retry_proposal(
+            proposal,
+            "approved",
+            user_id,
+            final_status=result.final_status.value,
+        )
+        order_payload = dict(proposal["order"])
+        order_payload["approval_status"] = "approved"
+        order_payload["signal_run_id"] = request.signal_run_id
+        self.store.save_order(request.run_id, request.order_id, order_payload)
+        self._answer(callback, "Retry order submitted.")
+        self._edit_callback_message(
+            callback,
+            (
+                f"Retry order completed\norder_id: {request.order_id}\n"
+                f"status: {result.final_status.value}"
+            ),
+        )
+        self._record("/retry_order", chat_id, user_id, username, "approved")
+        return True
+
+    def _ack_retry_proposal(
+        self,
+        proposal: Mapping[str, Any],
+        status: str,
+        user_id: int,
+        **details: Any,
+    ) -> None:
+        request = proposal.get("request") or {}
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            str(request.get("run_id") or new_run_id()),
+            "live_order_retry_proposal_ack",
+            {
+                "proposal_id": proposal["proposal_id"],
+                "blocked_order_id": proposal["blocked_order_id"],
+                "status": status,
+                "decided_by": (
+                    f"telegram:{user_id}" if isinstance(user_id, int) else str(user_id)
+                ),
+                **details,
+            },
+        )
+
+    def _lookup_retry_capacity(self, config: MaestroConfig, order: OrderIntent):
+        service = build_broker_readonly_service(
+            config,
+            self.store,
+            self.audit,
+            account_id=order.account_id,
+        )
+        while hasattr(service, "inner"):
+            service = service.inner
+        account = BrokerAccountRouter(config).account(order.account_id)
+        broker = account.broker if account is not None else "kis"
+        instrument = config.universe.get(order.symbol)
+        symbol = instrument.symbol_for_broker(broker) if instrument is not None else order.symbol
+        return service.client.get_buying_power(symbol, order.price)
+
+    def _validate_retry_trading_date(
+        self,
+        blocked: Mapping[str, Any],
+        config: MaestroConfig,
+    ) -> None:
+        checked_at = datetime.fromisoformat(str(blocked["checked_at"]).replace("Z", "+00:00"))
+        timezone = ZoneInfo(operator_timezone(config))
+        if checked_at.astimezone(timezone).date() != utc_now().astimezone(timezone).date():
+            raise ValueError("capacity-blocked orders can only be retried on the same trading day")
 
     def _process_cash_flow_callback(
         self,
@@ -815,12 +1102,18 @@ class TelegramOperatorCommandRouter:
         strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
         if not strategy_ids:
             raise ValueError("Budget request is missing strategy_ids")
+        # A user-selected budget is an explicit instruction to invest now, so the
+        # regenerated signal bypasses the contribution buy_day schedule (the
+        # already-executed-this-month guard still applies).
         signal_summary = MaestroOrchestrator(
             signal_config,
             config_identity=signal_identity,
-        ).run_signal(strategy_ids=strategy_ids)
+        ).run_signal(strategy_ids=strategy_ids, contribution_override=True)
         lines.append(f"new_signal_run_id: {signal_summary.signal_run_id}")
         lines.append(f"orders_preview_count: {signal_summary.orders_preview_count}")
+        if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
+            lines.append("no orders were generated because:")
+            lines.extend(f"- {reason}" for reason in signal_summary.no_order_reasons)
         if signal_summary.action_required:
             if self.approval_config_path is None:
                 lines.append("approval_status: not_created_missing_approval_config")
@@ -879,10 +1172,12 @@ class TelegramOperatorCommandRouter:
             user_id=user_id,
             username=username,
         )
+        # Funding was just confirmed by the operator; regenerate orders
+        # immediately instead of waiting for the scheduled buy_day.
         signal_summary = MaestroOrchestrator(
             signal_config,
             config_identity=signal_identity,
-        ).run_signal(strategy_ids=strategy_ids)
+        ).run_signal(strategy_ids=strategy_ids, contribution_override=True)
         self._save_funding_ack(
             str(request["request_id"]),
             "confirmed",
@@ -896,6 +1191,9 @@ class TelegramOperatorCommandRouter:
             f"new_signal_run_id: {signal_summary.signal_run_id}",
             f"orders_preview_count: {signal_summary.orders_preview_count}",
         ]
+        if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
+            lines.append("no orders were generated because:")
+            lines.extend(f"- {reason}" for reason in signal_summary.no_order_reasons)
         if signal_summary.action_required:
             if self.approval_config_path is None:
                 lines.append("approval_status: not_created_missing_approval_config")
@@ -1432,7 +1730,8 @@ class TelegramOperatorCommandRouter:
                 [
                     f"Confirm manual rebalance for {_telegram_strategy_display_name(strategy_id)}.",
                     f"unit: {unit}",
-                    "This runs the daily signal + approval pipeline now.",
+                    "This runs the daily signal + approval pipeline now,",
+                    "overriding the scheduled contribution buy day.",
                     "Live orders still require Telegram approval, and this bot",
                     "pauses while approval polling is active.",
                 ]
@@ -1607,8 +1906,9 @@ class TelegramOperatorCommandRouter:
         self._send(chat_id, "\n".join(lines))
 
     def _orders(self, chat_id: int) -> None:
+        open_statuses = self._refresh_open_order_statuses()
         rows = build_orders_table(self.store, limit=5)
-        if not rows:
+        if not rows and not open_statuses:
             self._send(chat_id, "Recent orders: none")
             return
         lines = ["Recent orders"]
@@ -1617,7 +1917,65 @@ class TelegramOperatorCommandRouter:
                 f"{row['order_id']} {row['side']} {row['symbol']} "
                 f"qty={_number(row['quantity'])} status={row['approval_status']}"
             )
+        if open_statuses:
+            lines.extend(["", "Open orders"])
+            for status in open_statuses:
+                remaining = status.partial_fill.remaining_quantity
+                lines.append(
+                    f"{status.broker_order.broker_order_id} "
+                    f"{status.broker_order.account_id or 'default'} {status.symbol or 'unknown'} "
+                    f"status={status.status.value} "
+                    f"filled={_number(status.partial_fill.filled_quantity)} "
+                    f"remaining={_number(remaining)}"
+                )
+                lines.append(
+                    f"/modify {status.broker_order.broker_order_id} <price> {_number(remaining)}"
+                )
         self._send(chat_id, "\n".join(lines))
+
+    def _refresh_open_order_statuses(self) -> list[LiveOrderStatusSnapshot]:
+        latest_by_broker: dict[str, LiveOrderStatusSnapshot] = {}
+        for row in self.store.list_system_events_by_type(
+            SystemEventType.LIVE_ORDER_STATUS,
+            limit=2000,
+        ):
+            status = LiveOrderStatusSnapshot.model_validate(row["payload"])
+            broker_order_id = status.broker_order.broker_order_id
+            latest_by_broker.setdefault(broker_order_id, status)
+        candidates = [
+            self._status_with_resolved_account(status)
+            for status in latest_by_broker.values()
+            if status.status in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}
+            and status.partial_fill.remaining_quantity > 0
+        ]
+        config = self.config
+        if self.approval_config_path is not None:
+            config = load_config(self.approval_config_path)
+        refreshed = []
+        reconciler = None
+        for status in candidates:
+            try:
+                dependencies = build_live_approval_dependencies(
+                    config,
+                    self.store,
+                    self.audit,
+                    account_id=status.broker_order.account_id,
+                )
+                current = dependencies.status_service.poll_order_status(
+                    new_run_id(),
+                    status.broker_order,
+                )
+                reconciler = dependencies.fill_reconciliation_service
+            except (RuntimeError, TimeoutError, TypeError, ValueError):
+                current = status
+            if (
+                current.status in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}
+                and current.partial_fill.remaining_quantity > 0
+            ):
+                refreshed.append(current)
+        if reconciler is not None:
+            reconciler.reconcile_latest(new_run_id())
+        return refreshed
 
     def _approvals(self, chat_id: int) -> None:
         rows = build_approvals_table(self.store, limit=5)
@@ -1887,6 +2245,39 @@ class TelegramOperatorCommandRouter:
                 return status
         return None
 
+    def _status_with_resolved_account(
+        self,
+        status: LiveOrderStatusSnapshot,
+    ) -> LiveOrderStatusSnapshot:
+        if status.broker_order.account_id:
+            return status
+        internal_order_id = status.broker_order.order_id
+        account_ids: set[str] = set()
+        for row in self.store.list_orders(limit=2000):
+            if row.get("order_id") == internal_order_id:
+                account_id = (row.get("payload") or {}).get("account_id")
+                if account_id:
+                    account_ids.add(str(account_id))
+        for row in self.store.list_system_events_by_type(
+            "live_order_submit_intent",
+            limit=2000,
+        ):
+            request = (row.get("payload") or {}).get("request") or {}
+            if request.get("order_id") == internal_order_id:
+                account_id = request.get("account_id")
+                if account_id:
+                    account_ids.add(str(account_id))
+        if len(account_ids) != 1:
+            return status
+        account_id = next(iter(account_ids))
+        return status.model_copy(
+            update={
+                "broker_order": status.broker_order.model_copy(
+                    update={"account_id": str(account_id)}
+                )
+            }
+        )
+
     def _pending_modify_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         for row in self.store.list_system_events_by_type(
             "live_order_modify_proposal_ack",
@@ -1900,6 +2291,54 @@ class TelegramOperatorCommandRouter:
         ):
             if row["payload"].get("proposal_id") == proposal_id:
                 return row["payload"]
+        return None
+
+    def _pending_capacity_block(self, order_id: str) -> dict[str, Any] | None:
+        retried = {
+            str(row["payload"].get("blocked_order_id"))
+            for row in self.store.list_system_events_by_type(
+                "live_order_retry_proposal_ack",
+                limit=2000,
+            )
+        }
+        retried.update(
+            str(row["payload"].get("blocked_order_id"))
+            for row in self.store.list_system_events_by_type(
+                "live_order_retry_proposal",
+                limit=2000,
+            )
+        )
+        if order_id in retried:
+            return None
+        for row in self.store.list_system_events_by_type(
+            "live_order_capacity_blocked",
+            limit=2000,
+        ):
+            payload = row["payload"]
+            if payload.get("blocked_order_id") == order_id:
+                return payload
+        return None
+
+    def _pending_retry_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        for row in self.store.list_system_events_by_type(
+            "live_order_retry_proposal_ack",
+            limit=2000,
+        ):
+            if row["payload"].get("proposal_id") == proposal_id:
+                return None
+        for row in self.store.list_system_events_by_type(
+            "live_order_retry_proposal",
+            limit=2000,
+        ):
+            if row["payload"].get("proposal_id") == proposal_id:
+                payload = row["payload"]
+                expires_at = payload.get("expires_at")
+                if expires_at and utc_now() >= datetime.fromisoformat(
+                    str(expires_at).replace("Z", "+00:00")
+                ):
+                    self._ack_retry_proposal(payload, "expired", "telegram:timeout")
+                    return None
+                return payload
         return None
 
 
@@ -1968,6 +2407,29 @@ def _modify_markup(proposal_id: str) -> dict[str, Any]:
                 }
             ],
             [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
+        ]
+    }
+
+
+def _retry_order_markup(proposal_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve retry order",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}retry-order:approve:{proposal_id}"
+                    ),
+                }
+            ],
+            [
+                {
+                    "text": "Reject",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}retry-order:reject:{proposal_id}"
+                    ),
+                }
+            ],
         ]
     }
 

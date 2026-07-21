@@ -23,6 +23,7 @@ from maestro.core.enums import (
 from maestro.core.ids import new_run_id
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.base import OrderIntent
+from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.live_orders import (
     BrokerOrderId,
     BrokerReconciliationRunner,
@@ -890,6 +891,39 @@ def test_broker_risk_validation_blocks_unreconciled_broker_snapshot(tmp_path):
     assert "broker_snapshot_not_reconciled" in reasons
 
 
+def test_broker_risk_validation_accepts_account_level_reconciled_snapshot(tmp_path):
+    # Multi-account reconciliation stores max(snapshot ids) at the top level and
+    # one snapshot id per account in account_results; an account whose latest
+    # snapshot only appears in account_results must still count as reconciled.
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_dry_run": True,
+        },
+    )
+    snapshot_id = _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=10_000_000.0,
+        buying_power=10_000_000.0,
+        positions={"MOCK_ETF_A": 100_000.0},
+    )
+    _save_passed_reconciliation(
+        orchestrator.state_store,
+        broker_snapshot_id=snapshot_id + 7,
+        account_results=[
+            {"account_id": "MOCK", "broker_snapshot_id": snapshot_id, "passed": True},
+            {"account_id": "other", "broker_snapshot_id": snapshot_id + 7, "passed": True},
+        ],
+    )
+
+    summary = orchestrator.run_once()
+
+    assert summary.orders_created == 2
+    assert orchestrator.state_store.list_system_events_by_type("broker_risk_halt") == []
+
+
 def test_broker_risk_validation_allows_concentrated_broker_truth(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,
@@ -1449,6 +1483,15 @@ class FakeLiveOrderClient(LiveOrderClient):
             ),
         )
 
+    def get_buying_power(self, symbol, order_price):
+        return BrokerBuyingPower(
+            symbol=symbol,
+            order_price=order_price,
+            cash_buying_power=1_000_000_000,
+            max_buy_quantity=1_000_000,
+            source="test",
+        )
+
 
 class FakeStatusClient(LiveOrderStatusClient):
     def get_order_status(self, broker_order_id: BrokerOrderId) -> LiveOrderStatusSnapshot:
@@ -1631,10 +1674,13 @@ def _save_passed_reconciliation(
     store: StateStore,
     *,
     broker_snapshot_id: int | None = None,
+    account_results: list[dict[str, Any]] | None = None,
 ) -> None:
     payload: dict[str, Any] = {"passed": True}
     if broker_snapshot_id is not None:
         payload["broker_snapshot_id"] = broker_snapshot_id
+    if account_results is not None:
+        payload["account_results"] = account_results
     store.save_system_event("run_reconcile", "broker_reconciliation", payload)
 
 

@@ -14,6 +14,7 @@ from maestro.core.enums import OrderSide, OrderStatus
 from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnlySnapshot
 from maestro.execution.brokers.kis.service import KISReadOnlyService
+from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.live_orders import (
     BrokerOrderId,
     LiveOrderClient,
@@ -260,11 +261,19 @@ def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
     store.save_system_event("run_reconcile", "broker_reconciliation", {"passed": True})
     live_client = CountingLiveOrderClient()
+    capacity_lookup = lambda order: BrokerBuyingPower(  # noqa: E731
+        symbol=order.symbol,
+        order_price=order.price,
+        cash_buying_power=1_000_000_000,
+        max_buy_quantity=1_000_000,
+        source="test",
+    )
     first = MaestroOrchestrator(
         config,
         live_order_client=live_client,
         live_order_status_client=FilledStatusClient(),
         broker_reconciliation_service=PassingBrokerReconciliation(),
+        order_capacity_lookup=capacity_lookup,
     )
     first.approval_manager = ApprovingTelegramApprovalManager()
     first.state_store.mark_signal_package_consumed = lambda signal_run_id, run_id: None
@@ -277,6 +286,7 @@ def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
         live_order_client=live_client,
         live_order_status_client=FilledStatusClient(),
         broker_reconciliation_service=PassingBrokerReconciliation(),
+        order_capacity_lookup=capacity_lookup,
     )
     second.approval_manager = ApprovingTelegramApprovalManager()
     second.approve_signal(signal_summary.signal_run_id)
@@ -714,9 +724,10 @@ def test_daily_signal_approval_cli_scopes_signal_run_to_strategy_ids(tmp_path, m
     captured: dict[str, object] = {}
     original_run_signal = MaestroOrchestrator.run_signal
 
-    def capturing_run_signal(self, strategy_ids=None):
+    def capturing_run_signal(self, strategy_ids=None, **kwargs):
         captured["strategy_ids"] = strategy_ids
-        return original_run_signal(self, strategy_ids=strategy_ids)
+        captured["contribution_override"] = kwargs.get("contribution_override")
+        return original_run_signal(self, strategy_ids=strategy_ids, **kwargs)
 
     monkeypatch.setattr(MaestroOrchestrator, "run_signal", capturing_run_signal)
 

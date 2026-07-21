@@ -74,6 +74,30 @@ maestro reconcile-fills --config <config>
 maestro recover-live-order --config <config> --reason "broker truth reconciled"
 ```
 
+If an order was excluded before approval, review the
+`live_order_capacity_blocked` event and Telegram's planned/available quantity.
+Submit a smaller standalone proposal only on the same trading date:
+
+```text
+/retry_order <blocked_order_id> <quantity> [price]
+```
+
+This creates a new approval and re-runs capacity, market-session, quote,
+reconciliation, and order-limit gates. Do not treat the blocked order itself as
+a completed contribution.
+
+For a broker-accepted order that remains `open` or `partially_filled`, use
+`/orders` to refresh its status and copy the displayed command:
+
+```text
+/modify <broker_order_id> <price> [quantity]
+```
+
+The modification requires another Telegram approval. KIS domestic verifies the
+current modifiable quantity before revision; an omitted quantity revises the
+entire remainder. If account routing cannot be recovered uniquely, modification
+is blocked and broker truth must be reconciled manually.
+
 7. If the halt cause is understood and resolved, clear only a halted state with
    an explicit reason:
 

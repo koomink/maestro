@@ -10,6 +10,7 @@ from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, SafetyState
 from maestro.core.ids import new_run_id
+from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.live_orders import (
     BrokerOrderId,
     BrokerReconciliationRunner,
@@ -340,10 +341,20 @@ class FakeLiveOrderClient(LiveOrderClient):
             order_id=request.order_id,
             status=OrderStatus.ACCEPTED_BY_BROKER,
             broker_order=BrokerOrderId(
+                broker="fake",
                 order_id=request.order_id,
                 broker_order_id=f"broker:{request.order_id}",
                 submitted_at=utc_now().isoformat(),
             ),
+        )
+
+    def get_buying_power(self, symbol, order_price):
+        return BrokerBuyingPower(
+            symbol=symbol,
+            order_price=order_price,
+            cash_buying_power=1_000_000_000,
+            max_buy_quantity=1_000_000,
+            source="test",
         )
 
 

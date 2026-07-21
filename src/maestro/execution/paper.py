@@ -31,6 +31,7 @@ class PaperExecutionEngine:
         *,
         as_of: datetime | None = None,
         contribution_already_executed: bool = False,
+        contribution_override: bool = False,
     ) -> list[OrderIntent]:
         return self.order_builder.build_orders(
             current_state,
@@ -38,6 +39,7 @@ class PaperExecutionEngine:
             prices,
             as_of=as_of,
             contribution_already_executed=contribution_already_executed,
+            contribution_override=contribution_override,
         )
 
     def contribution_month_key(self, as_of: datetime | None = None) -> str:
@@ -45,6 +47,9 @@ class PaperExecutionEngine:
 
     def contribution_is_due(self, as_of: datetime | None = None) -> bool:
         return self.order_builder.contribution_is_due(as_of)
+
+    def next_contribution_date(self, as_of: datetime | None = None):
+        return self.order_builder.next_contribution_date(as_of)
 
     def contribution_available_cash(self, current_state: PortfolioState) -> float:
         return self.order_builder.contribution_available_cash(current_state)

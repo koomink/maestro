@@ -452,6 +452,12 @@ the same `signal_run_id`.
   submit. Domestic orders use the domestic buying-power path; overseas orders
   call `/uapi/overseas-stock/v1/trading/inquire-psamount`. Insufficient KIS
   buying power or max buy quantity fails before any order endpoint call.
+- `OrderCapacityService` is the common pre-approval capacity gate. It calls the
+  account-routed `BrokerReadOnlyClient.get_buying_power(symbol, price)` for each
+  buy, reserves accepted notional within the account, and partitions only the
+  failing orders into `live_order_capacity_blocked` events. Lookup failures fail
+  closed per order. Broker pre-submit validation remains in place to catch
+  balance or open-order changes after approval.
 - KIS overseas order status lookup uses the broker submission timestamp to query
   the corresponding US exchange-local date range, reducing false unknown states
   around Korea/US date boundaries.
@@ -489,6 +495,18 @@ the same `signal_run_id`.
   after every poll, optionally runs broker reconciliation after fill updates, and
   persists a `live_order_lifecycle` system/audit summary. Reaching max polls is
   non-terminal and does not auto-cancel.
+- `LiveOrderBatchLifecycleService` submits a group sequentially before polling,
+  then round-robin polls all accepted orders per interval. Poll count and timeout
+  apply once to the batch. Definite pre-submit failures are isolated; ambiguous
+  submit/recovery results stop later submissions while already accepted orders
+  remain read-only tracked. It preserves per-order `live_order_lifecycle` events
+  and adds `live_order_batch_lifecycle` plus a transition-only Telegram summary.
+- `LiveOrderModifyClient` is implemented by KIS domestic stock. It verifies the
+  original order and `psbl_qty` through `TTTC0084R`/`VTTC0084R`, then submits a
+  revision to `/uapi/domestic-stock/v1/trading/order-rvsecncl` with
+  `TTTC0013U`/`VTTC0013U` and `RVSE_CNCL_DVSN_CD=01`. Account and parent broker
+  order IDs are retained. Common modification gates reject stale, terminal,
+  duplicate, over-limit, and above-remaining requests.
 - `build_live_approval_dependencies()` wires the live approval service graph:
   state store, audit logger, safety service, status service, fill
   reconciliation, optional broker reconciliation, optional notifications, KIS
@@ -1213,14 +1231,19 @@ Requirements:
 - Back `/help`, `/status`, `/health`, `/signal`, `/account`, `/portfolio`,
   `/apps`, `/orders`, and `/approvals` responses with Maestro state/read models
   and the latest stored broker snapshot.
+- Support `/retry_order <blocked_order_id> <quantity> [price]` for same-day
+  capacity blocks and `/modify <broker_order_id> <price> [quantity]` for broker-
+  accepted open remainders. Both create a new approval callback; neither is a
+  direct unapproved submission path. `/orders` refreshes open/partial statuses
+  and includes exact modification examples.
 - Support `/signal_<strategy>` commands through a separate signal config. These
   commands run one selected signal-enabled strategy, persist a signal package
   visible to Dashboard freshness/read models, and do not create approvals or
   submit broker orders.
 - Require confirmation callbacks for `/pause` and `/kill_switch`.
 - Persist Telegram command execution to audit/system events.
-- Do not allow Telegram commands to submit or cancel broker orders, call KIS
-  live read endpoints directly, disable risk limits, enable live mode, disable
+- Do not allow Telegram commands to submit or cancel broker orders without a
+  dedicated approval callback, disable risk limits, enable live mode, disable
   dry-run mode, change risk limits, resume, clear halted state, or trigger
   broker sync/reconciliation.
 

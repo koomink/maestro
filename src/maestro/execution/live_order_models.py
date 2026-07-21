@@ -228,6 +228,19 @@ class LiveOrderLifecycleResult(BaseModel):
     checked_at: str
 
 
+class LiveOrderBatchItemResult(BaseModel):
+    request: LiveOrderRequest
+    lifecycle: LiveOrderLifecycleResult
+
+
+class LiveOrderBatchLifecycleResult(BaseModel):
+    run_id: str
+    items: list[LiveOrderBatchItemResult] = Field(default_factory=list)
+    poll_rounds: int = 0
+    max_polls_reached: bool = False
+    checked_at: str
+
+
 __all__ = [
     "AppliedFill",
     "BrokerOrderRequest",
@@ -238,6 +251,8 @@ __all__ = [
     "LiveOrderCancelResult",
     "LiveOrderLifecycleNotification",
     "LiveOrderLifecycleResult",
+    "LiveOrderBatchItemResult",
+    "LiveOrderBatchLifecycleResult",
     "LiveOrderModifyRequest",
     "LiveOrderModifyResult",
     "LiveOrderRequest",

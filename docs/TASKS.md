@@ -730,6 +730,9 @@
       attribute Maestro fills, and enforce account bucket capacity
 - [x] Add a generic multi-account contribution allocator and apply Tranquillo v1
       across `kis_ps / tranquillo_ps` and `kis_isa / tranquillo_isa`
+- [x] Apply the contribution fee buffer once, split oversized contribution
+      orders at the per-order cap, and populate the 2026 KRX holiday schedule
+      used by Tranquillo operator profiles
 - [x] Add brokerless `dev_sandbox` routing for development strategies that need
       signal/approval UX rehearsal without KIS or Toss broker access
 - [x] Reject mixed strategy order posture within one account in a Symphony run
@@ -757,6 +760,14 @@
 - [x] Add systemd wiring and a locked signal-to-approval wrapper for
       `symphony_readonly`, `symphony_signal`, and conditional
       `symphony_approval`
+- [x] Add an account-routed pre-approval buying-capacity gate that isolates only
+      over-capacity orders and preserves the final broker pre-submit check
+- [x] Add same-day `/retry_order` proposals with fresh capacity/live gates, new
+      Telegram approval, linked ack events, and duplicate prevention
+- [x] Submit approved multi-order batches before round-robin status polling,
+      suppress unchanged open notifications, and persist batch summaries
+- [x] Add KIS domestic native revision support plus account recovery for legacy
+      order IDs and refreshed `/orders` modification examples
 
 ## Completed / Historical Notes
 

@@ -8,8 +8,10 @@ from typing import Any, Protocol
 
 from maestro.approval.models import ApprovalDecision, ApprovalRequest
 from maestro.core.clock import utc_now
+from maestro.core.enums import OrderStatus
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER, CredentialResolver
 from maestro.execution.live_orders import (
+    LiveOrderBatchLifecycleResult,
     LiveOrderLifecycleNotification,
     LiveOrderNotificationClient,
 )
@@ -185,6 +187,11 @@ class TelegramLiveOrderNotificationClient(LiveOrderNotificationClient):
 
     def notify(self, event: LiveOrderLifecycleNotification) -> None:
         text = _format_live_order_notification(event)
+        for chat_id in self.chat_ids:
+            self.client.send_message(chat_id, text)
+
+    def notify_batch(self, result: LiveOrderBatchLifecycleResult) -> None:
+        text = _format_live_order_batch(result)
         for chat_id in self.chat_ids:
             self.client.send_message(chat_id, text)
 
@@ -442,3 +449,43 @@ def _format_live_order_notification(event: LiveOrderLifecycleNotification) -> st
             f"message: {event.message}",
         ]
     )
+
+
+def _format_live_order_batch(result: LiveOrderBatchLifecycleResult) -> str:
+    lines = [
+        "Maestro live order batch summary",
+        f"run_id: {result.run_id}",
+        f"poll_rounds: {result.poll_rounds}",
+    ]
+    modify_commands = []
+    for index, item in enumerate(result.items, start=1):
+        request = item.request
+        lifecycle = item.lifecycle
+        latest = lifecycle.status_snapshots[-1] if lifecycle.status_snapshots else None
+        filled = latest.partial_fill.filled_quantity if latest else 0.0
+        remaining = latest.partial_fill.remaining_quantity if latest else request.quantity
+        lines.extend(
+            [
+                "",
+                f"{index}. {request.account_id or 'default'} {request.symbol}",
+                f"broker_order_id: {lifecycle.broker_order_id or 'pending'}",
+                f"status: {lifecycle.final_status.value}",
+                (
+                    f"quantity: {request.quantity:g} filled: {filled:g} "
+                    f"remaining: {remaining:g}"
+                ),
+                f"limit_price: {request.limit_price:g}",
+            ]
+        )
+        if (
+            lifecycle.broker_order_id
+            and remaining > 0
+            and lifecycle.final_status
+            in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}
+        ):
+            modify_commands.append(
+                f"/modify {lifecycle.broker_order_id} <price> {remaining:g}"
+            )
+    if modify_commands:
+        lines.extend(["", "Remaining orders can be modified with:", *modify_commands])
+    return "\n".join(lines)

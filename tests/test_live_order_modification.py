@@ -48,6 +48,16 @@ def test_modification_revalidates_remaining_notional(tmp_path):
     assert client.requests == []
 
 
+def test_modification_rejects_quantity_above_latest_remaining(tmp_path):
+    service, _, client, request, approval = _context(tmp_path)
+    request = request.model_copy(update={"quantity": 3.0})
+
+    with pytest.raises(ValueError, match="exceeds remaining quantity"):
+        service.modify_order(request, approval)
+
+    assert client.requests == []
+
+
 def _context(tmp_path, *, max_order_notional=1_000.0):
     store = StateStore(str(tmp_path / "state.db"))
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))

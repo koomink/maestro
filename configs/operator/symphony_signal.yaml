@@ -274,7 +274,15 @@ execution:
     open: "09:00"
     close: "15:30"
     weekdays: [0, 1, 2, 3, 4]
-    holidays: []
+    # Remaining 2026 KRX closures; refresh before each calendar year.
+    holidays:
+      - "2026-08-17"
+      - "2026-09-24"
+      - "2026-09-25"
+      - "2026-10-05"
+      - "2026-10-09"
+      - "2026-12-25"
+      - "2026-12-31"
   broker_validation:
     require_quote_validation: true
     max_quote_deviation_pct: 0.02

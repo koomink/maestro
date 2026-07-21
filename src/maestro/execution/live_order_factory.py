@@ -331,6 +331,7 @@ class ProductRoutingKISLiveOrderClient(
     LiveOrderClient,
     LiveOrderStatusClient,
     LiveOrderPreSubmitValidator,
+    LiveOrderModifyClient,
 ):
     def __init__(self, config: MaestroConfig, *, kis_config=None) -> None:
         self.config = config
@@ -372,6 +373,18 @@ class ProductRoutingKISLiveOrderClient(
         if not isinstance(client, LiveOrderStatusClient):
             raise ValueError(f"KIS client does not support order status: {product}")
         return client.get_order_status(broker_order_id)
+
+    def modify_order(self, request):
+        product = request.broker_order.broker_product
+        if product is None:
+            instrument = self.instruments.get(request.symbol)
+            product = instrument.broker_product if instrument else None
+        if product is None or product not in self.clients:
+            raise ValueError("KIS multi-product modification requires broker_product")
+        client = self.clients[product]
+        if not isinstance(client, LiveOrderModifyClient):
+            raise ValueError(f"KIS client does not support order modification: {product}")
+        return client.modify_order(request)
 
     def _client_for_request(self, request):
         product = request.broker_product

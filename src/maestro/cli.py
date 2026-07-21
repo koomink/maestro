@@ -261,6 +261,15 @@ def daily_signal_approval(
             "their own market sessions."
         ),
     ),
+    contribution_override: bool = typer.Option(
+        False,
+        "--contribution-override",
+        help=(
+            "Bypass the contribution buy_day schedule so manual rebalance "
+            "runs can generate contribution orders immediately. Contributions "
+            "already executed this month are still skipped."
+        ),
+    ),
     lock_path: Path = typer.Option(
         Path("/tmp/maestro-symphony-signal.lock"),
         "--lock-path",
@@ -283,6 +292,7 @@ def daily_signal_approval(
                 stop_telegram_operator=stop_telegram_operator,
                 telegram_operator_service=telegram_operator_service,
                 strategy_ids=selected_strategy_ids,
+                contribution_override=contribution_override,
             )
         except Exception as exc:
             failure_config = signal_config or approval_config or readonly_config
@@ -309,6 +319,7 @@ def _run_daily_signal_approval(
     stop_telegram_operator: bool,
     telegram_operator_service: str,
     strategy_ids: list[str] | None = None,
+    contribution_override: bool = False,
 ) -> None:
     readonly_maestro_config, readonly_identity = _load_operator_config(readonly_config)
     _refresh_daily_readonly(readonly_maestro_config, readonly_identity)
@@ -327,17 +338,28 @@ def _run_daily_signal_approval(
     signal_summary = MaestroOrchestrator(
         signal_maestro_config,
         config_identity=signal_identity,
-    ).run_signal(strategy_ids=strategy_ids)
+    ).run_signal(
+        strategy_ids=strategy_ids,
+        contribution_override=contribution_override,
+    )
     typer.echo(
         f"symphony_daily status=signal_completed "
         f"signal_run_id={signal_summary.signal_run_id} "
         f"action_required={str(signal_summary.action_required).lower()} "
-        f"orders_preview={signal_summary.orders_preview_count}"
+        f"orders_preview={signal_summary.orders_preview_count} "
+        f"contribution_override={str(signal_summary.contribution_override).lower()}"
     )
     _send_signal_summary_notification(signal_maestro_config, signal_summary)
 
     if not signal_summary.action_required:
         budget_sent = _send_signal_budget_request_notifications(
+            signal_maestro_config,
+            signal_summary.signal_run_id,
+        )
+        # Funding requests must go out even when a budget request was also
+        # raised (e.g. kis_isa needs a budget pick while kis_ps needs a top-up);
+        # otherwise the funding account silently drops out of the run.
+        funding_sent = _send_signal_funding_request_notifications(
             signal_maestro_config,
             signal_summary.signal_run_id,
         )
@@ -347,10 +369,6 @@ def _run_daily_signal_approval(
                 f"signal_run_id={signal_summary.signal_run_id}"
             )
             return
-        funding_sent = _send_signal_funding_request_notifications(
-            signal_maestro_config,
-            signal_summary.signal_run_id,
-        )
         if funding_sent:
             typer.echo(
                 f"symphony_daily status=funding_required "
@@ -573,15 +591,20 @@ def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) ->
         typer.echo("telegram_signal_summary=warn message=missing_bot_token")
         return
     strategies = ", ".join(summary.loaded_strategies) if summary.loaded_strategies else "none"
-    message = "\n".join(
-        [
-            "Maestro daily signal summary",
-            f"signal_run_id: {summary.signal_run_id}",
-            f"strategies: {strategies}",
-            f"action_required: {str(summary.action_required).lower()}",
-            f"orders_preview: {summary.orders_preview_count}",
-        ]
-    )
+    lines = [
+        "Maestro daily signal summary",
+        f"signal_run_id: {summary.signal_run_id}",
+        f"strategies: {strategies}",
+        f"action_required: {str(summary.action_required).lower()}",
+        f"orders_preview: {summary.orders_preview_count}",
+    ]
+    if getattr(summary, "contribution_override", False):
+        lines.append("contribution_override: true (manual rebalance)")
+    no_order_reasons = getattr(summary, "no_order_reasons", None) or []
+    if summary.orders_preview_count == 0 and no_order_reasons:
+        lines.append("no orders were generated because:")
+        lines.extend(f"- {reason}" for reason in no_order_reasons)
+    message = "\n".join(lines)
     try:
         client = TelegramBotAPIClient(
             token_env=maestro_config.approval.telegram_bot_token_env,

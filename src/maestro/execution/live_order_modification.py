@@ -91,6 +91,8 @@ class LiveOrderModificationService:
         quantity = request.quantity if request.quantity is not None else remaining
         if quantity <= 0:
             raise ValueError("Live order modification requires a remaining open quantity")
+        if quantity > remaining + 1e-9:
+            raise ValueError("Live order modification quantity exceeds remaining quantity")
         max_notional = self.config.live_order_limits.max_order_notional_for(request.currency)
         if max_notional is None:
             raise ValueError("Live order modification currency is missing a per-order cap")
