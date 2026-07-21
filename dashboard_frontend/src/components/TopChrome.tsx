@@ -1,6 +1,6 @@
 import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
 import type { DashboardSnapshot, Row, Tone } from "../types";
-import { formatValue } from "../utils/format";
+import { formatPercent, formatValue } from "../utils/format";
 import { useNow, usePrefersReducedMotion } from "../utils/hooks";
 import { toneFromValue } from "../utils/tone";
 import { trustSummary } from "../utils/trust";
@@ -63,7 +63,8 @@ export function TopChrome({
   const trust = trustSummary(snapshot);
   const configFingerprint = snapshot.header.operator_config?.fingerprint || "n/a";
   const total = latestRow(snapshot.investment_console.total_portfolio_performance);
-  const researchRows = snapshot.audit_trail.strategy_run_payloads.length + snapshot.virtuoso_apps.strategies.length;
+  const navDelta = Number(total.daily_return ?? total.period_return);
+  const navDeltaKnown = Number.isFinite(navDelta);
   return (
     <>
       <header className="topbar">
@@ -109,7 +110,13 @@ export function TopChrome({
         </div>
       </header>
       <section className="ticker-strip" aria-label="Dashboard status strip">
-        <TickerCell primary label="Total NAV" value={formatValue(total.total_value ?? total.current_value ?? total.value)} delta={displayCurrency} />
+        <TickerCell
+          primary
+          label="Total NAV"
+          value={formatValue(total.total_value ?? total.current_value ?? total.value)}
+          delta={navDeltaKnown ? formatPercent(navDelta) : displayCurrency}
+          tone={navDeltaKnown ? (navDelta > 0 ? "success" : navDelta < 0 ? "danger" : "neutral") : "neutral"}
+        />
         <TickerCarousel accounts={snapshot.investment_console.broker_account_overview.accounts} />
         <TickerCell label="Cash" value={metricValue(snapshot.investment_console.metrics, "Broker Cash", "n/a")} delta="ready" />
         <TickerCell label="Freshness" value={trust.freshness} delta="signals" tone={trust.freshnessTone} />
@@ -121,7 +128,6 @@ export function TopChrome({
           tone={snapshot.header.order_posture === "armed" ? "warning" : "success"}
         />
         <TickerCell label="Config" value={String(configFingerprint).slice(0, 8)} delta="op" />
-        <TickerCell label="Research" value={`${researchRows} rows`} delta="read model" />
       </section>
     </>
   );

@@ -245,7 +245,13 @@ export function App() {
             snapshot={snapshot}
           />
         )}
-        {activeTab === "Research" && <ResearchTab snapshot={snapshot} />}
+        {activeTab === "Research" && (
+          <ResearchTab
+            selectedStrategyId={selectedStrategyId}
+            setSelectedStrategyId={setSelectedStrategyId}
+            snapshot={snapshot}
+          />
+        )}
       </main>
       <footer className="statusbar">
         <span aria-live="polite" className={refreshAction.tone === "danger" ? "tone-danger" : undefined}>

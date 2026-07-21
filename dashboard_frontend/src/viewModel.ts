@@ -1,6 +1,6 @@
-import type { DashboardSnapshot, Metric, Row, Tone } from "./types";
+import type { DashboardSnapshot, Metric, Row, SignalFreshness, Tone } from "./types";
 import { firstValue } from "./utils/data";
-import { formatPercent, formatValue, humanize } from "./utils/format";
+import { formatAge, formatPercent, formatValue, humanize } from "./utils/format";
 import { toneFromValue } from "./utils/tone";
 
 export const tabs = ["Portfolio", "Maestro", "Virtuoso", "Research"] as const;
@@ -67,24 +67,17 @@ export function latestSignal(snapshot: DashboardSnapshot, strategyId: string) {
   );
 }
 
-export function strategyMetrics(strategy: Strategy): Metric[] {
-  const latest = strategy.performance_snapshot?.latest || {};
-  const quality = strategy.performance_snapshot?.quality?.status || "missing";
-  const ret = latest.cumulative_return ?? strategy.summary.cumulative_return;
-  const retNum = Number(ret);
-  return [
-    { label: "Signal", value: latestSignalLabel(strategy), tone: toneFromValue(latestSignalLabel(strategy)) },
-    { label: "Current Value", value: latest.current_value ?? strategy.summary.current_value ?? strategy.summary.book_value ?? "n/a" },
-    {
-      label: "Return",
-      value: ret == null ? "n/a" : formatPercent(ret),
-      tone: !Number.isFinite(retNum) ? "neutral" : retNum > 0 ? "success" : retNum < 0 ? "danger" : "neutral",
-    },
-    { label: "Evidence", value: quality, tone: toneFromValue(quality) },
-  ];
-}
+export type SignalFreshnessRow = SignalFreshness["strategies"][number];
 
-export function latestSignalLabel(strategy: Strategy) {
+/**
+ * Human label for a signal-freshness row: real freshness status from the
+ * backend (fresh/stale/missing/failed), not just the last run's validation.
+ */
+export function signalStatusLabel(signal: SignalFreshnessRow | undefined, strategy: Strategy): string {
+  if (signal?.status) {
+    return String(signal.status);
+  }
+  // Fallback when the freshness card has no row for this strategy.
   const run = strategy.runs[0];
   if (run?.validation_ok === true) {
     return "fresh";
@@ -93,4 +86,31 @@ export function latestSignalLabel(strategy: Strategy) {
     return "failed";
   }
   return "missing";
+}
+
+/** "2.1h ago · limit 24.0h" style caption for a signal-freshness row. */
+export function signalAgeCaption(signal: SignalFreshnessRow | undefined): string {
+  if (!signal || signal.age_seconds == null) {
+    return "No signal package";
+  }
+  const age = `${formatAge(signal.age_seconds)} ago`;
+  return signal.max_age_seconds == null ? age : `${age} · limit ${formatAge(signal.max_age_seconds)}`;
+}
+
+export function strategyMetrics(strategy: Strategy, signal?: SignalFreshnessRow): Metric[] {
+  const latest = strategy.performance_snapshot?.latest || {};
+  const quality = strategy.performance_snapshot?.quality?.status || "missing";
+  const ret = latest.cumulative_return ?? strategy.summary.cumulative_return;
+  const retNum = Number(ret);
+  const signalLabel = signalStatusLabel(signal, strategy);
+  return [
+    { label: "Signal", value: signalLabel, tone: toneFromValue(signalLabel) },
+    { label: "Current Value", value: latest.current_value ?? strategy.summary.current_value ?? strategy.summary.book_value ?? "n/a" },
+    {
+      label: "Return",
+      value: ret == null ? "n/a" : formatPercent(ret),
+      tone: !Number.isFinite(retNum) ? "neutral" : retNum > 0 ? "success" : retNum < 0 ? "danger" : "neutral",
+    },
+    { label: "Evidence", value: quality, tone: toneFromValue(quality) },
+  ];
 }

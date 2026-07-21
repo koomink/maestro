@@ -1,8 +1,20 @@
+"""Strategy book snapshots record each run's TARGET plan, not actual holdings.
+
+``book_value`` here is a projection — the run's total portfolio value times the
+book's target weight — so books of strategies sharing a capital pool overlap
+and the series tracks the whole portfolio, not the strategy's own results.
+Actual per-strategy holdings and performance are derived at read time from the
+account attribution ledger plus broker snapshot prices (see
+``maestro.dashboard.read_models.build_strategy_actual_performance_table``).
+"""
+
 from typing import Any
 
 from maestro.core.symbols import is_cash_symbol
 from maestro.sdk import StrategyBookAllocation, TargetAllocationResult
 from maestro.state.models import PortfolioState
+
+VALUATION_BASIS = "target_projection"
 
 
 def build_strategy_book_snapshots(
@@ -41,6 +53,8 @@ def build_strategy_book_snapshots(
                     "label": book.label or book.book_id,
                     "target_weight": book_weight,
                     "book_value": book_value,
+                    "target_value": book_value,
+                    "valuation_basis": VALUATION_BASIS,
                     "cash": cash,
                     "positions": positions,
                     "allocations": allocations,

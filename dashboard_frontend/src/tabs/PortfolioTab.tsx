@@ -1,7 +1,8 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import type { DashboardSnapshot, Row } from "../types";
+import type { DashboardSnapshot, Row, Tone } from "../types";
 import { filterByPeriod } from "../utils/data";
-import { formatPercent, formatValue } from "../utils/format";
+import { formatCompact, formatPercent, formatValue } from "../utils/format";
+import { toneFromValue } from "../utils/tone";
 import {
   accountDisplayLabel,
   buildAccountValuePie,
@@ -37,6 +38,7 @@ export function PortfolioTab({
   const yKey = rows.some((row) => Number.isFinite(Number(row.total_value))) ? "total_value" : "current_value";
   return (
     <section className="tab-grid portfolio-grid">
+      <PortfolioKpiStrip performanceRows={investment.total_portfolio_performance} />
       <Panel title="Portfolio Pulse">
         <PortfolioPulse displayCurrency={displayCurrency} snapshot={snapshot} />
       </Panel>
@@ -62,15 +64,121 @@ export function PortfolioTab({
           <AppMatrixPanel displayCurrency={displayCurrency} snapshot={snapshot} />
         </Panel>
         <Panel title="Holdings / Positions">
-          <CompactTable
-            columns={["account_id", "symbol", "name", "quantity", "average_price", "current_price"]}
-            dense
-            limit={14}
-            rows={investment.broker_positions.length ? investment.broker_positions : investment.portfolio}
-          />
+          <HoldingsTable investment={investment} />
         </Panel>
       </div>
     </section>
+  );
+}
+
+/**
+ * Top-line performance KPIs from the total-portfolio performance read model:
+ * NAV, latest period return, cumulative return, drawdown, reconciliation.
+ */
+function PortfolioKpiStrip({ performanceRows }: { performanceRows: Row[] }) {
+  const latest = performanceRows[0] || {};
+  const periodReturn = numeric(latest.daily_return ?? latest.period_return);
+  const cumulativeReturn = numeric(latest.cumulative_return);
+  const drawdown = numeric(latest.drawdown);
+  const cashFlow = numeric(latest.cash_flow);
+  const totalValue = numeric(latest.total_value);
+  const currency = String(latest.currency || latest.display_currency || "");
+  const reconciliation = String(latest.reconciliation_status || "n/a");
+  return (
+    <div className="kpi-strip">
+      <KpiCard
+        label="Total NAV"
+        value={totalValue == null ? "n/a" : `${formatValue(totalValue)} ${currency}`.trim()}
+        caption={formatValue(latest.created_at)}
+      />
+      <KpiCard
+        label="Period Return"
+        value={periodReturn == null ? "n/a" : formatPercent(periodReturn)}
+        caption="vs previous snapshot"
+        tone={returnTone(periodReturn)}
+      />
+      <KpiCard
+        label="Cumulative Return"
+        value={cumulativeReturn == null ? "n/a" : formatPercent(cumulativeReturn)}
+        caption="net of cash flows"
+        tone={returnTone(cumulativeReturn)}
+      />
+      <KpiCard
+        label="Drawdown"
+        value={drawdown == null ? "n/a" : formatPercent(drawdown)}
+        caption="from peak value"
+        tone={drawdown != null && drawdown < 0 ? "danger" : "neutral"}
+      />
+      <KpiCard
+        label="Period Cash Flow"
+        value={cashFlow == null ? "n/a" : `${formatCompact(cashFlow)} ${currency}`.trim()}
+        caption="deposits / withdrawals"
+      />
+      <KpiCard
+        label="Reconciliation"
+        value={reconciliation}
+        caption="broker vs state"
+        tone={toneFromValue(reconciliation)}
+      />
+    </div>
+  );
+}
+
+function returnTone(value: number | null): Tone {
+  if (value == null) {
+    return "neutral";
+  }
+  return value > 0 ? "success" : value < 0 ? "danger" : "neutral";
+}
+
+function KpiCard({ caption, label, tone = "neutral", value }: { caption?: string; label: string; tone?: Tone; value: string }) {
+  return (
+    <div className="kpi-card">
+      <b>{label}</b>
+      <span className={`kpi-value tone-${tone}`}>{value}</span>
+      {caption && <small>{caption}</small>}
+    </div>
+  );
+}
+
+function HoldingsTable({ investment }: { investment: DashboardSnapshot["investment_console"] }) {
+  const positions = investment.broker_positions;
+  if (!positions.length) {
+    return (
+      <CompactTable
+        columns={["account_id", "symbol", "name", "quantity", "average_price", "current_price"]}
+        dense
+        limit={14}
+        rows={investment.portfolio}
+      />
+    );
+  }
+  const rows: Row[] = positions
+    .map((row) => {
+      const quantity = numeric(row.quantity);
+      const averagePrice = numeric(row.average_price);
+      const currentPrice = numeric(row.current_price);
+      const marketValue = numeric(row.market_value) ?? (quantity != null && currentPrice != null ? quantity * currentPrice : null);
+      const pnlPct = averagePrice != null && averagePrice !== 0 && currentPrice != null ? currentPrice / averagePrice - 1 : null;
+      return {
+        account: accountDisplayLabel(row.account_id),
+        symbol: row.symbol,
+        name: row.name,
+        quantity,
+        price: currentPrice,
+        value: marketValue,
+        pnl: pnlPct == null ? "n/a" : formatPercent(pnlPct),
+        weight: formatPercent(row.weight),
+      };
+    })
+    .sort((a, b) => (numeric(b.value) ?? -1) - (numeric(a.value) ?? -1));
+  return (
+    <CompactTable
+      columns={["account", "symbol", "quantity", "price", "value", "pnl", "weight"]}
+      dense
+      limit={14}
+      rows={rows}
+    />
   );
 }
 
@@ -99,7 +207,7 @@ function AccountMatrixPanel({
     <div className="matrix-panel-body">
       <DonutChart
         centerLabel="by account"
-        centerValue={pieTotal > 0 ? `${formatValue(pieTotal)} ${displayCurrency}` : "n/a"}
+        centerValue={pieTotal > 0 ? `${formatCompact(pieTotal)} ${displayCurrency}` : "n/a"}
         slices={accountPie}
       />
       <PieNote excludedCount={excludedCount} omittedCount={omittedCount} unit="account" />
@@ -131,15 +239,19 @@ function AppMatrixPanel({
     }
     return map;
   }, [snapshot.investment_console.broker_account_overview.accounts]);
-  const accountIdByStrategyId = useMemo(() => {
+  // Per-strategy currency: backend-resolved account currency first (covers
+  // multi-account routing labels), then a direct broker-account lookup.
+  const currencyByStrategyId = useMemo(() => {
     const map = new Map<string, string>();
     for (const app of snapshot.workflow_pipelines.apps) {
-      if (app.account_id != null) {
-        map.set(app.strategy_id, String(app.account_id));
+      const direct = app.account_id != null ? accountCurrencyByAccountId.get(String(app.account_id)) : undefined;
+      const currency = app.account_currency ?? direct;
+      if (currency != null) {
+        map.set(app.strategy_id, String(currency));
       }
     }
     return map;
-  }, [snapshot.workflow_pipelines.apps]);
+  }, [snapshot.workflow_pipelines.apps, accountCurrencyByAccountId]);
 
   const { slices: pieSlices, excludedCount, omittedCount } = useMemo(() => {
     let excluded = 0;
@@ -147,41 +259,41 @@ function AppMatrixPanel({
     const slices: { label: string; value: number }[] = [];
     for (const strategy of snapshot.virtuoso_apps.strategies) {
       const bookValue = numeric(strategy.summary.book_value);
-      const accountId = accountIdByStrategyId.get(strategy.strategy_id);
-      const currency = accountId ? accountCurrencyByAccountId.get(accountId) : undefined;
+      if (bookValue == null || bookValue <= 0) {
+        omitted += 1;
+        continue;
+      }
+      const currency = currencyByStrategyId.get(strategy.strategy_id);
       const converted = convertValue(bookValue, currency, displayCurrency, fxSnapshot);
       if (converted == null) {
         excluded += 1;
         continue;
       }
-      if (converted <= 0) {
-        omitted += 1;
-        continue;
-      }
       slices.push({ label: appName(strategy.strategy_id), value: converted });
     }
     return { slices, excludedCount: excluded, omittedCount: omitted };
-  }, [snapshot.virtuoso_apps.strategies, accountIdByStrategyId, accountCurrencyByAccountId, displayCurrency, fxSnapshot]);
+  }, [snapshot.virtuoso_apps.strategies, currencyByStrategyId, displayCurrency, fxSnapshot]);
   const pieTotal = pieSlices.reduce((sum, slice) => sum + slice.value, 0);
-  const tableRows: Row[] = snapshot.virtuoso_apps.strategies.map((strategy) => {
-    const accountId = accountIdByStrategyId.get(strategy.strategy_id);
-    return {
-      strategy: appName(strategy.strategy_id),
-      currency: (accountId ? accountCurrencyByAccountId.get(accountId) : undefined) ?? "n/a",
-      value: strategy.summary.book_value,
-      return: formatPercent(strategy.summary.cumulative_return),
-      period: formatPercent(strategy.summary.period_return),
-      drawdown: formatPercent(strategy.summary.drawdown),
-    };
-  });
+  const tableRows: Row[] = snapshot.virtuoso_apps.strategies.map((strategy) => ({
+    strategy: appName(strategy.strategy_id),
+    currency: currencyByStrategyId.get(strategy.strategy_id) ?? "n/a",
+    value: strategy.summary.book_value,
+    return: formatPercent(strategy.summary.cumulative_return),
+    period: formatPercent(strategy.summary.period_return),
+    drawdown: formatPercent(strategy.summary.drawdown),
+  }));
   return (
     <div className="matrix-panel-body">
       <DonutChart
         centerLabel="by app"
-        centerValue={pieTotal > 0 ? `${formatValue(pieTotal)} ${displayCurrency}` : "n/a"}
+        centerValue={pieTotal > 0 ? `${formatCompact(pieTotal)} ${displayCurrency}` : "n/a"}
         slices={pieSlices}
       />
       <PieNote excludedCount={excludedCount} omittedCount={omittedCount} unit="app" />
+      <p className="muted-copy">
+        App values are actual attributed holdings (Maestro-purchased positions only); manually
+        held assets are not included.
+      </p>
       <CompactTable
         columns={["strategy", "currency", "value", "return", "period", "drawdown"]}
         dense
@@ -197,7 +309,7 @@ function PieNote({ excludedCount, omittedCount, unit }: { excludedCount: number;
     return null;
   }
   const parts = [
-    excludedCount > 0 ? `${excludedCount} ${unit}(s) excluded — FX unavailable.` : null,
+    excludedCount > 0 ? `${excludedCount} ${unit}(s) excluded — currency unknown or FX unavailable.` : null,
     omittedCount > 0 ? `${omittedCount} ${unit}(s) omitted — no positive value.` : null,
   ].filter(Boolean);
   return <p className="muted-copy">{parts.join(" ")}</p>;

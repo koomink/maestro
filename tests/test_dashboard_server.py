@@ -598,13 +598,20 @@ def test_dashboard_snapshot_supports_multi_strategy_multi_currency_fixture(tmp_p
     assert overview_by_id["tranquillo_us"]["app"] == "Tranquillo"
     assert overview_by_id["crescendo_kr"]["app"] == "Crescendo"
     virtuoso_by_id = {strategy["strategy_id"]: strategy for strategy in virtuoso_strategies}
-    tranquillo_performance = virtuoso_by_id["tranquillo_us"]["performance_snapshot"]
-    assert tranquillo_performance["latest"]["current_value"] == 1100.0
-    assert tranquillo_performance["latest"]["cumulative_cash_flow"] == 100.0
-    assert tranquillo_performance["latest"]["net_pnl"] == 0.0
-    assert tranquillo_performance["latest"]["twr"] == 0.0
-    assert tranquillo_performance["series"]["cash_flow_markers"][0]["amount"] == 100.0
-    assert tranquillo_performance["quality"]["status"] == "ok"
+    tranquillo = virtuoso_by_id["tranquillo_us"]
+    # Displayed performance is actual-holdings based; this fixture has no
+    # attribution ledger, so the actual series is honestly empty while the
+    # target-projection series keeps the persisted book history.
+    tranquillo_performance = tranquillo["performance_snapshot"]
+    assert tranquillo_performance["latest"]["current_value"] is None
+    assert tranquillo_performance["quality"]["status"] == "missing"
+    target_rows = list(reversed(tranquillo["target_performance"]))
+    assert target_rows[-1]["current_value"] == 1100.0
+    assert target_rows[-1]["cumulative_cash_flow"] == 100.0
+    assert target_rows[-1]["net_pnl"] == 0.0
+    assert target_rows[-1]["twr"] == 0.0
+    assert tranquillo["summary"]["basis"] == "actual"
+    assert tranquillo["summary"]["target_book_value"] == 1100.0
     pipelines = payload["workflow_pipelines"]
     assert [node["id"] for node in pipelines["system"]["nodes"]] == [
         "data",

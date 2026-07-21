@@ -1,4 +1,4 @@
-import type { DashboardRefreshResponse, DashboardSnapshot, GenerateSignalResponse } from "../types";
+import type { DashboardRefreshResponse, DashboardSnapshot, GenerateSignalResponse, RunDetail } from "../types";
 
 export async function fetchSnapshot(currency: "KRW" | "USD"): Promise<DashboardSnapshot> {
   const response = await fetch(`/api/dashboard/snapshot?display_currency=${currency}`);
@@ -25,6 +25,14 @@ export async function generateStrategySignal(strategyId: string): Promise<Genera
     throw new Error(await dashboardErrorMessage(response, "Signal generation failed"));
   }
   return (await response.json()) as GenerateSignalResponse;
+}
+
+export async function fetchRunDetail(runId: string): Promise<RunDetail> {
+  const response = await fetch(`/api/dashboard/runs/${encodeURIComponent(runId)}`);
+  if (!response.ok) {
+    throw new Error(await dashboardErrorMessage(response, "Run detail is unavailable"));
+  }
+  return (await response.json()) as RunDetail;
 }
 
 async function dashboardErrorMessage(response: Response, fallback: string): Promise<string> {

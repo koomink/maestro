@@ -1229,6 +1229,212 @@ def build_strategy_attribution_table(
     return rows
 
 
+def _strategy_attribution_scopes(config: Any) -> dict[str, list[tuple[str, str]]]:
+    """Map each strategy to the (account_id, bucket_id) pairs holding its positions.
+
+    The attribution ledger tracks quantities per (account, symbol, bucket) where
+    bucket == the strategy's execution sleeve. Multi-account contribution
+    strategies carry a routing label instead of a broker account id, so their
+    scope comes from the group's member account targets.
+    """
+    scopes: dict[str, list[tuple[str, str]]] = {}
+    group_method = getattr(config, "multi_account_contribution_group_for_strategy", None)
+    for strategy in getattr(config, "strategies", []):
+        strategy_id = getattr(strategy, "id", None)
+        if not strategy_id:
+            continue
+        group = group_method(strategy_id) if callable(group_method) else None
+        if group is not None:
+            pairs = [
+                (target.account_id, target.execution_sleeve) for target in group.account_targets
+            ]
+        else:
+            account_id = getattr(strategy, "account_id", None)
+            sleeve = getattr(strategy, "execution_sleeve", None)
+            pairs = [(str(account_id), str(sleeve))] if account_id and sleeve else []
+        if pairs:
+            scopes[str(strategy_id)] = pairs
+    return scopes
+
+
+def build_strategy_actual_performance_table(
+    store: StateStore,
+    config: MaestroConfig | None,
+    limit: int = 200,
+    attribution_limit: int = 5000,
+) -> list[dict[str, Any]]:
+    """Per-strategy performance series valued from ACTUAL attributed holdings.
+
+    Unlike ``build_strategy_book_performance_table`` (whose book values are
+    target projections — total portfolio value x target weight), this series
+    values the quantities the attribution ledger assigns to each strategy
+    bucket with the prices of each account's broker snapshots over time.
+    Quantity changes (fills) enter TWR as explicit cash flows, so the returns
+    measure the strategy's actual holdings performance, are immune to capital
+    shared with other strategies, and stay unaffected by pricing regressions
+    in strategy-run valuations.
+    """
+    scopes = _strategy_attribution_scopes(config) if config is not None else {}
+    if not scopes:
+        return []
+    scoped_accounts = {account_id for pairs in scopes.values() for account_id, _ in pairs}
+
+    # Attribution history grouped into whole-account versions (each save writes
+    # the account's full position set), oldest first.
+    versions: list[dict[str, Any]] = []
+    version_map: dict[tuple[str, Any, Any], dict[str, Any]] = {}
+    for row in reversed(store.list_account_attribution_snapshots(limit=attribution_limit)):
+        payload = _mapping(row.get("payload"))
+        account_id = str(row.get("account_id") or payload.get("account_id") or "")
+        if account_id not in scoped_accounts:
+            continue
+        key = (account_id, payload.get("version"), row.get("run_id"))
+        entry = version_map.get(key)
+        if entry is None:
+            entry = {
+                "account_id": account_id,
+                "created_at": str(row.get("created_at") or ""),
+                "positions": {},
+            }
+            version_map[key] = entry
+            versions.append(entry)
+        symbol = str(row.get("symbol") or payload.get("symbol") or "")
+        bucket_id = str(row.get("bucket_id") or payload.get("bucket_id") or "")
+        entry["positions"][(symbol, bucket_id)] = _float_or_none(payload.get("quantity")) or 0.0
+
+    if not versions:
+        return []
+
+    broker_rows = [
+        row
+        for row in reversed(store.list_broker_account_snapshots(limit=limit))
+        if _broker_snapshot_account_id(row) in scoped_accounts
+    ]
+
+    attribution_state: dict[str, dict[tuple[str, str], float]] = {}
+    prices_by_account: dict[str, dict[str, float]] = {}
+    twr_states: dict[str, dict[str, Any]] = {}
+    previous_quantities: dict[str, dict[tuple[str, str, str], float]] = {}
+    version_index = 0
+    rows: list[dict[str, Any]] = []
+    for broker_row in broker_rows:
+        created_at = str(broker_row.get("created_at") or "")
+        # Apply every attribution version recorded up to this valuation time.
+        while version_index < len(versions) and versions[version_index]["created_at"] <= created_at:
+            version = versions[version_index]
+            attribution_state[version["account_id"]] = dict(version["positions"])
+            version_index += 1
+        account_id = _broker_snapshot_account_id(broker_row)
+        payload = _mapping(broker_row.get("payload"))
+        account = _mapping(payload.get("account"))
+        prices_by_account[account_id] = {
+            str(position.get("symbol")): price
+            for position in _positions(account)
+            if (price := _float_or_none(position.get("current_price"))) is not None
+        }
+        for strategy_id, pairs in scopes.items():
+            if all(pair[0] != account_id for pair in pairs):
+                continue
+            quantities: dict[tuple[str, str, str], float] = {}
+            missing_prices: set[str] = set()
+            value = 0.0
+            has_ledger = False
+            for scope_account, bucket_id in pairs:
+                ledger = attribution_state.get(scope_account)
+                if ledger is None:
+                    continue
+                has_ledger = True
+                prices = prices_by_account.get(scope_account, {})
+                for (symbol, position_bucket), quantity in ledger.items():
+                    if position_bucket != bucket_id or quantity <= 0:
+                        continue
+                    quantities[(scope_account, bucket_id, symbol)] = quantity
+                    price = prices.get(symbol)
+                    if price is None:
+                        missing_prices.add(symbol)
+                        continue
+                    value += quantity * price
+            if not has_ledger:
+                continue
+            total_value = None if missing_prices else value
+            # Quantity deltas are contributions/withdrawals, not performance.
+            previous = previous_quantities.get(strategy_id, {})
+            cash_flow = 0.0
+            for key, quantity in quantities.items():
+                scope_account, _, symbol = key
+                price = prices_by_account.get(scope_account, {}).get(symbol)
+                if price is not None:
+                    cash_flow += (quantity - previous.get(key, 0.0)) * price
+            for key, quantity in previous.items():
+                if key not in quantities:
+                    scope_account, _, symbol = key
+                    price = prices_by_account.get(scope_account, {}).get(symbol)
+                    if price is not None:
+                        cash_flow -= quantity * price
+            previous_quantities[strategy_id] = quantities
+            timestamp = _parse_timestamp(created_at)
+            cash_flow_events = (
+                [
+                    {
+                        "timestamp": timestamp,
+                        "signed_amount": cash_flow,
+                        "payload": {
+                            "created_at": created_at,
+                            "amount": _round_money(cash_flow),
+                            "type": "attributed_fill",
+                        },
+                    }
+                ]
+                if abs(cash_flow) > 1e-9 and total_value is not None
+                else []
+            )
+            state = twr_states.setdefault(
+                strategy_id,
+                {
+                    "first_value": None,
+                    "previous_value": None,
+                    "peak_value": None,
+                    "cumulative_cash_flow": 0.0,
+                    "twr_growth": 1.0,
+                    "previous_timestamp": None,
+                    "cash_flow_events": [],
+                    "mwr_flows": [],
+                },
+            )
+            performance = _advance_twr_performance_state(
+                state,
+                total_value,
+                cash_flow if total_value is not None else 0.0,
+                timestamp,
+                cash_flow_events,
+            )
+            rows.append(
+                {
+                    "created_at": created_at,
+                    "run_id": broker_row.get("run_id"),
+                    "strategy_id": strategy_id,
+                    "book_id": strategy_id,
+                    "label": "actual holdings",
+                    "basis": "actual",
+                    "book_value": _round_money(total_value),
+                    "current_value": _round_money(total_value),
+                    "cash_flow": _round_money(cash_flow if total_value is not None else None),
+                    "cumulative_cash_flow": performance["cumulative_cash_flow"],
+                    "net_pnl": performance["net_pnl"],
+                    "period_return": performance["period_return"],
+                    "twr": performance["twr"],
+                    "cumulative_return": performance["twr"],
+                    "mwr": performance["mwr"],
+                    "irr": performance["mwr"],
+                    "drawdown": performance["drawdown"],
+                    "positions": {key[2]: quantity for key, quantity in quantities.items()},
+                    "missing_prices": sorted(missing_prices),
+                    "cash_flow_events": [event["payload"] for event in cash_flow_events],
+                }
+            )
+    return list(reversed(rows))
+
+
 def build_account_bucket_attribution_table(
     store: StateStore,
     *,

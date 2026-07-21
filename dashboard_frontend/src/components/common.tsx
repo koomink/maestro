@@ -1,7 +1,7 @@
-import type { ReactNode } from "react";
+import { type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, useId, useRef, useState } from "react";
 import type { Metric, Row, Tone } from "../types";
 import { chartPoints, columnsFor, dateTime, firstValue } from "../utils/data";
-import { formatValue, humanize } from "../utils/format";
+import { formatCompact, formatPercent, formatValue, humanize } from "../utils/format";
 import { relativeTime, useNow } from "../utils/hooks";
 import { toneClass, toneGlyph } from "../viewModel";
 
@@ -115,18 +115,22 @@ function isNumericColumn(rows: Row[], column: string): boolean {
 export function CompactTable({
   columns,
   dense = false,
+  emptyLabel = "No persisted rows are available.",
   limit = 8,
+  onRowClick,
   rows,
 }: {
   columns?: string[];
   dense?: boolean;
+  emptyLabel?: string;
   limit?: number;
+  onRowClick?: (row: Row) => void;
   rows: Row[];
 }) {
   const limitedRows = rows.slice(0, limit);
   const tableColumns = columns || columnsFor(limitedRows).slice(0, 6);
   if (!limitedRows.length) {
-    return <p className="muted-copy">No persisted rows are available.</p>;
+    return <p className="muted-copy">{emptyLabel}</p>;
   }
   const numericColumns = new Set(tableColumns.filter((column) => isNumericColumn(limitedRows, column)));
   return (
@@ -141,7 +145,11 @@ export function CompactTable({
         </thead>
         <tbody>
           {limitedRows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
+            <tr
+              className={onRowClick ? "row-clickable" : undefined}
+              key={rowIndex}
+              onClick={onRowClick ? () => onRowClick(row) : undefined}
+            >
               {tableColumns.map((column) => {
                 const text = formatValue(row[column]);
                 return (
@@ -152,6 +160,9 @@ export function CompactTable({
           ))}
         </tbody>
       </table>
+      {rows.length > limitedRows.length && (
+        <p className="table-note">Showing {limitedRows.length} of {rows.length} rows</p>
+      )}
     </div>
   );
 }
@@ -182,6 +193,28 @@ function markerPoints(rows: Row[], points: ReturnType<typeof chartPoints>, xKey:
     .filter((p): p is ReturnType<typeof chartPoints>[number] & { marker: Row } => Boolean(p));
 }
 
+/** Axis date label in KST ("07-12"). */
+function axisDate(time: number): string {
+  if (!Number.isFinite(time)) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", month: "2-digit", day: "2-digit" }).format(new Date(time));
+}
+
+function axisDateTime(time: number): string {
+  if (!Number.isFinite(time)) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(time));
+}
+
 export function TerminalChart({
   title,
   rows,
@@ -195,6 +228,9 @@ export function TerminalChart({
   yKey: string;
   markers?: Row[];
 }) {
+  const gradientId = useId();
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const points = chartPoints(rows, yKey);
   if (points.length < 2) {
     return (
@@ -204,27 +240,101 @@ export function TerminalChart({
       </div>
     );
   }
+  // Times parallel to `points`: same ordering/filter as chartPoints.
+  const pointTimes = rows
+    .slice()
+    .reverse()
+    .filter((row) => Number.isFinite(Number(row[yKey])))
+    .map((row) => dateTime(firstValue(row, [xKey, "as_of", "timestamp", "date"])));
   const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
   const areaPath = `${linePath} L ${points[points.length - 1].x} 200 L ${points[0].x} 200 Z`;
   const maxVal = Math.max(...points.map((point) => point.raw));
   const minVal = Math.min(...points.map((point) => point.raw));
+  const firstVal = points[0].raw;
+  const lastVal = points[points.length - 1].raw;
+  const periodReturn = firstVal !== 0 ? lastVal / firstVal - 1 : null;
+  const up = lastVal >= firstVal;
+  const gridYs = [42, 95, 148, 200];
+  const valueAtY = (y: number) => minVal + ((200 - y) / 158) * (maxVal - minVal);
+  const xLabelIndexes = Array.from(
+    new Set([0, Math.floor((points.length - 1) / 2), points.length - 1]),
+  ).filter((index) => Number.isFinite(pointTimes[index]));
+  const hovered = hoverIndex != null ? points[hoverIndex] : null;
+  const hoveredTime = hoverIndex != null ? pointTimes[hoverIndex] : Number.NaN;
+
+  function onMouseMove(event: ReactMouseEvent<SVGSVGElement>) {
+    const svg = svgRef.current;
+    if (!svg) {
+      return;
+    }
+    const rect = svg.getBoundingClientRect();
+    const viewX = ((event.clientX - rect.left) / rect.width) * 640;
+    let nearest = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    points.forEach((point, index) => {
+      const distance = Math.abs(point.x - viewX);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = index;
+      }
+    });
+    setHoverIndex(nearest);
+  }
+
+  const tooltipFlip = hovered != null && hovered.x > 470;
+  const tooltipX = hovered == null ? 0 : tooltipFlip ? hovered.x - 148 : hovered.x + 10;
+  const tooltipY = hovered == null ? 0 : Math.min(158, Math.max(46, hovered.y - 44));
+
   return (
-    <div className="terminal-chart">
+    <div
+      className="terminal-chart"
+      style={{ "--chart-color": up ? "var(--green)" : "var(--red)" } as CSSProperties}
+    >
       <div className="chart-title">
         <span>{title}</span>
-        <small>{formatValue(rows[0]?.created_at || rows[0]?.as_of || rows[0]?.timestamp)}</small>
+        <span className="chart-title-meta">
+          {periodReturn != null && (
+            <span className={up ? "chart-return tone-success" : "chart-return tone-danger"}>
+              {formatPercent(periodReturn)}
+            </span>
+          )}
+          <small>
+            {axisDate(pointTimes[0])} → {axisDate(pointTimes[points.length - 1])}
+          </small>
+        </span>
       </div>
-      <svg viewBox="0 0 640 220" role="img" aria-label={title}>
+      <svg
+        ref={svgRef}
+        viewBox="0 0 640 236"
+        role="img"
+        aria-label={title}
+        onMouseMove={onMouseMove}
+        onMouseLeave={() => setHoverIndex(null)}
+      >
         <defs>
-          <linearGradient id={`fill-${title.replace(/\W+/g, "-")}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--green)" stopOpacity="0.24" />
-            <stop offset="100%" stopColor="var(--green)" stopOpacity="0" />
+          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--chart-color, var(--green))" stopOpacity="0.24" />
+            <stop offset="100%" stopColor="var(--chart-color, var(--green))" stopOpacity="0" />
           </linearGradient>
         </defs>
         <path className="chart-grid" d="M 28 42 H 612 M 28 95 H 612 M 28 148 H 612 M 28 200 H 612" />
-        <text className="chart-label" x="24" y="42" textAnchor="end">{formatValue(maxVal)}</text>
-        <text className="chart-label" x="24" y="204" textAnchor="end">{formatValue(minVal)}</text>
-        <path className="chart-area" d={areaPath} fill={`url(#fill-${title.replace(/\W+/g, "-")})`} />
+        {gridYs.map((y) => (
+          <text className="chart-label" key={y} x="32" y={y - 4} textAnchor="start">
+            {formatCompact(valueAtY(y))}
+          </text>
+        ))}
+        {xLabelIndexes.map((index) => (
+          <text
+            className="chart-label"
+            key={index}
+            x={points[index].x}
+            y="216"
+            textAnchor={index === 0 ? "start" : index === points.length - 1 ? "end" : "middle"}
+          >
+            {axisDate(pointTimes[index])}
+          </text>
+        ))}
+        <path className="chart-area" d={areaPath} fill={`url(#${gradientId})`} />
         <path className="chart-line-shadow" d={linePath} />
         <path className="chart-line" d={linePath} />
         {markerPoints(rows, points, xKey, yKey, markers).slice(0, 12).map((point, index) => (
@@ -235,7 +345,96 @@ export function TerminalChart({
           </g>
         ))}
         <circle className="chart-dot" cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="5" />
+        {hovered && (
+          <g className="chart-hover">
+            <line className="chart-crosshair" x1={hovered.x} x2={hovered.x} y1="42" y2="200" />
+            <circle className="chart-hover-dot" cx={hovered.x} cy={hovered.y} r="4" />
+            <g transform={`translate(${tooltipX} ${tooltipY})`}>
+              <rect className="chart-tooltip-box" width="138" height="36" rx="4" />
+              <text className="chart-tooltip-date" x="8" y="14">{axisDateTime(hoveredTime)}</text>
+              <text className="chart-tooltip-value" x="8" y="29">{formatValue(hovered.raw)}</text>
+            </g>
+          </g>
+        )}
       </svg>
+    </div>
+  );
+}
+
+export type CompareSeriesInput = {
+  label: string;
+  color: string;
+  rows: Row[];
+  yKey: string;
+};
+
+/**
+ * Multi-series overlay chart with every series rebased to 100 at its first
+ * plotted point, so apps with different book sizes can be compared directly.
+ */
+export function CompareChart({ series, title }: { series: CompareSeriesInput[]; title: string }) {
+  const lines = series
+    .map((item) => {
+      const values = item.rows
+        .slice()
+        .reverse()
+        .map((row) => Number(row[item.yKey]))
+        .filter((value) => Number.isFinite(value));
+      return { label: item.label, color: item.color, values };
+    })
+    .filter((line) => line.values.length >= 2 && line.values[0] !== 0)
+    .map((line) => ({
+      ...line,
+      normalized: line.values.map((value) => (value / line.values[0]) * 100),
+    }));
+  if (!lines.length) {
+    return (
+      <div className="terminal-chart empty">
+        <div className="chart-title">{title}</div>
+        <p className="muted-copy">Not enough numeric history to compare apps.</p>
+      </div>
+    );
+  }
+  const allValues = lines.flatMap((line) => line.normalized);
+  const min = Math.min(...allValues);
+  const max = Math.max(...allValues);
+  const range = max - min || 1;
+  const toY = (value: number) => 200 - ((value - min) / range) * 158;
+  const gridYs = [42, 95, 148, 200];
+  const valueAtY = (y: number) => min + ((200 - y) / 158) * range;
+  return (
+    <div className="terminal-chart compare-chart">
+      <div className="chart-title">
+        <span>{title}</span>
+        <small>rebased to 100</small>
+      </div>
+      <svg viewBox="0 0 640 220" role="img" aria-label={title}>
+        <path className="chart-grid" d="M 28 42 H 612 M 28 95 H 612 M 28 148 H 612 M 28 200 H 612" />
+        {gridYs.map((y) => (
+          <text className="chart-label" key={y} x="32" y={y - 4} textAnchor="start">
+            {valueAtY(y).toFixed(1)}
+          </text>
+        ))}
+        {lines.map((line) => {
+          const step = 584 / Math.max(line.normalized.length - 1, 1);
+          const path = line.normalized
+            .map((value, index) => `${index === 0 ? "M" : "L"} ${28 + index * step} ${toY(value)}`)
+            .join(" ");
+          return <path className="compare-line" d={path} key={line.label} style={{ stroke: line.color }} />;
+        })}
+      </svg>
+      <ul className="compare-legend">
+        {lines.map((line) => {
+          const change = line.normalized[line.normalized.length - 1] / 100 - 1;
+          return (
+            <li key={line.label}>
+              <i style={{ background: line.color }} />
+              <span>{line.label}</span>
+              <b className={change >= 0 ? "tone-success" : "tone-danger"}>{formatPercent(change)}</b>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }
@@ -266,6 +465,11 @@ export function SummaryPill({ label, value }: { label: string; value: string }) 
 export type PieSlice = { label: string; value: number };
 
 const DONUT_PALETTE = ["var(--cyan)", "var(--green)", "var(--amber)", "var(--blue)", "var(--violet)", "var(--red)"];
+
+/** Stable series color by index — shared by donuts and compare charts. */
+export function seriesColor(index: number): string {
+  return DONUT_PALETTE[index % DONUT_PALETTE.length];
+}
 
 function polarPoint(cx: number, cy: number, r: number, angleDeg: number) {
   const angle = ((angleDeg - 90) * Math.PI) / 180;

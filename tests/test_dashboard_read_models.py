@@ -36,6 +36,7 @@ from maestro.dashboard.read_models import (
     build_run_detail,
     build_run_index_table,
     build_safety_state_card,
+    build_strategy_actual_performance_table,
     build_strategy_attribution_table,
     build_strategy_book_performance_table,
     build_strategy_book_snapshots_table,
@@ -1547,3 +1548,180 @@ def test_dashboard_snapshot_histories_are_latest_first_and_limited(tmp_path):
 
     assert [row["run_id"] for row in portfolio_history] == ["run_state_2", "run_state_1"]
     assert [row["run_id"] for row in broker_history] == ["run_broker_2", "run_broker_1"]
+
+
+def _set_created_at(store, table, run_id, created_at):
+    with store._connect() as conn:
+        conn.execute(
+            f"UPDATE {table} SET created_at = ? WHERE run_id = ?",
+            (created_at, run_id),
+        )
+
+
+def _actual_perf_config(strategies):
+    return type(
+        "Config",
+        (),
+        {
+            "strategies": strategies,
+            "multi_account_contribution_group_for_strategy": staticmethod(lambda _sid: None),
+        },
+    )()
+
+
+def _actual_perf_strategy(strategy_id, account_id, sleeve):
+    return type(
+        "Strategy",
+        (),
+        {
+            "id": strategy_id,
+            "account_id": account_id,
+            "execution_sleeve": sleeve,
+            "enabled": True,
+        },
+    )()
+
+
+def _toss_broker_payload(quantity, price):
+    return {
+        "account_id": "toss_brokerage",
+        "account": {
+            "account_id": "toss_brokerage",
+            "currency": "KRW",
+            "cash": 0.0,
+            "positions": [
+                {"symbol": "QQQ", "quantity": quantity, "current_price": price},
+            ],
+        },
+    }
+
+
+def test_strategy_actual_performance_values_attributed_holdings_with_broker_prices(tmp_path):
+    from maestro.portfolio.account_attribution import AttributionPosition
+
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_account_attribution_snapshot(
+        "attr_1",
+        [
+            AttributionPosition(
+                account_id="toss_brokerage",
+                symbol="QQQ",
+                bucket_id="crescendo_us",
+                quantity=2.0,
+                version=1,
+            ),
+            AttributionPosition(
+                account_id="toss_brokerage",
+                symbol="QQQ",
+                bucket_id="manual",
+                quantity=1.0,
+                version=1,
+            ),
+        ],
+    )
+    _set_created_at(store, "account_attribution_snapshots", "attr_1", "2026-07-01 00:00:00")
+    store.save_broker_account_snapshot("broker_1", "toss_brokerage", _toss_broker_payload(3, 100.0))
+    _set_created_at(store, "broker_account_snapshots", "broker_1", "2026-07-01 00:00:01")
+    store.save_broker_account_snapshot("broker_2", "toss_brokerage", _toss_broker_payload(3, 110.0))
+    _set_created_at(store, "broker_account_snapshots", "broker_2", "2026-07-02 00:00:01")
+    store.save_account_attribution_snapshot(
+        "attr_2",
+        [
+            AttributionPosition(
+                account_id="toss_brokerage",
+                symbol="QQQ",
+                bucket_id="crescendo_us",
+                quantity=3.0,
+                version=2,
+            ),
+            AttributionPosition(
+                account_id="toss_brokerage",
+                symbol="QQQ",
+                bucket_id="manual",
+                quantity=1.0,
+                version=2,
+            ),
+        ],
+    )
+    _set_created_at(store, "account_attribution_snapshots", "attr_2", "2026-07-03 00:00:00")
+    store.save_broker_account_snapshot("broker_3", "toss_brokerage", _toss_broker_payload(4, 110.0))
+    _set_created_at(store, "broker_account_snapshots", "broker_3", "2026-07-03 00:00:01")
+
+    config = _actual_perf_config(
+        [
+            _actual_perf_strategy("crescendo_us", "toss_brokerage", "crescendo_us"),
+            _actual_perf_strategy("tranquillo", "kis_isa", "tranquillo"),
+        ]
+    )
+
+    rows = build_strategy_actual_performance_table(store, config)
+
+    # No attribution ledger exists for tranquillo's account, so it emits no rows.
+    assert {row["strategy_id"] for row in rows} == {"crescendo_us"}
+    ordered = list(reversed(rows))
+    # Manual-bucket quantities never count toward the strategy's value.
+    assert [row["book_value"] for row in ordered] == [200.0, 220.0, 330.0]
+    assert ordered[0]["basis"] == "actual"
+    assert ordered[1]["period_return"] == pytest.approx(0.10)
+    # The attributed buy is a cash flow, not performance: TWR stays at +10%.
+    assert ordered[2]["cash_flow"] == pytest.approx(110.0)
+    assert ordered[2]["period_return"] == pytest.approx(0.0)
+    assert ordered[2]["cumulative_return"] == pytest.approx(0.10)
+    assert ordered[2]["positions"] == {"QQQ": 3.0}
+
+
+def test_strategy_actual_performance_resolves_multi_account_scopes(tmp_path):
+    from maestro.portfolio.account_attribution import AttributionPosition
+
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_account_attribution_snapshot(
+        "attr_isa",
+        [
+            AttributionPosition(
+                account_id="kis_isa",
+                symbol="KODEX",
+                bucket_id="tranquillo",
+                quantity=5.0,
+                version=1,
+            ),
+        ],
+    )
+    _set_created_at(store, "account_attribution_snapshots", "attr_isa", "2026-07-01 00:00:00")
+    store.save_broker_account_snapshot(
+        "broker_isa",
+        "kis_isa",
+        {
+            "account_id": "kis_isa",
+            "account": {
+                "account_id": "kis_isa",
+                "currency": "KRW",
+                "cash": 0.0,
+                "positions": [{"symbol": "KODEX", "quantity": 5, "current_price": 10_000.0}],
+            },
+        },
+    )
+    _set_created_at(store, "broker_account_snapshots", "broker_isa", "2026-07-01 00:00:01")
+
+    group_target = type(
+        "Target", (), {"account_id": "kis_isa", "execution_sleeve": "tranquillo"}
+    )()
+    group = type("Group", (), {"account_targets": [group_target]})()
+    strategy = _actual_perf_strategy(
+        "tranquillo", "multi_account_contributions.tranquillo", None
+    )
+    config = type(
+        "Config",
+        (),
+        {
+            "strategies": [strategy],
+            "multi_account_contribution_group_for_strategy": staticmethod(
+                lambda sid: group if sid == "tranquillo" else None
+            ),
+        },
+    )()
+
+    rows = build_strategy_actual_performance_table(store, config)
+
+    assert [
+        (row["strategy_id"], row["book_value"], row["positions"]) for row in rows
+    ] == [("tranquillo", 50_000.0, {"KODEX": 5.0})]

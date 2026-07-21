@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from maestro.dashboard.read_models import (
     build_run_detail,
     build_run_index_table,
     build_signal_freshness_card,
+    build_strategy_actual_performance_table,
     build_strategy_attribution_table,
     build_strategy_book_performance_table,
     build_strategy_book_snapshots_table,
@@ -129,6 +131,7 @@ def build_dashboard_snapshot(
     )
     strategy_book_snapshots = build_strategy_book_snapshots_table(store)
     strategy_book_performance = build_strategy_book_performance_table(store)
+    strategy_actual_performance = build_strategy_actual_performance_table(store, config)
     strategy_attribution = build_strategy_attribution_table(store)
     account_bucket_attribution = build_account_bucket_attribution_table(
         store,
@@ -145,6 +148,7 @@ def build_dashboard_snapshot(
         config,
         strategy_runs,
         strategy_book_performance,
+        strategy_actual_performance,
         strategy_attribution,
         strategy_book_snapshots,
         signal_freshness,
@@ -298,6 +302,7 @@ def build_dashboard_snapshot(
             broker_account_overview,
             signal_freshness,
             virtuoso_apps,
+            data_sources=_data_source_nodes(config, store),
         ),
         "virtuoso_apps": virtuoso_apps,
         "audit_trail": {
@@ -480,6 +485,8 @@ def _workflow_pipelines(
     broker_account_overview: dict[str, Any],
     signal_freshness: dict[str, Any],
     virtuoso_apps: dict[str, Any],
+    *,
+    data_sources: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     strategy_configs = {
         strategy.id: strategy
@@ -487,6 +494,7 @@ def _workflow_pipelines(
         if getattr(strategy, "readonly_enabled", True)
     }
     return {
+        "data_sources": data_sources or [],
         "system": {
             "nodes": _system_pipeline_nodes(
                 config,
@@ -653,7 +661,11 @@ def _app_pipeline(
 ) -> dict[str, Any]:
     strategy_id = str(app.get("strategy_id") or "")
     account_id = getattr(strategy_config, "account_id", None)
-    account_row = _account_overview_row(broker_account_overview, account_id)
+    account_ids = _strategy_account_ids(config, strategy_config)
+    account_rows = [
+        _account_overview_row(broker_account_overview, resolved_id) for resolved_id in account_ids
+    ]
+    account_row = _worst_account_row(account_rows)
     runs = app.get("runs") if isinstance(app.get("runs"), list) else []
     latest_run = runs[0] if runs else {}
     risk_row = _matched_run_or_account_row(risk_decisions, latest_run.get("run_id"), account_id)
@@ -677,13 +689,17 @@ def _app_pipeline(
         "strategy_id": strategy_id,
         "display_name": _virtuoso_app_display_name(strategy_id),
         "account_id": account_id,
+        "account_ids": account_ids,
+        "account_currency": _strategy_account_currency(
+            config, strategy_config, broker_account_overview
+        ),
         "nodes": [
             _pipeline_node(
                 "account",
                 "Account",
-                "connected" if account_id else "missing",
-                "success" if account_id else "warning",
-                account_id or "No account is mapped to this strategy.",
+                "connected" if account_ids else "missing",
+                "success" if account_ids else "warning",
+                ", ".join(account_ids) or "No account is mapped to this strategy.",
                 updated_at=account_row.get("created_at"),
                 run_id=account_row.get("run_id"),
                 next_check=(
@@ -693,9 +709,9 @@ def _app_pipeline(
             _pipeline_node(
                 "data",
                 "Data",
-                account_row.get("status") or ("missing" if account_id else "disabled"),
-                account_row.get("tone") or ("warning" if account_id else "neutral"),
-                _account_pipeline_detail(account_row, account_id),
+                account_row.get("status") or ("missing" if account_ids else "disabled"),
+                account_row.get("tone") or ("warning" if account_ids else "neutral"),
+                _accounts_pipeline_detail(account_rows, account_ids),
                 updated_at=account_row.get("created_at"),
                 run_id=account_row.get("run_id"),
                 next_check="Run account sync when the linked account snapshot is stale.",
@@ -835,15 +851,142 @@ def _risk_pipeline_detail(risk_row: dict[str, Any]) -> str:
     return "Risk decision has no recorded violations."
 
 
-def _account_pipeline_detail(account_row: dict[str, Any], account_id: Any) -> str:
-    if not account_id:
+def _data_source_nodes(config: Any, store: Any) -> list[dict[str, Any]]:
+    """One pipeline node per configured DataHub provider.
+
+    Status is evidence-based: each strategy's newest signal package records
+    which data types it requested (datahub_evidence), so a provider knows which
+    apps consume it, when it was last used, and how many data-quality issues
+    were attributed to its data types.
+    """
+    providers = [
+        provider
+        for provider in config.datahub.effective_providers()
+        if getattr(provider, "enabled", True)
+    ]
+    usage = _datahub_usage_by_strategy(store)
+    nodes = []
+    for provider in providers:
+        data_types = list(getattr(provider, "data_types", None) or [])
+        matched = {
+            strategy_id: info
+            for strategy_id, info in usage.items()
+            if not data_types or info["data_types"] & set(data_types)
+        }
+        issue_count = 0
+        counted_runs = set()
+        last_used_at = None
+        for info in matched.values():
+            if info["run_id"] not in counted_runs:
+                counted_runs.add(info["run_id"])
+                issue_count += sum(
+                    1
+                    for issue in info["issues"]
+                    if not data_types or str(issue.get("data_type")) in data_types
+                )
+            generated_at = info["generated_at"]
+            if generated_at and (last_used_at is None or str(generated_at) > str(last_used_at)):
+                last_used_at = generated_at
+        if issue_count:
+            status, tone = f"{issue_count} issue(s)", "warning"
+        elif matched:
+            status, tone = "ok", "success"
+        else:
+            status, tone = "configured", "neutral"
+        nodes.append(
+            {
+                "id": str(getattr(provider, "name", None) or provider.provider),
+                "provider": str(provider.provider),
+                "data_types": data_types,
+                "priority": getattr(provider, "priority", None),
+                "status": status,
+                "tone": tone,
+                "issue_count": issue_count,
+                "last_used_at": last_used_at,
+                "strategy_ids": sorted(matched),
+            }
+        )
+    nodes.sort(key=lambda node: (node["priority"] is None, node["priority"]))
+    return nodes
+
+
+def _datahub_usage_by_strategy(store: Any, limit: int = 12) -> dict[str, dict[str, Any]]:
+    """Newest datahub evidence per strategy from recent signal packages."""
+    usage: dict[str, dict[str, Any]] = {}
+    for event in store.list_system_events_by_type("signal_package", limit=limit):
+        payload = event.get("payload") or {}
+        evidence = payload.get("datahub_evidence") or {}
+        strategies = evidence.get("strategies") or {}
+        issues = [
+            issue
+            for issue in (evidence.get("issues") or payload.get("data_quality_issues") or [])
+            if isinstance(issue, dict)
+        ]
+        generated_at = evidence.get("generated_at") or event.get("created_at")
+        run_id = str(event.get("run_id") or "")
+        for strategy_id, requests in strategies.items():
+            if strategy_id in usage:
+                continue  # events are newest-first; first hit per strategy wins
+            data_types: set[str] = set()
+            if isinstance(requests, dict):
+                for request in requests.get("prefetch") or []:
+                    if isinstance(request, dict) and request.get("data_type"):
+                        data_types.add(str(request["data_type"]))
+                runtime = requests.get("runtime")
+                for request in (runtime or {}).get("requests") or []:
+                    if isinstance(request, dict) and request.get("data_type"):
+                        data_types.add(str(request["data_type"]))
+            usage[str(strategy_id)] = {
+                "run_id": run_id,
+                "data_types": data_types,
+                "issues": issues,
+                "generated_at": generated_at,
+            }
+    return usage
+
+
+def _strategy_account_ids(config: Any, strategy_config: Any | None) -> list[str]:
+    """Broker account ids backing a strategy.
+
+    Multi-account contribution strategies carry a routing label
+    (multi_account_contributions.<group>) instead of a broker account id, so the
+    real member accounts have to be resolved from the group config.
+    """
+    if strategy_config is None:
+        return []
+    group = _strategy_multi_account_group(config, strategy_config)
+    if group is not None:
+        return [str(target.account_id) for target in group.account_targets]
+    account_id = getattr(strategy_config, "account_id", None)
+    return [str(account_id)] if account_id else []
+
+
+_ACCOUNT_TONE_SEVERITY = {"danger": 3, "warning": 2, "neutral": 1, "success": 0}
+
+
+def _worst_account_row(account_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    present = [row for row in account_rows if row]
+    if not present:
+        return {}
+    if len(present) < len(account_rows):
+        # A mapped account without any snapshot is worse than any present row.
+        return {}
+    return max(present, key=lambda row: _ACCOUNT_TONE_SEVERITY.get(str(row.get("tone")), 2))
+
+
+def _accounts_pipeline_detail(account_rows: list[dict[str, Any]], account_ids: list[str]) -> str:
+    if not account_ids:
         return "This strategy has no linked account."
-    if not account_row:
-        return f"No dashboard account snapshot is available for {account_id}."
-    return (
-        f"{account_id} is {account_row.get('status', 'unknown')} with "
-        f"{account_row.get('positions_count', 0)} position(s)."
-    )
+    parts = []
+    for account_id, row in zip(account_ids, account_rows, strict=False):
+        if not row:
+            parts.append(f"{account_id} has no dashboard snapshot")
+            continue
+        parts.append(
+            f"{account_id} is {row.get('status', 'unknown')} with "
+            f"{row.get('positions_count', 0)} position(s)"
+        )
+    return "; ".join(parts) + "."
 
 
 def _strategy_signal_detail(latest_run: dict[str, Any], signal_row: dict[str, Any]) -> str:
@@ -1116,10 +1259,80 @@ def _performance_quality(
     return {"status": status, "reasons": reasons}
 
 
+def _book_performance_cache(config: Any) -> dict[str, Any]:
+    try:
+        path = Path(config.state.sqlite_path).parent / "book_performance.json"
+        if not path.exists():
+            return {}
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+_BOOK_DISPLAY_ORDER = ["dga", "accelerated_dual_momentum", "gtt_ue", "baa_a"]
+
+
+def _strategy_books_payload(
+    book_rows: list[dict[str, Any]],
+    performance_cache: dict[str, Any],
+) -> list[dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for row in book_rows:
+        book_id = str(row.get("book_id") or "")
+        if book_id and book_id not in latest:
+            latest[book_id] = row
+    cached_books = performance_cache.get("books") or {}
+    books: list[dict[str, Any]] = []
+    for book_id, row in latest.items():
+        payload = row.get("payload") or {}
+        metadata = payload.get("metadata") or {}
+        cached = cached_books.get(book_id) or {}
+        performance = None
+        if cached.get("dates") and cached.get("equity"):
+            performance = {
+                "dates": cached.get("dates"),
+                "equity": cached.get("equity"),
+                "metrics": cached.get("metrics") or {},
+                "window_start": cached.get("window_start"),
+                "exec_map": cached.get("exec_map") or {},
+                "generated_at": performance_cache.get("generated_at"),
+                "data_through": performance_cache.get("data_through"),
+                "note": performance_cache.get("note"),
+            }
+        books.append(
+            {
+                "book_id": book_id,
+                "label": row.get("label") or book_id,
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "target_weight": row.get("target_weight"),
+                "allocations": row.get("allocations") or {},
+                "rationale": row.get("rationale"),
+                "state": metadata.get("book_state"),
+                "universe": metadata.get("universe") or {},
+                "signal_evidence": metadata.get("signal_evidence") or [],
+                "signal_allocations": metadata.get("signal_allocations") or {},
+                "execution_map": metadata.get("execution_map") or {},
+                "performance": performance,
+            }
+        )
+    books.sort(
+        key=lambda book: (
+            _BOOK_DISPLAY_ORDER.index(book["book_id"])
+            if book["book_id"] in _BOOK_DISPLAY_ORDER
+            else len(_BOOK_DISPLAY_ORDER),
+            book["book_id"],
+        )
+    )
+    return books
+
+
 def _virtuoso_apps(
     config: Any,
     strategy_runs: list[dict[str, Any]],
     strategy_book_performance: list[dict[str, Any]],
+    strategy_actual_performance: list[dict[str, Any]],
     strategy_attribution: list[dict[str, Any]],
     strategy_book_snapshots: list[dict[str, Any]],
     signal_freshness: dict[str, Any],
@@ -1130,6 +1343,7 @@ def _virtuoso_apps(
         if getattr(strategy, "readonly_enabled", True)
     }
     strategy_ids = list(strategy_configs)
+    performance_cache = _book_performance_cache(config)
     enabled_count = sum(1 for strategy in strategy_configs.values() if strategy.enabled)
     evidence_strategy_count = len(
         {
@@ -1147,7 +1361,7 @@ def _virtuoso_apps(
             strategy_id,
             strategy_configs.get(strategy_id),
             _strategy_rows(strategy_runs, strategy_id),
-            _strategy_rows(strategy_book_performance, strategy_id),
+            _strategy_rows(strategy_actual_performance, strategy_id),
         )
         for strategy_id in strategy_ids
     ]
@@ -1175,19 +1389,32 @@ def _virtuoso_apps(
                     _strategy_rows(strategy_book_performance, strategy_id),
                     _strategy_rows(strategy_book_snapshots, strategy_id),
                 ),
-                "performance": _strategy_rows(strategy_book_performance, strategy_id),
+                # Actual attributed holdings drive the displayed performance;
+                # the target-projection series stays available for comparison.
+                "performance": _strategy_rows(strategy_actual_performance, strategy_id),
                 "performance_snapshot": _strategy_performance_snapshot(
-                    _strategy_rows(strategy_book_performance, strategy_id),
+                    _strategy_rows(strategy_actual_performance, strategy_id),
                 ),
+                "target_performance": _strategy_rows(strategy_book_performance, strategy_id),
                 "attribution": _strategy_rows(strategy_attribution, strategy_id),
                 "snapshots": _strategy_rows(strategy_book_snapshots, strategy_id),
+                "books": _strategy_books_payload(
+                    _strategy_rows(strategy_book_snapshots, strategy_id),
+                    performance_cache,
+                ),
                 "runs": _strategy_rows(strategy_runs, strategy_id),
                 "config": _strategy_config_payload(strategy_configs[strategy_id])
                 if strategy_id in strategy_configs
                 else None,
-                "summary": _strategy_return_summary(
-                    _strategy_rows(strategy_book_performance, strategy_id)
-                ),
+                "summary": {
+                    **_strategy_return_summary(
+                        _strategy_rows(strategy_actual_performance, strategy_id)
+                    ),
+                    "basis": "actual",
+                    "target_book_value": _strategy_return_summary(
+                        _strategy_rows(strategy_book_performance, strategy_id)
+                    )["book_value"],
+                },
             }
             for strategy_id in strategy_ids
         ],
@@ -1704,6 +1931,36 @@ def _strategy_execution_sleeve_target(config: Any, strategy_config: Any | None) 
     return getattr(sleeve, "target_weight", None)
 
 
+def _strategy_account_currency(
+    config: Any,
+    strategy_config: Any | None,
+    broker_account_overview: dict[str, Any],
+) -> Any:
+    """Currency of the account(s) backing a strategy, or None when mixed/unknown.
+
+    Multi-account contribution strategies carry a routing label instead of a
+    broker account id, so the currency has to be resolved from the group's
+    member accounts.
+    """
+    if strategy_config is None:
+        return None
+    group = _strategy_multi_account_group(config, strategy_config)
+    if group is not None:
+        account_ids = [target.account_id for target in group.account_targets]
+    else:
+        account_id = getattr(strategy_config, "account_id", None)
+        account_ids = [account_id] if account_id else []
+    currencies = set()
+    for account_id in account_ids:
+        row = _account_overview_row(broker_account_overview, account_id)
+        currency = row.get("currency")
+        if currency:
+            currencies.add(str(currency))
+    if len(currencies) == 1:
+        return next(iter(currencies))
+    return None
+
+
 def _strategy_multi_account_group(config: Any, strategy_config: Any | None) -> Any:
     if strategy_config is None:
         return None
@@ -1745,8 +2002,16 @@ def _strategy_performance_snapshot(rows: list[dict[str, Any]]) -> dict[str, Any]
         },
         "quality": quality,
         "lineage": {
-            "source_tables": ["strategy_book_snapshots", "system_events.strategy_cash_flow"],
-            "return_method": "time_weighted_return_with_explicit_strategy_cash_flows",
+            "basis": latest.get("basis") or "target_projection",
+            "source_tables": [
+                "account_attribution_snapshots",
+                "broker_account_snapshots",
+            ]
+            if latest.get("basis") == "actual"
+            else ["strategy_book_snapshots", "system_events.strategy_cash_flow"],
+            "return_method": "time_weighted_return_with_attributed_fill_cash_flows"
+            if latest.get("basis") == "actual"
+            else "time_weighted_return_with_explicit_strategy_cash_flows",
         },
     }
 
@@ -1773,10 +2038,51 @@ def _strategy_performance_quality(
                 ),
             }
         )
+    jump_count = _implausible_value_jump_count(rows)
+    if jump_count:
+        reasons.append(
+            {
+                "code": "implausible_value_jump",
+                "message": (
+                    f"{jump_count} snapshot(s) moved more than 2x versus the adjacent snapshot "
+                    "without a matching cash flow; TWR and drawdown derived from this series "
+                    "are unreliable (likely inconsistent pricing or unit changes)."
+                ),
+            }
+        )
     if not reasons:
         return {"status": "ok", "reasons": []}
     status = "missing" if reasons[0]["code"] == "insufficient_history" else "warning"
     return {"status": status, "reasons": reasons}
+
+
+def _implausible_value_jump_count(rows: list[dict[str, Any]]) -> int:
+    """Count adjacent same-book value moves beyond 2x that lack a matching cash flow.
+
+    Persisted book snapshots are valued with the prices of the run that wrote
+    them, so a pricing/unit regression poisons the series forever; flagging the
+    jumps keeps the derived TWR/drawdown from being read as real performance.
+    """
+    by_book: dict[str, list[dict[str, Any]]] = {}
+    for row in reversed(rows):  # oldest first
+        by_book.setdefault(str(row.get("book_id") or ""), []).append(row)
+    count = 0
+    for book_rows in by_book.values():
+        previous_value: float | None = None
+        for row in book_rows:
+            value = _float_value(row.get("book_value"))
+            if value is None or value <= 0:
+                continue
+            cash_flow = abs(_float_value(row.get("cash_flow")) or 0.0)
+            if (
+                previous_value is not None
+                and previous_value > 0
+                and cash_flow < 0.01 * max(previous_value, value)
+                and not 0.5 <= value / previous_value <= 2.0
+            ):
+                count += 1
+            previous_value = value
+    return count
 
 
 def _strategy_return_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:

@@ -44,7 +44,7 @@ export function formatValue(value: unknown): string {
     return value ? "yes" : "no";
   }
   if (typeof value === "number") {
-    return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    return Number.isInteger(value) ? value.toLocaleString() : value.toLocaleString(undefined, { maximumFractionDigits: 2 });
   }
   if (typeof value === "object") {
     return "summary available";
@@ -63,6 +63,46 @@ export function formatPercent(value: unknown, digits = 2): string {
   }
   const pct = parsed * 100;
   return `${pct > 0 ? "+" : ""}${pct.toFixed(digits)}%`;
+}
+
+/** Compact money-style notation for tight spaces (donut centers, KPI cards). */
+export function formatCompact(value: unknown): string {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return "n/a";
+  }
+  const abs = Math.abs(parsed);
+  if (abs >= 1e12) {
+    return `${(parsed / 1e12).toFixed(2)}T`;
+  }
+  if (abs >= 1e9) {
+    return `${(parsed / 1e9).toFixed(2)}B`;
+  }
+  if (abs >= 1e6) {
+    return `${(parsed / 1e6).toFixed(2)}M`;
+  }
+  if (abs >= 1e4) {
+    return `${(parsed / 1e3).toFixed(1)}K`;
+  }
+  return parsed.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+/** Human duration from seconds ("34m", "5.2h", "1.3d"). */
+export function formatAge(seconds: unknown): string {
+  const parsed = Number(seconds);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return "n/a";
+  }
+  if (parsed < 60) {
+    return `${Math.round(parsed)}s`;
+  }
+  if (parsed < 3600) {
+    return `${Math.round(parsed / 60)}m`;
+  }
+  if (parsed < 86400) {
+    return `${(parsed / 3600).toFixed(1)}h`;
+  }
+  return `${(parsed / 86400).toFixed(1)}d`;
 }
 
 export function formatReadableCell(value: unknown): string {

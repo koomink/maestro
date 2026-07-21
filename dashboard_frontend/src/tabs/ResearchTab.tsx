@@ -1,23 +1,47 @@
-import { useState } from "react";
-import type { DashboardSnapshot } from "../types";
-import { firstValue } from "../utils/data";
+import type { DashboardSnapshot, Row } from "../types";
+import { formatPercent } from "../utils/format";
 import { evidenceSummaries } from "../utils/trust";
-import { appName, latestStrategy, strategyMetrics } from "../viewModel";
-import { CompactTable, MetricRows, Panel, StatusPill, TerminalButton, TerminalChart } from "../components/common";
+import { appName, latestSignal, latestStrategy, signalStatusLabel, strategyMetrics } from "../viewModel";
+import { CompactTable, CompareChart, MetricRows, Panel, StatusPill, seriesColor } from "../components/common";
 
-export function ResearchTab({ snapshot }: { snapshot: DashboardSnapshot }) {
-  const [selectedStrategyId, setSelectedStrategyId] = useState(snapshot.virtuoso_apps.strategies[0]?.strategy_id || "");
-  const selected = latestStrategy(snapshot, selectedStrategyId) || snapshot.virtuoso_apps.strategies[0];
-  const perfRows = selected?.performance_snapshot?.series?.value?.length ? selected.performance_snapshot.series.value : selected?.performance || [];
-  const yKey = perfRows.some((row) => Number.isFinite(Number(row.current_value))) ? "current_value" : "book_value";
-  const runs = snapshot.virtuoso_apps.strategies.flatMap((strategy) =>
+export function ResearchTab({
+  selectedStrategyId,
+  setSelectedStrategyId,
+  snapshot,
+}: {
+  selectedStrategyId: string;
+  setSelectedStrategyId: (strategyId: string) => void;
+  snapshot: DashboardSnapshot;
+}) {
+  const strategies = snapshot.virtuoso_apps.strategies;
+  const selected = latestStrategy(snapshot, selectedStrategyId) || strategies[0];
+  const selectedSignal = selected ? latestSignal(snapshot, selected.strategy_id) : undefined;
+  const compareSeries = strategies.map((strategy, index) => {
+    const rows = strategy.performance_snapshot?.series?.value?.length
+      ? strategy.performance_snapshot.series.value
+      : strategy.performance;
+    const yKey = rows.some((row) => Number.isFinite(Number(row.current_value))) ? "current_value" : "book_value";
+    return { label: appName(strategy.strategy_id), color: seriesColor(index), rows, yKey };
+  });
+  const appComparisonRows: Row[] = strategies.map((strategy) => {
+    const signal = latestSignal(snapshot, strategy.strategy_id);
+    return {
+      app: appName(strategy.strategy_id),
+      return: formatPercent(strategy.performance_snapshot?.latest?.cumulative_return ?? strategy.summary.cumulative_return),
+      drawdown: formatPercent(strategy.summary.drawdown),
+      signal: signalStatusLabel(signal, strategy),
+      evidence: strategy.performance_snapshot?.quality?.status || "missing",
+    };
+  });
+  const runs: Row[] = strategies.flatMap((strategy) =>
     strategy.runs.map((run) => ({
       app: appName(strategy.strategy_id),
-      strategy_id: strategy.strategy_id,
-      status: firstValue(run, ["status", "validation_ok", "mode"]) ?? "persisted",
       created_at: run.created_at,
+      action: run.signal_action,
+      symbol: run.signal_symbol,
+      confidence: run.confidence,
+      validation: run.validation_ok,
       run_id: run.run_id,
-      evidence: strategy.performance_snapshot?.quality?.status || "missing",
     })),
   );
   return (
@@ -25,39 +49,42 @@ export function ResearchTab({ snapshot }: { snapshot: DashboardSnapshot }) {
       <Panel title="Research Control" aside={<StatusPill tone="primary">Read model</StatusPill>}>
         <label className="field">
           <span>Virtuoso App</span>
-          <select value={selectedStrategyId} onChange={(event) => setSelectedStrategyId(event.target.value)}>
-            {snapshot.virtuoso_apps.strategies.map((strategy) => (
+          <select value={selected?.strategy_id || ""} onChange={(event) => setSelectedStrategyId(event.target.value)}>
+            {strategies.map((strategy) => (
               <option key={strategy.strategy_id} value={strategy.strategy_id}>{appName(strategy.strategy_id)}</option>
             ))}
           </select>
         </label>
-        <label className="field">
-          <span>Saved Preset</span>
-          <select disabled>
-            <option>Research presets deferred</option>
-          </select>
-        </label>
-        <div className="disabled-actions">
-          <TerminalButton disabled>Run Backtest</TerminalButton>
-          <TerminalButton disabled>Save Preset</TerminalButton>
-        </div>
-        <p className="muted-copy">Queued jobs and preset writes are deferred. This tab reviews persisted strategy evidence only.</p>
+        <div className="panel-subhead">App Comparison</div>
+        <CompactTable
+          columns={["app", "return", "drawdown", "signal"]}
+          dense
+          emptyLabel="No apps are configured."
+          limit={6}
+          rows={appComparisonRows}
+        />
+        <p className="muted-copy">Backtest queueing and preset writes are deferred; this tab reviews persisted strategy evidence only.</p>
       </Panel>
-      <Panel className="main-chart-panel" title="Research Performance / Evidence Compare">
-        <TerminalChart title="Selected App Evidence" rows={perfRows} yKey={yKey} markers={selected?.performance_snapshot?.series?.cash_flow_markers || []} />
+      <Panel className="main-chart-panel" title="Performance Compare — All Apps">
+        <CompareChart series={compareSeries} title="Normalized App Performance" />
       </Panel>
       <Panel title="AI Interpretation">
         <div className="ai-copy">
-          <h3>Read-model Review</h3>
-          <p>Use this tab to compare persisted app performance, signal runs, and evidence quality before planning any queued backtest work.</p>
+          <h3>{selected ? `${appName(selected.strategy_id)} Read-model Review` : "Read-model Review"}</h3>
+          <p>Compare persisted app performance, signal runs, and evidence quality here before planning any parameter change or queued backtest work.</p>
         </div>
-        <MetricRows metrics={selected ? strategyMetrics(selected) : []} />
+        <MetricRows metrics={selected ? strategyMetrics(selected, selectedSignal) : []} />
       </Panel>
       <Panel className="span-2" title="Run Comparison Table">
-        <CompactTable rows={runs} limit={12} columns={["app", "status", "evidence", "created_at", "run_id"]} />
+        <CompactTable
+          columns={["app", "created_at", "action", "symbol", "confidence", "validation", "run_id"]}
+          emptyLabel="No signal runs are persisted."
+          limit={12}
+          rows={runs}
+        />
       </Panel>
       <Panel title="Evidence Summaries">
-        <CompactTable rows={evidenceSummaries(snapshot, "").slice(0, 10)} limit={10} />
+        <CompactTable limit={10} rows={evidenceSummaries(snapshot, "").slice(0, 10)} />
       </Panel>
     </section>
   );

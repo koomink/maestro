@@ -5,7 +5,7 @@ export function toneFromValue(value: unknown): Tone {
   if (["fresh", "ok", "passed", "success", "ready"].some((item) => normalized.includes(item))) {
     return "success";
   }
-  if (["stale", "missing", "open", "warn"].some((item) => normalized.includes(item))) {
+  if (["stale", "missing", "open", "warn", "unreconciled"].some((item) => normalized.includes(item))) {
     return "warning";
   }
   if (["fail", "error", "halt"].some((item) => normalized.includes(item))) {
