@@ -1,4 +1,6 @@
+import sqlite3
 from collections.abc import Callable
+from urllib.parse import quote
 
 from maestro.approval.models import ApprovalDecision
 from maestro.config.models import ExecutionConfig
@@ -133,6 +135,7 @@ class LiveOrderSafetyService:
             raise ValueError("Live order submission is limit-order only")
         if self.config.allowed_order_type != OrderType.LIMIT:
             raise ValueError("Configured live order type must be limit")
+        self._validate_idempotency_state(request)
         limits = self.config.live_order_limits
         order_limit_currency = (
             self._request_currency(request) if limits.max_order_notional_by_currency else None
@@ -156,8 +159,6 @@ class LiveOrderSafetyService:
         self._validate_instrument_contract(request)
         if self.account_attribution_validator is not None:
             self.account_attribution_validator(request)
-        if self._is_duplicate(request):
-            raise ValueError("Duplicate live order request rejected")
         if self.config.require_reconciliation_pass:
             latest = self.state_store.load_latest_system_event(
                 SystemEventType.BROKER_RECONCILIATION
@@ -221,13 +222,21 @@ class LiveOrderSafetyService:
             "submitted_date": _live_order_date(),
             "phase": "submit_intent",
         }
-        save_audited_system_event(
-            self.state_store,
-            self.audit_logger,
-            request.run_id,
-            "live_order_submit_intent",
-            intent_payload,
-        )
+        try:
+            save_audited_system_event(
+                self.state_store,
+                self.audit_logger,
+                request.run_id,
+                "live_order_submit_intent",
+                intent_payload,
+            )
+        except sqlite3.IntegrityError as exc:
+            if self.state_store.duplicate_key_exists(intent_payload["duplicate_key"]):
+                raise ValueError(
+                    "Live order submission already has a submit intent; "
+                    "operator recovery is required"
+                ) from exc
+            raise
 
     def _today_utc_bounds(self) -> tuple[str, str]:
         return trading_day_bounds_utc_str(self.config.market_session.timezone)
@@ -284,8 +293,15 @@ class LiveOrderSafetyService:
     def _daily_live_order_count(self) -> int:
         return len(self._daily_live_results())
 
-    def _is_duplicate(self, request: LiveOrderRequest) -> bool:
-        return self.state_store.duplicate_key_exists(_duplicate_key(request))
+    def _validate_idempotency_state(self, request: LiveOrderRequest) -> None:
+        duplicate_key = _duplicate_key(request)
+        if self.state_store.duplicate_key_exists(duplicate_key):
+            raise ValueError("Duplicate live order request rejected")
+        if self.state_store.duplicate_key_exists(f"intent:{duplicate_key}"):
+            raise ValueError(
+                "Live order submission already has a submit intent; "
+                "operator recovery is required"
+            )
 
     def _broker_order_seen(self, broker_order_id: str) -> bool:
         return self.state_store.broker_order_id_seen(broker_order_id)
@@ -300,6 +316,30 @@ def _duplicate_key(request: LiveOrderRequest) -> str:
     )
 
 
+def build_live_order_idempotency_key(
+    *,
+    signal_run_id: str | None,
+    account_id: str | None,
+    order_intent_id: str,
+    fallback_run_id: str,
+) -> str:
+    """Build the stable identity used to claim one broker submission."""
+    scope_kind = "signal" if signal_run_id else "run"
+    scope_id = signal_run_id or fallback_run_id
+    account_scope = account_id or "__default__"
+    parts = (
+        "live-order",
+        "v1",
+        scope_kind,
+        quote(scope_id, safe=""),
+        "account",
+        quote(account_scope, safe=""),
+        "intent",
+        quote(order_intent_id, safe=""),
+    )
+    return ":".join(parts)
+
+
 def _live_order_date() -> str:
     return utc_now().date().isoformat()
 
@@ -309,4 +349,4 @@ def _is_step_multiple(value: float, step: float) -> bool:
     return abs(scaled - round(scaled)) < 1e-9
 
 
-__all__ = ["LiveOrderSafetyService"]
+__all__ = ["LiveOrderSafetyService", "build_live_order_idempotency_key"]

@@ -15,6 +15,7 @@ from maestro.core.ids import new_run_id
 from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnlySnapshot
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.brokers.readonly import BrokerBuyingPower
+from maestro.execution.live_order_safety import build_live_order_idempotency_key
 from maestro.execution.live_orders import (
     BrokerOrderId,
     LiveOrderClient,
@@ -293,6 +294,14 @@ def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
 
     assert live_client.submit_count == 1
     lifecycle_events = store.list_system_events_by_type("live_order_lifecycle", limit=10)
+    intent_events = store.list_system_events_by_type("live_order_submit_intent", limit=10)
+    submitted_request = intent_events[0]["payload"]["request"]
+    assert submitted_request["duplicate_key"] == build_live_order_idempotency_key(
+        signal_run_id=signal_summary.signal_run_id,
+        account_id=submitted_request["account_id"],
+        order_intent_id=submitted_request["order_id"],
+        fallback_run_id=submitted_request["run_id"],
+    )
     assert lifecycle_events[0]["payload"]["final_status"] == "failed"
     assert (
         lifecycle_events[0]["payload"]["failed_reason"] == "Duplicate live order request rejected"

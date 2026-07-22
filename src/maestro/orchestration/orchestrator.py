@@ -53,6 +53,7 @@ from maestro.execution.live_order_factory import (
     LiveApprovalDependencies,
     build_live_approval_dependencies,
 )
+from maestro.execution.live_order_safety import build_live_order_idempotency_key
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
     LiveOrderClient,
@@ -2110,10 +2111,11 @@ class MaestroOrchestrator:
                 order_type=OrderType.LIMIT,
                 approval_id=approval_id,
                 run_id=run_id,
-                duplicate_key=(
-                    f"{signal_run_id}:{order.order_id}"
-                    if signal_run_id
-                    else f"{run_id}:{order.order_id}"
+                duplicate_key=build_live_order_idempotency_key(
+                    signal_run_id=signal_run_id,
+                    account_id=order.account_id,
+                    order_intent_id=order.order_id,
+                    fallback_run_id=run_id,
                 ),
                 currency=order.currency,
                 sleeve=order.sleeve,
@@ -2164,10 +2166,11 @@ class MaestroOrchestrator:
                 order_type=OrderType.LIMIT,
                 approval_id=approval_id,
                 run_id=run_id,
-                duplicate_key=(
-                    f"{signal_run_id}:{order.order_id}"
-                    if signal_run_id
-                    else f"{run_id}:{order.order_id}"
+                duplicate_key=build_live_order_idempotency_key(
+                    signal_run_id=signal_run_id,
+                    account_id=order.account_id,
+                    order_intent_id=order.order_id,
+                    fallback_run_id=run_id,
                 ),
                 currency=order.currency,
                 sleeve=order.sleeve,

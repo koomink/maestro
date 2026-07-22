@@ -6,7 +6,10 @@ from maestro.config.models import ExecutionConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus, OrderType
 from maestro.core.ids import new_run_id
-from maestro.execution.live_order_safety import _duplicate_key
+from maestro.execution.live_order_safety import (
+    _duplicate_key,
+    build_live_order_idempotency_key,
+)
 from maestro.execution.live_orders import (
     BrokerOrderId,
     LiveOrderClient,
@@ -162,6 +165,73 @@ def test_live_order_prevents_duplicates(tmp_path):
         service.submit_approved_order(request, approval)
 
     assert len(broker.requests) == 1
+
+
+def test_live_order_idempotency_key_scopes_signal_intent_to_account():
+    first = build_live_order_idempotency_key(
+        signal_run_id="signal:2026-07-22",
+        account_id="kis:primary",
+        order_intent_id="order:1",
+        fallback_run_id="run-unused",
+    )
+    second_account = build_live_order_idempotency_key(
+        signal_run_id="signal:2026-07-22",
+        account_id="kis:secondary",
+        order_intent_id="order:1",
+        fallback_run_id="run-unused",
+    )
+
+    assert first == (
+        "live-order:v1:signal:signal%3A2026-07-22:"
+        "account:kis%3Aprimary:intent:order%3A1"
+    )
+    assert second_account != first
+
+
+def test_live_order_restart_rejects_existing_submit_intent_before_broker_call(tmp_path):
+    service, request, approval, _ = _context(tmp_path)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+    service.state_store.save_system_event(
+        request.run_id,
+        "live_order_submit_intent",
+        _submit_intent_payload(request),
+    )
+    restarted_broker = FakeLiveOrderClient(OrderStatus.ACCEPTED_BY_BROKER)
+    restarted_service = LiveOrderSafetyService(
+        service.config,
+        StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000),
+        AuditLogger(str(tmp_path / "restarted-audit.jsonl")),
+        restarted_broker,
+    )
+
+    with pytest.raises(ValueError, match="submit intent.*recovery is required"):
+        restarted_service.submit_approved_order(request, approval)
+
+    assert restarted_broker.requests == []
+
+
+def test_live_order_timeout_cannot_resubmit_same_intent_after_restart(tmp_path):
+    service, request, approval, failing_broker = _context(
+        tmp_path,
+        broker=FakeFailingLiveOrderClient(),
+    )
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    first_result = service.submit_approved_order(request, approval)
+    restarted_broker = FakeLiveOrderClient(OrderStatus.ACCEPTED_BY_BROKER)
+    restarted_service = LiveOrderSafetyService(
+        service.config,
+        StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000),
+        AuditLogger(str(tmp_path / "restarted-audit.jsonl")),
+        restarted_broker,
+    )
+
+    with pytest.raises(ValueError, match="Duplicate"):
+        restarted_service.submit_approved_order(request, approval)
+
+    assert first_result.status == OrderStatus.HALTED
+    assert failing_broker.requests == [request]
+    assert restarted_broker.requests == []
 
 
 def test_live_order_duplicate_key_fallback_is_stable_without_timestamp(tmp_path):
