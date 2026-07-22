@@ -119,6 +119,11 @@ class LiveOrderStatusSnapshot(BaseModel):
     partial_fill: PartialFillSummary
     fills: list[FillEvent] = Field(default_factory=list)
     raw_status: str | None = None
+    currency: str | None = None
+    cumulative_filled_amount: float | None = None
+    cumulative_commission: float | None = None
+    cumulative_tax: float | None = None
+    settlement_date: str | None = None
     message: str | None = None
     raw: dict[str, Any] = Field(default_factory=dict)
 
@@ -133,6 +138,10 @@ class AppliedFill(BaseModel):
     cumulative_filled_quantity: float
     cumulative_filled_notional: float
     status_checked_at: str
+    commission: float = 0.0
+    tax: float = 0.0
+    cumulative_commission: float = 0.0
+    cumulative_tax: float = 0.0
 
 
 class SettlementCashAdjustment(BaseModel):
@@ -141,7 +150,9 @@ class SettlementCashAdjustment(BaseModel):
     amount: float
     transaction_costs_before: float
     transaction_costs_after: float
-    broker_snapshot_id: int
+    broker_snapshot_id: int | None = None
+    broker_order_id: str | None = None
+    source: str = "broker_snapshot"
 
 
 class SkippedFill(BaseModel):

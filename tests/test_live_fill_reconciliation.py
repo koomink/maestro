@@ -1,5 +1,7 @@
+import sqlite3
 from contextlib import contextmanager
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -148,6 +150,28 @@ def test_fill_watermarks_seed_from_legacy_events(tmp_path):
     assert state.cash == 300_000.0
     assert state.positions == {"005930": 10.0}
     assert store.load_fill_watermarks()["KIS-LEGACY"] == (10.0, 700_000.0)
+
+
+def test_fill_watermark_schema_migrates_existing_database_for_toss_costs(tmp_path):
+    database = tmp_path / "state.db"
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE TABLE fill_watermarks ("
+            "broker_order_id TEXT PRIMARY KEY, "
+            "cumulative_quantity REAL NOT NULL, "
+            "cumulative_notional REAL NOT NULL, "
+            "updated_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO fill_watermarks "
+            "(broker_order_id, cumulative_quantity, cumulative_notional) "
+            "VALUES ('TOSS-OLD', 1, 185.25)"
+        )
+
+    store = StateStore(str(database), initial_cash=0.0)
+
+    assert store.load_fill_watermarks()["TOSS-OLD"] == (1.0, 185.25)
+    assert store.load_fill_cost_watermarks()["TOSS-OLD"] == (0.0, 0.0)
 
 
 def test_apply_fill_reconciliation_persists_snapshot_watermark_and_event(tmp_path):
@@ -415,6 +439,114 @@ def test_settlement_day_cash_change_preserves_projected_broker_cash(tmp_path):
     assert account is not None
     assert account.cash_by_currency == broker["cash_by_currency"]
     assert broker["cash_balance"]["settled_cash"] == 929_986.0
+
+
+def test_toss_execution_costs_are_applied_once_across_partial_fills(tmp_path):
+    initial = PortfolioState(
+        cash=1_000.0,
+        cash_by_currency={"USD": 1_000.0},
+        positions={},
+    )
+    store, audit = _context(tmp_path, initial)
+    store.save_portfolio_snapshot("run_account", initial, account_id="toss_brokerage")
+    store.save_system_event(
+        "run_submit",
+        "live_order_result",
+        {
+            "request": {
+                "account_id": "toss_brokerage",
+                "sleeve": "crescendo_us",
+                "currency": "USD",
+            },
+            "result": {"broker_order": {"broker_order_id": "TOSS-FEE-1"}},
+        },
+    )
+
+    def toss_status(
+        *,
+        filled: float,
+        amount: float,
+        commission: float,
+        tax: float,
+        status: OrderStatus,
+    ) -> LiveOrderStatusSnapshot:
+        checked_at = utc_now().isoformat()
+        return LiveOrderStatusSnapshot(
+            broker_order=BrokerOrderId(
+                broker="toss",
+                broker_order_id="TOSS-FEE-1",
+                order_id="ord_toss_fee_1",
+                submitted_at=checked_at,
+                account_id="toss_brokerage",
+            ),
+            status=status,
+            checked_at=checked_at,
+            symbol="AAPL",
+            side=OrderSide.BUY,
+            currency="USD",
+            cumulative_filled_amount=amount,
+            cumulative_commission=commission,
+            cumulative_tax=tax,
+            settlement_date="2026-07-23",
+            partial_fill=PartialFillSummary(
+                ordered_quantity=2.0,
+                filled_quantity=filled,
+                remaining_quantity=2.0 - filled,
+                average_fill_price=amount / filled,
+                fill_count=1,
+            ),
+        )
+
+    _save_status(
+        store,
+        toss_status(
+            filled=1.0,
+            amount=185.25,
+            commission=0.18525,
+            tax=0.01,
+            status=OrderStatus.PARTIALLY_FILLED,
+        ),
+    )
+    service = PartialFillReconciliationService(store, audit)
+    first = service.reconcile_latest("run_toss_partial")
+    duplicate = service.reconcile_latest("run_toss_duplicate")
+    _save_status(
+        store,
+        toss_status(
+            filled=1.0,
+            amount=185.25,
+            commission=0.2,
+            tax=0.01,
+            status=OrderStatus.PARTIALLY_FILLED,
+        ),
+    )
+    late_cost = service.reconcile_latest("run_toss_late_cost")
+    _save_status(
+        store,
+        toss_status(
+            filled=2.0,
+            amount=380.0,
+            commission=0.38,
+            tax=0.02,
+            status=OrderStatus.FILLED,
+        ),
+    )
+    final = service.reconcile_latest("run_toss_filled")
+
+    aggregate = store.load_latest_portfolio_state()
+    account = store.load_latest_account_portfolio_state("toss_brokerage")
+    assert first.settlement_cash_adjustments[0].source == "toss_order_execution"
+    assert first.settlement_cash_adjustments[0].amount == pytest.approx(-0.19525)
+    assert duplicate.settlement_cash_adjustments == []
+    assert late_cost.applied_fills == []
+    assert late_cost.settlement_cash_adjustments[0].amount == pytest.approx(-0.01475)
+    assert final.applied_fills[0].notional == pytest.approx(194.75)
+    assert final.settlement_cash_adjustments[0].amount == pytest.approx(-0.19)
+    assert aggregate.cash_by_currency == pytest.approx({"USD": 619.6})
+    assert aggregate.positions == {"AAPL": 2.0}
+    assert account is not None
+    assert account.cash_by_currency == pytest.approx({"USD": 619.6})
+    assert store.load_fill_cost_watermarks()["TOSS-FEE-1"] == pytest.approx((0.38, 0.02))
 
 
 def test_rejected_canceled_halted_and_unknown_do_not_update_portfolio(tmp_path):

@@ -62,9 +62,24 @@ class StateStore:
                 "broker_order_id TEXT PRIMARY KEY, "
                 "cumulative_quantity REAL NOT NULL, "
                 "cumulative_notional REAL NOT NULL, "
+                "cumulative_commission REAL NOT NULL DEFAULT 0, "
+                "cumulative_tax REAL NOT NULL DEFAULT 0, "
                 "updated_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
+            fill_watermark_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(fill_watermarks)").fetchall()
+            }
+            if "cumulative_commission" not in fill_watermark_columns:
+                conn.execute(
+                    "ALTER TABLE fill_watermarks ADD COLUMN "
+                    "cumulative_commission REAL NOT NULL DEFAULT 0"
+                )
+            if "cumulative_tax" not in fill_watermark_columns:
+                conn.execute(
+                    "ALTER TABLE fill_watermarks ADD COLUMN "
+                    "cumulative_tax REAL NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS strategy_runs "
                 "("
@@ -410,6 +425,14 @@ class StateStore:
             ).fetchall()
         return {str(row[0]): (float(row[1]), float(row[2])) for row in rows}
 
+    def load_fill_cost_watermarks(self) -> dict[str, tuple[float, float]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT broker_order_id, cumulative_commission, cumulative_tax "
+                "FROM fill_watermarks"
+            ).fetchall()
+        return {str(row[0]): (float(row[1]), float(row[2])) for row in rows}
+
     def seed_fill_watermarks_from_events(self) -> None:
         if self.load_fill_watermarks():
             return
@@ -443,6 +466,7 @@ class StateStore:
         event_payload: dict[str, Any],
         *,
         account_states: dict[str, PortfolioState] | None = None,
+        cost_watermarks: dict[str, tuple[float, float]] | None = None,
     ) -> None:
         payload_json = json.dumps(event_payload, default=str)
         with self.writer_lock("apply_fill_reconciliation"):
@@ -466,7 +490,11 @@ class StateStore:
                                 ),
                             ),
                         )
-                self._upsert_fill_watermarks(conn, watermarks)
+                self._upsert_fill_watermarks(
+                    conn,
+                    watermarks,
+                    cost_watermarks=cost_watermarks,
+                )
                 conn.execute(
                     "INSERT INTO system_events "
                     "(run_id, event_type, payload, duplicate_key, broker_order_id) "
@@ -954,20 +982,32 @@ class StateStore:
         self,
         conn: sqlite3.Connection,
         watermarks: dict[str, tuple[float, float]],
+        *,
+        cost_watermarks: dict[str, tuple[float, float]] | None = None,
     ) -> None:
-        if not watermarks:
+        broker_order_ids = set(watermarks) | set(cost_watermarks or {})
+        if not broker_order_ids:
             return
         conn.executemany(
             "INSERT INTO fill_watermarks "
-            "(broker_order_id, cumulative_quantity, cumulative_notional, updated_at) "
-            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "(broker_order_id, cumulative_quantity, cumulative_notional, "
+            "cumulative_commission, cumulative_tax, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
             "ON CONFLICT(broker_order_id) DO UPDATE SET "
             "cumulative_quantity = excluded.cumulative_quantity, "
             "cumulative_notional = excluded.cumulative_notional, "
+            "cumulative_commission = excluded.cumulative_commission, "
+            "cumulative_tax = excluded.cumulative_tax, "
             "updated_at = CURRENT_TIMESTAMP",
             [
-                (broker_order_id, values[0], values[1])
-                for broker_order_id, values in watermarks.items()
+                (
+                    broker_order_id,
+                    watermarks.get(broker_order_id, (0.0, 0.0))[0],
+                    watermarks.get(broker_order_id, (0.0, 0.0))[1],
+                    (cost_watermarks or {}).get(broker_order_id, (0.0, 0.0))[0],
+                    (cost_watermarks or {}).get(broker_order_id, (0.0, 0.0))[1],
+                )
+                for broker_order_id in broker_order_ids
             ],
         )
 

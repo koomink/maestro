@@ -37,8 +37,11 @@ class PartialFillReconciliationService:
                 current_state = self.state_store.load_latest_portfolio_state()
                 next_state = current_state.model_copy(deep=True)
                 applied_by_order = self._load_applied_watermarks()
+                applied_costs_by_order = self.state_store.load_fill_cost_watermarks()
                 applied_fills: list[AppliedFill] = []
                 skipped_fills: list[SkippedFill] = []
+                execution_cost_adjustments: list[SettlementCashAdjustment] = []
+                updated_cost_watermarks: dict[str, tuple[float, float]] = {}
                 account_states: dict[str, PortfolioState] = {}
                 account_costs_before: dict[str, tuple[str | None, float]] = {}
                 account_currencies: dict[str, str] = {}
@@ -48,15 +51,21 @@ class PartialFillReconciliationService:
                 )
                 for row in reversed(rows):
                     snapshot = LiveOrderStatusSnapshot.model_validate(row["payload"])
-                    applied_fill, skipped_fill = _fill_delta(snapshot, applied_by_order)
+                    cost_delta = _execution_cost_delta(snapshot, applied_costs_by_order)
+                    applied_fill, skipped_fill = _fill_delta(
+                        snapshot,
+                        applied_by_order,
+                        cost_delta=cost_delta,
+                    )
                     if skipped_fill is not None:
                         skipped_fills.append(skipped_fill)
+                    if applied_fill is None and cost_delta is None:
                         continue
-                    if applied_fill is None:
-                        continue
-                    order_context = self._order_context(applied_fill.broker_order_id)
+                    broker_order_id = snapshot.broker_order.broker_order_id
+                    order_context = self._order_context(broker_order_id)
                     currency = order_context.currency if order_context is not None else None
-                    _apply_fill(next_state, applied_fill, currency=currency)
+                    if applied_fill is not None:
+                        _apply_fill(next_state, applied_fill, currency=currency)
                     if order_context is not None:
                         account_id = order_context.account_id
                         account_state = account_states.get(account_id)
@@ -70,14 +79,62 @@ class PartialFillReconciliationService:
                                 account_costs_before[account_id] = _transaction_cost_state(
                                     _latest_snapshot_for_account(self.state_store, account_id)
                                 )
-                        if account_state is not None:
+                        if account_state is not None and applied_fill is not None:
                             _apply_fill(
                                 account_state,
                                 applied_fill,
-                                currency=order_context.currency,
+                                currency=snapshot.currency or order_context.currency,
                             )
-                            account_currencies[account_id] = order_context.currency
-                    if order_context is not None and order_context.bucket_id:
+                        if account_state is not None and cost_delta is not None:
+                            commission_delta, tax_delta, cumulative_commission, cumulative_tax = (
+                                cost_delta
+                            )
+                            total_cost_delta = commission_delta + tax_delta
+                            cost_currency = snapshot.currency or order_context.currency
+                            if abs(total_cost_delta) > 1e-12:
+                                _apply_cash_adjustment(
+                                    account_state,
+                                    -total_cost_delta,
+                                    currency=cost_currency,
+                                )
+                                _apply_cash_adjustment(
+                                    next_state,
+                                    -total_cost_delta,
+                                    currency=cost_currency,
+                                )
+                                execution_cost_adjustments.append(
+                                    SettlementCashAdjustment(
+                                        account_id=account_id,
+                                        currency=cost_currency,
+                                        amount=-total_cost_delta,
+                                        transaction_costs_before=(
+                                            cumulative_commission
+                                            + cumulative_tax
+                                            - total_cost_delta
+                                        ),
+                                        transaction_costs_after=(
+                                            cumulative_commission + cumulative_tax
+                                        ),
+                                        broker_order_id=broker_order_id,
+                                        source="toss_order_execution",
+                                    )
+                                )
+                            applied_costs_by_order[broker_order_id] = (
+                                cumulative_commission,
+                                cumulative_tax,
+                            )
+                            updated_cost_watermarks[broker_order_id] = (
+                                cumulative_commission,
+                                cumulative_tax,
+                            )
+                        account_currencies[account_id] = (
+                            snapshot.currency or order_context.currency
+                        )
+                    if (
+                        applied_fill is not None
+                        and order_context is not None
+                        and order_context.bucket_id
+                    ):
                         AccountAttributionReconciliationService(
                             self.state_store,
                             self.audit_logger,
@@ -93,13 +150,14 @@ class PartialFillReconciliationService:
                                 f"{applied_fill.cumulative_filled_quantity}"
                             ),
                         )
-                    applied_by_order[applied_fill.broker_order_id] = (
-                        applied_fill.cumulative_filled_quantity,
-                        applied_fill.cumulative_filled_notional,
-                    )
-                    applied_fills.append(applied_fill)
+                    if applied_fill is not None:
+                        applied_by_order[applied_fill.broker_order_id] = (
+                            applied_fill.cumulative_filled_quantity,
+                            applied_fill.cumulative_filled_notional,
+                        )
+                        applied_fills.append(applied_fill)
 
-                settlement_adjustments = self._apply_settlement_costs(
+                settlement_adjustments = execution_cost_adjustments + self._apply_settlement_costs(
                     next_state,
                     account_states,
                     account_costs_before,
@@ -112,7 +170,7 @@ class PartialFillReconciliationService:
                     applied_fills=applied_fills,
                     settlement_cash_adjustments=settlement_adjustments,
                     skipped_fills=skipped_fills,
-                    portfolio_updated=bool(applied_fills),
+                    portfolio_updated=bool(applied_fills or settlement_adjustments),
                     cash=next_state.cash,
                     positions=next_state.positions,
                 )
@@ -124,12 +182,25 @@ class PartialFillReconciliationService:
                     )
                     for fill in applied_fills
                 }
+                for broker_order_id in updated_cost_watermarks:
+                    watermarks.setdefault(
+                        broker_order_id,
+                        applied_by_order.get(broker_order_id, (0.0, 0.0)),
+                    )
+                persisted_cost_watermarks = {
+                    broker_order_id: applied_costs_by_order.get(
+                        broker_order_id,
+                        (0.0, 0.0),
+                    )
+                    for broker_order_id in watermarks
+                }
                 self.state_store.apply_fill_reconciliation(
                     run_id,
                     next_state,
                     watermarks,
                     payload,
                     account_states=account_states,
+                    cost_watermarks=persisted_cost_watermarks,
                 )
 
         self.audit_logger.log(run_id, str(SystemEventType.FILL_RECONCILIATION), payload)
@@ -205,6 +276,8 @@ class PartialFillReconciliationService:
 def _fill_delta(
     snapshot: LiveOrderStatusSnapshot,
     applied_by_order: dict[str, tuple[float, float]],
+    *,
+    cost_delta: tuple[float, float, float, float] | None = None,
 ) -> tuple[AppliedFill | None, SkippedFill | None]:
     broker_order_id = snapshot.broker_order.broker_order_id
     if snapshot.status == OrderStatus.UNKNOWN:
@@ -217,7 +290,11 @@ def _fill_delta(
         return None, _skipped(snapshot, "missing_side")
 
     total_quantity = snapshot.partial_fill.filled_quantity
-    total_notional = snapshot.partial_fill.filled_notional
+    total_notional = (
+        snapshot.cumulative_filled_amount
+        if snapshot.cumulative_filled_amount is not None
+        else snapshot.partial_fill.filled_notional
+    )
     applied_quantity, applied_notional = applied_by_order.get(broker_order_id, (0.0, 0.0))
     delta_quantity = total_quantity - applied_quantity
     delta_notional = total_notional - applied_notional
@@ -236,8 +313,46 @@ def _fill_delta(
             cumulative_filled_quantity=total_quantity,
             cumulative_filled_notional=total_notional,
             status_checked_at=snapshot.checked_at,
+            commission=cost_delta[0] if cost_delta is not None else 0.0,
+            tax=cost_delta[1] if cost_delta is not None else 0.0,
+            cumulative_commission=cost_delta[2] if cost_delta is not None else 0.0,
+            cumulative_tax=cost_delta[3] if cost_delta is not None else 0.0,
         ),
         None,
+    )
+
+
+def _execution_cost_delta(
+    snapshot: LiveOrderStatusSnapshot,
+    applied_costs_by_order: dict[str, tuple[float, float]],
+) -> tuple[float, float, float, float] | None:
+    if snapshot.broker_order.broker != "toss":
+        return None
+    if snapshot.cumulative_commission is None and snapshot.cumulative_tax is None:
+        return None
+    cumulative_commission = float(snapshot.cumulative_commission or 0.0)
+    cumulative_tax = float(snapshot.cumulative_tax or 0.0)
+    if cumulative_commission < 0 or cumulative_tax < 0:
+        return None
+    previous_commission, previous_tax = applied_costs_by_order.get(
+        snapshot.broker_order.broker_order_id,
+        (0.0, 0.0),
+    )
+    if (
+        cumulative_commission < previous_commission
+        or cumulative_tax < previous_tax
+    ):
+        return None
+    if (
+        abs(cumulative_commission - previous_commission) < 1e-12
+        and abs(cumulative_tax - previous_tax) < 1e-12
+    ):
+        return None
+    return (
+        cumulative_commission - previous_commission,
+        cumulative_tax - previous_tax,
+        cumulative_commission,
+        cumulative_tax,
     )
 
 

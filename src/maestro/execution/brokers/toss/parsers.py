@@ -7,6 +7,7 @@ from maestro.execution.brokers.readonly import (
     BrokerAccountSnapshot,
     BrokerBuyingPower,
     BrokerCashBalance,
+    BrokerOrderSummary,
     BrokerPosition,
     BrokerReadOnlySnapshot,
 )
@@ -16,33 +17,62 @@ def toss_snapshot_from_payloads(
     *,
     account: dict[str, Any],
     holdings: dict[str, Any],
-    buying_power: dict[str, Any],
+    buying_power: dict[str, Any] | None = None,
+    buying_powers: list[dict[str, Any]] | None = None,
+    open_orders: list[dict[str, Any]] | None = None,
+    commissions: list[dict[str, Any]] | None = None,
     prices: list[dict[str, Any]] | None = None,
     fetched_at: datetime | None = None,
 ) -> BrokerReadOnlySnapshot:
-    buying_power_model = _buying_power(buying_power)
+    power_payloads = list(buying_powers or [])
+    if buying_power is not None:
+        power_payloads.insert(0, buying_power)
+    if not power_payloads:
+        raise ValueError("At least one Toss buying-power payload is required")
+    power_models = [_buying_power(payload) for payload in power_payloads]
+    available_by_currency = {
+        model.source_currency: model.cash_buying_power for model in power_models
+    }
+    pending_orders = _pending_orders(open_orders or [], commissions or [])
+    reserved_by_currency: dict[str, float] = {}
+    for order in pending_orders:
+        if order.currency and order.reserved_cash is not None:
+            reserved_by_currency[order.currency] = (
+                reserved_by_currency.get(order.currency, 0.0) + order.reserved_cash
+            )
+    cash_by_currency = {
+        currency: available + reserved_by_currency.get(currency, 0.0)
+        for currency, available in available_by_currency.items()
+    }
+    primary_currency = "KRW" if "KRW" in cash_by_currency else power_models[0].source_currency
+    cash = cash_by_currency[primary_currency]
+    available_cash = available_by_currency[primary_currency]
+    reserved_cash = reserved_by_currency.get(primary_currency, 0.0)
     positions = [_position(item) for item in holdings.get("items", [])]
     current_prices = {
         str(item["symbol"]): _decimal(item.get("lastPrice"))
         for item in prices or []
         if item.get("symbol") and item.get("lastPrice") is not None
     }
-    cash_by_currency = {buying_power_model.source_currency: buying_power_model.cash_buying_power}
     cash_balance = BrokerCashBalance(
-        currency=buying_power_model.source_currency,
-        cash=buying_power_model.cash_buying_power,
-        withdrawable_cash=buying_power_model.cash_buying_power,
+        currency=primary_currency,
+        cash=cash,
+        available_cash=available_cash,
+        reserved_cash=reserved_cash,
+        available_cash_by_currency=available_by_currency,
+        reserved_cash_by_currency=reserved_by_currency,
+        cash_semantics="available_plus_open_buy_reservations",
     )
     return BrokerReadOnlySnapshot(
         account=BrokerAccountSnapshot(
             account_id=str(account["accountNo"]),
-            cash=buying_power_model.cash_buying_power,
+            cash=cash,
             cash_by_currency=cash_by_currency,
-            buying_power=buying_power_model.cash_buying_power,
+            buying_power=available_cash,
             positions=positions,
             cash_balance=cash_balance,
             buying_power_detail=BrokerBuyingPower(
-                cash_buying_power=buying_power_model.cash_buying_power,
+                cash_buying_power=available_cash,
                 source="toss_openapi_readonly",
             ),
             daily_pnl_by_currency=_pnl_by_currency(holdings.get("dailyProfitLoss")),
@@ -51,7 +81,7 @@ def toss_snapshot_from_payloads(
         ),
         current_prices=current_prices,
         order_fills=[],
-        unfilled_orders=[],
+        unfilled_orders=pending_orders,
     )
 
 
@@ -78,6 +108,67 @@ def _position(item: dict[str, Any]) -> BrokerPosition:
         name=str(item.get("name")) if item.get("name") is not None else None,
         unrealized_pnl=_optional_decimal((item.get("profitLoss") or {}).get("amount")),
     )
+
+
+def _pending_orders(
+    orders: list[dict[str, Any]],
+    commissions: list[dict[str, Any]],
+) -> list[BrokerOrderSummary]:
+    rates = {
+        str(item.get("marketCountry") or "").upper(): _decimal(item.get("commissionRate"))
+        for item in commissions
+        if item.get("marketCountry")
+    }
+    output: list[BrokerOrderSummary] = []
+    for item in orders:
+        execution = item.get("execution") if isinstance(item.get("execution"), dict) else {}
+        quantity = _decimal(item.get("quantity"))
+        filled_quantity = _decimal(execution.get("filledQuantity"))
+        remaining_quantity = max(quantity - filled_quantity, 0.0)
+        currency = str(item.get("currency") or "").upper() or None
+        side = str(item.get("side") or "").lower()
+        price = _optional_decimal(item.get("price"))
+        reserved_principal = (
+            remaining_quantity * price
+            if side == "buy" and price is not None and remaining_quantity > 0
+            else 0.0
+        )
+        country = "KR" if currency == "KRW" else "US" if currency == "USD" else ""
+        commission_rate = rates.get(country, 0.0) / 100.0
+        total_order_notional = quantity * price if price is not None else 0.0
+        estimated_commission = reserved_principal * commission_rate
+        if country == "US" and total_order_notional <= 10.0:
+            estimated_commission = 0.0
+        reserved_cash = reserved_principal + estimated_commission
+        output.append(
+            BrokerOrderSummary(
+                order_id=str(item.get("orderId") or ""),
+                symbol=str(item.get("symbol") or ""),
+                side=side,
+                quantity=quantity,
+                status=str(item.get("status") or ""),
+                submitted_at=_datetime(item.get("orderedAt")),
+                filled_quantity=filled_quantity,
+                average_fill_price=_optional_decimal(execution.get("averageFilledPrice")),
+                raw_status=str(item.get("status") or "") or None,
+                currency=currency,
+                remaining_quantity=remaining_quantity,
+                limit_price=price,
+                reserved_cash=reserved_cash if reserved_cash > 0 else None,
+                estimated_commission=(
+                    estimated_commission if estimated_commission > 0 else None
+                ),
+            )
+        )
+    return output
+
+
+def _datetime(value: Any) -> datetime:
+    if value:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed
+    return utc_now()
 
 
 def _pnl_by_currency(payload: Any) -> dict[str, float] | None:

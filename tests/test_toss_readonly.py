@@ -134,6 +134,61 @@ def test_toss_daily_profit_loss_normalizes_to_daily_pnl_by_currency():
     assert snapshot.account.daily_pnl_by_currency == {"KRW": -15_000.0, "USD": 1.5}
 
 
+def test_toss_snapshot_reconstructs_cash_by_currency_from_open_buy_reservations():
+    snapshot = toss_snapshot_from_payloads(
+        account={"accountNo": "12345678901", "accountSeq": 7},
+        holdings={"items": []},
+        buying_powers=[
+            {"currency": "KRW", "cashBuyingPower": "4299895"},
+            {"currency": "USD", "cashBuyingPower": "814.56475"},
+        ],
+        open_orders=[
+            {
+                "orderId": "KR-OPEN",
+                "symbol": "005930",
+                "side": "BUY",
+                "status": "PENDING",
+                "price": "70000",
+                "quantity": "10",
+                "currency": "KRW",
+                "orderedAt": "2026-07-22T09:30:00+09:00",
+                "execution": {"filledQuantity": "0"},
+            },
+            {
+                "orderId": "US-OPEN",
+                "symbol": "AAPL",
+                "side": "BUY",
+                "status": "PARTIAL_FILLED",
+                "price": "185.25",
+                "quantity": "2",
+                "currency": "USD",
+                "orderedAt": "2026-07-22T23:30:00+09:00",
+                "execution": {
+                    "filledQuantity": "1",
+                    "averageFilledPrice": "185.25",
+                },
+            },
+        ],
+        commissions=[
+            {"marketCountry": "KR", "commissionRate": "0.015"},
+            {"marketCountry": "US", "commissionRate": "0.1"},
+        ],
+    )
+
+    assert snapshot.account.cash_by_currency == {"KRW": 5_000_000.0, "USD": 1_000.0}
+    assert snapshot.account.buying_power == 4_299_895.0
+    assert snapshot.account.cash_balance is not None
+    assert snapshot.account.cash_balance.available_cash_by_currency == {
+        "KRW": 4_299_895.0,
+        "USD": 814.56475,
+    }
+    assert snapshot.account.cash_balance.reserved_cash_by_currency == {
+        "KRW": 700_105.0,
+        "USD": 185.43525,
+    }
+    assert [order.order_id for order in snapshot.unfilled_orders] == ["KR-OPEN", "US-OPEN"]
+
+
 def test_toss_readonly_client_fetches_account_snapshot_with_account_header():
     transport = RecordingTossTransport(
         {
@@ -178,6 +233,9 @@ def test_toss_readonly_client_fetches_account_snapshot_with_account_header():
         ("/api/v1/accounts", {}, None),
         ("/api/v1/holdings", {}, 7),
         ("/api/v1/buying-power", {"currency": "KRW"}, 7),
+        ("/api/v1/buying-power", {"currency": "USD"}, 7),
+        ("/api/v1/orders", {"status": "OPEN"}, 7),
+        ("/api/v1/commissions", {}, 7),
     ]
 
 
@@ -242,6 +300,9 @@ def test_toss_readonly_client_ignores_non_toss_symbols_for_price_refresh():
         ("/api/v1/accounts", {}, None),
         ("/api/v1/holdings", {}, 7),
         ("/api/v1/buying-power", {"currency": "KRW"}, 7),
+        ("/api/v1/buying-power", {"currency": "USD"}, 7),
+        ("/api/v1/orders", {"status": "OPEN"}, 7),
+        ("/api/v1/commissions", {}, 7),
         ("/api/v1/prices", {"symbols": "AAPL"}, None),
     ]
 
@@ -440,6 +501,15 @@ class RecordingTossTransport:
     def get(self, path, params=None, *, account_seq=None):
         params = dict(params or {})
         self.calls.append((path, params, account_seq))
+        if path == "/api/v1/orders" and (path, account_seq) not in self.responses:
+            return {"result": {"orders": [], "nextCursor": None, "hasNext": False}}
+        if path == "/api/v1/commissions" and (path, account_seq) not in self.responses:
+            return {"result": []}
+        if path == "/api/v1/buying-power" and params.get("currency") == "USD":
+            response = self.responses[(path, account_seq)]
+            result = dict(response["result"])
+            if result.get("currency") != "USD":
+                return {"result": {"currency": "USD", "cashBuyingPower": "0"}}
         return self.responses[(path, account_seq)]
 
 

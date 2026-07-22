@@ -17,6 +17,11 @@ class BrokerCashBalance(BaseModel):
     next_day_cash: float | None = None
     projected_settlement_cash: float | None = None
     transaction_costs_today: float | None = None
+    available_cash: float | None = None
+    reserved_cash: float | None = None
+    available_cash_by_currency: dict[str, float] = Field(default_factory=dict)
+    reserved_cash_by_currency: dict[str, float] = Field(default_factory=dict)
+    cash_semantics: str | None = None
 
 
 class BrokerPosition(BaseModel):
@@ -77,6 +82,11 @@ class BrokerOrderSummary(BaseModel):
     average_fill_price: float | None = None
     name: str | None = None
     raw_status: str | None = None
+    currency: str | None = None
+    remaining_quantity: float | None = None
+    limit_price: float | None = None
+    reserved_cash: float | None = None
+    estimated_commission: float | None = None
 
 
 class BrokerReadOnlySnapshot(BaseModel):

@@ -301,6 +301,11 @@ def _status_snapshot(
         checked_at=utc_now().isoformat(),
         symbol=symbol or None,
         side=side,
+        currency=str(order.get("currency") or "").upper() or None,
+        cumulative_filled_amount=_optional_float(execution.get("filledAmount")),
+        cumulative_commission=_optional_float(execution.get("commission")),
+        cumulative_tax=_optional_float(execution.get("tax")),
+        settlement_date=str(execution.get("settlementDate") or "") or None,
         partial_fill=PartialFillSummary(
             ordered_quantity=ordered_quantity,
             filled_quantity=filled_quantity,

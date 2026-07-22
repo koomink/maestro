@@ -88,12 +88,16 @@ def test_toss_order_status_normalizes_partial_fill():
                     "side": "BUY",
                     "status": "PARTIAL_FILLED",
                     "quantity": "2",
+                    "currency": "USD",
                     "orderedAt": "2026-06-19T09:30:00+09:00",
                     "execution": {
                         "filledQuantity": "1",
                         "averageFilledPrice": "185.25",
                         "filledAmount": "185.25",
+                        "commission": "0.18525",
+                        "tax": "0",
                         "filledAt": "2026-06-19T09:31:00+09:00",
+                        "settlementDate": "2026-06-20",
                     },
                 }
             }
@@ -108,6 +112,11 @@ def test_toss_order_status_normalizes_partial_fill():
     assert status.partial_fill.filled_quantity == 1.0
     assert status.partial_fill.remaining_quantity == 1.0
     assert status.partial_fill.average_fill_price == 185.25
+    assert status.currency == "USD"
+    assert status.cumulative_filled_amount == 185.25
+    assert status.cumulative_commission == 0.18525
+    assert status.cumulative_tax == 0.0
+    assert status.settlement_date == "2026-06-20"
 
 
 def test_toss_order_status_maps_broker_symbol_to_canonical():

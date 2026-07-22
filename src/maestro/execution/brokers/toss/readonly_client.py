@@ -67,7 +67,7 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
         return []
 
     def get_unfilled_orders(self) -> list[BrokerOrderSummary]:
-        return []
+        return list(self._read_snapshot().unfilled_orders)
 
     def _read_snapshot(self):
         if self._snapshot is None:
@@ -75,11 +75,23 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
             holdings = self.transport.get("/api/v1/holdings", account_seq=self.account_seq)[
                 "result"
             ]
-            buying_power = self.transport.get(
-                "/api/v1/buying-power",
-                {"currency": "KRW"},
+            buying_powers = [
+                self.transport.get(
+                    "/api/v1/buying-power",
+                    {"currency": currency},
+                    account_seq=self.account_seq,
+                )["result"]
+                for currency in ("KRW", "USD")
+            ]
+            open_orders_payload = self.transport.get(
+                "/api/v1/orders",
+                {"status": "OPEN"},
                 account_seq=self.account_seq,
             )["result"]
+            commissions = self.transport.get(
+                "/api/v1/commissions",
+                account_seq=self.account_seq,
+            ).get("result", [])
             symbols = [
                 str(item["symbol"])
                 for item in holdings.get("items", [])
@@ -95,7 +107,9 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
             self._snapshot = toss_snapshot_from_payloads(
                 account=account,
                 holdings=holdings,
-                buying_power=buying_power,
+                buying_powers=buying_powers,
+                open_orders=list(open_orders_payload.get("orders", [])),
+                commissions=list(commissions),
                 prices=prices,
             )
         return self._snapshot
