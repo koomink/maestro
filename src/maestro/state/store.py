@@ -441,6 +441,8 @@ class StateStore:
         state: PortfolioState,
         watermarks: dict[str, tuple[float, float]],
         event_payload: dict[str, Any],
+        *,
+        account_states: dict[str, PortfolioState] | None = None,
     ) -> None:
         payload_json = json.dumps(event_payload, default=str)
         with self.writer_lock("apply_fill_reconciliation"):
@@ -451,6 +453,19 @@ class StateStore:
                         "(run_id, account_id, payload) VALUES (?, ?, ?)",
                         (run_id, None, json.dumps(state.model_dump(mode="json"), default=str)),
                     )
+                    for account_id, account_state in (account_states or {}).items():
+                        conn.execute(
+                            "INSERT INTO portfolio_snapshots "
+                            "(run_id, account_id, payload) VALUES (?, ?, ?)",
+                            (
+                                run_id,
+                                account_id,
+                                json.dumps(
+                                    account_state.model_dump(mode="json"),
+                                    default=str,
+                                ),
+                            ),
+                        )
                 self._upsert_fill_watermarks(conn, watermarks)
                 conn.execute(
                     "INSERT INTO system_events "

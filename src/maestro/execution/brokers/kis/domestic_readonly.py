@@ -135,11 +135,33 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
             for row in position_rows
             if _first_float(row, "hldg_qty", "ord_psbl_qty", default=0.0) > 0
         ]
-        cash = _first_float(summary, "dnca_tot_amt", "prvs_rcdl_excc_amt", "nxdy_excc_amt")
+        settled_cash = _optional_first_float(summary, "dnca_tot_amt")
+        next_day_cash = _optional_first_float(summary, "nxdy_excc_amt")
+        projected_settlement_cash = _optional_first_float(summary, "prvs_rcdl_excc_amt")
+        # Maestro accounts on trade-date economics. KIS's D+2 projected cash
+        # already includes unsettled buys/sells and transaction costs, whereas
+        # dnca_tot_amt remains unchanged until settlement and creates a false
+        # cash jump on D+2.
+        cash = next(
+            (
+                value
+                for value in (
+                    projected_settlement_cash,
+                    next_day_cash,
+                    settled_cash,
+                )
+                if value is not None
+            ),
+            0.0,
+        )
         cash_balance = KISCashBalance(
             cash=cash,
             total_asset_value=_optional_first_float(summary, "tot_evlu_amt", "nass_amt"),
-            withdrawable_cash=_optional_first_float(summary, "dnca_tot_amt", "nxdy_excc_amt"),
+            withdrawable_cash=settled_cash,
+            settled_cash=settled_cash,
+            next_day_cash=next_day_cash,
+            projected_settlement_cash=projected_settlement_cash,
+            transaction_costs_today=_optional_first_float(summary, "thdt_tlex_amt"),
         )
         # asst_icdc_amt (자산증감액) is today's total-asset change versus the
         # previous trading day — the closest daily-PnL figure the KIS balance

@@ -652,6 +652,50 @@ def test_kis_all_cash_account_snapshot_still_reports_account_level_daily_pnl(mon
     assert snapshot.daily_pnl_by_currency == {"KRW": -56_000.0}
 
 
+def test_kis_domestic_cash_uses_d2_projection_until_trade_settles(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+    )
+
+    class UnsettledKISTransport(FakeKISTransport):
+        def request(self, method, url, **kwargs):
+            payload = super().request(method, url, **kwargs)
+            if url.endswith("/inquire-balance"):
+                payload = dict(payload)
+                payload["output2"] = [
+                    {
+                        "dnca_tot_amt": "1000000",
+                        "nxdy_excc_amt": "999000",
+                        "prvs_rcdl_excc_amt": "929986",
+                        "thdt_tlex_amt": "14",
+                        "tot_evlu_amt": "999986",
+                    }
+                ]
+            return payload
+
+    snapshot = KISRestReadOnlyClient(
+        config,
+        transport=UnsettledKISTransport(),
+    ).get_account_snapshot()
+
+    assert snapshot.cash == 929_986.0
+    assert snapshot.cash_by_currency == {"KRW": 929_986.0}
+    assert snapshot.cash_balance is not None
+    assert snapshot.cash_balance.withdrawable_cash == 1_000_000.0
+    assert snapshot.cash_balance.settled_cash == 1_000_000.0
+    assert snapshot.cash_balance.next_day_cash == 999_000.0
+    assert snapshot.cash_balance.projected_settlement_cash == 929_986.0
+    assert snapshot.cash_balance.transaction_costs_today == 14.0
+
+
 def test_kis_token_expiry_without_timezone_is_interpreted_as_seoul_time():
     parsed = _parse_kis_datetime("2026-06-05 09:10:30")
 
@@ -1903,6 +1947,8 @@ class FakeKISTransport:
                         "dnca_tot_amt": "1000000",
                         "tot_evlu_amt": "1140000",
                         "nxdy_excc_amt": "1000000",
+                        "prvs_rcdl_excc_amt": "1000000",
+                        "thdt_tlex_amt": "0",
                         "asst_icdc_amt": "-56000",
                     }
                 ],

@@ -250,7 +250,10 @@ def test_approve_signal_propagates_signal_run_id_to_live_order_events(monkeypatc
     assert approval_summary.orders_created == 2
 
 
-def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
+def test_approve_signal_retry_cannot_resubmit_after_fill_changes_baseline(
+    monkeypatch,
+    tmp_path,
+):
     _mock_kis_snapshot_refresh(monkeypatch)
     config = _live_signal_config(tmp_path, "approved")
     config.execution.order_posture = "armed"
@@ -290,10 +293,11 @@ def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
         order_capacity_lookup=capacity_lookup,
     )
     second.approval_manager = ApprovingTelegramApprovalManager()
-    second.approve_signal(signal_summary.signal_run_id)
+
+    with pytest.raises(ValueError, match="broker snapshot changed.*cash_changed"):
+        second.approve_signal(signal_summary.signal_run_id)
 
     assert live_client.submit_count == 1
-    lifecycle_events = store.list_system_events_by_type("live_order_lifecycle", limit=10)
     intent_events = store.list_system_events_by_type("live_order_submit_intent", limit=10)
     submitted_request = intent_events[0]["payload"]["request"]
     assert submitted_request["duplicate_key"] == build_live_order_idempotency_key(
@@ -301,10 +305,6 @@ def test_approve_signal_retry_uses_stable_duplicate_key(monkeypatch, tmp_path):
         account_id=submitted_request["account_id"],
         order_intent_id=submitted_request["order_id"],
         fallback_run_id=submitted_request["run_id"],
-    )
-    assert lifecycle_events[0]["payload"]["final_status"] == "failed"
-    assert (
-        lifecycle_events[0]["payload"]["failed_reason"] == "Duplicate live order request rejected"
     )
 
 
@@ -1455,12 +1455,25 @@ def _mock_kis_snapshot_refresh(monkeypatch) -> None:
         self.client = client
 
     def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
+        portfolio = self.state_store.load_latest_account_portfolio_state(
+            self.logical_account_id
+        )
+        cash = portfolio.cash if portfolio is not None else 10_000_000.0
         account = KISAccountSnapshot(
             account_id=self.config.account_id or "MOCK-LIVE",
-            cash=10_000_000.0,
-            cash_by_currency={"KRW": 10_000_000.0},
-            buying_power=10_000_000.0,
-            positions=[],
+            cash=cash,
+            cash_by_currency={"KRW": cash},
+            buying_power=cash,
+            positions=[
+                {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "average_price": 100.0,
+                    "current_price": 100.0,
+                    "currency": "KRW",
+                }
+                for symbol, quantity in (portfolio.positions if portfolio else {}).items()
+            ],
             fetched_at=utc_now(),
             source="kis_mock",
         )

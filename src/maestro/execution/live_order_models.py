@@ -135,6 +135,15 @@ class AppliedFill(BaseModel):
     status_checked_at: str
 
 
+class SettlementCashAdjustment(BaseModel):
+    account_id: str
+    currency: str
+    amount: float
+    transaction_costs_before: float
+    transaction_costs_after: float
+    broker_snapshot_id: int
+
+
 class SkippedFill(BaseModel):
     broker_order_id: str
     status_checked_at: str
@@ -146,6 +155,7 @@ class FillReconciliationResult(BaseModel):
     run_id: str
     checked_at: str
     applied_fills: list[AppliedFill] = Field(default_factory=list)
+    settlement_cash_adjustments: list[SettlementCashAdjustment] = Field(default_factory=list)
     skipped_fills: list[SkippedFill] = Field(default_factory=list)
     portfolio_updated: bool = False
     cash: float

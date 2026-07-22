@@ -316,6 +316,107 @@ def test_fill_reconciliation_updates_strategy_attribution_bucket(tmp_path):
     assert strategy[0]["quantity"] == 2.0
 
 
+def test_fill_reconciliation_updates_account_cash_and_kis_transaction_costs(tmp_path):
+    initial = PortfolioState(
+        cash=1_000_000.0,
+        cash_by_currency={"KRW": 1_000_000.0},
+        positions={},
+    )
+    store, audit = _context(tmp_path, initial)
+    store.save_portfolio_snapshot("run_initial", initial, account_id="kis_isa")
+    store.save_broker_account_snapshot(
+        "run_before",
+        "MOCK-ISA",
+        _broker_snapshot_payload(
+            account_id="kis_isa",
+            cash=1_000_000.0,
+            positions={},
+            transaction_costs_today=0.0,
+        ),
+    )
+    store.save_system_event(
+        "run_submit",
+        "live_order_result",
+        {
+            "request": {
+                "account_id": "kis_isa",
+                "sleeve": "tranquillo_isa",
+                "currency": "KRW",
+            },
+            "result": {"broker_order": {"broker_order_id": "KIS-ISA-1"}},
+        },
+    )
+    _save_status(
+        store,
+        _status(
+            order_id="KIS-ISA-1",
+            status=OrderStatus.FILLED,
+            filled=1.0,
+            ordered=1.0,
+            avg_price=70_000.0,
+        ),
+    )
+
+    def refresh(account_id: str) -> None:
+        assert account_id == "kis_isa"
+        store.save_broker_account_snapshot(
+            "run_after",
+            "MOCK-ISA",
+            _broker_snapshot_payload(
+                account_id="kis_isa",
+                cash=929_986.0,
+                positions={"005930": 1.0},
+                transaction_costs_today=14.0,
+            ),
+        )
+
+    result = PartialFillReconciliationService(
+        store,
+        audit,
+        account_snapshot_refresher=refresh,
+    ).reconcile_latest("run_fill")
+
+    aggregate = store.load_latest_portfolio_state()
+    account = store.load_latest_account_portfolio_state("kis_isa")
+    assert aggregate.cash == 929_986.0
+    assert aggregate.cash_by_currency == {"KRW": 929_986.0}
+    assert aggregate.positions == {"005930": 1.0}
+    assert account is not None
+    assert account.cash == 929_986.0
+    assert account.cash_by_currency == {"KRW": 929_986.0}
+    assert account.positions == {"005930": 1.0}
+    assert result.settlement_cash_adjustments[0].amount == -14.0
+    assert result.settlement_cash_adjustments[0].account_id == "kis_isa"
+
+
+def test_settlement_day_cash_change_preserves_projected_broker_cash(tmp_path):
+    state = PortfolioState(
+        cash=929_986.0,
+        cash_by_currency={"KRW": 929_986.0},
+        positions={"005930": 1.0},
+    )
+    store, _ = _context(tmp_path, state)
+    store.save_portfolio_snapshot("run_account", state, account_id="kis_isa")
+    store.save_broker_account_snapshot(
+        "run_settled",
+        "MOCK-ISA",
+        _broker_snapshot_payload(
+            account_id="kis_isa",
+            cash=929_986.0,
+            positions={"005930": 1.0},
+            transaction_costs_today=0.0,
+            settled_cash=929_986.0,
+        ),
+    )
+
+    account = store.load_latest_account_portfolio_state("kis_isa")
+    broker = store.load_latest_broker_account_snapshot()["payload"]["account"]
+
+    assert account is not None
+    assert account.cash_by_currency == broker["cash_by_currency"]
+    assert broker["cash_balance"]["settled_cash"] == 929_986.0
+
+
 def test_rejected_canceled_halted_and_unknown_do_not_update_portfolio(tmp_path):
     store, audit = _context(tmp_path, PortfolioState(cash=1_000_000.0, positions={}))
     for status in [
@@ -392,6 +493,44 @@ def _context(tmp_path, state: PortfolioState) -> tuple[StateStore, AuditLogger]:
 
 def _save_status(store: StateStore, snapshot: LiveOrderStatusSnapshot) -> None:
     store.save_system_event("run_status", "live_order_status", snapshot.model_dump(mode="json"))
+
+
+def _broker_snapshot_payload(
+    *,
+    account_id: str,
+    cash: float,
+    positions: dict[str, float],
+    transaction_costs_today: float,
+    settled_cash: float = 1_000_000.0,
+) -> dict:
+    return {
+        "account_id": account_id,
+        "account": {
+            "account_id": "MOCK-ISA",
+            "cash": cash,
+            "cash_by_currency": {"KRW": cash},
+            "buying_power": cash,
+            "positions": [
+                {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "average_price": 70_000.0,
+                    "current_price": 70_000.0,
+                    "currency": "KRW",
+                }
+                for symbol, quantity in positions.items()
+            ],
+            "cash_balance": {
+                "currency": "KRW",
+                "cash": cash,
+                "withdrawable_cash": settled_cash,
+                "settled_cash": settled_cash,
+                "projected_settlement_cash": cash,
+                "transaction_costs_today": transaction_costs_today,
+            },
+            "source": "kis_rest_readonly",
+        },
+    }
 
 
 def _status(

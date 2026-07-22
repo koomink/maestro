@@ -114,7 +114,15 @@ def build_live_approval_dependencies(
         ),
     )
     status_service = LiveOrderStatusService(state_store, audit_logger, order_status_client)
-    fill_reconciliation_service = PartialFillReconciliationService(state_store, audit_logger)
+    fill_reconciliation_service = PartialFillReconciliationService(
+        state_store,
+        audit_logger,
+        account_snapshot_refresher=_build_fill_account_snapshot_refresher(
+            config,
+            state_store,
+            audit_logger,
+        ),
+    )
     workflow_service = LiveOrderWorkflowService(
         state_store,
         audit_logger,
@@ -213,6 +221,26 @@ def _build_broker_snapshot_refresher(
         return None
 
     def refresh() -> None:
+        service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
+
+    return refresh
+
+
+def _build_fill_account_snapshot_refresher(
+    config: MaestroConfig,
+    state_store: StateStore,
+    audit_logger: AuditLogger,
+):
+    if not config.accounts:
+        return None
+
+    def refresh(account_id: str) -> None:
+        service = build_broker_readonly_service(
+            config,
+            state_store,
+            audit_logger,
+            account_id=account_id,
+        )
         service.fetch_and_store_snapshot(config.portfolio.allowed_symbols)
 
     return refresh

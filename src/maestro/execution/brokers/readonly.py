@@ -13,6 +13,10 @@ class BrokerCashBalance(BaseModel):
     cash: float
     total_asset_value: float | None = None
     withdrawable_cash: float | None = None
+    settled_cash: float | None = None
+    next_day_cash: float | None = None
+    projected_settlement_cash: float | None = None
+    transaction_costs_today: float | None = None
 
 
 class BrokerPosition(BaseModel):
