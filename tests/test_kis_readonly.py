@@ -436,6 +436,64 @@ def test_adopt_broker_snapshot_seeds_portfolio_for_reconciliation(tmp_path):
     assert events[0]["payload"]["reason"] == "operator baseline rehearsal"
 
 
+def test_adopt_broker_snapshot_can_scope_multi_account_baseline(tmp_path):
+    config = _two_account_readonly_config(tmp_path)
+    config_path = tmp_path / "multi_account_live_readonly.yaml"
+    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_portfolio_snapshot(
+        "run_aggregate",
+        PortfolioState(cash=999.0, cash_by_currency={"KRW": 999.0}, positions={}),
+    )
+    store.save_broker_account_snapshot(
+        "run_isa",
+        "MOCK-ISA",
+        {
+            "account_id": "kis_isa",
+            "account": {
+                "account_id": "MOCK-ISA",
+                "cash": 125.0,
+                "cash_by_currency": {"KRW": 125.0},
+                "positions": [],
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_other",
+        "MOCK-TOSS",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "MOCK-TOSS",
+                "cash": 500.0,
+                "cash_by_currency": {"KRW": 500.0},
+                "positions": [],
+            },
+        },
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "adopt-broker-snapshot",
+            "--config",
+            str(config_path),
+            "--account-id",
+            "kis_isa",
+            "--reason",
+            "settled cash accepted",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "account_id=kis_isa cash=125.00" in result.output
+    assert store.load_latest_account_portfolio_state("kis_isa").cash == 125.0
+    assert store.load_latest_portfolio_state().cash == 999.0
+    event = store.list_system_events_by_type("broker_snapshot_adopted")[0]
+    assert event["payload"]["account_id"] == "kis_isa"
+    assert event["payload"]["broker_snapshot_id"] == 1
+
+
 def test_adopt_broker_snapshot_rejects_positions_outside_allowed_symbols(tmp_path):
     config = _live_readonly_config(tmp_path)
     raw = config.model_dump(mode="json")

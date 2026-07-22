@@ -1564,15 +1564,23 @@ def reconcile(config: Path | None = CONFIG_OPTION) -> None:
 def adopt_broker_snapshot(
     config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
+    account_id: str | None = typer.Option(None, "--account-id"),
 ) -> None:
     maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
         raise typer.BadParameter("adopt-broker-snapshot requires live_readonly or live_approval")
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    latest = store.load_latest_broker_account_snapshot()
+    latest = (
+        latest_snapshot_for_account(store, account_id)
+        if account_id
+        else store.load_latest_broker_account_snapshot()
+    )
     if latest is None:
-        raise typer.BadParameter("adopt-broker-snapshot requires a latest broker snapshot")
+        scope = f" for account_id={account_id}" if account_id else ""
+        raise typer.BadParameter(
+            "adopt-broker-snapshot requires a latest broker snapshot" + scope
+        )
 
     account = latest["payload"]["account"]
     state = _portfolio_state_from_broker_account(
@@ -1582,13 +1590,17 @@ def adopt_broker_snapshot(
         unknown_symbol_policy=maestro_config.portfolio.unknown_broker_position_policy,
     )
     run_id = new_run_id()
-    account_id = str(latest["payload"].get("account_id") or latest.get("account_id") or "")
-    if account_id:
-        store.save_portfolio_snapshot(run_id, state, account_id=account_id)
-    store.save_portfolio_snapshot(run_id, state)
+    adopted_account_id = str(
+        latest["payload"].get("account_id") or latest.get("account_id") or ""
+    )
+    if adopted_account_id:
+        store.save_portfolio_snapshot(run_id, state, account_id=adopted_account_id)
+    if account_id is None:
+        store.save_portfolio_snapshot(run_id, state)
     payload = {
         "reason": reason,
         "broker_snapshot_id": latest["id"],
+        "account_id": adopted_account_id or None,
         "broker_account_id": account.get("account_id"),
         "cash": state.cash,
         "cash_by_currency": state.cash_by_currency,
@@ -1603,7 +1615,8 @@ def adopt_broker_snapshot(
     )
     typer.echo(
         f"adopted run_id={run_id} broker_snapshot_id={latest['id']} "
-        f"account_id={account.get('account_id') or 'none'} cash={state.cash:.2f} "
+        f"account_id={adopted_account_id or account.get('account_id') or 'none'} "
+        f"cash={state.cash:.2f} "
         f"positions={len(state.positions)}"
     )
 
