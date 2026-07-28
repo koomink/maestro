@@ -192,12 +192,12 @@ class YahooDataProvider(BaseDataProvider):
             provider_symbol = self.symbol_map.get(request.symbol, request.symbol)
             rows = self._fetch_rows(request, provider_symbol)
             if not rows:
-                raise ValueError(f"No Yahoo data for symbol: {request.symbol}")
+                raise ProviderUnavailableError(f"No Yahoo data for symbol: {request.symbol}")
 
             lookback = request.lookback or len(rows)
             selected = rows[-lookback:]
             if not selected:
-                raise ValueError(f"No Yahoo data for symbol: {request.symbol}")
+                raise ProviderUnavailableError(f"No Yahoo data for symbol: {request.symbol}")
 
             bars, warnings = self._build_bars(request.symbol, selected, generated_at)
             if not bars:

@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 
 from maestro.datahub.errors import ProviderUnavailableError
+from maestro.datahub.resilience import ResilientDataProvider
 from maestro.datahub.yahoo_provider import YahooDataProvider
 from maestro.sdk import DataRequest
 
@@ -86,6 +87,21 @@ class FakeYahooClient:
         if self.error is not None:
             raise self.error
         return self.dividends_payloads.get(symbol, [])
+
+
+class FlakyEmptyYahooClient(FakeYahooClient):
+    """Returns an empty history for the first calls, the way Yahoo does under throttling."""
+
+    def __init__(self, payloads: dict[str, Any], *, empty_responses: int) -> None:
+        super().__init__(payloads)
+        self.empty_responses = empty_responses
+
+    def history(self, symbol: str, **kwargs: Any) -> Any:
+        rows = super().history(symbol, **kwargs)
+        if self.empty_responses > 0:
+            self.empty_responses -= 1
+            return []
+        return rows
 
 
 def request(
@@ -177,11 +193,28 @@ def test_yahoo_provider_handles_cash_usd_without_external_call():
     assert client.calls == []
 
 
-def test_yahoo_provider_rejects_missing_symbol():
+def test_yahoo_provider_treats_empty_history_as_unavailable():
     provider = YahooDataProvider(client=FakeYahooClient({"MISSING": []}))
 
-    with pytest.raises(ValueError, match="No Yahoo data for symbol: MISSING"):
+    with pytest.raises(ProviderUnavailableError, match="No Yahoo data for symbol: MISSING"):
         provider.get_data([request(symbol="MISSING")])
+
+
+def test_yahoo_provider_empty_history_is_retried_by_the_resilient_wrapper():
+    now = datetime.now(UTC)
+    client = FlakyEmptyYahooClient(
+        {"SPY": [_bar_row(now - timedelta(days=2)), _bar_row(now - timedelta(days=1))]},
+        empty_responses=1,
+    )
+    provider = ResilientDataProvider(
+        YahooDataProvider(client=client),
+        retry_max_attempts=2,
+    )
+
+    bundle = provider.get_data([request()])
+
+    assert bundle.data["SPY"]["latest_price"]["price"] == 101.0
+    assert len(client.calls) == 2
 
 
 def test_yahoo_provider_rejects_malformed_payload():
