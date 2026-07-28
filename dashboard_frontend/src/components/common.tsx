@@ -1,4 +1,4 @@
-import { type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, useId, useRef, useState } from "react";
+import { type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode, useRef, useState } from "react";
 import type { Metric, Row, Tone } from "../types";
 import { chartPoints, columnsFor, dateTime, firstValue } from "../utils/data";
 import { formatCompact, formatPercent, formatValue, humanize } from "../utils/format";
@@ -228,7 +228,6 @@ export function TerminalChart({
   yKey: string;
   markers?: Row[];
 }) {
-  const gradientId = useId();
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const points = chartPoints(rows, yKey);
@@ -247,13 +246,15 @@ export function TerminalChart({
     .filter((row) => Number.isFinite(Number(row[yKey])))
     .map((row) => dateTime(firstValue(row, [xKey, "as_of", "timestamp", "date"])));
   const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
-  const areaPath = `${linePath} L ${points[points.length - 1].x} 200 L ${points[0].x} 200 Z`;
   const maxVal = Math.max(...points.map((point) => point.raw));
   const minVal = Math.min(...points.map((point) => point.raw));
   const firstVal = points[0].raw;
   const lastVal = points[points.length - 1].raw;
   const periodReturn = firstVal !== 0 ? lastVal / firstVal - 1 : null;
   const up = lastVal >= firstVal;
+  // The y axis spans only min..max, so a small move fills the plot. State what
+  // the full plot height is actually worth, or the amplitude reads as drama.
+  const spanPct = minVal !== 0 ? (maxVal - minVal) / Math.abs(minVal) : null;
   const gridYs = [42, 95, 148, 200];
   const valueAtY = (y: number) => minVal + ((200 - y) / 158) * (maxVal - minVal);
   const xLabelIndexes = Array.from(
@@ -293,6 +294,9 @@ export function TerminalChart({
       <div className="chart-title">
         <span>{title}</span>
         <span className="chart-title-meta">
+          {spanPct != null && (
+            <span className="chart-scale">full height {(spanPct * 100).toFixed(1)}%</span>
+          )}
           {periodReturn != null && (
             <span className={up ? "chart-return tone-success" : "chart-return tone-danger"}>
               {formatPercent(periodReturn)}
@@ -311,12 +315,6 @@ export function TerminalChart({
         onMouseMove={onMouseMove}
         onMouseLeave={() => setHoverIndex(null)}
       >
-        <defs>
-          <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="var(--chart-color, var(--green))" stopOpacity="0.24" />
-            <stop offset="100%" stopColor="var(--chart-color, var(--green))" stopOpacity="0" />
-          </linearGradient>
-        </defs>
         <path className="chart-grid" d="M 28 42 H 612 M 28 95 H 612 M 28 148 H 612 M 28 200 H 612" />
         {gridYs.map((y) => (
           <text className="chart-label" key={y} x="32" y={y - 4} textAnchor="start">
@@ -334,8 +332,10 @@ export function TerminalChart({
             {axisDate(pointTimes[index])}
           </text>
         ))}
-        <path className="chart-area" d={areaPath} fill={`url(#${gradientId})`} />
-        <path className="chart-line-shadow" d={linePath} />
+        <line className="chart-baseline" x1="28" x2="612" y1={points[0].y} y2={points[0].y} />
+        <text className="chart-baseline-label" x="612" y={Math.max(52, points[0].y - 6)} textAnchor="end">
+          open · {formatCompact(firstVal)}
+        </text>
         <path className="chart-line" d={linePath} />
         {markerPoints(rows, points, xKey, yKey, markers).slice(0, 12).map((point, index) => (
           <g className="cash-flow-marker" key={index}>
@@ -344,7 +344,7 @@ export function TerminalChart({
             <title>{formatValue(point.marker.amount ?? point.marker.value)}</title>
           </g>
         ))}
-        <circle className="chart-dot" cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="5" />
+        <circle className="chart-dot" cx={points[points.length - 1].x} cy={points[points.length - 1].y} r="3.5" />
         {hovered && (
           <g className="chart-hover">
             <line className="chart-crosshair" x1={hovered.x} x2={hovered.x} y1="42" y2="200" />
@@ -464,7 +464,19 @@ export function SummaryPill({ label, value }: { label: string; value: string }) 
 
 export type PieSlice = { label: string; value: number };
 
-const DONUT_PALETTE = ["var(--cyan)", "var(--green)", "var(--amber)", "var(--blue)", "var(--violet)", "var(--red)"];
+/**
+ * Categorical ramp for proportion breakdowns. Deliberately shares no hue with
+ * the status palette — reusing --green/--amber/--red here made an account
+ * render amber and read as a warning when it was only the second slice.
+ */
+const DONUT_PALETTE = [
+  "var(--cat-1)",
+  "var(--cat-2)",
+  "var(--cat-3)",
+  "var(--cat-4)",
+  "var(--cat-5)",
+  "var(--cat-6)",
+];
 
 /** Stable series color by index — shared by donuts and compare charts. */
 export function seriesColor(index: number): string {

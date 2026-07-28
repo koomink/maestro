@@ -153,7 +153,11 @@ function HoldingsTable({ investment }: { investment: DashboardSnapshot["investme
       />
     );
   }
+  // Sort on weight, not market_value: values are in each position's own
+  // currency, so ordering by them puts a 4M KRW holding above a $9.7k one.
   const rows: Row[] = positions
+    .slice()
+    .sort((a, b) => (numeric(b.weight) ?? -1) - (numeric(a.weight) ?? -1))
     .map((row) => {
       const quantity = numeric(row.quantity);
       const averagePrice = numeric(row.average_price);
@@ -164,17 +168,17 @@ function HoldingsTable({ investment }: { investment: DashboardSnapshot["investme
         account: accountDisplayLabel(row.account_id),
         symbol: row.symbol,
         name: row.name,
+        ccy: row.currency,
         quantity,
         price: currentPrice,
         value: marketValue,
         pnl: pnlPct == null ? "n/a" : formatPercent(pnlPct),
         weight: formatPercent(row.weight),
       };
-    })
-    .sort((a, b) => (numeric(b.value) ?? -1) - (numeric(a.value) ?? -1));
+    });
   return (
     <CompactTable
-      columns={["account", "symbol", "quantity", "price", "value", "pnl", "weight"]}
+      columns={["account", "symbol", "ccy", "quantity", "price", "value", "pnl", "weight"]}
       dense
       limit={14}
       rows={rows}
@@ -364,7 +368,7 @@ function PortfolioPulse({ displayCurrency, snapshot }: { displayCurrency: "KRW" 
           label="Total Asset"
           value={displayAssetRow(totalRow, totalCurrency)}
           control={<CurrencyToggle label="Total asset" value={totalCurrency} onChange={setTotalCurrency} />}
-          tone={totalRow?.amount == null ? "warning" : "success"}
+          tone={totalRow?.amount == null ? "warning" : undefined}
         />
         <PulseRow label="FX" value={fxDisplay} tone={fxTone(fxStatus)} />
         <PulseRow
@@ -377,7 +381,7 @@ function PortfolioPulse({ displayCurrency, snapshot }: { displayCurrency: "KRW" 
           label="Total Exposure"
           value={totalExposureDisplay}
           control={<CurrencyToggle label="Total exposure" value={exposureCurrency} onChange={setExposureCurrency} />}
-          tone={totalExposureDisplay === "n/a" ? "warning" : "primary"}
+          tone={totalExposureDisplay === "n/a" ? "warning" : undefined}
         />
       </div>
       <CashExposureSpeedometer
