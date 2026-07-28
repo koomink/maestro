@@ -75,6 +75,30 @@ def test_verdict_reason_rows_explain_status_sources():
     assert all(row["next_check"] for row in rows)
 
 
+def test_freshness_reason_uses_operator_wording_and_a_specific_next_check():
+    """The brief is the first thing read on the dashboard, so it must not echo
+    the event key that happens to back a check."""
+    rows = _verdict_reason_rows(
+        operator_summary={},
+        freshness=[
+            {
+                "name": "scheduled_run",
+                "status": "stale",
+                "age_seconds": 1_676_249,
+                "max_age_seconds": 86_400,
+            }
+        ],
+        health={},
+        reconciliation={"passed": True},
+        live_order_lifecycle={},
+        fx_snapshot={"status": "fresh"},
+    )
+
+    (row,) = rows
+    assert row["reason"] == "Scheduled run is stale — last written 19d ago, limit 24h"
+    assert row["next_check"] == "Check the daily signal timers on the host"
+
+
 def test_freshness_rollup_treats_missing_scheduled_run_as_warning():
     rows = [
         {"name": "broker_snapshot", "status": "fresh"},

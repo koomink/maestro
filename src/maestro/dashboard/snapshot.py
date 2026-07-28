@@ -1495,6 +1495,26 @@ def _asset_summary_rows(
     ]
 
 
+# The operator brief is the first thing read on the dashboard, so it should
+# name things the way the operator does rather than echoing the event key that
+# happens to back the check.
+_FRESHNESS_LABELS = {
+    "broker_snapshot": "Broker snapshot",
+    "broker_reconciliation": "Broker reconciliation",
+    "heartbeat": "Service heartbeat",
+    "scheduled_run": "Scheduled run",
+}
+
+_FRESHNESS_NEXT_CHECKS = {
+    "broker_snapshot": "Run account sync, then confirm the accounts report fresh",
+    "broker_reconciliation": (
+        "Run account sync; if it still fails, compare broker holdings against state"
+    ),
+    "heartbeat": "Check the maestro service is running on the host",
+    "scheduled_run": "Check the daily signal timers on the host",
+}
+
+
 def _verdict_reason_rows(
     operator_summary: dict[str, Any],
     freshness: list[dict[str, Any]],
@@ -1524,15 +1544,18 @@ def _verdict_reason_rows(
             source = _row_label(row, "Freshness")
             age = row.get("age_seconds")
             max_age = row.get("max_age_seconds")
-            detail = f"{source} is {status}"
+            detail = f"{_FRESHNESS_LABELS.get(source, source)} is {status}"
             if age is not None and max_age is not None:
-                detail = f"{detail} ({_duration(age)} old, limit {_duration(max_age)})"
+                detail = f"{detail} — last written {_duration(age)} ago, limit {_duration(max_age)}"
             rows.append(
                 _verdict_reason_row(
                     source=source,
                     status=status,
                     reason=detail,
-                    next_check="Review freshness evidence and run the relevant sync if needed",
+                    next_check=_FRESHNESS_NEXT_CHECKS.get(
+                        source,
+                        "Review the evidence for this check and re-run the job that writes it",
+                    ),
                     tone=_status_tone(status),
                 )
             )
