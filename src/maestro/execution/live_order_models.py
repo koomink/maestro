@@ -259,7 +259,26 @@ class LiveOrderBatchLifecycleResult(BaseModel):
     items: list[LiveOrderBatchItemResult] = Field(default_factory=list)
     poll_rounds: int = 0
     max_polls_reached: bool = False
+    orders_planned: int = 0
+    orders_submitted: int = 0
+    orders_accepted: int = 0
+    orders_filled: int = 0
+    orders_failed: int = 0
+    submission_duration_seconds: float = 0.0
+    polling_duration_seconds: float = 0.0
+    reconciliation_duration_seconds: float = 0.0
+    total_duration_seconds: float = 0.0
     checked_at: str
+
+
+class LiveOrderRecoveryCandidate(BaseModel):
+    source_order_id: str
+    order: dict[str, Any]
+    source_type: str
+    reason: str
+    signal_run_id: str | None = None
+    created_at: str
+    status: str = "pending"
 
 
 __all__ = [
@@ -274,6 +293,7 @@ __all__ = [
     "LiveOrderLifecycleResult",
     "LiveOrderBatchItemResult",
     "LiveOrderBatchLifecycleResult",
+    "LiveOrderRecoveryCandidate",
     "LiveOrderModifyRequest",
     "LiveOrderModifyResult",
     "LiveOrderRequest",

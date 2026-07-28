@@ -61,6 +61,15 @@ class LiveOrderWorkflowService:
     ) -> LiveOrderWorkflowResult:
         submitted = self.safety_service.submit_approved_order(request, approval_decision)
         broker_order = submitted.broker_order
+        if submitted.status == OrderStatus.REJECTED:
+            return LiveOrderWorkflowResult(
+                run_id=request.run_id,
+                workflow_status=OrderStatus.REJECTED,
+                order_id=request.order_id,
+                submitted_order=submitted,
+                failed_reason=submitted.message,
+                checked_at=utc_now().isoformat(),
+            )
         if submitted.status == OrderStatus.HALTED or broker_order is None:
             return LiveOrderWorkflowResult(
                 run_id=request.run_id,

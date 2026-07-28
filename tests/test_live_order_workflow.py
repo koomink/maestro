@@ -93,6 +93,20 @@ def test_workflow_unknown_submit_result_halts_without_polling(tmp_path):
     assert status_client.requests == []
 
 
+def test_workflow_definitive_submit_rejection_does_not_poll(tmp_path):
+    workflow, _, _, status_client, request, approval = _context(
+        tmp_path,
+        submit_status=OrderStatus.REJECTED,
+        poll_status=OrderStatus.OPEN,
+    )
+
+    result = workflow.run(request, approval)
+
+    assert result.workflow_status == OrderStatus.REJECTED
+    assert result.broker_order_id is None
+    assert status_client.requests == []
+
+
 def test_workflow_unknown_status_polling_halts(tmp_path):
     workflow, store, _, status_client, request, approval = _context(
         tmp_path,
@@ -236,7 +250,7 @@ class FakeSubmitClient(LiveOrderClient):
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         self.requests.append(request)
         broker_order = None
-        if self.status != OrderStatus.UNKNOWN:
+        if self.status not in {OrderStatus.UNKNOWN, OrderStatus.REJECTED}:
             broker_order = _broker_order(request.order_id)
         return LiveOrderResult(
             order_id=request.order_id,

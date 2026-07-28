@@ -73,7 +73,9 @@ class LiveOrderBatchLifecycleService:
         items: list[tuple[LiveOrderRequest, BatchOrderDependencies]],
         approval_decision: ApprovalDecision,
     ) -> LiveOrderBatchLifecycleResult:
+        run_started = monotonic()
         states = [_OrderState(request=request, dependencies=deps) for request, deps in items]
+        submission_started = monotonic()
         stop_submissions = False
         for state in states:
             if stop_submissions:
@@ -101,12 +103,18 @@ class LiveOrderBatchLifecycleService:
                 state.submitted.status,
                 "Live order submission result received.",
             )
+            if state.submitted.status == OrderStatus.REJECTED:
+                state.failed_reason = state.submitted.message or "Broker rejected live order."
+                state.terminal = True
+                continue
             if state.submitted.status == OrderStatus.HALTED or broker_order is None:
                 state.halt_reason = state.submitted.message or "Live order submission halted."
                 state.terminal = True
                 stop_submissions = True
 
+        submission_duration = monotonic() - submission_started
         started_at = monotonic()
+        reconciliation_duration = 0.0
         poll_rounds = 0
         max_polls_reached = False
         active = [state for state in states if not state.terminal]
@@ -159,7 +167,9 @@ class LiveOrderBatchLifecycleService:
                     None,
                 )
             if fill_service is not None:
+                reconciliation_started = monotonic()
                 fill_result = fill_service.reconcile_latest(states[0].request.run_id)
+                reconciliation_duration += monotonic() - reconciliation_started
                 for state in states:
                     if state.snapshots:
                         state.fill_results.append(fill_result)
@@ -183,9 +193,11 @@ class LiveOrderBatchLifecycleService:
                             is reconciliation
                         ]
                         try:
+                            reconciliation_started = monotonic()
                             broker_result = reconciliation.reconcile_latest().model_dump(
                                 mode="json"
                             )
+                            reconciliation_duration += monotonic() - reconciliation_started
                         except Exception as exc:
                             for state in related:
                                 state.final_status = OrderStatus.FAILED
@@ -222,6 +234,7 @@ class LiveOrderBatchLifecycleService:
 
         if active:
             max_polls_reached = True
+        polling_duration = monotonic() - started_at
         lifecycle_results = [
             self._lifecycle_result(state, max_polls_reached=state in active)
             for state in states
@@ -247,6 +260,19 @@ class LiveOrderBatchLifecycleService:
             ],
             poll_rounds=poll_rounds,
             max_polls_reached=max_polls_reached,
+            orders_planned=len(states),
+            orders_submitted=sum(state.submitted is not None for state in states),
+            orders_accepted=sum(state.broker_order_id is not None for state in states),
+            orders_filled=sum(state.final_status == OrderStatus.FILLED for state in states),
+            orders_failed=sum(
+                state.final_status
+                in {OrderStatus.FAILED, OrderStatus.REJECTED, OrderStatus.HALTED}
+                for state in states
+            ),
+            submission_duration_seconds=submission_duration,
+            polling_duration_seconds=polling_duration,
+            reconciliation_duration_seconds=reconciliation_duration,
+            total_duration_seconds=monotonic() - run_started,
             checked_at=utc_now().isoformat(),
         )
         if states:

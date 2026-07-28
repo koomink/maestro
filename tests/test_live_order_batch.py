@@ -76,6 +76,23 @@ def test_batch_continues_after_definite_pre_submit_failure(tmp_path):
     ]
 
 
+def test_batch_continues_after_definitive_broker_rejection(tmp_path):
+    calls: list[str] = []
+    service, fill_service = _batch_service(tmp_path)
+    items = [
+        (_request("ord_1"), _dependencies(_RejectedSafetyService(calls), calls, fill_service)),
+        (_request("ord_2"), _dependencies(_SafetyService(calls), calls, fill_service)),
+    ]
+
+    result = service.run(items, _approval())
+
+    assert calls[:2] == ["submit:ord_1", "submit:ord_2"]
+    assert [item.lifecycle.final_status for item in result.items] == [
+        OrderStatus.REJECTED,
+        OrderStatus.OPEN,
+    ]
+
+
 def test_batch_stops_later_submissions_after_ambiguous_halt(tmp_path):
     calls: list[str] = []
     service, fill_service = _batch_service(tmp_path)
@@ -182,6 +199,20 @@ class _HaltedSafetyService:
             order_id=request.order_id,
             status=OrderStatus.HALTED,
             message="ambiguous broker submission",
+        )
+
+
+class _RejectedSafetyService:
+    def __init__(self, calls: list[str]) -> None:
+        self.calls = calls
+
+    def submit_approved_order(self, request, approval):
+        del approval
+        self.calls.append(f"submit:{request.order_id}")
+        return LiveOrderResult(
+            order_id=request.order_id,
+            status=OrderStatus.REJECTED,
+            message="kis order rejected: APBK1497",
         )
 
 
