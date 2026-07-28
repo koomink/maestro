@@ -309,8 +309,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   background: rgba(255,255,255,0.025);
 }
 
-.ticker-cell b,
-.carousel-item b {
+.ticker-cell b {
   display: block;
   color: var(--muted);
   font-size: 10px;
@@ -319,8 +318,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   letter-spacing: 0.06em;
 }
 
-.ticker-cell span,
-.carousel-item span {
+.ticker-cell span {
   display: block;
   margin-top: 4px;
   color: #f4f7fc;
@@ -334,8 +332,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 /* This was hardcoded green, so every caption ("ready", "signals", "state",
    "read-only", "op") read as healthy even next to a warning value. Colour
    comes from the cell's own tone now. */
-.ticker-cell small,
-.carousel-item small {
+.ticker-cell small {
   margin-left: 6px;
   color: var(--faint);
   font-size: 10px;
@@ -343,14 +340,6 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   text-transform: uppercase;
 }
 
-.carousel-item {
-  height: 100%;
-  flex-shrink: 0;
-  padding: 6px 12px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-}
 
 /* Emphasize the primary headline metric (Total NAV) over peer cells. */
 .ticker-cell.ticker-primary {
@@ -631,12 +620,14 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   stroke-width: 14;
   stroke-linecap: round;
 }
+/* Was a blue-cyan-amber-red sweep, which implied risk zones the system never
+   defines — 80% exposure is a target, not an alarm. One neutral hue; the arc
+   length and the needle carry the reading. */
 .speedometer-arc {
   fill: none;
-  stroke: url(#cashExposureGradient);
+  stroke: var(--cat-1);
   stroke-width: 10;
   stroke-linecap: round;
-  filter: url(#speedometerGlow);
 }
 .speedometer-tick {
   stroke: rgba(232, 237, 245, 0.42);
@@ -644,7 +635,7 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
   stroke-linecap: round;
 }
 .speedometer-needle {
-  filter: drop-shadow(0 0 9px rgba(34, 211, 238, 0.45));
+  filter: none;
 }
 .speedometer-needle-shadow {
   stroke: rgba(4, 8, 14, 0.9);
@@ -1007,21 +998,24 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 /* ═══════════════════════════════════════════════
    AI COPY
    ═══════════════════════════════════════════════ */
+/* Was a cyan-tinted gradient card with a decorative sparkle glyph. Cyan means
+   selection now, and the brief is text the operator reads, not a feature. */
 .ai-copy {
-  border: 1px solid rgba(34, 211, 238, 0.12);
-  background: linear-gradient(135deg, rgba(34, 211, 238, 0.04), rgba(99, 102, 241, 0.03));
+  border: 1px solid var(--line);
+  background: var(--panel-2);
   border-radius: var(--radius);
   padding: var(--panel-pad);
   margin-bottom: var(--panel-pad);
-  position: relative;
 }
-.ai-copy::before {
-  content: '✦';
-  position: absolute;
-  top: 10px; right: 12px;
-  color: var(--cyan);
-  font-size: 12px;
-  opacity: 0.5;
+
+.ai-next-check {
+  margin: 8px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .ai-copy h3 {
@@ -1741,45 +1735,6 @@ input:focus-visible,
 }
 .error-banner strong { color: var(--red); }
 .error-banner-note { color: var(--muted); white-space: nowrap; }
-
-
-/* ═══════════════════════════════════════════════
-   CAROUSEL CONTROLS
-   ═══════════════════════════════════════════════ */
-.carousel-controls {
-  position: absolute;
-  right: 6px;
-  bottom: 4px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.2s ease;
-}
-.carousel-wrapper:hover .carousel-controls,
-.carousel-wrapper:focus-within .carousel-controls {
-  opacity: 1;
-}
-.carousel-controls button {
-  width: 16px;
-  height: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--line-bright);
-  border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.4);
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1;
-}
-.carousel-controls button:hover { color: var(--text); }
-.carousel-index {
-  color: var(--faint);
-  font-family: var(--mono);
-  font-size: 8px;
-  font-variant-numeric: tabular-nums;
-}
 
 
 /* ═══════════════════════════════════════════════

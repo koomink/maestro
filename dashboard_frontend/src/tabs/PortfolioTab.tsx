@@ -34,6 +34,9 @@ export function PortfolioTab({
   snapshot: DashboardSnapshot;
 }) {
   const investment = snapshot.investment_console;
+  // The reason rows already carry the follow-up action; without it the brief
+  // states a problem and leaves the operator to guess what to do about it.
+  const nextCheck = String(snapshot.system_verdict.reason_rows[0]?.next_check ?? "");
   const rows = filterByPeriod(investment.total_portfolio_performance, period);
   const yKey = rows.some((row) => Number.isFinite(Number(row.total_value))) ? "total_value" : "current_value";
   return (
@@ -53,6 +56,7 @@ export function PortfolioTab({
         <div className="ai-copy">
           <h3>Operator Brief</h3>
           <p>{snapshot.system_verdict.copy}</p>
+          {nextCheck && <p className="ai-next-check">Next: {nextCheck}</p>}
         </div>
         <MetricRows metrics={snapshot.system_verdict.capital_summary.slice(0, 5)} />
       </Panel>
@@ -441,6 +445,9 @@ function CurrencyToggle({
   );
 }
 
+/** Length of the 180° r=79 gauge arc, used to fill it proportionally. */
+const SPEEDOMETER_ARC_LENGTH = Math.PI * 79;
+
 function CashExposureSpeedometer({
   cashLabel,
   exposureLabel,
@@ -457,30 +464,16 @@ function CashExposureSpeedometer({
   return (
     <div className="pulse-speedometer">
       <svg viewBox="0 0 220 136" role="img" aria-label="Total cash to total exposure ratio">
-        <defs>
-          <linearGradient
-            id="cashExposureGradient"
-            x1="28"
-            y1="0"
-            x2="192"
-            y2="0"
-            gradientUnits="userSpaceOnUse"
-          >
-            <stop offset="0%" stopColor="var(--blue)" />
-            <stop offset="48%" stopColor="var(--cyan)" />
-            <stop offset="72%" stopColor="var(--amber)" />
-            <stop offset="100%" stopColor="var(--red)" />
-          </linearGradient>
-          <filter id="speedometerGlow" x="-20%" y="-30%" width="140%" height="160%">
-            <feGaussianBlur stdDeviation="2.5" result="blur" />
-            <feMerge>
-              <feMergeNode in="blur" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
         <path className="speedometer-track" d="M 31 102 A 79 79 0 0 1 189 102" />
-        <path className="speedometer-arc" d="M 31 102 A 79 79 0 0 1 189 102" />
+        {/* The arc now fills to the reading instead of painting a fixed
+            rainbow behind it, so its length carries the value. */}
+        {ratio != null && (
+          <path
+            className="speedometer-arc"
+            d="M 31 102 A 79 79 0 0 1 189 102"
+            strokeDasharray={`${ratio * SPEEDOMETER_ARC_LENGTH} ${SPEEDOMETER_ARC_LENGTH}`}
+          />
+        )}
         {[0, 0.25, 0.5, 0.75, 1].map((tick) => {
           const angle = (-90 + tick * 180) * (Math.PI / 180);
           const x1 = 110 + Math.sin(angle) * 69;

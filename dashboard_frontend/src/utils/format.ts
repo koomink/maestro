@@ -96,13 +96,24 @@ export function formatAge(seconds: unknown): string {
   if (parsed < 60) {
     return `${Math.round(parsed)}s`;
   }
-  if (parsed < 3600) {
+  // Guard on the rounded value, not the raw one, so 3599s is "1h" not "60m".
+  if (Math.round(parsed / 60) < 60) {
     return `${Math.round(parsed / 60)}m`;
   }
+  // Compound units past an hour: "1h 48m" reads as a duration, where "1.8h"
+  // has to be converted in your head before it can be compared to a limit.
+  // Rounding the minor unit can carry into the major one (7199s must be "2h",
+  // not "1h 60m"), so normalise before formatting.
   if (parsed < 86400) {
-    return `${(parsed / 3600).toFixed(1)}h`;
+    const totalMinutes = Math.round(parsed / 60);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
   }
-  return `${(parsed / 86400).toFixed(1)}d`;
+  const totalHours = Math.round(parsed / 3600);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  return hours === 0 ? `${days}d` : `${days}d ${hours}h`;
 }
 
 export function formatReadableCell(value: unknown): string {

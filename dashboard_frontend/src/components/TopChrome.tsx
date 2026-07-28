@@ -1,7 +1,7 @@
-import { type KeyboardEvent as ReactKeyboardEvent, useEffect, useState } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { DashboardSnapshot, Row, Tone } from "../types";
 import { formatAge, formatPercent, formatValue } from "../utils/format";
-import { useNow, usePrefersReducedMotion } from "../utils/hooks";
+import { useNow } from "../utils/hooks";
 import { toneFromValue } from "../utils/tone";
 import { trustSummary } from "../utils/trust";
 import { type ActionState, type TabName, latestRow, metricValue, rowValue, tabs, toneClass, toneGlyph } from "../viewModel";
@@ -117,7 +117,7 @@ export function TopChrome({
           delta={navDeltaKnown ? formatPercent(navDelta) : displayCurrency}
           tone={navDeltaKnown ? (navDelta > 0 ? "success" : navDelta < 0 ? "danger" : "neutral") : "neutral"}
         />
-        <TickerCarousel accounts={snapshot.investment_console.broker_account_overview.accounts} />
+        <AccountsTickerCell accounts={snapshot.investment_console.broker_account_overview.accounts} />
         <TickerCell label="Cash" value={metricValue(snapshot.investment_console.metrics, "Broker Cash", "n/a")} delta="ready" />
         <TickerCell label="Freshness" value={trust.freshness} delta="signals" tone={trust.freshnessTone} />
         <TickerCell label="Recon" value={trust.reconciliation} delta="state" tone={trust.reconciliationTone} />
@@ -133,92 +133,59 @@ export function TopChrome({
   );
 }
 
-function TickerCarousel({ accounts }: { accounts: Row[] }) {
-  const [currentIndex, setCurrentIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
-  const reducedMotion = usePrefersReducedMotion();
-  const count = accounts?.length ?? 0;
+/** Tone precedence when several accounts disagree: worst state wins. */
+const ACCOUNT_TONE_RANK: Record<string, number> = { danger: 3, warning: 2, success: 1, neutral: 0 };
 
-  useEffect(() => {
-    if (count <= 1 || paused || reducedMotion) {
-      return;
-    }
-    const interval = window.setInterval(() => {
-      setCurrentIndex((i) => (i + 1) % count);
-    }, 5000);
-    return () => window.clearInterval(interval);
-  }, [count, paused, reducedMotion]);
-
-  // Keep index in range if the account list shrinks.
-  useEffect(() => {
-    if (currentIndex >= count && count > 0) {
-      setCurrentIndex(0);
-    }
-  }, [count, currentIndex]);
-
+/**
+ * Aggregate account freshness in one cell.
+ *
+ * This replaced a carousel that showed one of N accounts and advanced every
+ * five seconds: two thirds of the state was always hidden, the cell moved
+ * while you were reading it, and the account it happened to be showing was
+ * not necessarily the one that needed attention. Per-account detail lives in
+ * the Account Matrix panel.
+ */
+function AccountsTickerCell({ accounts }: { accounts: Row[] }) {
   if (!accounts || accounts.length === 0) {
-    return <TickerCell label="Account" value="synced" />;
+    return <TickerCell label="Accounts" value="none configured" />;
   }
-
-  function step(direction: 1 | -1) {
-    setCurrentIndex((i) => (i + direction + count) % count);
-  }
-
+  const total = accounts.length;
+  const fresh = accounts.filter((acc) => String(acc.status || "") === "fresh").length;
+  // Surface the account furthest past its limit — that is the one to act on.
+  const worst = accounts.reduce((acc, candidate) => {
+    const rank = ACCOUNT_TONE_RANK[toneFromValue(candidate.status)] ?? 0;
+    const bestRank = ACCOUNT_TONE_RANK[toneFromValue(acc.status)] ?? 0;
+    if (rank !== bestRank) {
+      return rank > bestRank ? candidate : acc;
+    }
+    return Number(candidate.age_seconds ?? -1) > Number(acc.age_seconds ?? -1) ? candidate : acc;
+  }, accounts[0]);
+  const tone = toneFromValue(worst.status);
+  const age = worst.age_seconds == null
+    ? "missing"
+    : `${formatAge(Number(worst.age_seconds))} · limit ${formatAge(Number(worst.max_age_seconds))}`;
   return (
-    <div
-      className="ticker-cell carousel-wrapper"
-      style={{ padding: 0, position: "relative" }}
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
-    >
-      <div
-        className="carousel-track"
-        style={{
-          transform: `translateY(-${currentIndex * 100}%)`,
-          transition: reducedMotion ? "none" : "transform 0.5s cubic-bezier(0.4, 0, 0.2, 1)",
-          height: "100%",
-        }}
-      >
-        {accounts.map((acc, i) => {
-          const accountId = formatValue(acc.account_id || "Account");
+    <TickerCell
+      label={`Accounts ${fresh}/${total} fresh`}
+      value={formatValue(worst.status || "synced")}
+      delta={age}
+      tone={tone}
+      title={accounts
+        .map((acc) => {
+          const id = formatValue(acc.account_id || "account");
           const status = formatValue(acc.status || "synced");
-          const timestamp = acc.age_seconds == null
-            ? "missing"
-            : `${formatAge(Number(acc.age_seconds))} ago · limit ${formatAge(Number(acc.max_age_seconds))}`;
-          const tone = toneFromValue(acc.status);
-          return (
-            <div
-              key={String(acc.account_id ?? i)}
-              className={`carousel-item ${toneClass(tone)}`}
-              title={`${accountId}: ${status} ${timestamp}`.trim()}
-            >
-              <b>{accountId}</b>
-              <span>
-                <i className="tone-glyph" aria-hidden="true">{toneGlyph(tone)}</i>
-                {status}
-                <small>{timestamp}</small>
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      {count > 1 && (
-        <div className="carousel-controls">
-          <button type="button" aria-label="Previous account" onClick={() => step(-1)}>‹</button>
-          <span className="carousel-index">{currentIndex + 1}/{count}</span>
-          <button type="button" aria-label="Next account" onClick={() => step(1)}>›</button>
-        </div>
-      )}
-    </div>
+          const detail = acc.age_seconds == null ? "missing" : `${formatAge(Number(acc.age_seconds))} old`;
+          return `${id}: ${status} · ${detail}`;
+        })
+        .join("\n")}
+    />
   );
 }
 
-function TickerCell({ label, value, delta, tone = "neutral", primary = false }: { label: string; value: string; delta?: string; tone?: Tone; primary?: boolean }) {
+function TickerCell({ label, value, delta, tone = "neutral", primary = false, title }: { label: string; value: string; delta?: string; tone?: Tone; primary?: boolean; title?: string }) {
   const showGlyph = tone !== "neutral";
   return (
-    <div className={`ticker-cell ${primary ? "ticker-primary " : ""}${toneClass(tone)}`} title={`${label}: ${value} ${delta || ""}`.trim()}>
+    <div className={`ticker-cell ${primary ? "ticker-primary " : ""}${toneClass(tone)}`} title={title ?? `${label}: ${value} ${delta || ""}`.trim()}>
       <b>{label}</b>
       <span>
         {showGlyph && <i className="tone-glyph" aria-hidden="true">{toneGlyph(tone)}</i>}
