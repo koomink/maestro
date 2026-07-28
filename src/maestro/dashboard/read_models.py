@@ -611,28 +611,43 @@ def build_broker_position_exposure_table(
     store: StateStore,
     config: MaestroConfig | None = None,
     limit: int = 100,
+    display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
     latest_snapshots = _latest_broker_snapshots_by_account(store, config)
     if not latest_snapshots:
         return []
+    fx_snapshot = build_fx_rate_snapshot_card(store)
     positions_by_account = []
-    total_values = []
+    # Weight has to be measured against the same total the NAV uses. Summing
+    # raw per-account totals mixed units: a Toss account reporting KRW cash
+    # alongside USD holdings produced a denominator that excluded the USD leg,
+    # so USD positions were divided by a KRW-only total and reported far too
+    # small (a 21% holding showed as 0.04%).
+    components: dict[str, float] = {}
     for snapshot in latest_snapshots:
         payload = _mapping(snapshot.get("payload"))
         account = _mapping(payload.get("account"))
         positions = _positions(account)
         account_id = _broker_snapshot_account_id(snapshot)
-        positions_by_account.extend((account_id, position) for position in positions)
-        total_value = _account_total_value(account, positions)
-        if total_value is not None:
-            total_values.append(total_value)
-    total_value = sum(total_values) if total_values else None
+        positions_by_account.extend(
+            (account_id, position, account, payload) for position in positions
+        )
+        for currency, value in _account_value_components(account, positions, payload).items():
+            components[currency] = components.get(currency, 0.0) + value
+    total_value = _convert_components(components, display_currency, fx_snapshot)
     rows = []
-    for account_id, position in sorted(
+    for account_id, position, account, payload in sorted(
         positions_by_account,
         key=lambda item: (item[0], str(item[1].get("symbol") or "")),
     ):
         market_value = _position_market_value(position)
+        currency = _position_currency(position, account, payload)
+        rate = _fx_rate(currency, display_currency, fx_snapshot)
+        if currency != display_currency and fx_snapshot.get("status") != "fresh":
+            # Same rule as _convert_components: a stale rate must not silently
+            # produce a converted weight.
+            rate = None
+        converted_value = None if rate is None else market_value * rate
         rows.append(
             {
                 "account_id": account_id,
@@ -642,7 +657,8 @@ def build_broker_position_exposure_table(
                 "average_price": _float_or_none(position.get("average_price")),
                 "current_price": _float_or_none(position.get("current_price")),
                 "market_value": market_value,
-                "weight": _safe_weight(market_value, total_value),
+                "currency": currency,
+                "weight": _safe_weight(converted_value, total_value),
                 "unrealized_pnl": _float_or_none(position.get("unrealized_pnl")),
             }
         )
@@ -2526,9 +2542,29 @@ def _account_value_components(
     if cash is not None:
         components[cash_currency] = components.get(cash_currency, 0.0) + cash
     for position in positions:
-        currency = str(position.get("currency") or cash_currency)
+        currency = _position_currency(position, account, payload, default_currency)
         components[currency] = components.get(currency, 0.0) + _position_market_value(position)
     return components
+
+
+def _position_currency(
+    position: dict[str, Any],
+    account: dict[str, Any],
+    payload: dict[str, Any],
+    default_currency: str = "KRW",
+) -> str:
+    """Currency one position is denominated in.
+
+    Shared by `_account_value_components` and the position exposure table so
+    both bucket a position the same way; a mismatch there silently divides a
+    USD value by a KRW total.
+    """
+    account_currency = _snapshot_currency(account, payload)
+    if account_currency == "UNKNOWN":
+        account_currency = default_currency
+    cash_balance = _mapping(account.get("cash_balance"))
+    cash_currency = str(cash_balance.get("currency") or account_currency)
+    return str(position.get("currency") or cash_currency)
 
 
 def _account_cash_components(

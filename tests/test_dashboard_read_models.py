@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -785,6 +786,103 @@ def test_broker_summary_and_exposure_aggregate_latest_snapshot_per_account(tmp_p
         "TIGER_NASDAQ100_LEVERAGE",
     ]
     assert positions[0]["account_id"] == "kis_mock"
+
+
+def test_position_weights_use_fx_converted_total(tmp_path):
+    """Regression test: a position's weight must be measured against the same
+    total the NAV uses, with both sides in one currency.
+
+    A Toss-style account reports KRW cash next to USD holdings and gives no
+    aggregate total. Summing raw per-account totals excluded the USD leg from
+    the denominator, so a USD position was divided by a KRW-only total and
+    reported orders of magnitude too small — a 20% holding showed as 0.04%.
+    """
+    store = StateStore(tmp_path / "state.db")
+    store.save_broker_account_snapshot(
+        "run_fx_weight",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "TOSS",
+                "cash": 1_000_000.0,
+                "cash_balance": {"currency": "KRW"},
+                "positions": [
+                    {
+                        "symbol": "005930",
+                        "currency": "KRW",
+                        "quantity": 10.0,
+                        "current_price": 100_000.0,
+                    },
+                    {
+                        "symbol": "QQQ",
+                        "currency": "USD",
+                        "quantity": 10.0,
+                        "current_price": 300.0,
+                    },
+                ],
+            },
+        },
+    )
+    store.save_system_event(
+        "run_fx",
+        "fx_rate_snapshot",
+        {
+            "source": "fixture",
+            "as_of": utc_now().isoformat(),
+            "max_age_seconds": 3600,
+            "rates": {"USD/KRW": 1000.0},
+        },
+    )
+
+    positions = build_broker_position_exposure_table(store, display_currency="KRW")
+    by_symbol = {row["symbol"]: row for row in positions}
+
+    # Total in KRW: 1,000,000 cash + 1,000,000 KRW stock + 3,000,000 (USD 3,000).
+    assert by_symbol["005930"]["weight"] == pytest.approx(1_000_000 / 5_000_000)
+    assert by_symbol["QQQ"]["weight"] == pytest.approx(3_000_000 / 5_000_000)
+    # market_value stays in the position's own currency; currency now says which.
+    assert by_symbol["QQQ"]["market_value"] == 3_000.0
+    assert by_symbol["QQQ"]["currency"] == "USD"
+
+
+def test_position_weights_are_none_when_fx_is_stale(tmp_path):
+    """A stale rate must not silently produce a converted weight."""
+    store = StateStore(tmp_path / "state.db")
+    store.save_broker_account_snapshot(
+        "run_fx_stale",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "TOSS",
+                "cash": 1_000_000.0,
+                "cash_balance": {"currency": "KRW"},
+                "positions": [
+                    {
+                        "symbol": "QQQ",
+                        "currency": "USD",
+                        "quantity": 10.0,
+                        "current_price": 300.0,
+                    },
+                ],
+            },
+        },
+    )
+    store.save_system_event(
+        "run_fx",
+        "fx_rate_snapshot",
+        {
+            "source": "fixture",
+            "as_of": (utc_now() - timedelta(hours=5)).isoformat(),
+            "max_age_seconds": 3600,
+            "rates": {"USD/KRW": 1000.0},
+        },
+    )
+
+    assert build_fx_rate_snapshot_card(store)["status"] == "stale"
+    positions = build_broker_position_exposure_table(store, display_currency="KRW")
+    assert positions[0]["weight"] is None
 
 
 def test_disabled_account_excluded_from_totals_when_config_is_supplied(tmp_path):

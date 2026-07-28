@@ -81,7 +81,11 @@ def build_dashboard_snapshot(
     system_events = build_system_events_table(store)
     portfolio_table = build_portfolio_table(store)
     maestro_exposure = build_maestro_state_exposure_table(store)
-    broker_positions = build_broker_position_exposure_table(store, config)
+    broker_positions = build_broker_position_exposure_table(
+        store,
+        config,
+        display_currency=selected_currency,
+    )
     portfolio_history = build_portfolio_snapshot_history_table(store)
     broker_history = build_broker_snapshot_history_table(store)
     account_performance = build_account_performance_table(
