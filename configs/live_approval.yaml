@@ -66,13 +66,14 @@ approval:
   provider: telegram
   require_approval: true
   default_decision: expired
-  timeout_seconds: 300
+  timeout_seconds: 600
   telegram_bot_token_env: TELEGRAM_BOT_TOKEN
   telegram_allowed_chat_ids:
     - 123456789
   whitelisted_user_ids:
     - 123456789
   telegram_poll_interval_seconds: 1.0
+  telegram_reminder_seconds: [120, 300, 480]
 
 kis:
   enabled: true

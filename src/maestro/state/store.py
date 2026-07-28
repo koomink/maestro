@@ -672,6 +672,7 @@ class StateStore:
             execution_sleeve=execution_sleeve,
             account_id=account_id,
         )
+        contribution_order_ids -= self._approved_recovery_source_order_ids()
         if not contribution_order_ids:
             return False
         seen_in_lifecycle: set[str] = set()
@@ -692,6 +693,22 @@ class StateStore:
             if self._list_system_events_by_order_id("live_order_result", order_id):
                 return True
         return False
+
+    def _approved_recovery_source_order_ids(self) -> set[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM system_events WHERE event_type = ?",
+                ("live_order_recovery_ack",),
+            ).fetchall()
+        source_order_ids = set()
+        for (raw_payload,) in rows:
+            payload = json.loads(raw_payload)
+            if str(payload.get("status") or "").lower() != "approved":
+                continue
+            source_order_id = payload.get("source_order_id")
+            if source_order_id:
+                source_order_ids.add(str(source_order_id))
+        return source_order_ids
 
     def _monthly_contribution_order_ids(
         self,

@@ -198,7 +198,7 @@ def approve_signal(
     stop_telegram_operator: bool = typer.Option(
         True,
         "--stop-telegram-operator/--keep-telegram-operator",
-        help="Stop the polling Telegram operator while approval polling is active.",
+        help="Deprecated; the Telegram operator remains active for async approvals.",
     ),
     telegram_operator_service: str = typer.Option(
         "maestro-telegram-operator.service",
@@ -206,20 +206,29 @@ def approve_signal(
         envvar="MAESTRO_TELEGRAM_OPERATOR_SERVICE",
     ),
 ) -> None:
-    def run_approval():
-        maestro_config, identity = _load_operator_config(config)
-        return MaestroOrchestrator(maestro_config, config_identity=identity).approve_signal(
-            signal_run_id,
+    maestro_config, identity = _load_operator_config(config)
+    orchestrator = MaestroOrchestrator(maestro_config, config_identity=identity)
+    if (
+        maestro_config.mode == RunMode.LIVE_APPROVAL
+        and maestro_config.approval.provider == "telegram"
+    ):
+        if stop_telegram_operator:
+            typer.echo("symphony_approve status=info reason=operator_kept_for_async_approval")
+        summary = orchestrator.dispatch_signal_approval(signal_run_id)
+        orders = summary.orders_planned
+        pending = summary.approvals_pending
+    else:
+        summary = _with_telegram_operator_stopped(
+            stop_telegram_operator,
+            telegram_operator_service,
+            lambda: orchestrator.approve_signal(signal_run_id),
         )
-
-    summary = _with_telegram_operator_stopped(
-        stop_telegram_operator,
-        telegram_operator_service,
-        run_approval,
-    )
+        orders = summary.orders_created
+        pending = 0
     typer.echo(
         f"signal_run_id={summary.signal_run_id} run_id={summary.run_id} "
-        f"orders={summary.orders_created} approval_status={summary.approval_status}"
+        f"orders={orders} approvals_pending={pending} "
+        f"approval_status={summary.approval_status}"
     )
 
 
@@ -382,22 +391,35 @@ def _run_daily_signal_approval(
             )
         return
 
-    def run_approval():
-        return MaestroOrchestrator(
-            approval_maestro_config,
-            config_identity=approval_identity,
-        ).approve_signal(signal_summary.signal_run_id)
-
-    approval_summary = _with_telegram_operator_stopped(
-        stop_telegram_operator,
-        telegram_operator_service,
-        run_approval,
+    approval_orchestrator = MaestroOrchestrator(
+        approval_maestro_config,
+        config_identity=approval_identity,
     )
+    if (
+        approval_maestro_config.mode == RunMode.LIVE_APPROVAL
+        and approval_maestro_config.approval.provider == "telegram"
+    ):
+        approval_summary = approval_orchestrator.dispatch_signal_approval(
+            signal_summary.signal_run_id
+        )
+        orders = approval_summary.orders_planned
+        pending = approval_summary.approvals_pending
+        status_label = "approval_pending"
+    else:
+        approval_summary = _with_telegram_operator_stopped(
+            stop_telegram_operator,
+            telegram_operator_service,
+            lambda: approval_orchestrator.approve_signal(signal_summary.signal_run_id),
+        )
+        orders = approval_summary.orders_created
+        pending = 0
+        status_label = "approval_completed"
     typer.echo(
-        f"symphony_daily status=approval_completed "
+        f"symphony_daily status={status_label} "
         f"signal_run_id={approval_summary.signal_run_id} "
         f"run_id={approval_summary.run_id} "
-        f"orders={approval_summary.orders_created} "
+        f"orders={orders} "
+        f"approvals_pending={pending} "
         f"approval_status={approval_summary.approval_status}"
     )
 

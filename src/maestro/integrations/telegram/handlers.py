@@ -2,16 +2,17 @@ import os
 import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+from math import floor, isfinite
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from maestro.approval.models import ApprovalDecision
+from maestro.approval.models import ApprovalDecision, PendingApprovalEnvelope
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderStatus, OrderType, RunMode, SafetyState
+from maestro.core.enums import OrderSide, OrderStatus, OrderType, RunMode, SafetyState
 from maestro.core.ids import new_order_id, new_run_id
 from maestro.core.strategy_names import (
     strategy_command_slug as _telegram_strategy_command_slug,
@@ -54,6 +55,7 @@ from maestro.execution.funding_requests import (
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_order_models import (
     LiveOrderModifyRequest,
+    LiveOrderRecoveryCandidate,
     LiveOrderRequest,
     LiveOrderStatusSnapshot,
 )
@@ -71,13 +73,12 @@ from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 OPERATOR_CALLBACK_PREFIX = "operator:"
-# Maps strategy ids to systemd units that run the full daily-signal-approval
-# pipeline for that strategy, e.g.
+# Maps strategy ids to systemd units that dispatch the daily signal and
+# non-blocking live approval pipeline for that strategy, e.g.
 # MAESTRO_REBALANCE_UNITS="tranquillo=maestro-symphony-signal-kr.service,\
 # crescendo_us=maestro-symphony-signal-us.service".
-# The unit runs outside the telegram-operator cgroup, which matters because
-# daily-signal-approval stops this operator service while approval polling is
-# active — an in-process or child-process run would be killed with it.
+# The unit runs outside the telegram-operator cgroup so signal generation does
+# not block command/update handling in the long-running operator.
 REBALANCE_UNITS_ENV = "MAESTRO_REBALANCE_UNITS"
 TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "Show Maestro command list"),
@@ -130,14 +131,14 @@ class TelegramOperatorCommandRouter:
         if not isinstance(message, Mapping):
             return False
         text = message.get("text")
-        if not isinstance(text, str) or not text.startswith("/"):
+        if not isinstance(text, str):
             return False
-        command = _command_name(text)
         chat_id = _chat_id(message)
         user = message.get("from")
         user_id, username = _user_identity(user if isinstance(user, Mapping) else {})
         if chat_id is None or user_id is None:
             return False
+        command = _command_name(text) if text.startswith("/") else "/retry_quantity"
         if not self._chat_allowed(chat_id):
             self._record(command, chat_id, user_id, username, "denied_chat")
             return True
@@ -145,6 +146,15 @@ class TelegramOperatorCommandRouter:
             self._send(chat_id, "Unauthorized Telegram user.")
             self._record(command, chat_id, user_id, username, "denied_user")
             return True
+
+        if not text.startswith("/"):
+            return self._process_retry_quantity_reply(
+                message,
+                text,
+                chat_id,
+                user_id,
+                username,
+            )
 
         if command.startswith("/signal_"):
             self._generate_strategy_signal(chat_id, command)
@@ -203,6 +213,7 @@ class TelegramOperatorCommandRouter:
         return True
 
     def poll_once(self, *, offset: int | None = None, timeout_seconds: int = 0) -> int | None:
+        self._sweep_pending_approvals()
         response = self.client.get_updates(
             offset=offset,
             timeout_seconds=timeout_seconds,
@@ -300,6 +311,30 @@ class TelegramOperatorCommandRouter:
             )
         if action.startswith("retry-order:"):
             return self._process_retry_order_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("appr:"):
+            return self._process_async_approval_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("cap:"):
+            return self._process_capacity_retry_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("recover:"):
+            return self._process_recovery_callback(
                 callback,
                 action,
                 chat_id,
@@ -558,16 +593,9 @@ class TelegramOperatorCommandRouter:
                 request.run_id,
                 request.broker_order,
             )
-            fill_result = dependencies.fill_reconciliation_service.reconcile_latest(
-                request.run_id
-            )
-            if (
-                fill_result.applied_fills
-                and dependencies.broker_reconciliation_service is not None
-            ):
-                reconciliation = (
-                    dependencies.broker_reconciliation_service.reconcile_latest()
-                )
+            fill_result = dependencies.fill_reconciliation_service.reconcile_latest(request.run_id)
+            if fill_result.applied_fills and dependencies.broker_reconciliation_service is not None:
+                reconciliation = dependencies.broker_reconciliation_service.reconcile_latest()
                 if reconciliation.passed is not True:
                     raise ValueError("Broker reconciliation failed after latest fills")
             result = dependencies.modify_service.modify_order(
@@ -619,70 +647,101 @@ class TelegramOperatorCommandRouter:
             self._send(chat_id, "Usage: /retry_order <blocked_order_id> <quantity> [price]")
             self._record("/retry_order", chat_id, user_id, username, "invalid")
             return
-        blocked = self._pending_capacity_block(parts[1])
-        if blocked is None:
-            self._send(chat_id, "Capacity-blocked order was not found or was already retried.")
-            self._record("/retry_order", chat_id, user_id, username, "missing")
-            return
-        config = self.config
-        if self.approval_config_path is not None:
-            config = load_config(self.approval_config_path)
         try:
-            if config.mode != RunMode.LIVE_APPROVAL:
-                raise ValueError("retry orders require live_approval mode")
-            self._validate_retry_trading_date(blocked, config)
-            original = OrderIntent.model_validate(blocked["order"])
             quantity = float(parts[2])
-            price = float(parts[3]) if len(parts) == 4 else original.price
-            if quantity <= 0 or quantity > original.quantity:
-                raise ValueError("retry quantity must be positive and no greater than planned")
-            proposal_id = new_run_id()
-            metadata = dict(original.metadata)
-            metadata["capacity_retry_of"] = original.order_id
-            order = original.model_copy(
-                update={
-                    "order_id": new_order_id(),
-                    "quantity": quantity,
-                    "price": price,
-                    "notional": quantity * price,
-                    "metadata": metadata,
-                }
+            price = float(parts[3]) if len(parts) == 4 else None
+            self._propose_retry_order(
+                parts[1],
+                quantity,
+                chat_id,
+                price=price,
             )
-            capacity_service = OrderCapacityService(
-                lambda candidate: self._lookup_retry_capacity(config, candidate)
-            )
-            accepted, capacity_blocks = capacity_service.partition([order])
-            if capacity_blocks or not accepted:
-                reason = capacity_blocks[0].reason if capacity_blocks else "capacity unavailable"
-                raise ValueError(f"retry order is still blocked: {reason}")
-            gate_blocks = LiveExecutionGateService(config, self.store, self.audit).evaluate(
-                proposal_id,
-                [order],
-                [],
-            )
-            if gate_blocks:
-                reasons = ", ".join(str(item.get("reason")) for item in gate_blocks)
-                raise ValueError(f"retry order is blocked by live gate: {reasons}")
-            request = LiveOrderRequest(
-                order_id=order.order_id,
-                symbol=order.symbol,
-                side=order.side,
-                quantity=order.quantity,
-                limit_price=order.price,
-                order_type=OrderType.LIMIT,
-                approval_id=f"retry_{proposal_id}",
-                run_id=proposal_id,
-                duplicate_key=f"capacity-retry:{original.order_id}:{order.order_id}",
-                currency=order.currency,
-                sleeve=order.sleeve,
-                account_id=order.account_id,
-                broker_product=order.broker_product,
-                signal_run_id=blocked.get("signal_run_id"),
-            )
-        except (RuntimeError, TypeError, ValueError) as exc:
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
             self._send(chat_id, f"Invalid retry order: {exc}")
             self._record("/retry_order", chat_id, user_id, username, "invalid")
             return
+        self._record("/retry_order", chat_id, user_id, username, "proposed")
+
+    def _propose_retry_order(
+        self,
+        order_id: str,
+        quantity: float,
+        chat_id: int,
+        *,
+        price: float | None = None,
+    ) -> str:
+        candidate = self._pending_recovery_candidate(order_id)
+        if candidate is None:
+            raise ValueError("recoverable order was not found or was already retried")
+        config = self.config
+        if self.approval_config_path is not None:
+            config = load_config(self.approval_config_path)
+        if config.mode != RunMode.LIVE_APPROVAL:
+            raise ValueError("retry orders require live_approval mode")
+        self._validate_recovery_window(candidate, config)
+        original = OrderIntent.model_validate(candidate.order)
+        if not isfinite(quantity) or quantity <= 0 or quantity > original.quantity:
+            raise ValueError("retry quantity must be positive and no greater than planned")
+        retry_price = price if price is not None else self._lookup_retry_price(config, original)
+        if not isfinite(retry_price) or retry_price <= 0:
+            raise ValueError("retry price must be a positive finite number")
+        proposal_id = new_run_id()
+        metadata = dict(original.metadata)
+        metadata["recovery_of"] = original.order_id
+        if candidate.source_type == "capacity_blocked":
+            metadata["capacity_retry_of"] = original.order_id
+        order = original.model_copy(
+            update={
+                "order_id": new_order_id(),
+                "quantity": quantity,
+                "price": retry_price,
+                "notional": quantity * retry_price,
+                "metadata": metadata,
+            }
+        )
+        capacity_service = OrderCapacityService(
+            lambda candidate: self._lookup_retry_capacity(config, candidate)
+        )
+        accepted, capacity_blocks = capacity_service.partition([order])
+        if capacity_blocks or not accepted:
+            reason = capacity_blocks[0].reason if capacity_blocks else "capacity unavailable"
+            raise ValueError(f"retry order is still blocked: {reason}")
+        gate_blocks = LiveExecutionGateService(config, self.store, self.audit).evaluate(
+            proposal_id,
+            [order],
+            [],
+        )
+        if gate_blocks:
+            reasons = ", ".join(str(item.get("reason")) for item in gate_blocks)
+            raise ValueError(f"retry order is blocked by live gate: {reasons}")
+        request = LiveOrderRequest(
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            quantity=order.quantity,
+            limit_price=order.price,
+            order_type=OrderType.LIMIT,
+            approval_id=f"retry_{proposal_id}",
+            run_id=proposal_id,
+            duplicate_key=f"capacity-retry:{original.order_id}:{order.order_id}",
+            currency=order.currency,
+            sleeve=order.sleeve,
+            account_id=order.account_id,
+            broker_product=order.broker_product,
+            signal_run_id=candidate.signal_run_id,
+        )
+        candidate_duplicate_key = f"live-order-recovery-candidate:{original.order_id}"
+        if not self.store.duplicate_key_exists(candidate_duplicate_key):
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                proposal_id,
+                "live_order_recovery_candidate",
+                {
+                    **candidate.model_dump(mode="json"),
+                    "duplicate_key": candidate_duplicate_key,
+                },
+            )
         save_audited_system_event(
             self.store,
             self.audit,
@@ -691,6 +750,8 @@ class TelegramOperatorCommandRouter:
             {
                 "proposal_id": proposal_id,
                 "blocked_order_id": original.order_id,
+                "recovery_order_id": original.order_id,
+                "source_type": candidate.source_type,
                 "order": order.model_dump(mode="json"),
                 "request": request.model_dump(mode="json"),
                 "status": "pending",
@@ -704,8 +765,8 @@ class TelegramOperatorCommandRouter:
             chat_id,
             "\n".join(
                 [
-                    "Capacity-blocked order retry proposal",
-                    f"blocked_order_id: {original.order_id}",
+                    "Recoverable order retry proposal",
+                    f"source_order_id: {original.order_id}",
                     f"new_order_id: {order.order_id}",
                     f"account_id: {order.account_id or 'default'}",
                     f"symbol: {order.symbol}",
@@ -715,7 +776,252 @@ class TelegramOperatorCommandRouter:
             ),
             reply_markup=_retry_order_markup(proposal_id),
         )
+        return proposal_id
+
+    def _process_capacity_retry_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        order_id = action.removeprefix("cap:")
+        blocked = self._pending_capacity_block(order_id)
+        if blocked is None:
+            self._answer(callback, "This capacity block is no longer active.")
+            return True
+        maximum = blocked.get("max_buy_quantity")
+        if maximum is None or float(maximum) <= 0:
+            self._answer(callback, "No positive retry quantity is currently available.")
+            return True
+        try:
+            self._propose_retry_order(order_id, float(maximum), chat_id)
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._answer(callback, f"Retry failed: {exc}")
+            self._record("/retry_order", chat_id, user_id, username, "failed")
+            return True
+        self._answer(callback, "Retry proposal created. Review the new approval message.")
         self._record("/retry_order", chat_id, user_id, username, "proposed")
+        return True
+
+    def _process_recovery_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] not in {"review", "original", "max", "input"}:
+            self._answer(callback, "This recovery action is no longer active.")
+            return True
+        transition, order_id = parts[1], parts[2]
+        try:
+            candidate, original, price, maximum = self._retry_order_review(order_id)
+            if transition == "review":
+                self._send(
+                    chat_id,
+                    "\n".join(
+                        [
+                            "Recoverable order",
+                            f"source_order_id: {order_id}",
+                            f"account_id: {original.account_id or 'default'}",
+                            f"symbol: {original.symbol}",
+                            f"reason: {candidate.reason}",
+                            f"original_quantity: {original.quantity:g}",
+                            f"current_max_quantity: {maximum:g}",
+                            f"latest_price: {price:g}",
+                        ]
+                    ),
+                    reply_markup=_recovery_options_markup(
+                        order_id,
+                        original.quantity,
+                        maximum,
+                    ),
+                )
+                self._answer(callback, "Choose a retry quantity.")
+                self._record("/retry_order", chat_id, user_id, username, "reviewed")
+                return True
+            if transition == "input":
+                response = self._send(
+                    chat_id,
+                    (
+                        f"{original.symbol} 재주문 수량을 입력하세요. "
+                        f"(원 수량 {original.quantity:g}, 현재 최대 {maximum:g})"
+                    ),
+                    reply_markup={
+                        "force_reply": True,
+                        "selective": True,
+                        "input_field_placeholder": "수량 입력",
+                    },
+                )
+                message_id = _sent_message_id(response)
+                if message_id is None:
+                    raise RuntimeError("Telegram did not return the quantity prompt message id")
+                prompt_id = new_run_id()
+                save_audited_system_event(
+                    self.store,
+                    self.audit,
+                    prompt_id,
+                    "live_order_retry_quantity_prompt",
+                    {
+                        "prompt_id": prompt_id,
+                        "source_order_id": order_id,
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "message_id": message_id,
+                        "original_quantity": original.quantity,
+                        "max_quantity": maximum,
+                        "created_at": utc_now().isoformat(),
+                        "expires_at": (utc_now() + timedelta(minutes=10)).isoformat(),
+                        "duplicate_key": f"retry-quantity-prompt:{prompt_id}",
+                    },
+                )
+                self._answer(callback, "Reply to the quantity prompt.")
+                self._record("/retry_order", chat_id, user_id, username, "prompted")
+                return True
+            quantity = original.quantity if transition == "original" else maximum
+            if quantity <= 0:
+                raise ValueError("no positive retry quantity is currently available")
+            self._propose_retry_order(order_id, quantity, chat_id, price=price)
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._answer(callback, f"Retry unavailable: {exc}")
+            self._record("/retry_order", chat_id, user_id, username, "failed")
+            return True
+        self._answer(callback, "Retry proposal created. Review the new approval message.")
+        self._record("/retry_order", chat_id, user_id, username, "proposed")
+        return True
+
+    def _retry_order_review(
+        self,
+        order_id: str,
+    ) -> tuple[LiveOrderRecoveryCandidate, OrderIntent, float, float]:
+        candidate = self._pending_recovery_candidate(order_id)
+        if candidate is None:
+            raise ValueError("recoverable order was not found or was already retried")
+        config = (
+            load_config(self.approval_config_path)
+            if self.approval_config_path is not None
+            else self.config
+        )
+        if config.mode != RunMode.LIVE_APPROVAL:
+            raise ValueError("retry orders require live_approval mode")
+        self._validate_recovery_window(candidate, config)
+        original = OrderIntent.model_validate(candidate.order)
+        price = self._lookup_retry_price(config, original)
+        maximum = original.quantity
+        if original.side == OrderSide.BUY:
+            capacity = self._lookup_retry_capacity(
+                config,
+                original.model_copy(update={"price": price, "notional": original.quantity * price}),
+            )
+            cash_quantity = max(0.0, float(capacity.cash_buying_power)) / price
+            maximum = min(original.quantity, cash_quantity)
+            if capacity.max_buy_quantity is not None:
+                maximum = min(maximum, float(capacity.max_buy_quantity))
+        instrument = config.universe.get(original.symbol)
+        step = float(instrument.quantity_step) if instrument is not None else 1.0
+        maximum = floor((max(0.0, maximum) + 1e-9) / step) * step
+        return candidate, original, price, maximum
+
+    def _process_retry_quantity_reply(
+        self,
+        message: Mapping[str, Any],
+        text: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        reply = message.get("reply_to_message")
+        message_id = reply.get("message_id") if isinstance(reply, Mapping) else None
+        if not isinstance(message_id, int):
+            return False
+        prompt = self._pending_retry_quantity_prompt(chat_id, user_id, message_id)
+        if prompt is None:
+            return False
+        try:
+            quantity = float(text.strip().replace(",", ""))
+            if not isfinite(quantity) or quantity <= 0:
+                raise ValueError("quantity must be a positive finite number")
+            if quantity > float(prompt["original_quantity"]):
+                raise ValueError("quantity cannot exceed the original planned quantity")
+        except (TypeError, ValueError) as exc:
+            self._send(chat_id, f"Invalid quantity: {exc}. Reply to the same prompt again.")
+            self._record("/retry_quantity", chat_id, user_id, username, "invalid")
+            return True
+        try:
+            proposal_id = self._propose_retry_order(
+                str(prompt["source_order_id"]),
+                quantity,
+                chat_id,
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._ack_retry_quantity_prompt(prompt, "failed", reason=str(exc))
+            self._send(
+                chat_id,
+                f"Retry proposal failed: {exc}",
+                reply_markup=_recovery_review_markup(str(prompt["source_order_id"])),
+            )
+            self._record("/retry_quantity", chat_id, user_id, username, "failed")
+            return True
+        self._ack_retry_quantity_prompt(prompt, "consumed", proposal_id=proposal_id)
+        self._record("/retry_quantity", chat_id, user_id, username, "proposed")
+        return True
+
+    def _pending_retry_quantity_prompt(
+        self,
+        chat_id: int,
+        user_id: int,
+        message_id: int,
+    ) -> dict[str, Any] | None:
+        acknowledged = {
+            str(row["payload"].get("prompt_id"))
+            for row in self.store.list_system_events_by_type(
+                "live_order_retry_quantity_prompt_ack",
+                limit=5000,
+            )
+        }
+        for row in self.store.list_system_events_by_type(
+            "live_order_retry_quantity_prompt",
+            limit=5000,
+        ):
+            prompt = row["payload"]
+            if (
+                str(prompt.get("prompt_id")) in acknowledged
+                or prompt.get("chat_id") != chat_id
+                or prompt.get("user_id") != user_id
+                or prompt.get("message_id") != message_id
+            ):
+                continue
+            expires_at = datetime.fromisoformat(str(prompt["expires_at"]).replace("Z", "+00:00"))
+            if utc_now() >= expires_at:
+                self._ack_retry_quantity_prompt(prompt, "expired")
+                return None
+            return prompt
+        return None
+
+    def _ack_retry_quantity_prompt(
+        self,
+        prompt: Mapping[str, Any],
+        status: str,
+        **details: Any,
+    ) -> None:
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "live_order_retry_quantity_prompt_ack",
+            {
+                "prompt_id": prompt["prompt_id"],
+                "source_order_id": prompt["source_order_id"],
+                "status": status,
+                "decided_at": utc_now().isoformat(),
+                "duplicate_key": f"retry-quantity-prompt-ack:{prompt['prompt_id']}",
+                **details,
+            },
+        )
 
     def _process_retry_order_callback(
         self,
@@ -804,6 +1110,174 @@ class TelegramOperatorCommandRouter:
         self._record("/retry_order", chat_id, user_id, username, "approved")
         return True
 
+    def _process_async_approval_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] not in {"a", "r"}:
+            self._answer(callback, "This approval request is no longer active.")
+            return True
+        envelope = self._pending_async_approval(parts[2])
+        if envelope is None:
+            self._answer(callback, "This approval request is no longer active.")
+            self._record("/approval", chat_id, user_id, username, "stale_callback")
+            return True
+        status = "approved" if parts[1] == "a" else "rejected"
+        try:
+            summary = self._resolve_async_approval(
+                envelope,
+                status=status,
+                decided_by=f"telegram:{username or user_id}",
+                reason=f"Telegram button {status} callback.",
+            )
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._answer(callback, f"Approval failed: {exc}")
+            self._record("/approval", chat_id, user_id, username, "failed")
+            return True
+        self._answer(callback, f"Approval {status}.")
+        self._edit_callback_message(
+            callback,
+            (
+                f"Approval {status}\n"
+                f"approval_id: {envelope.approval_id}\n"
+                f"orders: {summary.orders_created}"
+            ),
+        )
+        self._record("/approval", chat_id, user_id, username, status)
+        return True
+
+    def _resolve_async_approval(
+        self,
+        envelope: PendingApprovalEnvelope,
+        *,
+        status: str,
+        decided_by: str,
+        reason: str,
+    ):
+        decision = ApprovalDecision(
+            approval_id=envelope.approval_id,
+            run_id=envelope.run_id,
+            status=status,
+            decided_at=utc_now(),
+            decided_by=decided_by,
+            reason=reason,
+        )
+        duplicate_key = f"telegram-approval-ack:{envelope.approval_id}"
+        with self.store.writer_lock("telegram_approval_callback_claim"):
+            if self.store.duplicate_key_exists(duplicate_key):
+                raise ValueError("Approval request was already decided")
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                envelope.run_id,
+                "telegram_approval_ack",
+                {
+                    "approval_id": envelope.approval_id,
+                    "signal_run_id": envelope.signal_run_id,
+                    "status": status,
+                    "decided_by": decided_by,
+                    "decided_at": decision.decided_at.isoformat(),
+                    "duplicate_key": duplicate_key,
+                },
+            )
+        config = self.config
+        identity = self.config_identity
+        if self.approval_config_path is not None:
+            config, identity = load_config_with_identity(self.approval_config_path)
+        try:
+            return MaestroOrchestrator(
+                config,
+                telegram_client=self.client,
+                config_identity=identity,
+            ).resolve_pending_signal_approval(envelope, decision)
+        except Exception as exc:
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                envelope.run_id,
+                "telegram_approval_resolution_failed",
+                {
+                    "approval_id": envelope.approval_id,
+                    "status": status,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            raise
+
+    def _sweep_pending_approvals(self) -> None:
+        acked = {
+            str(row["payload"].get("approval_id"))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_ack",
+                limit=2000,
+            )
+        }
+        reminders = {
+            (
+                str(row["payload"].get("approval_id")),
+                int(row["payload"].get("reminder_seconds", 0)),
+            )
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_reminder",
+                limit=5000,
+            )
+        }
+        now = utc_now()
+        for row in reversed(
+            self.store.list_system_events_by_type(
+                "telegram_approval_pending",
+                limit=2000,
+            )
+        ):
+            payload = row["payload"]
+            approval_id = str(payload.get("approval_id") or "")
+            if not approval_id or approval_id in acked:
+                continue
+            envelope = PendingApprovalEnvelope.model_validate(payload)
+            if now >= envelope.expires_at:
+                try:
+                    self._resolve_async_approval(
+                        envelope,
+                        status="expired",
+                        decided_by="telegram:timeout",
+                        reason="Telegram approval timed out.",
+                    )
+                except ValueError:
+                    pass
+                continue
+            elapsed = (now - envelope.created_at).total_seconds()
+            for reminder_seconds in envelope.reminder_seconds:
+                key = (approval_id, reminder_seconds)
+                if elapsed < reminder_seconds or key in reminders:
+                    continue
+                for chat_id in self.config.approval.telegram_allowed_chat_ids:
+                    self._send(
+                        chat_id,
+                        f"Approval reminder ({reminder_seconds // 60}m)\n\n{envelope.message}",
+                        reply_markup=_async_approval_markup(envelope.approval_id),
+                    )
+                save_audited_system_event(
+                    self.store,
+                    self.audit,
+                    envelope.run_id,
+                    "telegram_approval_reminder",
+                    {
+                        "approval_id": envelope.approval_id,
+                        "reminder_seconds": reminder_seconds,
+                        "sent_at": now.isoformat(),
+                        "duplicate_key": (
+                            f"telegram-approval-reminder:{envelope.approval_id}:{reminder_seconds}"
+                        ),
+                    },
+                )
+                reminders.add(key)
+
     def _ack_retry_proposal(
         self,
         proposal: Mapping[str, Any],
@@ -812,6 +1286,7 @@ class TelegramOperatorCommandRouter:
         **details: Any,
     ) -> None:
         request = proposal.get("request") or {}
+        decided_by = f"telegram:{user_id}" if isinstance(user_id, int) else str(user_id)
         save_audited_system_event(
             self.store,
             self.audit,
@@ -821,9 +1296,20 @@ class TelegramOperatorCommandRouter:
                 "proposal_id": proposal["proposal_id"],
                 "blocked_order_id": proposal["blocked_order_id"],
                 "status": status,
-                "decided_by": (
-                    f"telegram:{user_id}" if isinstance(user_id, int) else str(user_id)
-                ),
+                "decided_by": decided_by,
+                **details,
+            },
+        )
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            str(request.get("run_id") or new_run_id()),
+            "live_order_recovery_ack",
+            {
+                "proposal_id": proposal["proposal_id"],
+                "source_order_id": proposal["blocked_order_id"],
+                "status": status,
+                "decided_by": decided_by,
                 **details,
             },
         )
@@ -843,15 +1329,40 @@ class TelegramOperatorCommandRouter:
         symbol = instrument.symbol_for_broker(broker) if instrument is not None else order.symbol
         return service.client.get_buying_power(symbol, order.price)
 
-    def _validate_retry_trading_date(
+    def _lookup_retry_price(self, config: MaestroConfig, order: OrderIntent) -> float:
+        service = build_broker_readonly_service(
+            config,
+            self.store,
+            self.audit,
+            account_id=order.account_id,
+        )
+        while hasattr(service, "inner"):
+            service = service.inner
+        prices = service.client.get_current_prices([order.symbol])
+        price = float(prices.get(order.symbol, 0.0))
+        if price <= 0:
+            raise ValueError(f"latest broker quote is unavailable for {order.symbol}")
+        return price
+
+    def _validate_recovery_window(
         self,
-        blocked: Mapping[str, Any],
+        candidate: LiveOrderRecoveryCandidate,
         config: MaestroConfig,
     ) -> None:
-        checked_at = datetime.fromisoformat(str(blocked["checked_at"]).replace("Z", "+00:00"))
         timezone = ZoneInfo(operator_timezone(config))
-        if checked_at.astimezone(timezone).date() != utc_now().astimezone(timezone).date():
-            raise ValueError("capacity-blocked orders can only be retried on the same trading day")
+        created_at = datetime.fromisoformat(candidate.created_at.replace("Z", "+00:00"))
+        created_date = created_at.astimezone(timezone).date()
+        current_date = utc_now().astimezone(timezone).date()
+        metadata = candidate.order.get("metadata") or {}
+        if metadata.get("order_generation_mode") == "buy_only_contribution":
+            contribution_month = str(metadata.get("contribution_month") or "")
+            if contribution_month != current_date.strftime("%Y-%m"):
+                raise ValueError(
+                    "contribution recovery orders expire at the end of their contribution month"
+                )
+            return
+        if created_date != current_date:
+            raise ValueError("rebalancing recovery orders can only be retried the same trading day")
 
     def _process_cash_flow_callback(
         self,
@@ -1131,16 +1642,32 @@ class TelegramOperatorCommandRouter:
             approval_config, approval_identity = load_config_with_identity(
                 self.approval_config_path
             )
-            approval_summary = MaestroOrchestrator(
+            approval_orchestrator = MaestroOrchestrator(
                 approval_config,
                 telegram_client=self.client,
                 config_identity=approval_identity,
-            ).approve_signal(signal_summary.signal_run_id)
+            )
+            if (
+                approval_config.mode == RunMode.LIVE_APPROVAL
+                and approval_config.approval.provider == "telegram"
+            ):
+                approval_summary = approval_orchestrator.dispatch_signal_approval(
+                    signal_summary.signal_run_id
+                )
+                order_line = f"orders_planned: {approval_summary.orders_planned}"
+                pending_line = f"approvals_pending: {approval_summary.approvals_pending}"
+            else:
+                approval_summary = approval_orchestrator.approve_signal(
+                    signal_summary.signal_run_id
+                )
+                order_line = f"orders_created: {approval_summary.orders_created}"
+                pending_line = "approvals_pending: 0"
             lines.extend(
                 [
                     f"approval_run_id: {approval_summary.run_id}",
                     f"approval_status: {approval_summary.approval_status}",
-                    f"orders_created: {approval_summary.orders_created}",
+                    order_line,
+                    pending_line,
                 ]
             )
             return "\n".join(lines)
@@ -1211,16 +1738,32 @@ class TelegramOperatorCommandRouter:
             approval_config, approval_identity = load_config_with_identity(
                 self.approval_config_path
             )
-            approval_summary = MaestroOrchestrator(
+            approval_orchestrator = MaestroOrchestrator(
                 approval_config,
                 telegram_client=self.client,
                 config_identity=approval_identity,
-            ).approve_signal(signal_summary.signal_run_id)
+            )
+            if (
+                approval_config.mode == RunMode.LIVE_APPROVAL
+                and approval_config.approval.provider == "telegram"
+            ):
+                approval_summary = approval_orchestrator.dispatch_signal_approval(
+                    signal_summary.signal_run_id
+                )
+                order_line = f"orders_planned: {approval_summary.orders_planned}"
+                pending_line = f"approvals_pending: {approval_summary.approvals_pending}"
+            else:
+                approval_summary = approval_orchestrator.approve_signal(
+                    signal_summary.signal_run_id
+                )
+                order_line = f"orders_created: {approval_summary.orders_created}"
+                pending_line = "approvals_pending: 0"
             lines.extend(
                 [
                     f"approval_run_id: {approval_summary.run_id}",
                     f"approval_status: {approval_summary.approval_status}",
-                    f"orders_created: {approval_summary.orders_created}",
+                    order_line,
+                    pending_line,
                 ]
             )
             return "\n".join(lines)
@@ -1830,8 +2373,7 @@ class TelegramOperatorCommandRouter:
             age_label = "missing" if age is None else _compact_age(float(age)) + " ago"
             limit_label = "n/a" if limit is None else _compact_age(float(limit))
             lines.append(
-                f"{account['account_id']}: {account['status']} · "
-                f"{age_label} · limit {limit_label}"
+                f"{account['account_id']}: {account['status']} · {age_label} · limit {limit_label}"
             )
             if account.get("last_refresh_error"):
                 lines.append(f"  last error: {account['last_refresh_error']}")
@@ -1855,9 +2397,7 @@ class TelegramOperatorCommandRouter:
             return
         lines = ["Broker account refresh"]
         for result in report.results:
-            lines.append(
-                f"{result.account_id}: {result.status} · retries {result.retry_count}"
-            )
+            lines.append(f"{result.account_id}: {result.status} · retries {result.retry_count}")
             if result.error_message:
                 lines.append(f"  error: {result.error_message}")
         self._send(chat_id, "\n".join(lines))
@@ -1932,7 +2472,15 @@ class TelegramOperatorCommandRouter:
     def _orders(self, chat_id: int) -> None:
         open_statuses = self._refresh_open_order_statuses()
         rows = build_orders_table(self.store, limit=5)
-        if not rows and not open_statuses:
+        recoverable = []
+        for row in self.store.list_orders(limit=5000):
+            order_id = str(row.get("order_id") or "")
+            candidate = self._pending_recovery_candidate(order_id)
+            if candidate is not None:
+                recoverable.append(candidate)
+            if len(recoverable) >= 5:
+                break
+        if not rows and not open_statuses and not recoverable:
             self._send(chat_id, "Recent orders: none")
             return
         lines = ["Recent orders"]
@@ -1955,7 +2503,23 @@ class TelegramOperatorCommandRouter:
                 lines.append(
                     f"/modify {status.broker_order.broker_order_id} <price> {_number(remaining)}"
                 )
-        self._send(chat_id, "\n".join(lines))
+        if recoverable:
+            lines.extend(["", "Recoverable orders"])
+            for candidate in recoverable:
+                order = candidate.order
+                lines.append(
+                    f"{candidate.source_order_id} {order.get('account_id') or 'default'} "
+                    f"{order.get('symbol')} qty={_number(order.get('quantity'))} "
+                    f"reason={candidate.reason}"
+                )
+                lines.append(
+                    f"/retry_order {candidate.source_order_id} {_number(order.get('quantity'))}"
+                )
+        self._send(
+            chat_id,
+            "\n".join(lines),
+            reply_markup=(_recoverable_orders_markup(recoverable) if recoverable else None),
+        )
 
     def _refresh_open_order_statuses(self) -> list[LiveOrderStatusSnapshot]:
         latest_by_broker: dict[str, LiveOrderStatusSnapshot] = {}
@@ -2003,10 +2567,37 @@ class TelegramOperatorCommandRouter:
 
     def _approvals(self, chat_id: int) -> None:
         rows = build_approvals_table(self.store, limit=5)
-        if not rows:
+        acked = {
+            str(row["payload"].get("approval_id"))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_ack",
+                limit=2000,
+            )
+        }
+        pending = [
+            PendingApprovalEnvelope.model_validate(row["payload"])
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_pending",
+                limit=20,
+            )
+            if str(row["payload"].get("approval_id")) not in acked
+        ][:5]
+        if not rows and not pending:
             self._send(chat_id, "Recent approvals: none")
             return
         lines = ["Recent approvals"]
+        for envelope in pending:
+            expires = format_operator_time(
+                envelope.expires_at,
+                operator_timezone(self.config),
+            )
+            lines.append(
+                f"{envelope.approval_id} status=pending "
+                f"orders={envelope.request.order_count} "
+                f"expires={expires}"
+            )
+        if rows:
+            lines.append("Terminal approvals")
         for row in rows:
             lines.append(
                 f"{row['approval_id']} status={row['status']} "
@@ -2179,11 +2770,11 @@ class TelegramOperatorCommandRouter:
         text: str,
         *,
         reply_markup: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> Mapping[str, Any] | None:
         try:
-            self.client.send_message(chat_id, text, reply_markup=reply_markup)
+            return self.client.send_message(chat_id, text, reply_markup=reply_markup)
         except TypeError:
-            self.client.send_message(chat_id, text)
+            return self.client.send_message(chat_id, text)
 
     def _answer(self, callback: Mapping[str, Any], text: str) -> None:
         callback_id = callback.get("id")
@@ -2318,21 +2909,7 @@ class TelegramOperatorCommandRouter:
         return None
 
     def _pending_capacity_block(self, order_id: str) -> dict[str, Any] | None:
-        retried = {
-            str(row["payload"].get("blocked_order_id"))
-            for row in self.store.list_system_events_by_type(
-                "live_order_retry_proposal_ack",
-                limit=2000,
-            )
-        }
-        retried.update(
-            str(row["payload"].get("blocked_order_id"))
-            for row in self.store.list_system_events_by_type(
-                "live_order_retry_proposal",
-                limit=2000,
-            )
-        )
-        if order_id in retried:
+        if self._recovery_was_proposed(order_id):
             return None
         for row in self.store.list_system_events_by_type(
             "live_order_capacity_blocked",
@@ -2342,6 +2919,107 @@ class TelegramOperatorCommandRouter:
             if payload.get("blocked_order_id") == order_id:
                 return payload
         return None
+
+    def _pending_recovery_candidate(
+        self,
+        order_id: str,
+    ) -> LiveOrderRecoveryCandidate | None:
+        if self._recovery_was_proposed(order_id):
+            return None
+        for row in self.store.list_system_events_by_type(
+            "live_order_recovery_candidate",
+            limit=5000,
+        ):
+            if str(row["payload"].get("source_order_id")) == order_id:
+                return LiveOrderRecoveryCandidate.model_validate(row["payload"])
+        blocked = self._pending_capacity_block(order_id)
+        if blocked is not None:
+            return LiveOrderRecoveryCandidate(
+                source_order_id=order_id,
+                order=blocked["order"],
+                source_type="capacity_blocked",
+                reason=str(blocked.get("reason") or "capacity_blocked"),
+                signal_run_id=blocked.get("signal_run_id"),
+                created_at=str(blocked.get("checked_at") or utc_now().isoformat()),
+            )
+
+        order_row = next(
+            (
+                row
+                for row in self.store.list_orders(limit=5000)
+                if str(row.get("order_id")) == order_id
+            ),
+            None,
+        )
+        if order_row is None:
+            return None
+        order_payload = order_row["payload"]
+        try:
+            order = OrderIntent.model_validate(order_payload).model_dump(mode="json")
+        except ValueError:
+            return None
+        if str(order_payload.get("approval_status") or "").lower() == "expired":
+            return LiveOrderRecoveryCandidate(
+                source_order_id=order_id,
+                order=order,
+                source_type="approval_expired",
+                reason="telegram_approval_expired_before_submit",
+                signal_run_id=order_payload.get("signal_run_id"),
+                created_at=str(order_row.get("created_at") or utc_now().isoformat()),
+            )
+
+        for row in self.store.list_system_events_by_type(
+            str(SystemEventType.LIVE_ORDER_LIFECYCLE),
+            limit=5000,
+        ):
+            payload = row["payload"]
+            if str(payload.get("order_id")) != order_id:
+                continue
+            final_status = str(payload.get("final_status") or "").lower()
+            if final_status not in {"rejected", "failed", "halted"}:
+                return None
+            if payload.get("broker_order_id"):
+                return None
+            return LiveOrderRecoveryCandidate(
+                source_order_id=order_id,
+                order=order,
+                source_type=f"lifecycle_{final_status}",
+                reason=str(
+                    payload.get("failed_reason") or payload.get("halt_reason") or final_status
+                ),
+                signal_run_id=payload.get("signal_run_id") or order_payload.get("signal_run_id"),
+                created_at=str(payload.get("checked_at") or order_row.get("created_at")),
+            )
+        return None
+
+    def _recovery_was_proposed(self, order_id: str) -> bool:
+        proposals = {
+            str(row["payload"].get("proposal_id")): row["payload"]
+            for row in self.store.list_system_events_by_type(
+                "live_order_retry_proposal",
+                limit=5000,
+            )
+            if str(row["payload"].get("blocked_order_id")) == order_id
+        }
+        acknowledgements = {
+            str(row["payload"].get("proposal_id")): str(row["payload"].get("status"))
+            for row in self.store.list_system_events_by_type(
+                "live_order_retry_proposal_ack",
+                limit=5000,
+            )
+            if str(row["payload"].get("blocked_order_id")) == order_id
+        }
+        if "approved" in acknowledgements.values():
+            return True
+        for proposal_id, proposal in proposals.items():
+            if proposal_id in acknowledgements:
+                continue
+            expires_at = proposal.get("expires_at")
+            if not expires_at or utc_now() < datetime.fromisoformat(
+                str(expires_at).replace("Z", "+00:00")
+            ):
+                return True
+        return False
 
     def _pending_retry_proposal(self, proposal_id: str) -> dict[str, Any] | None:
         for row in self.store.list_system_events_by_type(
@@ -2363,6 +3041,27 @@ class TelegramOperatorCommandRouter:
                     self._ack_retry_proposal(payload, "expired", "telegram:timeout")
                     return None
                 return payload
+        return None
+
+    def _pending_async_approval(
+        self,
+        approval_id: str,
+    ) -> PendingApprovalEnvelope | None:
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_ack",
+            limit=2000,
+        ):
+            if row["payload"].get("approval_id") == approval_id:
+                return None
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_pending",
+            limit=2000,
+        ):
+            if row["payload"].get("approval_id") == approval_id:
+                envelope = PendingApprovalEnvelope.model_validate(row["payload"])
+                if utc_now() >= envelope.expires_at:
+                    return None
+                return envelope
         return None
 
 
@@ -2401,6 +3100,23 @@ def _confirmation_markup(action: str) -> dict[str, Any]:
                 }
             ],
             [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
+        ]
+    }
+
+
+def _async_approval_markup(approval_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}appr:a:{approval_id}",
+                },
+                {
+                    "text": "Reject",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}appr:r:{approval_id}",
+                },
+            ]
         ]
     }
 
@@ -2456,6 +3172,73 @@ def _retry_order_markup(proposal_id: str) -> dict[str, Any]:
             ],
         ]
     }
+
+
+def _recovery_review_markup(order_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "재주문 검토",
+                    "callback_data": (f"{OPERATOR_CALLBACK_PREFIX}recover:review:{order_id}"),
+                }
+            ]
+        ]
+    }
+
+
+def _recoverable_orders_markup(
+    candidates: list[LiveOrderRecoveryCandidate],
+) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": (f"재주문 검토 · {candidate.order.get('symbol') or 'unknown'}"),
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}recover:review:{candidate.source_order_id}"
+                    ),
+                }
+            ]
+            for candidate in candidates
+        ]
+    }
+
+
+def _recovery_options_markup(
+    order_id: str,
+    original_quantity: float,
+    max_quantity: float,
+) -> dict[str, Any]:
+    rows = [
+        [
+            {
+                "text": f"원 수량 {original_quantity:g}",
+                "callback_data": (f"{OPERATOR_CALLBACK_PREFIX}recover:original:{order_id}"),
+            }
+        ],
+        [
+            {
+                "text": f"현재 최대 {max_quantity:g}",
+                "callback_data": f"{OPERATOR_CALLBACK_PREFIX}recover:max:{order_id}",
+            }
+        ],
+        [
+            {
+                "text": "직접 수량 입력",
+                "callback_data": f"{OPERATOR_CALLBACK_PREFIX}recover:input:{order_id}",
+            }
+        ],
+    ]
+    return {"inline_keyboard": rows}
+
+
+def _sent_message_id(response: Mapping[str, Any] | None) -> int | None:
+    if not isinstance(response, Mapping):
+        return None
+    result = response.get("result")
+    message_id = result.get("message_id") if isinstance(result, Mapping) else None
+    return message_id if isinstance(message_id, int) else None
 
 
 def _cash_flow_proposal_markup(proposal: Mapping[str, Any]) -> dict[str, Any]:

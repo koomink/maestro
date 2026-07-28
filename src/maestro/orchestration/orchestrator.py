@@ -10,7 +10,11 @@ from typing import Any
 from pydantic import BaseModel
 
 from maestro.approval.manager import ApprovalManager
-from maestro.approval.models import ApprovalDecision
+from maestro.approval.models import (
+    ApprovalDecision,
+    ApprovalDispatchResult,
+    PendingApprovalEnvelope,
+)
 from maestro.config.execution import ExecutionConfig
 from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
@@ -65,6 +69,8 @@ from maestro.execution.live_orders import (
 from maestro.execution.order_capacity import OrderCapacityBlock, OrderCapacityService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.fx.service import ConfiguredFXRefreshService
+from maestro.integrations.telegram.bot import TelegramBotAPIClient
+from maestro.integrations.telegram.formatter import format_approval_request
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.ops.readonly_refresh import (
     latest_snapshot_for_account,
@@ -123,6 +129,13 @@ class SignalApprovalSummary(BaseModel):
     run_id: str
     orders_created: int
     approval_status: str
+    orders_planned: int = 0
+    orders_capacity_blocked: int = 0
+    approvals_pending: int = 0
+    orders_submitted: int = 0
+    orders_accepted: int = 0
+    orders_filled: int = 0
+    orders_failed: int = 0
 
 
 @dataclass(frozen=True)
@@ -215,6 +228,154 @@ class MaestroOrchestrator:
         with self.state_store.writer_lock("approve_signal"):
             return self._approve_signal_locked(signal_run_id)
 
+    def dispatch_signal_approval(self, signal_run_id: str) -> ApprovalDispatchResult:
+        """Persist and send live Telegram approvals without polling for a decision."""
+        with self.state_store.writer_lock("dispatch_signal_approval"):
+            return self._dispatch_signal_approval_locked(signal_run_id)
+
+    def resolve_pending_signal_approval(
+        self,
+        envelope: PendingApprovalEnvelope,
+        decision: ApprovalDecision,
+    ) -> SignalApprovalSummary:
+        """Apply one terminal decision loaded by the long-running Telegram operator."""
+        with self.state_store.live_order_lock("resolve_pending_signal_approval"):
+            package = self.state_store.load_signal_package(envelope.signal_run_id)
+            if package is None:
+                raise ValueError(f"Unknown signal_run_id: {envelope.signal_run_id}")
+            orders = [OrderIntent.model_validate(item) for item in envelope.orders]
+            if decision.status == "approved":
+                self._validate_signal_package_for_approval(package)
+                self._validate_signal_approval_preconditions(envelope.run_id, package)
+                orders, capacity_blocks = self._partition_orders_by_capacity(
+                    envelope.run_id,
+                    orders,
+                    signal_run_id=envelope.signal_run_id,
+                    package=package,
+                )
+                if capacity_blocks or not orders:
+                    raise ValueError("Pending approval is blocked by current broker capacity")
+                self._validate_signal_approval_gates(envelope.run_id, orders, package)
+
+            approval_payload = {
+                "signal_run_id": envelope.signal_run_id,
+                "source_strategy_ids": envelope.source_strategy_ids,
+                "request": envelope.request.model_dump(mode="json"),
+                "decision": decision.model_dump(mode="json"),
+                "message": envelope.message,
+                "account_ids": envelope.account_ids,
+            }
+            if len(envelope.account_ids) == 1:
+                approval_payload["account_id"] = envelope.account_ids[0]
+            self.state_store.save_approval(
+                envelope.run_id,
+                envelope.approval_id,
+                approval_payload,
+            )
+            self.audit.log(envelope.run_id, "approval_decision", approval_payload)
+
+            lifecycle_results: list[LiveOrderLifecycleResult] = []
+            if decision.status == "approved":
+                lifecycle_results, next_state = self._execute_live_approval_orders(
+                    envelope.run_id,
+                    orders,
+                    envelope.approval_id,
+                    decision,
+                    signal_run_id=envelope.signal_run_id,
+                )
+                self.state_store.save_portfolio_snapshot(envelope.run_id, next_state)
+            else:
+                self.state_store.save_system_event(
+                    envelope.run_id,
+                    SystemEventType.EXECUTION_SKIPPED,
+                    {
+                        "signal_run_id": envelope.signal_run_id,
+                        "source_strategy_ids": envelope.source_strategy_ids,
+                        "approval_status": decision.status,
+                    },
+                )
+
+            for order in orders:
+                order_payload = order.model_dump(mode="json")
+                order_payload["signal_run_id"] = envelope.signal_run_id
+                order_payload["approval_status"] = decision.status
+                if not (
+                    self.config.mode == RunMode.LIVE_APPROVAL
+                    and self._effective_order_posture(order) == "dry_run"
+                ):
+                    self.state_store.save_order(
+                        envelope.run_id,
+                        order.order_id,
+                        order_payload,
+                    )
+                if decision.status == "expired":
+                    duplicate_key = f"live-order-recovery-candidate:{order.order_id}"
+                    if not self.state_store.duplicate_key_exists(duplicate_key):
+                        self._record_event(
+                            envelope.run_id,
+                            "live_order_recovery_candidate",
+                            {
+                                "source_order_id": order.order_id,
+                                "order": order.model_dump(mode="json"),
+                                "source_type": "approval_expired",
+                                "reason": "telegram_approval_expired_before_submit",
+                                "signal_run_id": envelope.signal_run_id,
+                                "created_at": decision.decided_at.isoformat(),
+                                "status": "pending",
+                                "duplicate_key": duplicate_key,
+                            },
+                        )
+                        self._notify_recovery_order(
+                            envelope.run_id,
+                            order,
+                            "telegram_approval_expired_before_submit",
+                        )
+            self.state_store.save_system_event(
+                envelope.run_id,
+                "signal_approval_completed",
+                {
+                    "signal_run_id": envelope.signal_run_id,
+                    "orders_created": len(orders),
+                    "orders_planned": len(envelope.orders),
+                    "orders_submitted": sum(
+                        result.submitted_order is not None for result in lifecycle_results
+                    ),
+                    "orders_accepted": sum(
+                        result.broker_order_id is not None for result in lifecycle_results
+                    ),
+                    "orders_filled": sum(
+                        result.final_status.value == "filled" for result in lifecycle_results
+                    ),
+                    "orders_failed": sum(
+                        result.final_status.value in {"failed", "rejected", "halted"}
+                        for result in lifecycle_results
+                    ),
+                    "approval_status": decision.status,
+                    "approval_count": 1,
+                    "approval_statuses": [decision.status],
+                },
+            )
+            return SignalApprovalSummary(
+                signal_run_id=envelope.signal_run_id,
+                run_id=envelope.run_id,
+                orders_created=len(orders),
+                approval_status=decision.status,
+                orders_planned=len(envelope.orders),
+                orders_submitted=sum(
+                    result.submitted_order is not None for result in lifecycle_results
+                ),
+                orders_accepted=sum(
+                    result.broker_order_id is not None for result in lifecycle_results
+                ),
+                orders_filled=sum(
+                    result.final_status.value == "filled" for result in lifecycle_results
+                ),
+                orders_failed=sum(
+                    result.final_status.value in {"failed", "rejected", "halted"}
+                    for result in lifecycle_results
+                ),
+            )
+
     def _run_signal_locked(
         self,
         *,
@@ -251,9 +412,7 @@ class MaestroOrchestrator:
                 state_store=self.state_store,
                 audit_logger=self.audit,
             )
-            blocking_account_ids = sorted(
-                set(report.failed_account_ids) - bootstrap_account_ids
-            )
+            blocking_account_ids = sorted(set(report.failed_account_ids) - bootstrap_account_ids)
             if blocking_account_ids:
                 raise ValueError(
                     "signal readonly preflight failed for required account(s): "
@@ -642,6 +801,174 @@ class MaestroOrchestrator:
             run_id=run_id,
             orders_created=len(approval_orders),
             approval_status=approval_status,
+        )
+
+    def _dispatch_signal_approval_locked(
+        self,
+        signal_run_id: str,
+    ) -> ApprovalDispatchResult:
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            raise ValueError("Async Telegram dispatch requires live_approval mode")
+        if self.config.approval.provider != "telegram":
+            raise ValueError("Async approval dispatch requires Telegram approval")
+        package = self.state_store.load_signal_package(signal_run_id)
+        if package is None:
+            raise ValueError(f"Unknown signal_run_id: {signal_run_id}")
+        if package.get("approval_consumed"):
+            raise ValueError(f"Signal package already consumed: {signal_run_id}")
+        orders = [
+            OrderIntent.model_validate(order_payload)
+            for order_payload in package.get("orders_preview", [])
+        ]
+        approval_orders = self._orders_requiring_approval(orders)
+        run_id = new_run_id()
+        self._record_run_provenance(run_id, "approval_dispatch", signal_run_id=signal_run_id)
+        if not approval_orders:
+            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+            self.state_store.save_system_event(
+                run_id,
+                "signal_approval_completed",
+                {
+                    "signal_run_id": signal_run_id,
+                    "orders_created": 0,
+                    "orders_planned": 0,
+                    "approval_status": "not_required",
+                },
+            )
+            return ApprovalDispatchResult(
+                signal_run_id=signal_run_id,
+                run_id=run_id,
+                orders_planned=0,
+                approval_status="not_required",
+            )
+
+        signal_account_mappings = package.get("strategy_account_mappings")
+        if (
+            signal_account_mappings is not None
+            and signal_account_mappings != self._strategy_account_mappings()
+        ):
+            raise ValueError(
+                "Signal package account mapping mismatch: "
+                f"signal={signal_account_mappings} current={self._strategy_account_mappings()}"
+            )
+        baseline_refs = package.get("broker_snapshot_refs") or []
+        if baseline_refs:
+            self._validate_signal_broker_baseline(baseline_refs)
+        required_account_ids = [
+            str(account_id) for account_id in package.get("required_account_ids") or []
+        ]
+        if required_account_ids:
+            report = refresh_readonly_accounts(
+                self.config,
+                self.config_identity,
+                account_ids=required_account_ids,
+                source="approval_preflight",
+                max_snapshot_age_seconds=(
+                    self.config.reconciliation.approval_snapshot_max_age_seconds
+                ),
+                state_store=self.state_store,
+                audit_logger=self.audit,
+            )
+            if report.failed_account_ids:
+                raise ValueError(
+                    "approval readonly preflight failed for required account(s): "
+                    + ", ".join(report.failed_account_ids)
+                )
+        self._validate_signal_package_for_approval(package)
+        self._validate_signal_approval_preconditions(run_id, package)
+        approval_orders, capacity_blocks = self._partition_orders_by_capacity(
+            run_id,
+            approval_orders,
+            signal_run_id=signal_run_id,
+            package=package,
+        )
+        if not approval_orders:
+            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+            self.state_store.save_system_event(
+                run_id,
+                "signal_approval_completed",
+                {
+                    "signal_run_id": signal_run_id,
+                    "orders_created": 0,
+                    "orders_planned": len(orders),
+                    "orders_capacity_blocked": len(capacity_blocks),
+                    "approval_status": "capacity_blocked",
+                },
+            )
+            return ApprovalDispatchResult(
+                signal_run_id=signal_run_id,
+                run_id=run_id,
+                orders_planned=len(orders),
+                orders_capacity_blocked=len(capacity_blocks),
+                approval_status="capacity_blocked",
+            )
+        self._validate_signal_approval_gates(run_id, approval_orders, package)
+        self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+
+        client = self.telegram_client or TelegramBotAPIClient(
+            token_env=self.config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        risk_violations = package.get("risk_decision", {}).get("violations", [])
+        pending_count = 0
+        for source_strategy_ids, group_orders in self._approval_order_groups(
+            approval_orders,
+            package,
+        ):
+            request = self.approval_manager.create_request(
+                run_id,
+                group_orders,
+                risk_violations,
+                source_strategy_ids,
+            )
+            if request is None:
+                raise ValueError("live_approval mode requires an approval request")
+            message = format_approval_request(request)
+            envelope = PendingApprovalEnvelope(
+                approval_id=request.approval_id,
+                run_id=run_id,
+                signal_run_id=signal_run_id,
+                request=request,
+                orders=[order.model_dump(mode="json") for order in group_orders],
+                message=message,
+                source_strategy_ids=list(source_strategy_ids),
+                account_ids=sorted(
+                    {order.account_id for order in group_orders if order.account_id}
+                ),
+                reminder_seconds=self.config.approval.telegram_reminder_seconds,
+                created_at=request.created_at,
+                expires_at=request.expires_at,
+                duplicate_key=f"telegram-approval-pending:{request.approval_id}",
+            )
+            self._record_event(
+                run_id,
+                "telegram_approval_pending",
+                envelope.model_dump(mode="json"),
+            )
+            markup = _async_approval_markup(request.approval_id)
+            for chat_id in self.config.approval.telegram_allowed_chat_ids:
+                client.send_message(chat_id, message, reply_markup=markup)
+            pending_count += 1
+
+        self.state_store.save_system_event(
+            run_id,
+            "signal_approval_pending",
+            {
+                "signal_run_id": signal_run_id,
+                "orders_created": len(approval_orders),
+                "orders_planned": len(orders),
+                "orders_capacity_blocked": len(capacity_blocks),
+                "approvals_pending": pending_count,
+                "approval_status": "pending",
+            },
+        )
+        return ApprovalDispatchResult(
+            signal_run_id=signal_run_id,
+            run_id=run_id,
+            orders_planned=len(orders),
+            orders_capacity_blocked=len(capacity_blocks),
+            approvals_pending=pending_count,
+            approval_status="pending",
         )
 
     def _run_once_locked(self) -> RunOnceSummary:
@@ -1403,8 +1730,7 @@ class MaestroOrchestrator:
         ).reconcile_latest(run_id=run_id)
         if not reconciliation.passed:
             raise ValueError(
-                "account-scoped broker baseline reconciliation failed: "
-                + ", ".join(account_ids)
+                "account-scoped broker baseline reconciliation failed: " + ", ".join(account_ids)
             )
         return merged
 
@@ -1753,12 +2079,10 @@ class MaestroOrchestrator:
                     "blocked_order_id": item.order.order_id,
                     "signal_run_id": signal_run_id,
                     "status": "pending",
-                    "config_signal_contract_fingerprint": (
-                        package or {}
-                    ).get("config_signal_contract_fingerprint"),
-                    "config_runtime_fingerprint": (package or {}).get(
-                        "config_runtime_fingerprint"
+                    "config_signal_contract_fingerprint": (package or {}).get(
+                        "config_signal_contract_fingerprint"
                     ),
+                    "config_runtime_fingerprint": (package or {}).get("config_runtime_fingerprint"),
                 }
             )
             self._record_event(run_id, "live_order_capacity_blocked", payload)
@@ -1791,16 +2115,11 @@ class MaestroOrchestrator:
         return client.get_buying_power(symbol, order.price)
 
     def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> None:
-        if self.telegram_client is None:
-            return
-        maximum = (
-            "unknown" if block.max_buy_quantity is None else f"{block.max_buy_quantity:g}"
+        client = self.telegram_client or TelegramBotAPIClient(
+            token_env=self.config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
         )
-        retry_quantity = (
-            maximum
-            if block.max_buy_quantity is not None and block.max_buy_quantity > 0
-            else "<quantity>"
-        )
+        maximum = "unknown" if block.max_buy_quantity is None else f"{block.max_buy_quantity:g}"
         text = "\n".join(
             [
                 "Maestro order blocked before approval",
@@ -1810,16 +2129,27 @@ class MaestroOrchestrator:
                 f"planned_quantity: {block.requested_quantity:g}",
                 f"max_buy_quantity: {maximum}",
                 f"reason: {block.reason}",
-                "Submit a corrected standalone proposal with:",
-                (
-                    f"/retry_order {block.order.order_id} {retry_quantity} "
-                    f"{block.order.price:g}"
-                ),
+                "Tap below to review the current retry quantities.",
             ]
         )
         for chat_id in self.config.approval.telegram_allowed_chat_ids:
             try:
-                self.telegram_client.send_message(chat_id, text)
+                client.send_message(
+                    chat_id,
+                    text,
+                    reply_markup={
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "재주문 검토",
+                                    "callback_data": (
+                                        f"operator:recover:review:{block.order.order_id}"
+                                    ),
+                                }
+                            ]
+                        ]
+                    },
+                )
             except Exception as exc:
                 self._record_event(
                     run_id,
@@ -1827,6 +2157,68 @@ class MaestroOrchestrator:
                     {
                         "order_id": block.order.order_id,
                         "status": "capacity_blocked",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
+
+    def _notify_recovery_order(
+        self,
+        run_id: str,
+        order: OrderIntent,
+        reason: str,
+    ) -> None:
+        try:
+            client = self.telegram_client or TelegramBotAPIClient(
+                token_env=self.config.approval.telegram_bot_token_env,
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:
+            self._record_event(
+                run_id,
+                "live_order_notification_failed",
+                {
+                    "order_id": order.order_id,
+                    "status": "recoverable",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return
+        text = "\n".join(
+            [
+                "Maestro recoverable order",
+                f"order_id: {order.order_id}",
+                f"account_id: {order.account_id or 'default'}",
+                f"symbol: {order.symbol}",
+                f"quantity: {order.quantity:g}",
+                f"reason: {reason}",
+                "Tap below to review the current retry quantities.",
+            ]
+        )
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            try:
+                client.send_message(
+                    chat_id,
+                    text,
+                    reply_markup={
+                        "inline_keyboard": [
+                            [
+                                {
+                                    "text": "재주문 검토",
+                                    "callback_data": (f"operator:recover:review:{order.order_id}"),
+                                }
+                            ]
+                        ]
+                    },
+                )
+            except Exception as exc:
+                self._record_event(
+                    run_id,
+                    "live_order_notification_failed",
+                    {
+                        "order_id": order.order_id,
+                        "status": "recoverable",
                         "error_type": type(exc).__name__,
                         "error_message": str(exc),
                     },
@@ -2130,9 +2522,7 @@ class MaestroOrchestrator:
                         safety_service=dependencies.safety_service,
                         status_service=dependencies.status_service,
                         fill_reconciliation_service=dependencies.fill_reconciliation_service,
-                        broker_reconciliation_service=(
-                            dependencies.broker_reconciliation_service
-                        ),
+                        broker_reconciliation_service=(dependencies.broker_reconciliation_service),
                     ),
                 )
             )
@@ -2142,6 +2532,38 @@ class MaestroOrchestrator:
             self.audit,
             batch_notification_client,
         ).run(batch_items, approval_decision)
+        orders_by_id = {order.order_id: order for order in armed_orders}
+        for item in batch.items:
+            lifecycle = item.lifecycle
+            if (
+                lifecycle.final_status.value not in {"failed", "rejected", "halted"}
+                or lifecycle.broker_order_id is not None
+            ):
+                continue
+            order = orders_by_id.get(lifecycle.order_id)
+            if order is None:
+                continue
+            self._record_event(
+                run_id,
+                "live_order_recovery_candidate",
+                {
+                    "source_order_id": order.order_id,
+                    "order": order.model_dump(mode="json"),
+                    "source_type": f"lifecycle_{lifecycle.final_status.value}",
+                    "reason": lifecycle.failed_reason
+                    or lifecycle.halt_reason
+                    or lifecycle.final_status.value,
+                    "signal_run_id": signal_run_id,
+                    "created_at": lifecycle.checked_at,
+                    "status": "pending",
+                    "duplicate_key": f"live-order-recovery-candidate:{order.order_id}",
+                },
+            )
+            self._notify_recovery_order(
+                run_id,
+                order,
+                lifecycle.failed_reason or lifecycle.halt_reason or lifecycle.final_status.value,
+            )
         return (
             [item.lifecycle for item in batch.items],
             self.state_store.load_latest_portfolio_state(),
@@ -3225,6 +3647,23 @@ def _profile_name(config_identity: ConfigIdentity | None) -> str | None:
     if config_identity is None:
         return None
     return Path(config_identity.path).stem
+
+
+def _async_approval_markup(approval_id: str) -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "Approve",
+                    "callback_data": f"operator:appr:a:{approval_id}",
+                },
+                {
+                    "text": "Reject",
+                    "callback_data": f"operator:appr:r:{approval_id}",
+                },
+            ]
+        ]
+    }
 
 
 def _parse_signal_ref_time(value: str) -> datetime:

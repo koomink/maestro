@@ -418,6 +418,61 @@ def test_live_contribution_duplicate_counts_applied_fills(tmp_path):
     assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
 
 
+def test_live_contribution_approved_recovery_supersedes_halted_source(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = _contribution_order_payload("ord-live-halted")
+    store.save_order("run-1", "ord-live-halted", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-halted",
+            "final_status": "halted",
+            "broker_order_id": None,
+            "applied_fills": [],
+        },
+    )
+    store.save_system_event(
+        "run-retry",
+        "live_order_recovery_ack",
+        {
+            "source_order_id": "ord-live-halted",
+            "status": "approved",
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is False
+
+
+@pytest.mark.parametrize("status", ["pending", "rejected", "expired"])
+def test_live_contribution_unapproved_recovery_keeps_halted_source(tmp_path, status):
+    store = StateStore(str(tmp_path / "state.db"))
+    order_payload = _contribution_order_payload("ord-live-halted")
+    store.save_order("run-1", "ord-live-halted", order_payload)
+    store.save_system_event(
+        "run-1",
+        "live_order_lifecycle",
+        {
+            "run_id": "run-1",
+            "order_id": "ord-live-halted",
+            "final_status": "halted",
+            "broker_order_id": None,
+            "applied_fills": [],
+        },
+    )
+    store.save_system_event(
+        "run-retry",
+        "live_order_recovery_ack",
+        {
+            "source_order_id": "ord-live-halted",
+            "status": status,
+        },
+    )
+
+    assert store.monthly_live_contribution_order_exists("2026-05", "KRW") is True
+
+
 def test_live_contribution_duplicate_blocks_unclassified_lifecycle_status(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
     order_payload = _contribution_order_payload("ord-live-unclassified")

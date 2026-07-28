@@ -16,6 +16,7 @@ class ApprovalConfig(StrictConfigModel):
     telegram_bot_token_env: str = "TELEGRAM_BOT_TOKEN"
     telegram_allowed_chat_ids: list[int] = Field(default_factory=list)
     telegram_poll_interval_seconds: float = Field(default=1.0, ge=0)
+    telegram_reminder_seconds: list[int] = Field(default_factory=list)
 
     @field_validator("default_decision")
     @classmethod
@@ -23,6 +24,21 @@ class ApprovalConfig(StrictConfigModel):
         if value not in {"approved", "rejected", "expired"}:
             raise ValueError("default_decision must be approved, rejected, or expired")
         return value
+
+    @field_validator("telegram_reminder_seconds")
+    @classmethod
+    def validate_telegram_reminder_seconds(cls, value: list[int]) -> list[int]:
+        if any(item <= 0 for item in value):
+            raise ValueError("telegram_reminder_seconds values must be positive")
+        if value != sorted(set(value)):
+            raise ValueError("telegram_reminder_seconds must be sorted and unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_reminders_before_timeout(self) -> "ApprovalConfig":
+        if any(item >= self.timeout_seconds for item in self.telegram_reminder_seconds):
+            raise ValueError("telegram reminders must occur before timeout_seconds")
+        return self
 
     @model_validator(mode="after")
     def apply_maestro_telegram_env_defaults(self) -> "ApprovalConfig":

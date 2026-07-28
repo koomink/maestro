@@ -1,18 +1,22 @@
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import yaml
 from typer.testing import CliRunner
 
+from maestro.approval.models import ApprovalRequest, PendingApprovalEnvelope
 from maestro.cli import app
 from maestro.config.broker import BrokerAccountConfig
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
-from maestro.core.enums import SafetyState
+from maestro.core.enums import RunMode, SafetyState
 from maestro.core.ids import new_run_id
 from maestro.dashboard.actions import build_signal_freshness
+from maestro.execution.base import OrderIntent
 from maestro.execution.brokers.readonly import (
     BrokerAccountSnapshot,
+    BrokerBuyingPower,
     BrokerPosition,
     BrokerReadOnlySnapshot,
 )
@@ -2004,6 +2008,286 @@ def test_retry_order_rejection_ack_prevents_duplicate_callback(tmp_path):
     assert client.answered_callbacks[-1]["text"] == "This retry proposal is no longer active."
 
 
+def test_async_approval_rejection_is_persisted_once(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    envelope = _pending_approval_envelope()
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        envelope.run_id,
+        "telegram_approval_pending",
+        envelope.model_dump(mode="json"),
+    )
+    update = callback_update(f"operator:appr:r:{envelope.approval_id}")
+
+    assert router.process_update(update)
+    assert router.process_update(update)
+
+    assert len(store.list_approvals(limit=10)) == 1
+    acknowledgements = store.list_system_events_by_type("telegram_approval_ack")
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0]["payload"]["status"] == "rejected"
+    assert client.answered_callbacks[-1]["text"] == ("This approval request is no longer active.")
+
+
+def test_async_approval_reminders_are_sent_once(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    envelope = _pending_approval_envelope(reminder_seconds=[120, 300, 480])
+    store.save_system_event(
+        envelope.run_id,
+        "telegram_approval_pending",
+        envelope.model_dump(mode="json"),
+    )
+
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.utc_now",
+        lambda: envelope.created_at + timedelta(seconds=121),
+    )
+    router.poll_once(timeout_seconds=0)
+    router.poll_once(timeout_seconds=0)
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.utc_now",
+        lambda: envelope.created_at + timedelta(seconds=301),
+    )
+    router.poll_once(timeout_seconds=0)
+
+    reminders = store.list_system_events_by_type("telegram_approval_reminder")
+    assert sorted(row["payload"]["reminder_seconds"] for row in reminders) == [120, 300]
+    assert len([item for item in client.sent_messages if "Approval reminder" in item["text"]]) == 2
+
+
+def test_expired_contribution_order_is_recoverable_but_open_order_is_not(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=FakeTelegramClient(),
+    )
+    month = utc_now().astimezone().strftime("%Y-%m")
+    expired_order = _pending_approval_envelope().orders[0]
+    expired_order["metadata"] = {
+        "order_generation_mode": "buy_only_contribution",
+        "contribution_month": month,
+    }
+    store.save_order(
+        "run_expired",
+        expired_order["order_id"],
+        {
+            **expired_order,
+            "signal_run_id": "signal_expired",
+            "approval_status": "expired",
+        },
+    )
+    open_order = {**expired_order, "order_id": "ord_open_1"}
+    store.save_order(
+        "run_open",
+        open_order["order_id"],
+        {**open_order, "approval_status": "approved"},
+    )
+    store.save_system_event(
+        "run_open",
+        "live_order_lifecycle",
+        {
+            "run_id": "run_open",
+            "order_id": open_order["order_id"],
+            "final_status": "open",
+            "broker_order_id": "broker-open-1",
+            "checked_at": utc_now().isoformat(),
+        },
+    )
+
+    candidate = router._pending_recovery_candidate(expired_order["order_id"])
+
+    assert candidate is not None
+    assert candidate.source_type == "approval_expired"
+    assert router._pending_recovery_candidate(open_order["order_id"]) is None
+
+
+def test_orders_adds_recovery_review_button(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+    order = _store_recoverable_order(store)
+
+    router._orders(100)
+
+    markup = client.sent_messages[-1]["reply_markup"]
+    button = markup["inline_keyboard"][0][0]
+    assert button["text"] == "재주문 검토 · MOCK_ETF_A"
+    assert button["callback_data"] == f"operator:recover:review:{order.order_id}"
+    assert len(button["callback_data"]) <= 64
+
+
+def test_recovery_review_shows_original_max_and_direct_input(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path)).model_copy(
+        update={"mode": RunMode.LIVE_APPROVAL}
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+    order = _store_recoverable_order(store, quantity=38)
+    monkeypatch.setattr(router, "_lookup_retry_price", lambda config, order: 13_140.0)
+    monkeypatch.setattr(
+        router,
+        "_lookup_retry_capacity",
+        lambda config, order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=1_000_000,
+            max_buy_quantity=31,
+            source="test",
+        ),
+    )
+
+    assert router.process_update(callback_update(f"operator:recover:review:{order.order_id}"))
+
+    message = client.sent_messages[-1]
+    assert "original_quantity: 38" in message["text"]
+    assert "current_max_quantity: 31" in message["text"]
+    buttons = [row[0] for row in message["reply_markup"]["inline_keyboard"]]
+    assert [button["text"] for button in buttons] == [
+        "원 수량 38",
+        "현재 최대 31",
+        "직접 수량 입력",
+    ]
+    assert all(len(button["callback_data"]) <= 64 for button in buttons)
+
+
+def test_direct_quantity_reply_creates_one_retry_proposal(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+    order = _store_recoverable_order(store, quantity=38)
+    candidate = router._pending_recovery_candidate(order.order_id)
+    monkeypatch.setattr(
+        router,
+        "_retry_order_review",
+        lambda order_id: (candidate, order, 13_140.0, 31.0),
+    )
+    proposed: list[tuple[str, float]] = []
+
+    def propose(order_id, quantity, chat_id, *, price=None):
+        del chat_id, price
+        proposed.append((order_id, quantity))
+        return "run_retry_direct"
+
+    monkeypatch.setattr(router, "_propose_retry_order", propose)
+    assert router.process_update(callback_update(f"operator:recover:input:{order.order_id}"))
+    prompt_message_id = client.sent_messages[-1]["reply_markup"]
+    assert prompt_message_id["force_reply"] is True
+    reply = message_update("29")
+    reply["message"]["reply_to_message"] = {"message_id": len(client.sent_messages)}
+
+    assert router.process_update(reply)
+    assert router.process_update(reply) is False
+
+    assert proposed == [(order.order_id, 29.0)]
+    acknowledgements = store.list_system_events_by_type("live_order_retry_quantity_prompt_ack")
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0]["payload"]["status"] == "consumed"
+
+
+def test_rejected_retry_proposal_allows_another_recovery_review(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=FakeTelegramClient(),
+    )
+    order = _store_recoverable_order(store)
+    proposal_id = "run_retry_rejected"
+    store.save_system_event(
+        proposal_id,
+        "live_order_retry_proposal",
+        {
+            "proposal_id": proposal_id,
+            "blocked_order_id": order.order_id,
+            "expires_at": (utc_now() + timedelta(minutes=10)).isoformat(),
+        },
+    )
+    assert router._pending_recovery_candidate(order.order_id) is None
+    store.save_system_event(
+        proposal_id,
+        "live_order_retry_proposal_ack",
+        {
+            "proposal_id": proposal_id,
+            "blocked_order_id": order.order_id,
+            "status": "rejected",
+        },
+    )
+
+    assert router._pending_recovery_candidate(order.order_id) is not None
+
+
+def _store_recoverable_order(
+    store: StateStore,
+    *,
+    quantity: float = 10,
+) -> OrderIntent:
+    order = OrderIntent(
+        order_id="ord_12345678901234567890123456789012",
+        symbol="MOCK_ETF_A",
+        side="buy",
+        quantity=quantity,
+        price=100,
+        notional=quantity * 100,
+        currency="KRW",
+        account_id="paper_cash",
+        metadata={
+            "order_generation_mode": "buy_only_contribution",
+            "contribution_month": utc_now().strftime("%Y-%m"),
+        },
+    )
+    store.save_order(
+        "run_recoverable",
+        order.order_id,
+        {
+            **order.model_dump(mode="json"),
+            "approval_status": "expired",
+            "signal_run_id": "signal_recoverable",
+        },
+    )
+    return order
+
+
 class FakeTelegramClient:
     def __init__(self, updates: list[dict[str, Any]] | None = None) -> None:
         self.updates = list(updates or [])
@@ -2150,6 +2434,47 @@ def callback_update(
             "from": {"id": user_id, "username": "operator"},
         },
     }
+
+
+def _pending_approval_envelope(
+    *,
+    reminder_seconds: list[int] | None = None,
+) -> PendingApprovalEnvelope:
+    now = utc_now()
+    order = OrderIntent(
+        order_id="ord_async_1",
+        symbol="MOCK_ETF_A",
+        side="buy",
+        quantity=1,
+        price=100,
+        notional=100,
+        account_id="paper",
+    )
+    request = ApprovalRequest(
+        approval_id="appr_async_1",
+        run_id="run_async_1",
+        created_at=now,
+        expires_at=now + timedelta(seconds=600),
+        channel="telegram",
+        source_strategy_ids=["tranquillo"],
+        order_count=1,
+        estimated_notional=100,
+        proposed_orders=[order.model_dump(mode="json")],
+    )
+    return PendingApprovalEnvelope(
+        approval_id=request.approval_id,
+        run_id=request.run_id,
+        signal_run_id="signal_async_1",
+        request=request,
+        orders=[order.model_dump(mode="json")],
+        message="Async approval",
+        source_strategy_ids=["tranquillo"],
+        account_ids=["paper"],
+        reminder_seconds=list(reminder_seconds or []),
+        created_at=now,
+        expires_at=request.expires_at,
+        duplicate_key=f"telegram-approval-pending:{request.approval_id}",
+    )
 
 
 def _telegram_config_path(tmp_path) -> Path:

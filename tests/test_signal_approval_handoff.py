@@ -233,6 +233,41 @@ def test_approve_signal_creates_strategy_grouped_approval_requests(tmp_path):
     ]
 
 
+def test_dispatch_signal_approval_returns_pending_without_polling(monkeypatch, tmp_path):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _live_signal_config(tmp_path, "expired")
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    config.approval.whitelisted_user_ids = [100]
+    config.approval.timeout_seconds = 600
+    config.approval.telegram_reminder_seconds = [120, 300, 480]
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    client = FakeTelegramClient()
+
+    result = MaestroOrchestrator(
+        config,
+        telegram_client=client,
+        order_capacity_lookup=lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=10_000_000,
+            max_buy_quantity=100_000,
+            source="fake",
+        ),
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    assert result.approval_status == "pending"
+    assert result.approvals_pending == 1
+    assert store.list_approvals(limit=10) == []
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    assert pending[0]["payload"]["reminder_seconds"] == [120, 300, 480]
+    assert client.sent_messages[0]["reply_markup"]["inline_keyboard"][0][0][
+        "callback_data"
+    ].startswith("operator:appr:a:")
+
+
 def test_approve_signal_propagates_signal_run_id_to_live_order_events(monkeypatch, tmp_path):
     _mock_kis_snapshot_refresh(monkeypatch)
     config = _live_signal_config(tmp_path, "approved")

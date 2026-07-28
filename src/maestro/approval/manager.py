@@ -45,20 +45,14 @@ class ApprovalManager:
         if not self.config.enabled or not self.config.require_approval:
             return None, None, None
 
-        now = utc_now()
-        request = ApprovalRequest(
-            approval_id=new_approval_id(),
-            run_id=run_id,
-            profile_name=self.profile_name,
-            created_at=now,
-            expires_at=now + timedelta(seconds=self.config.timeout_seconds),
-            channel=self.config.provider,
-            source_strategy_ids=list(source_strategy_ids or []),
-            order_count=len(orders),
-            estimated_notional=sum(order.notional for order in orders),
-            proposed_orders=[self._proposed_order_payload(order) for order in orders],
-            risk_violations=risk_violations,
+        request = self.create_request(
+            run_id,
+            orders,
+            risk_violations,
+            source_strategy_ids,
         )
+        if request is None:
+            return None, None, None
         if self.config.provider == "telegram":
             if self.run_mode not in {RunMode.PAPER, RunMode.LIVE_APPROVAL}:
                 raise ValueError("Telegram approval requires paper or live_approval mode")
@@ -88,6 +82,30 @@ class ApprovalManager:
             reason="Configured Phase 2 approval stub decision.",
         )
         return request, decision, message
+
+    def create_request(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        risk_violations: list[str],
+        source_strategy_ids: list[str] | None = None,
+    ) -> ApprovalRequest | None:
+        if not self.config.enabled or not self.config.require_approval:
+            return None
+        now = utc_now()
+        return ApprovalRequest(
+            approval_id=new_approval_id(),
+            run_id=run_id,
+            profile_name=self.profile_name,
+            created_at=now,
+            expires_at=now + timedelta(seconds=self.config.timeout_seconds),
+            channel=self.config.provider,
+            source_strategy_ids=list(source_strategy_ids or []),
+            order_count=len(orders),
+            estimated_notional=sum(order.notional for order in orders),
+            proposed_orders=[self._proposed_order_payload(order) for order in orders],
+            risk_violations=risk_violations,
+        )
 
     def _proposed_order_payload(self, order: OrderIntent) -> dict:
         payload = order.model_dump(mode="json")
