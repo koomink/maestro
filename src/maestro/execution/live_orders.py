@@ -3,6 +3,7 @@ from maestro.execution.live_order_batch import (
     LiveOrderBatchLifecycleService,
 )
 from maestro.execution.live_order_cancellation import LiveOrderCancellationService
+from maestro.execution.live_order_errors import BrokerOrderRejectedError
 from maestro.execution.live_order_fills import PartialFillReconciliationService
 from maestro.execution.live_order_lifecycle import LiveOrderLifecycleService
 from maestro.execution.live_order_models import (
@@ -44,6 +45,7 @@ __all__ = [
     "AppliedFill",
     "BatchOrderDependencies",
     "BrokerOrderId",
+    "BrokerOrderRejectedError",
     "BrokerOrderRequest",
     "BrokerReconciliationRunner",
     "FillEvent",

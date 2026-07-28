@@ -12,6 +12,7 @@ from maestro.execution.live_order_safety import (
 )
 from maestro.execution.live_orders import (
     BrokerOrderId,
+    BrokerOrderRejectedError,
     LiveOrderClient,
     LiveOrderPreSubmitValidator,
     LiveOrderRequest,
@@ -363,6 +364,25 @@ def test_live_order_requires_recovery_on_unknown_submit_response(tmp_path):
     assert broker.requests == [request]
 
 
+def test_live_order_records_definitive_broker_rejection_without_recovery(tmp_path):
+    broker = FakeRejectedLiveOrderClient()
+    service, request, approval, _ = _context(tmp_path, broker=broker)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    result = service.submit_approved_order(request, approval)
+
+    assert result.status == OrderStatus.REJECTED
+    assert result.raw == {
+        "broker_rejection": True,
+        "broker": "kis",
+        "code": "APBK1497",
+        "message": "파생ETF 거래 불가",
+    }
+    assert service.state_store.list_system_events_by_type("live_order_recovery_required") == []
+    event = service.state_store.list_system_events_by_type("live_order_result")[0]["payload"]
+    assert event["result"]["status"] == "rejected"
+
+
 def test_live_order_status_service_persists_status_snapshot(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -516,6 +536,12 @@ class FakeFailingLiveOrderClient(LiveOrderClient):
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         self.requests.append(request)
         raise RuntimeError("broker submit timed out")
+
+
+class FakeRejectedLiveOrderClient(LiveOrderClient):
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        del request
+        raise BrokerOrderRejectedError("kis", "APBK1497", "파생ETF 거래 불가")
 
 
 class FakePreSubmitRejectingClient(FakeLiveOrderClient, LiveOrderPreSubmitValidator):

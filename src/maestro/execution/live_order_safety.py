@@ -8,6 +8,7 @@ from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, Currency, OrderStatus, OrderType
 from maestro.core.instruments import TradableInstrument
 from maestro.core.trading_day import trading_day_bounds_utc_str
+from maestro.execution.live_order_errors import BrokerOrderRejectedError
 from maestro.execution.live_order_models import LiveOrderRequest, LiveOrderResult
 from maestro.execution.live_order_ports import LiveOrderClient, LiveOrderPreSubmitValidator
 from maestro.monitoring.audit_logger import AuditLogger
@@ -57,6 +58,21 @@ class LiveOrderSafetyService:
         self._persist_submit_intent(request)
         try:
             result = self.broker_client.submit_limit_order(request)
+        except BrokerOrderRejectedError as exc:
+            rejected = LiveOrderResult(
+                order_id=request.order_id,
+                status=OrderStatus.REJECTED,
+                signal_run_id=request.signal_run_id,
+                message=str(exc),
+                raw={
+                    "broker_rejection": True,
+                    "broker": exc.broker,
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            )
+            self._persist(SystemEventType.LIVE_ORDER_RESULT, request, rejected)
+            return rejected
         except Exception as exc:
             halted = LiveOrderResult(
                 order_id=request.order_id,

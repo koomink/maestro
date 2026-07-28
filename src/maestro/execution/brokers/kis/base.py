@@ -8,6 +8,15 @@ from maestro.execution.brokers.kis.parsers import _tr_cont
 from maestro.execution.brokers.kis.transport import UrlLibKISTransport
 
 
+class KISAPIResponseError(ValueError):
+    """KIS returned a parsed application-level error response."""
+
+    def __init__(self, context: str, code: str, message: str) -> None:
+        super().__init__(f"{context} failed: {code} {message}")
+        self.code = code
+        self.message = message
+
+
 class KISRestBaseClient:
     request_error_context = "KIS request"
     post_error_context = "KIS request"
@@ -123,9 +132,9 @@ class KISRestBaseClient:
 
     def _raise_for_error(self, payload: dict[str, Any], context: str) -> None:
         if payload.get("rt_cd") not in ("0", None):
-            msg_cd = payload.get("msg_cd", "unknown")
-            msg1 = payload.get("msg1", "KIS request failed")
-            raise ValueError(f"{context} failed: {msg_cd} {msg1}")
+            msg_cd = str(payload.get("msg_cd", "unknown"))
+            msg1 = str(payload.get("msg1", "KIS request failed"))
+            raise KISAPIResponseError(context, msg_cd, msg1)
 
 
-__all__ = ["KISRestBaseClient"]
+__all__ = ["KISAPIResponseError", "KISRestBaseClient"]

@@ -1,5 +1,6 @@
 from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
+from maestro.execution.brokers.kis.base import KISAPIResponseError
 from maestro.execution.brokers.kis.models import KISBuyingPower, KISOrderSummary
 from maestro.execution.brokers.kis.overseas_readonly import (
     KISRestOverseasStockReadOnlyClient,
@@ -13,6 +14,7 @@ from maestro.execution.brokers.kis.parsers import (
     _status_snapshot_from_summary,
     _unknown_status_snapshot,
 )
+from maestro.execution.live_order_errors import BrokerOrderRejectedError
 from maestro.execution.live_order_models import (
     BrokerOrderId,
     LiveOrderCancelRequest,
@@ -46,23 +48,26 @@ class KISRestOverseasStockLiveOrderClient(
 
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         instrument = self._instrument(request.symbol)
-        payload = self._post(
-            "/uapi/overseas-stock/v1/trading/order",
-            self._order_tr_id(request.side, str(instrument.exchange_code or "")),
-            {
-                "CANO": self.credentials.cano,
-                "ACNT_PRDT_CD": self.credentials.account_product_code,
-                "OVRS_EXCG_CD": str(instrument.exchange_code or ""),
-                "PDNO": instrument.broker_symbol,
-                "ORD_QTY": _kis_overseas_quantity(request.quantity),
-                "OVRS_ORD_UNPR": _kis_overseas_price(request.limit_price),
-                "CTAC_TLNO": "",
-                "MGCO_APTM_ODNO": "",
-                "SLL_TYPE": "00" if request.side == OrderSide.SELL else "",
-                "ORD_SVR_DVSN_CD": "0",
-                "ORD_DVSN": "00",
-            },
-        )
+        try:
+            payload = self._post(
+                "/uapi/overseas-stock/v1/trading/order",
+                self._order_tr_id(request.side, str(instrument.exchange_code or "")),
+                {
+                    "CANO": self.credentials.cano,
+                    "ACNT_PRDT_CD": self.credentials.account_product_code,
+                    "OVRS_EXCG_CD": str(instrument.exchange_code or ""),
+                    "PDNO": instrument.broker_symbol,
+                    "ORD_QTY": _kis_overseas_quantity(request.quantity),
+                    "OVRS_ORD_UNPR": _kis_overseas_price(request.limit_price),
+                    "CTAC_TLNO": "",
+                    "MGCO_APTM_ODNO": "",
+                    "SLL_TYPE": "00" if request.side == OrderSide.SELL else "",
+                    "ORD_SVR_DVSN_CD": "0",
+                    "ORD_DVSN": "00",
+                },
+            )
+        except KISAPIResponseError as exc:
+            raise BrokerOrderRejectedError("kis", exc.code, exc.message) from exc
         output = _as_dict(payload.get("output"))
         broker_order_id = _optional_str(output.get("ODNO") or output.get("odno"))
         broker_order_org_no = _optional_str(

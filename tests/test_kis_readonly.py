@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -22,6 +23,7 @@ from maestro.execution.brokers.kis.rest_client import (
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_orders import (
     BrokerOrderId,
+    BrokerOrderRejectedError,
     LiveOrderCancelRequest,
     LiveOrderModifyRequest,
     LiveOrderRequest,
@@ -788,6 +790,40 @@ def test_kis_live_order_client_uses_domestic_limit_order_payload(monkeypatch):
     }
 
 
+def test_kis_domestic_live_order_raises_definitive_rejection(monkeypatch):
+    monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
+    monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
+    monkeypatch.setenv("TEST_KIS_ACCESS_TOKEN", "access-token")
+    config = KISConfig(
+        enabled=True,
+        provider="kis",
+        account_id="12345678-01",
+        app_key_env="TEST_KIS_APP_KEY",
+        app_secret_env="TEST_KIS_APP_SECRET",
+        access_token_env="TEST_KIS_ACCESS_TOKEN",
+    )
+    client = KISRestLiveOrderClient(
+        config,
+        transport=FakeKISTransport(order_error=("APBK1497", "파생ETF 거래 불가")),
+    )
+
+    with pytest.raises(BrokerOrderRejectedError) as exc_info:
+        client.submit_limit_order(
+            LiveOrderRequest(
+                order_id="ord_live_rejected",
+                symbol="005930",
+                side=OrderSide.BUY,
+                quantity=2,
+                limit_price=70000,
+                approval_id="appr_1",
+                run_id="run_1",
+            )
+        )
+
+    assert exc_info.value.code == "APBK1497"
+    assert exc_info.value.message == "파생ETF 거래 불가"
+
+
 def test_kis_domestic_paper_trading_live_order_uses_vts_endpoint_and_demo_tr_id(monkeypatch):
     monkeypatch.setenv("TEST_KIS_APP_KEY", "app-key")
     monkeypatch.setenv("TEST_KIS_APP_SECRET", "app-secret")
@@ -1010,6 +1046,7 @@ def test_kis_domestic_pre_submit_uses_broker_symbol_and_order_price(monkeypatch)
     ][0]
     assert buying_power_call["params"]["PDNO"] == "418660"
     assert buying_power_call["params"]["ORD_UNPR"] == "70000"
+    assert buying_power_call["params"]["ORD_DVSN"] == "00"
 
 
 def test_kis_domestic_pre_submit_rejects_insufficient_buying_power(monkeypatch):
@@ -1437,8 +1474,9 @@ def test_kis_overseas_live_order_client_fails_on_kis_error_response(monkeypatch)
                 run_id="run_1",
             )
         )
-    except ValueError as exc:
-        assert "KIS overseas live order request failed" in str(exc)
+    except BrokerOrderRejectedError as exc:
+        assert exc.code == "EGW001"
+        assert exc.message == "rejected"
     else:
         raise AssertionError("Expected KIS error response to fail closed")
 
@@ -1595,11 +1633,7 @@ def test_kis_domestic_modify_uses_verified_revision_payload(monkeypatch):
         )
     )
 
-    call = [
-        call
-        for call in transport.calls
-        if call["url"].endswith("/trading/order-rvsecncl")
-    ][0]
+    call = [call for call in transport.calls if call["url"].endswith("/trading/order-rvsecncl")][0]
     assert call["headers"]["tr_id"] == "TTTC0013U"
     assert call["json_body"] == {
         "CANO": "12345678",
@@ -1631,9 +1665,7 @@ def test_kis_domestic_modify_omitted_quantity_revises_full_remainder(monkeypatch
     )
 
     call = [
-        call
-        for call in client.transport.calls
-        if call["url"].endswith("/trading/order-rvsecncl")
+        call for call in client.transport.calls if call["url"].endswith("/trading/order-rvsecncl")
     ][0]
     assert call["json_body"]["ORD_QTY"] == "3"
     assert call["json_body"]["QTY_ALL_ORD_YN"] == "Y"
@@ -1904,6 +1936,7 @@ class FakeKISTransport:
         paginated_daily: bool = False,
         buying_power: str = "750000",
         max_buy_quantity: str = "10",
+        order_error: tuple[str, str] | None = None,
     ) -> None:
         self.calls = []
         self.partial_order = partial_order
@@ -1912,6 +1945,7 @@ class FakeKISTransport:
         self.paginated_daily = paginated_daily
         self.buying_power = buying_power
         self.max_buy_quantity = max_buy_quantity
+        self.order_error = order_error
 
     def request(self, method, url, *, headers, params=None, json_body=None, timeout_seconds=10.0):
         self.calls.append(
@@ -2079,6 +2113,9 @@ class FakeKISTransport:
                 ],
             }
         if url.endswith("/trading/order-cash"):
+            if self.order_error is not None:
+                code, message = self.order_error
+                return {"rt_cd": "1", "msg_cd": code, "msg1": message}
             return {
                 "rt_cd": "0",
                 "msg1": "order accepted",

@@ -7,6 +7,7 @@ from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.live_orders import (
     BrokerOrderId,
+    BrokerOrderRejectedError,
     BrokerReconciliationRunner,
     LiveOrderClient,
     LiveOrderLifecycleNotification,
@@ -139,6 +140,22 @@ def test_lifecycle_submit_exception_records_recovery_required_and_halts(tmp_path
     assert recovery["request"]["order_id"] == request.order_id
     assert recovery["result"]["raw"]["exception_type"] == "TimeoutError"
     assert notifier.events[-1].status == OrderStatus.HALTED
+
+
+def test_lifecycle_definitive_submit_rejection_does_not_require_recovery(tmp_path):
+    lifecycle, store, status_client, notifier, request, approval, _ = _context(
+        tmp_path,
+        statuses=[_poll(OrderStatus.FILLED)],
+        submit_client=RejectedSubmitClient(),
+    )
+
+    result = lifecycle.run(request, approval)
+
+    assert result.final_status == OrderStatus.REJECTED
+    assert result.broker_order_id is None
+    assert status_client.call_count == 0
+    assert store.list_system_events_by_type("live_order_recovery_required") == []
+    assert notifier.events[-1].status == OrderStatus.REJECTED
 
 
 def test_lifecycle_status_poll_exception_after_submit_records_recovery_required(tmp_path):
@@ -454,6 +471,12 @@ class FailingSubmitClient(LiveOrderClient):
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         del request
         raise TimeoutError("submit timed out")
+
+
+class RejectedSubmitClient(LiveOrderClient):
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        del request
+        raise BrokerOrderRejectedError("kis", "APBK1497", "파생ETF 거래 불가")
 
 
 class FailingStatusClient(LiveOrderStatusClient):

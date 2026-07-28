@@ -83,6 +83,17 @@ class LiveOrderLifecycleService:
                 "Live order submission result received.",
                 broker_order_id,
             )
+            if submitted_order.status == OrderStatus.REJECTED:
+                result = self._result(
+                    request=request,
+                    final_status=OrderStatus.REJECTED,
+                    submitted_order=submitted_order,
+                    broker_order_id=broker_order_id,
+                    notifications_sent=notifications,
+                    failed_reason=submitted_order.message,
+                )
+                self._persist_summary(result)
+                return result
             if submitted_order.status == OrderStatus.HALTED or broker_order is None:
                 result = self._result(
                     request=request,

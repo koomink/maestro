@@ -64,7 +64,7 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
                 "ACNT_PRDT_CD": self.credentials.account_product_code,
                 "PDNO": pdno,
                 "ORD_UNPR": _kis_price(order_price) if order_price is not None else "0",
-                "ORD_DVSN": "01",
+                "ORD_DVSN": "00",
                 "CMA_EVLU_AMT_ICLD_YN": "N",
                 "OVRS_ICLD_YN": "N",
             },

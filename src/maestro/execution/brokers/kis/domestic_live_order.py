@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from maestro.core.clock import utc_now
 from maestro.core.enums import BrokerProduct, OrderSide, OrderStatus
+from maestro.execution.brokers.kis.base import KISAPIResponseError
 from maestro.execution.brokers.kis.domestic_readonly import KISRestDomesticStockReadOnlyClient
 from maestro.execution.brokers.kis.models import KISBuyingPower, KISOrderSummary
 from maestro.execution.brokers.kis.parsers import (
@@ -13,6 +14,7 @@ from maestro.execution.brokers.kis.parsers import (
     _status_snapshot_from_summary,
     _unknown_status_snapshot,
 )
+from maestro.execution.live_order_errors import BrokerOrderRejectedError
 from maestro.execution.live_order_models import (
     BrokerOrderId,
     LiveOrderModifyRequest,
@@ -47,18 +49,21 @@ class KISRestDomesticStockLiveOrderClient(
         _validate_buying_power(request, buying_power)
 
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
-        payload = self._post(
-            "/uapi/domestic-stock/v1/trading/order-cash",
-            self._order_tr_id(request.side),
-            {
-                "CANO": self.credentials.cano,
-                "ACNT_PRDT_CD": self.credentials.account_product_code,
-                "PDNO": self._broker_symbol(request.symbol),
-                "ORD_DVSN": "00",
-                "ORD_QTY": _kis_quantity(request.quantity),
-                "ORD_UNPR": _kis_price(request.limit_price),
-            },
-        )
+        try:
+            payload = self._post(
+                "/uapi/domestic-stock/v1/trading/order-cash",
+                self._order_tr_id(request.side),
+                {
+                    "CANO": self.credentials.cano,
+                    "ACNT_PRDT_CD": self.credentials.account_product_code,
+                    "PDNO": self._broker_symbol(request.symbol),
+                    "ORD_DVSN": "00",
+                    "ORD_QTY": _kis_quantity(request.quantity),
+                    "ORD_UNPR": _kis_price(request.limit_price),
+                },
+            )
+        except KISAPIResponseError as exc:
+            raise BrokerOrderRejectedError("kis", exc.code, exc.message) from exc
         output = _as_dict(payload.get("output"))
         broker_order_id = _optional_str(output.get("ODNO") or output.get("odno"))
         broker_order_org_no = _optional_str(
