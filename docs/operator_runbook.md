@@ -76,15 +76,28 @@ maestro recover-live-order --config <config> --reason "broker truth reconciled"
 
 If an order was excluded before approval, review the
 `live_order_capacity_blocked` event and Telegram's planned/available quantity.
-Submit a smaller standalone proposal only on the same trading date:
+Tap `재주문 검토` in the failure alert or `/orders`, then choose the original
+quantity, the freshly calculated maximum quantity, or `직접 수량 입력`. Direct
+input must be sent as a reply to Maestro's quantity prompt within 10 minutes.
+The original-quantity choice can still be rejected if current capacity is lower.
+The typed fallback is:
 
 ```text
 /retry_order <blocked_order_id> <quantity> [price]
 ```
 
-This creates a new approval and re-runs capacity, market-session, quote,
-reconciliation, and order-limit gates. Do not treat the blocked order itself as
-a completed contribution.
+This creates a new order ID and approval and re-runs capacity, market-session,
+quote, reconciliation, and order-limit gates. Contribution orders can be
+recovered through their contribution month; ordinary rebalances remain
+same-trading-day only. Pre-broker failures and expired approvals appear in
+`/orders` under `Recoverable orders`. Do not treat the blocked order itself as a
+completed contribution.
+
+KIS application errors with a returned response code, such as `APBK1497`, are
+recorded as definitive `rejected` orders. Network timeouts and malformed
+responses remain `halted` and require operator recovery. When an operator
+approves `/retry_order`, the source contribution order is superseded; the new
+order's result becomes the monthly contribution idempotency source of truth.
 
 For a broker-accepted order that remains `open` or `partially_filled`, use
 `/orders` to refresh its status and copy the displayed command:

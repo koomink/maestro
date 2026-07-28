@@ -762,12 +762,26 @@
       `symphony_approval`
 - [x] Add an account-routed pre-approval buying-capacity gate that isolates only
       over-capacity orders and preserves the final broker pre-submit check
+- [x] Align KIS domestic capacity lookup with limit-order `ORD_DVSN=00` so
+      broker maximum quantity is not understated by a market-order ceiling
 - [x] Add same-day `/retry_order` proposals with fresh capacity/live gates, new
       Telegram approval, linked ack events, and duplicate prevention
 - [x] Submit approved multi-order batches before round-robin status polling,
       suppress unchanged open notifications, and persist batch summaries
+- [x] Dispatch live Telegram approvals asynchronously through the always-on
+      operator, with 10-minute expiry and 2/5/8-minute reminders
+- [x] Generalize recovery to capacity, pre-broker failure, and expired approval
+      candidates while keeping open/partial orders on `/modify`
+- [x] Add Telegram recovery-review buttons for failure alerts and `/orders`,
+      with original/current-maximum choices and an audited direct-quantity
+      ForceReply flow that still requires a new approval
+- [x] Add batch status counters and phase-duration telemetry without changing
+      polling frequency
 - [x] Add KIS domestic native revision support plus account recovery for legacy
       order IDs and refreshed `/orders` modification examples
+- [x] Classify KIS application-level order errors as definitive rejections,
+      preserve ambiguous transport failures as halted, and supersede recovered
+      source contribution orders in monthly idempotency checks
 - [x] Record audited run provenance for signal, approval, and `run_once` with
       deployment commit/source hash and prepared/runtime config fingerprints
 

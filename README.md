@@ -458,17 +458,37 @@ generation can reuse the latest broker snapshot's validated `current_prices` as
 the limit price basis instead of drifting from the broker quote checked during
 reconciliation. For KIS domestic and overseas buy orders, the live-order adapter
 also rechecks KIS buying power and max buy quantity with the actual limit price
-immediately before broker submit and rejects the order if KIS reports
-insufficient capacity.
+and matching limit-order semantics immediately before broker submit and rejects
+the order if KIS reports insufficient capacity.
 
 Before Telegram approval, Maestro applies the same account-routed broker
 capacity check to every live buy order. An order that exceeds current cash or
 maximum buy quantity is excluded without blocking valid orders for other
 accounts, and is persisted as `live_order_capacity_blocked`. The Telegram alert
-includes the planned and available quantity plus a
-`/retry_order <blocked_order_id> <quantity> [price]` example. A retry is limited
-to the original quantity, same trading date, fresh capacity and live gates, and
-always creates a new Telegram approval.
+includes a recovery-review button. `/orders` exposes the same button for
+capacity blocks, pre-broker failures, and expired approvals. The review fetches
+the latest quote and buying power, then offers the original quantity, the
+current maximum quantity, or a Telegram reply prompt for a directly entered
+quantity. Every choice re-runs capacity and live gates and creates a new order
+ID and Telegram approval; it never submits directly. The typed
+`/retry_order <blocked_order_id> <quantity> [price]` command remains available
+as a fallback. Contribution-order recovery remains valid through its
+contribution month; ordinary rebalance recovery remains same-day.
+
+Live Telegram approvals are persisted as `telegram_approval_pending` and return
+from the CLI immediately. The long-running Telegram operator remains active,
+routes approval callbacks, sends configured reminders, and records terminal
+acks. Production defaults use a 10-minute window with reminders at 2, 5, and 8
+minutes. Capacity blocks, pre-broker failures, and approval expiry are exposed as
+recoverable original orders; open and partially filled broker orders remain
+`/modify`-only.
+
+KIS application-level order errors (`rt_cd != 0`) are definitive broker
+rejections, not ambiguous submissions. They are recorded as `rejected` and do
+not create `live_order_recovery_required`; transport failures and malformed
+responses remain fail-closed as `halted`. Once a `/retry_order` proposal is
+approved, its source contribution order is superseded and the replacement
+order's lifecycle determines whether that month's contribution was executed.
 
 Partial and full fill reconciliation reads `live_order_status` snapshots,
 applies only newly recognized cumulative fill deltas to Maestro portfolio state,
@@ -503,7 +523,10 @@ Telegram summary shows requested, filled, and remaining quantities and provides
 `/modify <broker_order_id> <price> [quantity]` for open remainders. `/orders`
 refreshes current open/partial orders and prints the same command. KIS domestic
 modification uses its native revision endpoint after a fresh modifiable-quantity
-query; every modification still requires a separate Telegram approval.
+query; every modification still requires a separate Telegram approval. Batch
+events also record planned/submitted/accepted/filled/failed counts and
+submission, polling, reconciliation, and total durations without changing the
+30-second polling interval.
 
 `MaestroOrchestrator.run_once()` remains paper-mode by default, but in
 `live_approval` mode it uses the existing proposal and approval path, converts
@@ -857,8 +880,9 @@ than operator-facing example configs. For the Telegram approval MVP, set
 In `live_approval` mode with Telegram approval, chat IDs and whitelisted user
 IDs are required at config load time, either from those shared env vars or from
 per-config `telegram_allowed_chat_ids` and `whitelisted_user_ids` overrides.
-Maestro sends the order proposal through the Bot API and `run-once` blocks while
-polling for inline approve/reject button callbacks. Manual typed
+Maestro sends the order proposal through the Bot API, persists it, and returns
+with `approval_status=pending`; the continuously running Telegram operator
+handles inline approve/reject callbacks and expiry. Manual typed
 `approve <approval_id>` / `reject <approval_id>` replies are ignored. Webhooks,
 dashboard write controls, and live auto trading remain deferred. Normal tests
 use fake Telegram clients and do not call the Telegram network.

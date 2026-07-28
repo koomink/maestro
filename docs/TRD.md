@@ -342,7 +342,9 @@ refreshes broker truth and reconciliation periodically, while
 trading-day schedule. That command obtains a file lock, refreshes read-only
 broker state when configured, sends the daily Telegram signal summary, skips
 approval when `action_required=false`, and stops the long-running Telegram
-operator while approval polling is active.
+operator only for legacy synchronous non-live approval profiles. Live Telegram
+approval dispatch persists `telegram_approval_pending`, returns immediately,
+and leaves the operator running as the single update consumer.
 
 `signal_run_id` handoff must be immutable and auditable. The saved signal
 package should include the config identity, generated timestamp, account
@@ -466,6 +468,21 @@ the same `signal_run_id`.
   failing orders into `live_order_capacity_blocked` events. Lookup failures fail
   closed per order. Broker pre-submit validation remains in place to catch
   balance or open-order changes after approval.
+- KIS domestic buying-power lookup uses `ORD_DVSN=00` with the intended limit
+  price so `max_buy_quantity` is calculated with the same semantics as the
+  eventual limit order, rather than a market-order upper-limit price.
+- Live Telegram approval is asynchronous. Pending envelopes, reminders, and
+  terminal acknowledgements are audited system events; the operator atomically
+  claims callbacks and re-runs all live gates before execution. Default
+  production expiry is 600 seconds with reminders at 120, 300, and 480 seconds.
+- Capacity blocks, pre-broker terminal failures, and expired approvals create
+  recoverable original-order candidates. Each recovery uses a new order ID and
+  approval; broker-open and partially filled orders remain modification-only.
+- KIS `rt_cd != 0` order responses raise a typed definitive-rejection error.
+  Safety and batch lifecycle code persist these as `rejected` and continue with
+  later orders; transport/parse failures remain ambiguous `halted` recovery
+  cases. An approved recovery ack supersedes its source contribution order so
+  monthly idempotency is determined by the replacement lifecycle.
 - KIS overseas order status lookup uses the broker submission timestamp to query
   the corresponding US exchange-local date range, reducing false unknown states
   around Korea/US date boundaries.
@@ -509,6 +526,8 @@ the same `signal_run_id`.
   submit/recovery results stop later submissions while already accepted orders
   remain read-only tracked. It preserves per-order `live_order_lifecycle` events
   and adds `live_order_batch_lifecycle` plus a transition-only Telegram summary.
+  Batch summaries include status counters and phase durations; polling defaults
+  remain unchanged until production timing evidence supports tuning.
 - `LiveOrderModifyClient` is implemented by KIS domestic stock. It verifies the
   original order and `psbl_qty` through `TTTC0084R`/`VTTC0084R`, then submits a
   revision to `/uapi/domestic-stock/v1/trading/order-rvsecncl` with
@@ -1244,6 +1263,11 @@ Requirements:
   accepted open remainders. Both create a new approval callback; neither is a
   direct unapproved submission path. `/orders` refreshes open/partial statuses
   and includes exact modification examples.
+- Expose recovery-review buttons both in failure notifications and `/orders`.
+  A review refreshes quote and buying power and offers original quantity,
+  current maximum quantity, or a 10-minute user-bound ForceReply prompt for a
+  direct quantity. Prompt consumption and expiry are persisted; all choices
+  share the `/retry_order` gates and create a new approval.
 - Support `/signal_<strategy>` commands through a separate signal config. These
   commands run one selected signal-enabled strategy, persist a signal package
   visible to Dashboard freshness/read models, and do not create approvals or
