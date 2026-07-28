@@ -726,6 +726,7 @@ class TelegramOperatorCommandRouter:
             duplicate_key=f"capacity-retry:{original.order_id}:{order.order_id}",
             currency=order.currency,
             sleeve=order.sleeve,
+            execution_sleeve=order.execution_sleeve,
             account_id=order.account_id,
             broker_product=order.broker_product,
             signal_run_id=candidate.signal_run_id,

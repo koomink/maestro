@@ -19,6 +19,12 @@ class OrderIntent(BaseModel):
     broker_product: BrokerProduct | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @property
+    def execution_sleeve(self) -> str | None:
+        """Attribution bucket for this order, distinct from the currency `sleeve`."""
+        execution_sleeve = self.metadata.get("execution_sleeve")
+        return str(execution_sleeve) if execution_sleeve is not None else None
+
 
 class ExecutionResult(BaseModel):
     order_id: str

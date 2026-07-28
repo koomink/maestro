@@ -299,7 +299,10 @@ def test_fill_reconciliation_updates_strategy_attribution_bucket(tmp_path):
         {
             "request": {
                 "account_id": "toss_brokerage",
-                "sleeve": "crescendo_us",
+                # sleeve carries the currency sleeve; the attribution bucket is
+                # the execution sleeve, which is a different value entirely.
+                "sleeve": "USD",
+                "execution_sleeve": "crescendo_us",
             },
             "result": {"broker_order": {"broker_order_id": "TOSS-1"}},
         },
@@ -340,6 +343,128 @@ def test_fill_reconciliation_updates_strategy_attribution_bucket(tmp_path):
     assert strategy[0]["quantity"] == 2.0
 
 
+def test_fill_reconciliation_does_not_attribute_a_sell_to_the_currency_sleeve(tmp_path):
+    # Regression: the attribution bucket used to be read from request["sleeve"],
+    # which carries the currency sleeve ("USD"), not the execution sleeve. A live
+    # sell then validated against a nonexistent "USD" bucket and raised
+    # AttributionValidationError, aborting reconciliation before the fill and cash
+    # were persisted.
+    store, audit = _context(tmp_path, PortfolioState(cash=1_000.0, positions={"QQQ": 5.0}))
+    attribution = AccountAttributionReconciliationService(store, audit)
+    attribution.reconcile_broker_snapshot(
+        run_id="run_sync",
+        account_id="toss_brokerage",
+        broker_snapshot_id=10,
+        broker_positions={"QQQ": 5.0},
+        strategy_symbols_by_bucket={"crescendo_us": {"QQQ"}},
+    )
+    attribution.adopt_latest(
+        run_id="run_adopt",
+        account_id="toss_brokerage",
+        reason="verified",
+        adopted_by="cli",
+    )
+    store.save_system_event(
+        "run_submit",
+        "live_order_result",
+        {
+            "request": {
+                "account_id": "toss_brokerage",
+                "sleeve": "USD",
+            },
+            "result": {"broker_order": {"broker_order_id": "TOSS-NO-SLEEVE"}},
+        },
+    )
+    _save_status(store, _toss_sell_status("TOSS-NO-SLEEVE", quantity=5.0, price=670.0))
+
+    result = PartialFillReconciliationService(store, audit).reconcile_latest("run_fill")
+
+    # The fill still reaches the portfolio; only attribution is skipped.
+    assert result.applied_fills[0].quantity == 5.0
+    state = store.load_latest_portfolio_state()
+    assert state.positions == {}
+    assert state.cash == 4_350.0
+    assert any(
+        skipped.reason == "attribution_bucket_unresolved" for skipped in result.skipped_fills
+    )
+    latest = store.load_latest_system_event("account_attribution_reconciliation")
+    assert not any(position["bucket_id"] == "USD" for position in latest["payload"]["positions"])
+
+
+def test_fill_reconciliation_records_a_maestro_strategy_sell(tmp_path):
+    store, audit = _context(tmp_path, PortfolioState(cash=1_000.0, positions={"QQQ": 5.0}))
+    attribution = AccountAttributionReconciliationService(store, audit)
+    attribution.reconcile_broker_snapshot(
+        run_id="run_sync",
+        account_id="toss_brokerage",
+        broker_snapshot_id=10,
+        broker_positions={"QQQ": 5.0},
+        strategy_symbols_by_bucket={"crescendo_us": {"QQQ"}},
+    )
+    attribution.adopt_latest(
+        run_id="run_adopt",
+        account_id="toss_brokerage",
+        reason="verified",
+        adopted_by="cli",
+    )
+    store.save_system_event(
+        "run_submit",
+        "live_order_result",
+        {
+            "request": {
+                "account_id": "toss_brokerage",
+                "sleeve": "USD",
+                "execution_sleeve": "crescendo_us",
+            },
+            "result": {"broker_order": {"broker_order_id": "TOSS-SELL"}},
+        },
+    )
+    _save_status(store, _toss_sell_status("TOSS-SELL", quantity=5.0, price=670.0))
+
+    PartialFillReconciliationService(store, audit).reconcile_latest("run_fill")
+
+    latest = store.load_latest_system_event("account_attribution_reconciliation")
+    strategy = [
+        position
+        for position in latest["payload"]["positions"]
+        if position["bucket_id"] == "crescendo_us"
+    ]
+    assert strategy == [] or strategy[0]["quantity"] == 0.0
+    assert any(
+        change.get("event_type") == "maestro_strategy_sell"
+        for change in latest["payload"].get("changes") or []
+    )
+
+
+def _toss_sell_status(
+    broker_order_id: str,
+    *,
+    quantity: float,
+    price: float,
+) -> LiveOrderStatusSnapshot:
+    checked_at = utc_now().isoformat()
+    return LiveOrderStatusSnapshot(
+        broker_order=BrokerOrderId(
+            broker="toss",
+            broker_order_id=broker_order_id,
+            order_id=f"ord_{broker_order_id}",
+            submitted_at=checked_at,
+            account_id="toss_brokerage",
+        ),
+        status=OrderStatus.FILLED,
+        checked_at=checked_at,
+        symbol="QQQ",
+        side=OrderSide.SELL,
+        partial_fill=PartialFillSummary(
+            ordered_quantity=quantity,
+            filled_quantity=quantity,
+            remaining_quantity=0.0,
+            average_fill_price=price,
+            fill_count=1,
+        ),
+    )
+
+
 def test_fill_reconciliation_updates_account_cash_and_kis_transaction_costs(tmp_path):
     initial = PortfolioState(
         cash=1_000_000.0,
@@ -364,7 +489,8 @@ def test_fill_reconciliation_updates_account_cash_and_kis_transaction_costs(tmp_
         {
             "request": {
                 "account_id": "kis_isa",
-                "sleeve": "tranquillo_isa",
+                "sleeve": "KRW",
+                "execution_sleeve": "tranquillo_isa",
                 "currency": "KRW",
             },
             "result": {"broker_order": {"broker_order_id": "KIS-ISA-1"}},
@@ -455,7 +581,8 @@ def test_toss_execution_costs_are_applied_once_across_partial_fills(tmp_path):
         {
             "request": {
                 "account_id": "toss_brokerage",
-                "sleeve": "crescendo_us",
+                "sleeve": "USD",
+                "execution_sleeve": "crescendo_us",
                 "currency": "USD",
             },
             "result": {"broker_order": {"broker_order_id": "TOSS-FEE-1"}},

@@ -133,6 +133,12 @@ class PartialFillReconciliationService:
                     if (
                         applied_fill is not None
                         and order_context is not None
+                        and order_context.attribution_bucket_unresolved
+                    ):
+                        skipped_fills.append(_skipped(snapshot, "attribution_bucket_unresolved"))
+                    if (
+                        applied_fill is not None
+                        and order_context is not None
                         and order_context.bucket_id
                     ):
                         AccountAttributionReconciliationService(
@@ -214,21 +220,24 @@ class PartialFillReconciliationService:
             payload = row["payload"]
             request = payload.get("request", {})
             account_id = str(request.get("account_id") or "")
-            bucket_id = str(request.get("sleeve") or "")
+            # Attribution buckets are execution sleeves ("crescendo_us"), not the
+            # currency sleeve that request["sleeve"] carries ("USD").
+            bucket_id = str(request.get("execution_sleeve") or "")
             currency = str(request.get("currency") or "KRW")
             if account_id:
                 attribution = AccountAttributionReconciliationService(
                     self.state_store,
                     self.audit_logger,
                 )
+                has_attribution = attribution.has_attribution(account_id)
                 return _OrderContext(
                     account_id=account_id,
-                    bucket_id=(
-                        bucket_id
-                        if bucket_id and attribution.has_attribution(account_id)
-                        else None
-                    ),
+                    bucket_id=bucket_id if bucket_id and has_attribution else None,
                     currency=currency,
+                    # An account keeping an attribution ledger must tell us which
+                    # bucket the fill belongs to. Missing it means the ledger will
+                    # silently drift, so surface it instead of skipping quietly.
+                    attribution_bucket_unresolved=has_attribution and not bucket_id,
                 )
         return None
 
@@ -370,6 +379,7 @@ class _OrderContext:
     account_id: str
     bucket_id: str | None
     currency: str
+    attribution_bucket_unresolved: bool = False
 
 
 def _apply_fill(

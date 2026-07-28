@@ -51,6 +51,9 @@ class LiveOrderRequest(BaseModel):
     duplicate_key: str | None = None
     currency: Currency | None = None
     sleeve: str | None = None
+    # The currency sleeve above ("USD"/"KRW") is not the attribution bucket. Fills
+    # are attributed by execution sleeve ("crescendo_us"), so carry it separately.
+    execution_sleeve: str | None = None
     account_id: str | None = None
     broker_product: BrokerProduct | None = None
     signal_run_id: str | None = None
