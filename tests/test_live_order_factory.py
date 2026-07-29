@@ -22,6 +22,7 @@ from maestro.execution.brokers.toss.live_order_client import TossLiveOrderClient
 from maestro.execution.live_order_factory import (
     _build_live_order_client,
     build_live_approval_dependencies,
+    build_live_order_status_client,
 )
 from maestro.execution.live_orders import (
     BrokerOrderId,
@@ -285,6 +286,47 @@ def test_toss_account_builds_live_order_client(tmp_path):
     client = _build_live_order_client(config, account_id="toss_brokerage")
 
     assert isinstance(client, TossLiveOrderClient)
+
+
+def test_status_client_builder_routes_by_broker_for_resumed_order_polling(tmp_path, monkeypatch):
+    """resume-order-tracking must reach every broker, not just KIS.
+
+    It re-polls orders with no submitting client to reuse, so it builds the status
+    client from config alone; routing by broker keeps the USD (Toss) sleeve covered.
+    """
+    monkeypatch.setenv("KIS_MOCK_APP_KEY", "app-key")
+    monkeypatch.setenv("KIS_MOCK_APP_SECRET", "app-secret")
+    base = _config(tmp_path).model_copy(
+        update={
+            "kis": KISConfig(
+                enabled=True,
+                provider="kis",
+                account_id="12345678-01",
+                broker_products=["kis_domestic_stock"],
+            )
+        }
+    )
+    toss_config = base.model_copy(
+        update={
+            "accounts": [
+                BrokerAccountConfig(
+                    id="toss_brokerage",
+                    broker="toss",
+                    environment="real",
+                    account_seq=7,
+                )
+            ]
+        }
+    )
+
+    assert isinstance(
+        build_live_order_status_client(base),
+        KISRestDomesticStockLiveOrderClient,
+    )
+    assert isinstance(
+        build_live_order_status_client(toss_config, account_id="toss_brokerage"),
+        TossLiveOrderClient,
+    )
 
 
 def _config(tmp_path) -> MaestroConfig:
