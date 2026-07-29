@@ -34,7 +34,10 @@ from maestro.execution.funding_requests import (
     format_contribution_funding_request,
     funding_request_reply_markup,
 )
-from maestro.execution.live_order_factory import build_live_order_status_client
+from maestro.execution.live_order_factory import (
+    build_live_order_notification_client,
+    build_live_order_status_client,
+)
 from maestro.execution.live_order_ports import LiveOrderStatusClient
 from maestro.execution.live_order_tracking import LiveOrderTrackingResumeService
 from maestro.execution.live_orders import PartialFillReconciliationService
@@ -1710,7 +1713,12 @@ def resume_order_tracking(
     def status_client_for(account_id: str | None) -> LiveOrderStatusClient:
         return build_live_order_status_client(maestro_config, account_id=account_id)
 
-    service = LiveOrderTrackingResumeService(store, audit, status_client_for)
+    service = LiveOrderTrackingResumeService(
+        store,
+        audit,
+        status_client_for,
+        notification_client=build_live_order_notification_client(maestro_config),
+    )
     run_id = new_run_id()
     summary = service.resume(run_id, limit=limit)
     save_audited_system_event(

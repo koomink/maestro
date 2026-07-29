@@ -17,8 +17,15 @@ from typing import Any
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderStatus
 from maestro.execution.live_order_fills import PartialFillReconciliationService
-from maestro.execution.live_order_models import BrokerOrderId, FillReconciliationResult
-from maestro.execution.live_order_ports import LiveOrderStatusClient
+from maestro.execution.live_order_models import (
+    BrokerOrderId,
+    FillReconciliationResult,
+    LiveOrderLifecycleNotification,
+)
+from maestro.execution.live_order_ports import (
+    LiveOrderNotificationClient,
+    LiveOrderStatusClient,
+)
 from maestro.execution.live_order_status import LiveOrderStatusService
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.events import SystemEventType, save_audited_system_event
@@ -60,12 +67,14 @@ class LiveOrderTrackingResumeService:
         status_client_for_account: "Callable[[str | None], LiveOrderStatusClient]",
         *,
         fill_reconciliation_service: PartialFillReconciliationService | None = None,
+        notification_client: LiveOrderNotificationClient | None = None,
     ) -> None:
         self.state_store = state_store
         self.audit_logger = audit_logger
         # Each brokerage account authenticates separately, so the status client is
         # resolved per order rather than shared.
         self.status_client_for_account = status_client_for_account
+        self.notification_client = notification_client
         self.fill_reconciliation_service = (
             fill_reconciliation_service
             or PartialFillReconciliationService(state_store, audit_logger)
@@ -150,6 +159,16 @@ class LiveOrderTrackingResumeService:
             if snapshot.status in TERMINAL_ORDER_STATUSES:
                 self._persist_resolved(run_id, order, snapshot.status)
                 resolved.append(order.order_id)
+                # Without this the recovery is as silent as the loss was: the
+                # operator approved an order and never heard how it ended.
+                self._notify(
+                    run_id,
+                    order,
+                    snapshot.status,
+                    f"Live order reached {snapshot.status.value} after tracking resumed; "
+                    f"filled {snapshot.partial_fill.filled_quantity:g}"
+                    f"/{snapshot.partial_fill.ordered_quantity:g}.",
+                )
             else:
                 still_open.append(order.order_id)
 
@@ -171,6 +190,40 @@ class LiveOrderTrackingResumeService:
             ),
         }
         return summary
+
+    def _notify(
+        self,
+        run_id: str,
+        order: OutstandingOrder,
+        status: OrderStatus,
+        message: str,
+    ) -> None:
+        if self.notification_client is None:
+            return
+        try:
+            self.notification_client.notify(
+                LiveOrderLifecycleNotification(
+                    run_id=run_id,
+                    order_id=order.order_id,
+                    status=status,
+                    message=message,
+                    broker_order_id=order.broker_order.broker_order_id,
+                )
+            )
+        except Exception as exc:
+            # A dropped message must not lose the fill that was just recovered.
+            save_audited_system_event(
+                self.state_store,
+                self.audit_logger,
+                run_id,
+                "live_order_notification_failed",
+                {
+                    "order_id": order.order_id,
+                    "status": status.value,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
 
     def _resolved_broker_order_ids(self, *, limit: int) -> set[str]:
         """Broker order ids that no longer need re-polling.

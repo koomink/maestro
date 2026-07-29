@@ -3,6 +3,8 @@ from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.live_order_tracking import LiveOrderTrackingResumeService
 from maestro.execution.live_orders import (
     BrokerOrderId,
+    LiveOrderLifecycleNotification,
+    LiveOrderNotificationClient,
     LiveOrderStatusClient,
     LiveOrderStatusSnapshot,
     PartialFillSummary,
@@ -31,6 +33,55 @@ def test_resume_applies_a_fill_that_arrived_after_the_poll_window_closed(tmp_pat
     assert store.load_latest_portfolio_state().positions == {"KODEX": 37.0}
     resolved = store.list_system_events_by_type("live_order_tracking_resolved", limit=10)
     assert resolved[0]["payload"]["final_status"] == OrderStatus.FILLED.value
+
+
+def test_resume_notifies_when_a_recovered_order_reaches_a_terminal_status(tmp_path):
+    """Recovering the fill silently would still leave the operator in the dark.
+
+    The original complaint was not the drift itself but approving an order and
+    never hearing whether it filled.
+    """
+    store, audit = _stores(tmp_path)
+    _record_outstanding(store, broker_order_id="0004931100")
+    filled = _snapshot(OrderStatus.FILLED, filled=37.0, remaining=0.0, average_fill_price=13_395.0)
+    notifier = FakeNotificationClient()
+    service = _service(store, audit, {"0004931100": filled}, notification_client=notifier)
+
+    service.resume("run_resume_1")
+
+    assert [event.status for event in notifier.events] == [OrderStatus.FILLED]
+    assert notifier.events[0].order_id == "ord_kodex_1"
+    assert notifier.events[0].broker_order_id == "0004931100"
+    assert "filled 37/37" in notifier.events[0].message
+
+
+def test_resume_does_not_notify_for_an_order_that_is_still_working(tmp_path):
+    store, audit = _stores(tmp_path)
+    _record_outstanding(store, broker_order_id="0004931100")
+    notifier = FakeNotificationClient()
+    service = _service(
+        store, audit, {"0004931100": _snapshot(OrderStatus.OPEN)}, notification_client=notifier
+    )
+
+    service.resume("run_resume_1")
+
+    assert notifier.events == []
+
+
+def test_resume_keeps_a_recovered_fill_when_notification_delivery_fails(tmp_path):
+    store, audit = _stores(tmp_path)
+    _record_outstanding(store, broker_order_id="0004931100")
+    filled = _snapshot(OrderStatus.FILLED, filled=37.0, remaining=0.0, average_fill_price=13_395.0)
+    service = _service(
+        store, audit, {"0004931100": filled}, notification_client=FailingNotificationClient()
+    )
+
+    summary = service.resume("run_resume_1")
+
+    assert summary["resolved_order_ids"] == ["ord_kodex_1"]
+    assert store.load_latest_portfolio_state().positions == {"KODEX": 37.0}
+    failures = store.list_system_events_by_type("live_order_notification_failed", limit=10)
+    assert failures[0]["payload"]["error_type"] == "RuntimeError"
 
 
 def test_resume_leaves_a_still_working_order_outstanding_for_the_next_run(tmp_path):
@@ -133,9 +184,27 @@ def _stores(tmp_path):
     return store, audit
 
 
-def _service(store, audit, snapshots, *, failing_broker_order_ids=None):
+def _service(store, audit, snapshots, *, failing_broker_order_ids=None, notification_client=None):
     client = FakeStatusClient(snapshots, failing_broker_order_ids or set())
-    return LiveOrderTrackingResumeService(store, audit, lambda account_id: client)
+    return LiveOrderTrackingResumeService(
+        store,
+        audit,
+        lambda account_id: client,
+        notification_client=notification_client,
+    )
+
+
+class FakeNotificationClient(LiveOrderNotificationClient):
+    def __init__(self) -> None:
+        self.events: list[LiveOrderLifecycleNotification] = []
+
+    def notify(self, event: LiveOrderLifecycleNotification) -> None:
+        self.events.append(event)
+
+
+class FailingNotificationClient(LiveOrderNotificationClient):
+    def notify(self, event: LiveOrderLifecycleNotification) -> None:
+        raise RuntimeError("telegram unreachable")
 
 
 def _broker_order(broker_order_id: str, order_id: str, account_id: str) -> BrokerOrderId:

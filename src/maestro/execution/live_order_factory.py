@@ -326,6 +326,14 @@ def _build_status_client(
     raise ValueError("live_approval requires an injected fake status client")
 
 
+def build_live_order_notification_client(
+    config: MaestroConfig,
+    telegram_client: TelegramBotClient | None = None,
+) -> LiveOrderNotificationClient | None:
+    """Order notification client for callers outside a live-order lifecycle run."""
+    return _build_notification_client(config, telegram_client)
+
+
 def _build_notification_client(
     config: MaestroConfig,
     telegram_client: TelegramBotClient | None,
