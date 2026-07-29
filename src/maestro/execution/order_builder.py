@@ -14,6 +14,20 @@ from maestro.portfolio.manager import PortfolioTarget
 from maestro.state.models import PortfolioState
 
 
+def round_price_to_tick(raw_price: float, instrument: TradableInstrument | None) -> float:
+    """Snap a price down to the instrument's tick.
+
+    Brokers reject limit prices that are not tick multiples, and market quotes are
+    not guaranteed to be: a USD ETF quote can carry four decimals against a 0.01
+    tick. Anything that sets an order price must pass through here, including code
+    that substitutes a broker quote after the order was built.
+    """
+    if instrument is None:
+        return raw_price
+    ticks = int(Decimal(str(raw_price)) / Decimal(str(instrument.price_tick)))
+    return float(Decimal(ticks) * Decimal(str(instrument.price_tick)))
+
+
 class OrderBuilder:
     def __init__(
         self,
@@ -439,11 +453,7 @@ class OrderBuilder:
         }
 
     def _order_price(self, symbol: str, raw_price: float) -> float:
-        instrument = self.instruments.get(symbol)
-        if instrument is None:
-            return raw_price
-        ticks = int(Decimal(str(raw_price)) / Decimal(str(instrument.price_tick)))
-        return float(Decimal(ticks) * Decimal(str(instrument.price_tick)))
+        return round_price_to_tick(raw_price, self.instruments.get(symbol))
 
     def _is_contribution_due(self, as_of: datetime | None) -> bool:
         local_date = self._local_date(as_of)

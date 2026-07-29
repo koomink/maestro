@@ -1,6 +1,9 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from maestro.core.enums import OrderSide
+from maestro.core.instruments import TradableInstrument
+from maestro.execution.base import OrderIntent
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.sdk import DataBundle
 
@@ -41,6 +44,72 @@ def test_apply_fx_prices_converts_only_usd_instruments_for_krw_portfolio():
 
     assert result == {"SPY": 135000.0, "005930": 70000.0, "CASH_KRW": 1.0}
     assert prices == {"SPY": 100.0, "005930": 70000.0, "CASH_KRW": 1.0}
+
+
+def test_apply_native_order_prices_snaps_substituted_broker_quotes_to_the_price_tick():
+    """Substituting a broker quote must not undo the order builder's tick rounding.
+
+    Regression: order prices come from _order_generation_prices, which prefers the
+    broker's quote, and a USD ETF quote can carry four decimals against a 0.01 tick.
+    The raw substitution discarded the rounding and the live execution gate rejected
+    the entire signal run on price_tick — that is how the 2026-07-29 US signal run
+    failed once the FX fix let the USD sleeve generate buys again.
+    """
+    orchestrator = object.__new__(MaestroOrchestrator)
+    orchestrator.config = SimpleNamespace(
+        universe=SimpleNamespace(
+            instruments=[
+                _instrument("BIL", price_tick=0.01),
+                _instrument("SPY", price_tick=0.01),
+            ]
+        )
+    )
+    orders = [
+        _order("BIL", quantity=3.0),
+        _order("SPY", quantity=1.0),
+        _order("UNLISTED", quantity=2.0),
+    ]
+
+    repriced = orchestrator._apply_native_order_prices(
+        orders,
+        {"BIL": 91.6378, "SPY": 739.39, "UNLISTED": 12.3456},
+    )
+
+    by_symbol = {order.symbol: order for order in repriced}
+    assert by_symbol["BIL"].price == 91.63
+    assert by_symbol["BIL"].notional == 3.0 * 91.63
+    # An already-aligned quote is left exactly as it is.
+    assert by_symbol["SPY"].price == 739.39
+    # Nothing to snap to without an instrument, so the quote passes through.
+    assert by_symbol["UNLISTED"].price == 12.3456
+
+
+def _instrument(symbol: str, *, price_tick: float) -> TradableInstrument:
+    return TradableInstrument(
+        symbol=symbol,
+        asset_type="etf",
+        region="US",
+        currency="USD",
+        broker="kis",
+        broker_product="kis_overseas_stock",
+        broker_symbol=symbol,
+        exchange_code="NASD",
+        quantity_step=1,
+        price_tick=price_tick,
+        min_order_quantity=1,
+        min_order_notional=1,
+    )
+
+
+def _order(symbol: str, *, quantity: float) -> OrderIntent:
+    return OrderIntent(
+        order_id=f"ord_{symbol.lower()}",
+        symbol=symbol,
+        side=OrderSide.BUY,
+        quantity=quantity,
+        price=1.0,
+        notional=quantity,
+    )
 
 
 def test_apply_fx_prices_leaves_prices_unchanged_for_non_krw_portfolio():

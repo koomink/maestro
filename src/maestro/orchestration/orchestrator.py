@@ -66,6 +66,7 @@ from maestro.execution.live_orders import (
     LiveOrderRequest,
     LiveOrderStatusClient,
 )
+from maestro.execution.order_builder import round_price_to_tick
 from maestro.execution.order_capacity import OrderCapacityBlock, OrderCapacityService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.fx.service import ConfiguredFXRefreshService
@@ -3438,12 +3439,20 @@ class MaestroOrchestrator:
         orders: list[OrderIntent],
         prices: dict[str, float],
     ) -> list[OrderIntent]:
+        instruments = {
+            instrument.symbol: instrument for instrument in self.config.universe.instruments
+        }
         repriced_orders: list[OrderIntent] = []
         for order in orders:
             price = prices.get(order.symbol)
             if price is None:
                 repriced_orders.append(order)
                 continue
+            # These prices prefer the broker's quote, which is not guaranteed to sit
+            # on a tick, so re-snap it. Without this the substitution silently
+            # discards the tick rounding the order builder already did and the live
+            # execution gate rejects the whole run on price_tick.
+            price = round_price_to_tick(price, instruments.get(order.symbol))
             repriced_orders.append(
                 order.model_copy(
                     update={
