@@ -1721,13 +1721,16 @@ def resume_order_tracking(
     )
     run_id = new_run_id()
     summary = service.resume(run_id, limit=limit)
-    save_audited_system_event(
-        store,
-        audit,
-        run_id,
-        "live_order_tracking_resume",
-        summary,
-    )
+    # Runs on a short timer, and the common case is nothing outstanding. Recording
+    # those would bury the runs that actually did something.
+    if summary["outstanding_orders"]:
+        save_audited_system_event(
+            store,
+            audit,
+            run_id,
+            "live_order_tracking_resume",
+            summary,
+        )
     for entry in summary["polled"]:
         typer.echo(
             f"order_id={entry['order_id']} broker_order_id={entry['broker_order_id']} "
