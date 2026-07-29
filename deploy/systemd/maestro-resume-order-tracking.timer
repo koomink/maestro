@@ -1,0 +1,18 @@
+[Unit]
+Description=Re-poll outstanding live orders every 2 minutes during KRX and US market hours
+
+[Timer]
+# KRX session (09:00-15:30 KST).
+OnCalendar=Mon..Fri *-*-* 09..15:0/2 Asia/Seoul
+# US open, covering both EDT (22:30 KST) and EST (23:30 KST).
+OnCalendar=Mon..Fri *-*-* 22..23:0/2 Asia/Seoul
+# US session through the close, 05:00 KST under EDT and 06:00 KST under EST.
+OnCalendar=Tue..Sat *-*-* 00..06:0/2 Asia/Seoul
+# systemd defaults to 1 minute of slack, which would smear a 2 minute cadence.
+AccuracySec=10s
+# One catch-up run after downtime: a reboot is exactly when a fill goes unobserved.
+Persistent=true
+Unit=maestro-resume-order-tracking.service
+
+[Install]
+WantedBy=timers.target

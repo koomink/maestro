@@ -427,3 +427,49 @@ Verify:
 systemctl list-timers maestro-fx-refresh.timer
 journalctl -u maestro-fx-refresh.service -n 5 --no-pager
 ```
+
+## Outstanding live order tracking
+
+The live order lifecycle polls order status on a bounded loop
+(`order_status_max_polls` x `order_status_poll_interval_seconds`, 20 x 30s =
+10 minutes in the operator config). An order still working at the last poll is
+left live at the broker with nobody watching it, and fill reconciliation replays
+recorded `live_order_status` events, so a fill arriving after that point can
+never be applied — `reconcile-fills` and `recover-live-order` both replay the
+same events and find nothing. The position then drifts until someone adopts the
+broker snapshot by hand, losing the real fill quantity, price, and settlement
+costs.
+
+The lifecycle now records `live_order_tracking_incomplete` and notifies when the
+window closes on a working order, and `maestro resume-order-tracking` re-polls
+those orders so the fill lands on the normal reconciliation path and the operator
+gets a Telegram message with the outcome.
+
+`maestro-resume-order-tracking.timer` runs it every 2 minutes during KRX and US
+market hours. That bounds notification latency after the inline 10-minute window
+to 2 minutes. When nothing is outstanding the run makes no broker API calls,
+writes no events, and finishes in about half a second, so a short period is
+cheap. The US windows cover both EDT (22:30-05:00 KST) and EST
+(23:30-06:00 KST).
+
+Note this deliberately does **not** raise `live_order_recovery_required`: that
+blocks all live trading until an operator clears it, and a limit order still
+working after ten minutes is normal. A poll that cannot reach the broker exits
+non-zero so the failure surfaces, and one unreachable order does not stop the
+others from being recovered.
+
+Install:
+
+```bash
+sudo cp deploy/systemd/maestro-resume-order-tracking.service \
+        deploy/systemd/maestro-resume-order-tracking.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now maestro-resume-order-tracking.timer
+```
+
+Verify:
+
+```bash
+systemctl list-timers maestro-resume-order-tracking.timer
+journalctl -u maestro-resume-order-tracking.service -n 5 --no-pager
+```
