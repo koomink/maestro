@@ -288,6 +288,32 @@ def _build_attribution_validator(
     return validate
 
 
+def build_live_order_status_client(
+    config: MaestroConfig,
+    *,
+    account_id: str | None = None,
+) -> LiveOrderStatusClient:
+    """Status client for polling orders outside a live-order lifecycle run.
+
+    Used by resume-order-tracking, which re-polls orders left outstanding by a
+    closed poll window and so has no submitting client to reuse.
+    """
+    kis_config = _kis_config_for_account(config, account_id)
+    if kis_config.provider != "kis":
+        raise ValueError(f"order status polling requires a KIS broker, got {kis_config.provider}")
+    products = kis_config.effective_broker_products()
+    if len(products) > 1:
+        return ProductRoutingKISLiveOrderClient(config, kis_config=kis_config)
+    status_client = build_kis_rest_live_order_client(
+        kis_config,
+        config.universe.instruments,
+        broker_product=products[0],
+    )
+    if not isinstance(status_client, LiveOrderStatusClient):
+        raise ValueError(f"KIS client does not support order status: {products[0]}")
+    return status_client
+
+
 def _build_status_client(
     config: MaestroConfig,
     live_order_client: LiveOrderClient,

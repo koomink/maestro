@@ -272,6 +272,57 @@ def test_lifecycle_max_polls_reached_while_open(tmp_path):
     assert sleeps == []
 
 
+def test_lifecycle_max_polls_reached_while_open_records_outstanding_order(tmp_path):
+    """A closed poll window must leave the order tracked, not abandoned.
+
+    Regression: the loop exited silently on a still-working order. Fill
+    reconciliation replays recorded status snapshots, so a fill arriving after the
+    last poll could never be applied and the position drifted until someone adopted
+    the broker snapshot by hand.
+    """
+    lifecycle, store, _, notifier, request, approval, _ = _context(
+        tmp_path,
+        statuses=[_poll(OrderStatus.OPEN), _poll(OrderStatus.OPEN)],
+        max_polls=2,
+        poll_interval=0.0,
+        sleep_fn=lambda seconds: None,
+    )
+
+    result = lifecycle.run(request, approval)
+
+    assert result.max_polls_reached is True
+    events = store.list_system_events_by_type("live_order_tracking_incomplete", limit=10)
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload["order_id"] == request.order_id
+    assert payload["last_status"] == OrderStatus.OPEN.value
+    assert payload["poll_count"] == 2
+    assert payload["max_polls"] == 2
+    # The broker order must round-trip so a later process can re-poll it.
+    assert payload["broker_order"]["broker_order_id"] == result.broker_order_id
+    assert notifier.events[-1].message == (
+        "Live order still working when status polling ended; tracking left open."
+    )
+
+
+def test_lifecycle_terminal_status_records_no_outstanding_order(tmp_path):
+    lifecycle, store, _, _, request, approval, _ = _context(
+        tmp_path,
+        statuses=[
+            _poll(OrderStatus.OPEN),
+            _poll(OrderStatus.FILLED, filled=2.0, remaining=0.0, average_fill_price=70_000.0),
+        ],
+        max_polls=2,
+        poll_interval=0.0,
+        sleep_fn=lambda seconds: None,
+    )
+
+    result = lifecycle.run(request, approval)
+
+    assert result.final_status == OrderStatus.FILLED
+    assert store.list_system_events_by_type("live_order_tracking_incomplete", limit=10) == []
+
+
 def test_lifecycle_terminal_timeout_reuses_max_polls_flag(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):

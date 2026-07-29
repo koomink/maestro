@@ -22,6 +22,8 @@ class SystemEventType(StrEnum):
     LIVE_ORDER_LIFECYCLE = "live_order_lifecycle"
     LIVE_ORDER_RESULT = "live_order_result"
     LIVE_ORDER_HALT = "live_order_halt"
+    LIVE_ORDER_TRACKING_INCOMPLETE = "live_order_tracking_incomplete"
+    LIVE_ORDER_TRACKING_RESOLVED = "live_order_tracking_resolved"
     LIVE_ORDER_RECOVERY_REQUIRED = "live_order_recovery_required"
     LIVE_ORDER_RECOVERY_COMPLETED = "live_order_recovery_completed"
     LIVE_ORDER_RECOVERY_HALT = "live_order_recovery_halt"
@@ -60,6 +62,19 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     SystemEventType.LIVE_ORDER_LIFECYCLE: ("run_id", "order_id", "final_status", "checked_at"),
     SystemEventType.LIVE_ORDER_RESULT: ("submitted_date", "notional", "request", "result"),
     SystemEventType.LIVE_ORDER_HALT: ("reason",),
+    SystemEventType.LIVE_ORDER_TRACKING_INCOMPLETE: (
+        "reason",
+        "order_id",
+        "broker_order",
+        "last_status",
+        "poll_count",
+    ),
+    SystemEventType.LIVE_ORDER_TRACKING_RESOLVED: (
+        "order_id",
+        "broker_order_id",
+        "final_status",
+        "checked_at",
+    ),
     SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED: ("reason", "order_id"),
     SystemEventType.LIVE_ORDER_RECOVERY_COMPLETED: (
         "broker_reconciliation_event_id",

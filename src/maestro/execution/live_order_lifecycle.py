@@ -9,6 +9,7 @@ from maestro.core.enums import OrderStatus
 from maestro.execution.live_order_fills import PartialFillReconciliationService
 from maestro.execution.live_order_models import (
     AppliedFill,
+    BrokerOrderId,
     FillReconciliationResult,
     LiveOrderLifecycleNotification,
     LiveOrderLifecycleResult,
@@ -110,11 +111,12 @@ class LiveOrderLifecycleService:
             poll_count = 0
             final_status = submitted_order.status
             poll_started_at = monotonic()
+            elapsed_seconds = 0.0
             for poll_index in range(self.config.order_status_max_polls):
+                elapsed_seconds = monotonic() - poll_started_at
                 if (
                     self.config.order_status_terminal_timeout_seconds > 0
-                    and monotonic() - poll_started_at
-                    > self.config.order_status_terminal_timeout_seconds
+                    and elapsed_seconds > self.config.order_status_terminal_timeout_seconds
                 ):
                     max_polls_reached = True
                     break
@@ -196,6 +198,26 @@ class LiveOrderLifecycleService:
                     self._persist_summary(result)
                     return result
             max_polls_reached = True
+            if final_status not in _TERMINAL_LIFECYCLE_STATUSES:
+                # The poll window closed while the order was still working at the
+                # broker. Anything it fills from here happens unobserved, so record
+                # the order as outstanding for resume-order-tracking to pick up
+                # instead of walking away from it.
+                self._persist_tracking_incomplete(
+                    request,
+                    broker_order,
+                    final_status,
+                    poll_count,
+                    elapsed_seconds=elapsed_seconds,
+                )
+                self._notify(
+                    notifications,
+                    request.run_id,
+                    request.order_id,
+                    final_status,
+                    "Live order still working when status polling ended; tracking left open.",
+                    broker_order_id,
+                )
             result = self._result(
                 request=request,
                 final_status=final_status,
@@ -292,6 +314,35 @@ class LiveOrderLifecycleService:
                     "broker_order": broker_order.model_dump(mode="json"),
                     "message": str(exc),
                 },
+            },
+        )
+
+    def _persist_tracking_incomplete(
+        self,
+        request: LiveOrderRequest,
+        broker_order: BrokerOrderId,
+        last_status: OrderStatus,
+        poll_count: int,
+        *,
+        elapsed_seconds: float,
+    ) -> None:
+        save_audited_system_event(
+            self.state_store,
+            self.audit_logger,
+            request.run_id,
+            SystemEventType.LIVE_ORDER_TRACKING_INCOMPLETE,
+            {
+                "reason": "poll_window_closed_before_terminal_status",
+                "order_id": request.order_id,
+                "broker_order": broker_order.model_dump(mode="json"),
+                "broker_order_id": broker_order.broker_order_id,
+                "last_status": last_status.value,
+                "poll_count": poll_count,
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "poll_interval_seconds": self.config.order_status_poll_interval_seconds,
+                "max_polls": self.config.order_status_max_polls,
+                "terminal_timeout_seconds": self.config.order_status_terminal_timeout_seconds,
+                "checked_at": utc_now().isoformat(),
             },
         )
 

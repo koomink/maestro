@@ -34,6 +34,9 @@ from maestro.execution.funding_requests import (
     format_contribution_funding_request,
     funding_request_reply_markup,
 )
+from maestro.execution.live_order_factory import build_live_order_status_client
+from maestro.execution.live_order_ports import LiveOrderStatusClient
+from maestro.execution.live_order_tracking import LiveOrderTrackingResumeService
 from maestro.execution.live_orders import PartialFillReconciliationService
 from maestro.execution.reconciliation import BrokerReconciliationService
 from maestro.fx.service import ConfiguredFXRefreshService
@@ -1682,6 +1685,62 @@ def reconcile_fills(config: Path | None = CONFIG_OPTION) -> None:
         f"portfolio_updated={str(result.portfolio_updated).lower()} "
         f"cash={result.cash:.2f} positions={len(result.positions)}"
     )
+
+
+@app.command("resume-order-tracking")
+def resume_order_tracking(
+    config: Path | None = CONFIG_OPTION,
+    limit: int = typer.Option(100, help="Maximum outstanding orders to inspect."),
+) -> None:
+    """Re-poll orders whose status poll window closed before a terminal state.
+
+    The lifecycle poll loop is bounded, so an order still working at the last poll is
+    left live at the broker with nobody watching it. Fill reconciliation replays
+    recorded status snapshots, so without a fresh poll such a fill can never be
+    applied. Run this on a timer to keep those orders tracked.
+    """
+    maestro_config, identity = _load_operator_config(config)
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter(
+            "resume-order-tracking requires mode=live_readonly or live_approval"
+        )
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+
+    def status_client_for(account_id: str | None) -> LiveOrderStatusClient:
+        return build_live_order_status_client(maestro_config, account_id=account_id)
+
+    service = LiveOrderTrackingResumeService(store, audit, status_client_for)
+    run_id = new_run_id()
+    summary = service.resume(run_id, limit=limit)
+    save_audited_system_event(
+        store,
+        audit,
+        run_id,
+        "live_order_tracking_resume",
+        summary,
+    )
+    for entry in summary["polled"]:
+        typer.echo(
+            f"order_id={entry['order_id']} broker_order_id={entry['broker_order_id']} "
+            f"{entry['previous_status']}->{entry['status']} "
+            f"filled={entry['filled_quantity']}"
+        )
+    for failure in summary["failures"]:
+        typer.echo(
+            f"order_id={failure['order_id']} poll_failed "
+            f"{failure['error_type']}: {failure['error_message']}"
+        )
+    typer.echo(
+        f"outstanding_orders={summary['outstanding_orders']} "
+        f"polled={len(summary['polled'])} "
+        f"resolved={len(summary['resolved_order_ids'])} "
+        f"still_open={len(summary['still_open_order_ids'])} "
+        f"failed={len(summary['failures'])} "
+        f"applied_fills={len(summary['applied_fills'])}"
+    )
+    if summary["failures"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("recover-live-order")
