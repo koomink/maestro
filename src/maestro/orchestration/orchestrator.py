@@ -496,7 +496,11 @@ class MaestroOrchestrator:
             account_orders = scoped_execution.propose_orders(
                 order_scope.state,
                 order_scope.target,
-                valuation_prices,
+                # Order sizing must use native prices: a currency sleeve holds a
+                # single currency and its cash stays in that currency, so pricing it
+                # in the base currency scales buys by the FX rate and rounds them to
+                # zero. Base-currency prices are for cross-currency valuation only.
+                native_prices,
                 as_of=order_generation_time,
                 contribution_already_executed=contribution_already_executed,
                 contribution_override=contribution_override,
@@ -1051,7 +1055,8 @@ class MaestroOrchestrator:
                 account_orders = scoped_execution.propose_orders(
                     order_scope.state,
                     order_scope.target,
-                    valuation_prices,
+                    # Native prices, for the same reason as the signal preview path.
+                    native_prices,
                     as_of=order_generation_time,
                     contribution_already_executed=self._contribution_already_executed(
                         order_generation_time,

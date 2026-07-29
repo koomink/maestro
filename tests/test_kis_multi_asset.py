@@ -182,6 +182,44 @@ def test_order_builder_drops_scaled_sleeve_buy_below_minimum():
     assert [order.symbol for order in orders] == ["AAPL"]
     assert orders[0].side == OrderSide.SELL
 
+
+def test_order_builder_sleeve_buys_need_prices_in_the_sleeve_currency():
+    """Sleeve cash and sleeve prices must share a currency.
+
+    Regression: the orchestrator used to size orders with base-currency (FX
+    converted) prices while the sleeve's cash stayed in its own currency. The
+    cash-scaling step then divided a USD cash figure by a KRW notional, shrinking
+    every buy by the FX rate until it rounded to zero shares. Sells were unaffected,
+    so a USD sleeve could liquidate but never buy.
+    """
+    builder = OrderBuilder(
+        config=ExecutionConfig(order_posture="armed"),
+        instruments=[_us_instrument("AAPL"), _us_instrument("VOO")],
+        currency_sleeves={"USD": {"cash_symbol": "CASH_USD", "symbols": ["AAPL", "VOO"]}},
+    )
+    state = PortfolioState(cash=0, cash_by_currency={"USD": 10_000.0}, positions={"AAPL": 10})
+    target = PortfolioTarget(
+        timestamp=datetime.now(UTC),
+        allocations={},
+        allocation_sleeves={"USD": {"VOO": 1.0}},
+    )
+    usd_prices = {"AAPL": 100.0, "VOO": 100.0}
+    krw_rate = 1_350.0
+    base_currency_prices = {symbol: price * krw_rate for symbol, price in usd_prices.items()}
+
+    native = builder.build_orders(state, target, usd_prices)
+    converted = builder.build_orders(state, target, base_currency_prices)
+
+    native_buys = {order.symbol: order.quantity for order in native if order.side == OrderSide.BUY}
+    # Sleeve value is $11,000 (cash $10,000 + AAPL 10 @ $100) but only $10,000 is
+    # spendable, so the $11,000 of buys scales down to 100 shares.
+    assert native_buys == {"VOO": 100.0}
+    # Same portfolio, same target, prices quoted in the base currency: every buy is
+    # lost while the sell survives.
+    assert [order.symbol for order in converted] == ["AAPL"]
+    assert converted[0].side == OrderSide.SELL
+
+
 def test_paper_execution_updates_cash_by_order_currency():
     config = load_config("tests/fixtures/configs/live_approval_kis_multi_asset.yaml")
     state = PortfolioState(
