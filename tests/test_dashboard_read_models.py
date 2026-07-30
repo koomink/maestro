@@ -630,6 +630,35 @@ def test_freshness_table_labels_fresh_stale_missing_and_disabled_rows(tmp_path):
     assert rows["scheduled_run"]["status"] == "not_configured"
 
 
+def test_freshness_scheduled_run_accepts_split_pipeline_event(tmp_path):
+    """Regression test: the split KR/US daily pipeline emits
+    `signal_run_completed` and never `run_once_completed`.
+
+    The health check already accepted both; this table only read
+    `run_once_completed`, so a deployment whose signals ran on schedule every
+    day still reported `scheduled_run` stale — 21 days of a false warning on
+    the most prominent line of the dashboard.
+    """
+    raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    raw["kis"]["token_cache_path"] = str(tmp_path / "token.json")
+    raw["monitoring"] = {
+        "heartbeat_max_age_seconds": 3600,
+        "scheduled_run_max_age_seconds": 86400,
+    }
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    store.save_system_event("run_signal", "signal_run_completed", {"orders_created": 0})
+
+    rows = {row["name"]: row for row in build_freshness_table(config, store)}
+
+    assert rows["scheduled_run"]["status"] == "fresh"
+
+
 def test_freshness_policy_marks_stale_invalid_and_failed_precedence(tmp_path):
     raw = yaml.safe_load(Path("configs/live_approval.yaml").read_text())
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")

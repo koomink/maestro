@@ -28,6 +28,34 @@ from maestro.state.store import StateStore
 _SCHEDULED_RUN_EVENT_TYPES = ("run_once_completed", "signal_run_completed")
 
 
+def latest_scheduled_run_event(store: StateStore) -> dict[str, Any] | None:
+    """Most recent evidence that the daily orchestration ran.
+
+    Covers both deployment styles: the legacy single-config `run-once` loop
+    (`run_once_completed`) and the split signal/approval daily pipeline
+    (`signal_run_completed`), which never emits `run_once_completed`. Without
+    this, `scheduled_run` would report stale forever for split-pipeline
+    deployments and permanently block `clear-halt`.
+
+    Module level so the health check and the dashboard freshness table read
+    the same definition — they drifted apart once already, leaving the
+    dashboard warning about a pipeline that was running fine.
+    """
+    candidates = [
+        event
+        for event_type in _SCHEDULED_RUN_EVENT_TYPES
+        if (event := store.load_latest_system_event(event_type)) is not None
+    ]
+    if not candidates:
+        return None
+
+    def _sort_key(event: dict[str, Any]) -> float:
+        age = _age_seconds(event["created_at"])
+        return float("inf") if age is None else age
+
+    return min(candidates, key=_sort_key)
+
+
 class HealthService:
     def __init__(self, config: MaestroConfig, store: StateStore) -> None:
         self.config = config
@@ -268,28 +296,7 @@ class HealthService:
         )
 
     def _latest_scheduled_run_event(self) -> dict[str, Any] | None:
-        """Most recent evidence that the daily orchestration ran.
-
-        Covers both deployment styles: the legacy single-config `run-once`
-        loop (`run_once_completed`) and the split signal/approval daily
-        pipeline (`signal_run_completed`), which never emits
-        `run_once_completed`. Without this, `scheduled_run` would report
-        stale forever for split-pipeline deployments and permanently block
-        `clear-halt`.
-        """
-        candidates = [
-            event
-            for event_type in _SCHEDULED_RUN_EVENT_TYPES
-            if (event := self.store.load_latest_system_event(event_type)) is not None
-        ]
-        if not candidates:
-            return None
-
-        def _sort_key(event: dict[str, Any]) -> float:
-            age = _age_seconds(event["created_at"])
-            return float("inf") if age is None else age
-
-        return min(candidates, key=_sort_key)
+        return latest_scheduled_run_event(self.store)
 
     def _datahub_check(self) -> HealthCheck:
         provider_count = len(self.config.datahub.providers)

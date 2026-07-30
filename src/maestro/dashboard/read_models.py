@@ -10,7 +10,7 @@ from maestro.core.time_display import (
     operator_timezone,
 )
 from maestro.dashboard.actions import build_signal_freshness
-from maestro.monitoring.health import HealthService
+from maestro.monitoring.health import HealthService, latest_scheduled_run_event
 from maestro.state.events import (
     SystemEventType,
     missing_system_event_required_fields,
@@ -73,7 +73,7 @@ def build_freshness_table(config: MaestroConfig, store: StateStore) -> list[dict
     broker_snapshot = store.load_latest_broker_account_snapshot()
     reconciliation = store.load_latest_system_event("broker_reconciliation")
     heartbeat = store.load_latest_system_event("maestro_heartbeat")
-    scheduled_run = store.load_latest_system_event("run_once_completed")
+    scheduled_run = latest_scheduled_run_event(store)
     max_reconciliation_age = config.reconciliation.max_age_seconds
     timezone = operator_timezone(config)
     return [
