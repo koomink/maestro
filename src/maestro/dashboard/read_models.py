@@ -901,6 +901,7 @@ def build_currency_sleeve_performance_table(
         for row in store.list_broker_account_snapshots(limit=limit)
         if _broker_snapshot_account_id(row) not in disabled_ids
     ]
+    expected_accounts = _expected_account_ids(source_rows)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):
         group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
@@ -915,6 +916,8 @@ def build_currency_sleeve_performance_table(
             account_id = _broker_snapshot_account_id(row)
             if account_id:
                 latest_by_account[account_id] = row
+        if not expected_accounts <= latest_by_account.keys():
+            continue
 
         component_values: dict[str, float] = {}
         component_cash: dict[str, float] = {}
@@ -982,6 +985,7 @@ def build_total_portfolio_performance_table(
         for row in store.list_broker_account_snapshots(limit=limit)
         if _broker_snapshot_account_id(row) not in disabled_ids
     ]
+    expected_accounts = _expected_account_ids(source_rows)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):
         group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
@@ -1003,6 +1007,8 @@ def build_total_portfolio_performance_table(
             account_id = _broker_snapshot_account_id(row)
             if account_id:
                 latest_by_account[account_id] = row
+        if not expected_accounts <= latest_by_account.keys():
+            continue
 
         component_values: dict[str, float] = {}
         component_cash_flows: dict[str, float] = {}
@@ -2545,6 +2551,26 @@ def _account_value_components(
         currency = _position_currency(position, account, payload, default_currency)
         components[currency] = components.get(currency, 0.0) + _position_market_value(position)
     return components
+
+
+def _expected_account_ids(source_rows: list[dict[str, Any]]) -> set[str]:
+    """Accounts a complete portfolio total has to include.
+
+    The performance builders walk snapshots forward in time and carry each
+    account's latest value forward, because accounts refresh on independent
+    timers and rarely land in the same group. That means the first groups in
+    the window are summed before every account has reported: the total is a
+    partial one, and since it anchors `first_value`, cumulative return is
+    computed against it (a 3-account portfolio showed +351% this way).
+
+    "Expected" is the set observed anywhere in the window rather than the
+    configured set, so an account that is configured but has never synced
+    (`mapped · not synced`) cannot blank the series forever. Disabled
+    accounts are already filtered out of `source_rows` upstream.
+    """
+    return {
+        account_id for row in source_rows if (account_id := _broker_snapshot_account_id(row))
+    }
 
 
 def _position_currency(

@@ -817,6 +817,63 @@ def test_broker_summary_and_exposure_aggregate_latest_snapshot_per_account(tmp_p
     assert positions[0]["account_id"] == "kis_mock"
 
 
+def _save_account_snapshot(store, run_id, account_id, cash):
+    store.save_broker_account_snapshot(
+        run_id,
+        account_id,
+        {
+            "account_id": account_id,
+            "account": {
+                "account_id": account_id,
+                "currency": "KRW",
+                "cash": cash,
+                "total_value": cash,
+                "positions": [],
+            },
+        },
+    )
+
+
+def test_total_portfolio_performance_skips_warm_up_rows(tmp_path):
+    """Regression test: rows summed before every account has reported must not
+    reach the series.
+
+    Accounts refresh on independent timers, so the builder carries each
+    account's latest value forward. At the start of the window that carry
+    map is empty, and the first groups total only the accounts seen so far.
+    Because the first row anchors `first_value`, a partial total made
+    cumulative return meaningless — a live 3-account portfolio reported
+    +351% off a single-account opening row.
+    """
+    store = StateStore(tmp_path / "state.db")
+    # Only acct_a has reported: this group is incomplete.
+    _save_account_snapshot(store, "run_1", "acct_a", 1_000_000.0)
+    # acct_b joins; from here the total covers the whole portfolio.
+    _save_account_snapshot(store, "run_2", "acct_b", 3_000_000.0)
+    _save_account_snapshot(store, "run_3", "acct_a", 1_100_000.0)
+
+    rows = build_total_portfolio_performance_table(store, display_currency="KRW")
+
+    # The 1,000,000 warm-up row is gone; the series opens at the full total.
+    assert [row["total_value"] for row in reversed(rows)] == [4_000_000.0, 4_100_000.0]
+    assert rows[-1]["cumulative_return"] == pytest.approx(0.0)
+    assert rows[0]["cumulative_return"] == pytest.approx(0.025)
+
+
+def test_currency_sleeve_performance_skips_warm_up_rows(tmp_path):
+    """The per-currency series carries accounts forward the same way, so it
+    needs the same guard."""
+    store = StateStore(tmp_path / "state.db")
+    _save_account_snapshot(store, "run_1", "acct_a", 1_000_000.0)
+    _save_account_snapshot(store, "run_2", "acct_b", 3_000_000.0)
+    _save_account_snapshot(store, "run_3", "acct_a", 1_100_000.0)
+
+    rows = build_currency_sleeve_performance_table(store)
+
+    krw = [row for row in reversed(rows) if row["currency"] == "KRW"]
+    assert [row["total_value"] for row in krw] == [4_000_000.0, 4_100_000.0]
+
+
 def test_position_weights_use_fx_converted_total(tmp_path):
     """Regression test: a position's weight must be measured against the same
     total the NAV uses, with both sides in one currency.
