@@ -15,6 +15,7 @@ from maestro.config.env import load_default_env_files, load_env_file
 from maestro.config.identity import ConfigIdentity
 from maestro.config.loader import load_config_with_identity
 from maestro.config.models import MaestroConfig
+from maestro.core.clock import utc_now
 from maestro.core.enums import ProfileStage, RunMode
 from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
@@ -66,6 +67,10 @@ from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 app = typer.Typer()
+performance_baseline_app = typer.Typer()
+cash_flow_app = typer.Typer()
+app.add_typer(performance_baseline_app, name="performance-baseline")
+app.add_typer(cash_flow_app, name="cash-flow")
 
 CONFIG_ENV_VAR = "MAESTRO_CONFIG"
 CONFIG_OPTION = typer.Option(
@@ -984,6 +989,9 @@ def telegram_operator(
     while True:
         try:
             offset = router.poll_once(offset=offset, timeout_seconds=timeout_seconds)
+            notifier = getattr(router, "notify_pending_cash_flows", None)
+            if callable(notifier):
+                notifier()
             typer.echo(f"telegram_operator status=ok offset={offset or 'none'}")
             if once:
                 return
@@ -1586,6 +1594,138 @@ def reconcile(config: Path | None = CONFIG_OPTION) -> None:
             symbol = f" symbol={issue.symbol}" if issue.symbol else ""
             typer.echo(f"issue={issue.issue_type}{symbol} message={issue.message}")
         raise typer.Exit(1)
+
+
+@performance_baseline_app.command("adopt")
+def adopt_performance_baseline(
+    config: Path | None = CONFIG_OPTION,
+    reason: str = typer.Option(..., "--reason"),
+    max_age_seconds: int = typer.Option(1200, "--max-age-seconds", min=1),
+) -> None:
+    from maestro.dashboard.read_models import broker_snapshot_value_components
+
+    maestro_config, identity = _load_operator_config(config)
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter(
+            "performance-baseline adopt requires live_readonly or live_approval"
+        )
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    report = refresh_readonly_accounts(
+        maestro_config,
+        identity,
+        source="performance_baseline_adopt",
+        max_snapshot_age_seconds=0,
+        state_store=store,
+        audit_logger=audit,
+    )
+    failures = [
+        (
+            f"{result.account_id}:status={result.status}:"
+            f"age={result.age_seconds}:reconciled={result.reconciliation_passed}"
+        )
+        for result in report.results
+        if result.status != "refreshed"
+        or result.reconciliation_passed is not True
+        or result.age_seconds is None
+        or result.age_seconds > max_age_seconds
+    ]
+    if failures:
+        raise typer.BadParameter(
+            "performance baseline requires fresh reconciled snapshots: "
+            + ", ".join(failures)
+        )
+    accounts: dict[str, dict[str, object]] = {}
+    component_values: dict[str, float] = {}
+    for result in report.results:
+        snapshot = latest_snapshot_for_account(store, result.account_id)
+        if snapshot is None:
+            raise typer.BadParameter(
+                f"performance baseline snapshot missing: account_id={result.account_id}"
+            )
+        components = broker_snapshot_value_components(
+            snapshot,
+            default_currency=maestro_config.portfolio.base_currency,
+        )
+        accounts[result.account_id] = {
+            "snapshot_id": snapshot["id"],
+            "components": components,
+        }
+        for currency, value in components.items():
+            component_values[currency] = component_values.get(currency, 0.0) + value
+    run_id = new_run_id()
+    effective_at = max(
+        str(latest_snapshot_for_account(store, result.account_id)["created_at"])
+        for result in report.results
+    )
+    payload = {
+        "baseline_id": run_id,
+        "effective_at": effective_at,
+        "accounts": accounts,
+        "component_values": component_values,
+        "base_currency": maestro_config.portfolio.base_currency,
+        "reason": reason,
+        "source_refresh_run_id": report.run_id,
+    }
+    save_audited_system_event(
+        store,
+        audit,
+        run_id,
+        SystemEventType.PERFORMANCE_BASELINE_ADOPTED,
+        payload,
+    )
+    typer.echo(
+        f"adopted baseline_id={run_id} effective_at={effective_at} "
+        f"accounts={len(accounts)}"
+    )
+
+
+@cash_flow_app.command("record")
+def record_account_cash_flow(
+    account_id: str = typer.Option(..., "--account-id"),
+    amount: float = typer.Option(..., "--amount", min=0.000001),
+    currency: str = typer.Option(..., "--currency"),
+    flow_type: str = typer.Option(..., "--flow-type"),
+    reason: str = typer.Option(..., "--reason"),
+    effective_at: str | None = typer.Option(None, "--effective-at"),
+    transfer_id: str | None = typer.Option(None, "--transfer-id"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    known_accounts = set(broker_readonly_account_ids(maestro_config))
+    if account_id not in known_accounts:
+        raise typer.BadParameter(f"unknown account_id={account_id}")
+    normalized_type = flow_type.strip().lower()
+    if normalized_type not in {"deposit", "withdrawal"}:
+        raise typer.BadParameter("--flow-type must be deposit or withdrawal")
+    normalized_currency = currency.strip().upper()
+    timestamp = effective_at or utc_now().isoformat()
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    run_id = new_run_id()
+    signed_amount = abs(amount) if normalized_type == "deposit" else -abs(amount)
+    payload = {
+        "account_id": account_id,
+        "amount": signed_amount,
+        "currency": normalized_currency,
+        "flow_type": normalized_type,
+        "effective_at": timestamp,
+        "source": "operator_cli",
+        "reason": reason,
+        "transfer_id": transfer_id,
+        "decided_by": "operator_cli",
+    }
+    save_audited_system_event(
+        store,
+        audit,
+        run_id,
+        SystemEventType.ACCOUNT_CASH_FLOW,
+        payload,
+    )
+    typer.echo(
+        f"recorded cash_flow_id={run_id} account_id={account_id} "
+        f"amount={signed_amount:.6f} currency={normalized_currency}"
+    )
 
 
 @app.command("adopt-broker-snapshot")

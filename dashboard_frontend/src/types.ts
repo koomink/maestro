@@ -192,6 +192,10 @@ export type DashboardSnapshot = {
     performance_snapshot: {
       schema_version: number;
       display_currency: "KRW" | "USD";
+      period?: string;
+      coverage_start?: string | null;
+      coverage_end?: string | null;
+      rows_returned?: number;
       latest: Row;
       series: {
         account: Row[];

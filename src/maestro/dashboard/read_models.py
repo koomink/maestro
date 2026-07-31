@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
@@ -771,6 +772,7 @@ def build_broker_snapshot_history_table(
                 "positions_market_value": positions_market_value,
                 "total_value": total_value,
                 "source": account.get("source") or payload.get("source"),
+                "performance_status": "legacy",
             }
         )
     return rows
@@ -809,6 +811,14 @@ def build_account_performance_table(
     limit: int = 100,
     display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
+    baseline = store.load_latest_system_event(SystemEventType.PERFORMANCE_BASELINE_ADOPTED)
+    if baseline is not None:
+        return _build_baselined_account_performance_table(
+            store,
+            baseline,
+            config=config,
+            display_currency=display_currency,
+        )
     disabled_ids = _disabled_native_account_ids(config)
     source_rows = [
         row
@@ -830,7 +840,7 @@ def build_account_performance_table(
         payload = _mapping(row.get("payload"))
         account = _mapping(payload.get("account"))
         positions = _positions(account)
-        account_id = str(row.get("account_id") or account.get("account_id") or "")
+        account_id = _broker_snapshot_account_id(row)
         total_value, currency, cash = _account_currency_aware_total(
             account, positions, payload, fx_snapshot, display_currency
         )
@@ -880,6 +890,183 @@ def build_account_performance_table(
     return list(reversed(rows))
 
 
+def _build_baselined_account_performance_table(
+    store: StateStore,
+    baseline_row: dict[str, Any],
+    *,
+    config: MaestroConfig | None,
+    display_currency: str,
+) -> list[dict[str, Any]]:
+    baseline = _mapping(baseline_row.get("payload"))
+    baseline_timestamp = _parse_timestamp(
+        baseline.get("effective_at") or baseline_row.get("created_at")
+    )
+    if baseline_timestamp is None:
+        return []
+    since = baseline_timestamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    source_rows = list(
+        reversed(store.list_broker_account_snapshots(limit=None, since=since))
+    )
+    fx_events = _fx_rate_events(store)
+    baseline_fx = _fx_snapshot_as_of(fx_events, baseline_timestamp)
+    baseline_accounts = _mapping(baseline.get("accounts"))
+    tracked_accounts = set(str(account_id) for account_id in baseline_accounts)
+    tracked_accounts.update(
+        event["account_id"]
+        for event in _account_lifecycle_events(store, after=baseline_timestamp)
+        if event["event_type"] == SystemEventType.ACCOUNT_TRACKING_STARTED
+    )
+    cash_flows = _account_cash_flow_events(
+        store,
+        after=baseline_timestamp,
+        exclude_internal_transfers=False,
+    )
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    states: dict[str, dict[str, Any]] = {}
+    rows = []
+    for row in source_rows:
+        timestamp = _parse_timestamp(row.get("created_at"))
+        if timestamp is None or timestamp <= baseline_timestamp:
+            continue
+        account_id = _broker_snapshot_account_id(row)
+        if account_id not in tracked_accounts:
+            continue
+        payload = _mapping(row.get("payload"))
+        account = _mapping(payload.get("account"))
+        positions = _positions(account)
+        fx_snapshot = _fx_snapshot_as_of(fx_events, timestamp)
+        total_value, currency, cash = _account_currency_aware_total(
+            account,
+            positions,
+            payload,
+            fx_snapshot,
+            display_currency,
+        )
+        state = states.get(account_id)
+        if state is None:
+            baseline_account = _mapping(baseline_accounts.get(account_id))
+            baseline_components = {
+                str(key): float(value)
+                for key, value in _mapping(baseline_account.get("components")).items()
+            }
+            if len(baseline_components) == 1:
+                baseline_value = next(iter(baseline_components.values()))
+            else:
+                baseline_value = _convert_components(
+                    baseline_components,
+                    display_currency,
+                    baseline_fx,
+                )
+            initial_value = baseline_value if baseline_value is not None else total_value
+            state = {
+                "first_value": initial_value,
+                "previous_value": initial_value,
+                "peak_value": initial_value,
+                "cumulative_cash_flow": 0.0,
+                "twr_growth": 1.0,
+                "twr_peak": 1.0,
+                "previous_timestamp": (
+                    baseline_timestamp if baseline_value is not None else timestamp
+                ),
+                "cash_flow_events": [],
+                "mwr_flows": (
+                    [(baseline_timestamp, -initial_value)]
+                    if initial_value is not None and baseline_value is not None
+                    else [(timestamp, -initial_value)]
+                    if initial_value is not None
+                    else []
+                ),
+            }
+            states[account_id] = state
+            if baseline_value is None:
+                total_value = None
+        period_events = [
+            event
+            for event in _period_cash_flow_events(
+                cash_flows,
+                state.get("previous_timestamp"),
+                timestamp,
+            )
+            if event.get("account_id") == account_id
+        ]
+        converted_events = []
+        flow_failed = False
+        cash_flow = 0.0
+        for event in period_events:
+            event_fx = _fx_snapshot_as_of(fx_events, event["timestamp"])
+            converted = _convert_components(
+                {event["currency"]: event["signed_amount"]},
+                currency,
+                event_fx,
+            )
+            if converted is None:
+                flow_failed = True
+                break
+            cash_flow += converted
+            converted_events.append(
+                {
+                    "timestamp": event["timestamp"],
+                    "signed_amount": converted,
+                    "payload": {
+                        **event["payload"],
+                        "display_amount": converted,
+                        "display_currency": currency,
+                        "fx_rate": _fx_rate(event["currency"], currency, event_fx),
+                        "fx_as_of": event_fx.get("as_of"),
+                        "fx_event_id": event_fx.get("event_id"),
+                    },
+                }
+            )
+        performance = _advance_twr_performance_state(
+            state,
+            total_value if not flow_failed else None,
+            cash_flow,
+            timestamp,
+            converted_events,
+        )
+        reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
+        rows.append(
+            {
+                "created_at": row.get("created_at"),
+                "run_id": row.get("run_id"),
+                "account_id": account_id,
+                "currency": currency,
+                "total_value": total_value,
+                "cash": cash,
+                "positions_market_value": (
+                    total_value - cash
+                    if total_value is not None and cash is not None
+                    else None
+                ),
+                "realized_pnl": _first_float(
+                    account,
+                    payload,
+                    ("realized_pnl", "realized_profit_loss", "realized_profit"),
+                ),
+                "unrealized_pnl": _account_unrealized_pnl(account, positions),
+                "fees": _first_float(account, payload, ("fees", "fee", "commission")),
+                "cash_flow": _round_money(cash_flow),
+                "period_return": performance["period_return"],
+                "daily_return": None,
+                "cumulative_return": performance["twr"],
+                "twr": performance["twr"],
+                "mwr": performance["mwr"],
+                "drawdown": performance["drawdown"],
+                "reconciliation_status": _reconciliation_status(reconciliation),
+                "reconciliation_created_at": (reconciliation or {}).get("created_at"),
+                "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
+                "source": account.get("source") or payload.get("source"),
+                "performance_status": "tracked",
+                "baseline_id": baseline.get("baseline_id"),
+                "baseline_at": baseline.get("effective_at"),
+                "cash_flow_events": [event["payload"] for event in converted_events],
+            }
+        )
+    for account_id in states:
+        _assign_daily_returns([row for row in rows if row["account_id"] == account_id])
+    return list(reversed(rows))
+
+
 def build_currency_sleeve_performance_table(
     store: StateStore,
     config: MaestroConfig | None = None,
@@ -895,6 +1082,13 @@ def build_currency_sleeve_performance_table(
     silently fold a USD sleeve into the KRW row (or vice versa) and make
     that sleeve appear to not exist at all.
     """
+    baseline = store.load_latest_system_event(SystemEventType.PERFORMANCE_BASELINE_ADOPTED)
+    if baseline is not None:
+        return _build_baselined_currency_sleeve_performance_table(
+            store,
+            baseline,
+            config=config,
+        )
     disabled_ids = _disabled_native_account_ids(config)
     source_rows = [
         row
@@ -968,8 +1162,171 @@ def build_currency_sleeve_performance_table(
                     "cumulative_return": performance["cumulative_return"],
                     "drawdown": performance["drawdown"],
                     "reconciliation_status": combined_reconciliation,
+                    "performance_status": "legacy",
                 }
             )
+    return list(reversed(rows))
+
+
+def _build_baselined_currency_sleeve_performance_table(
+    store: StateStore,
+    baseline_row: dict[str, Any],
+    *,
+    config: MaestroConfig | None,
+) -> list[dict[str, Any]]:
+    baseline = _mapping(baseline_row.get("payload"))
+    baseline_timestamp = _parse_timestamp(
+        baseline.get("effective_at") or baseline_row.get("created_at")
+    )
+    if baseline_timestamp is None:
+        return []
+    since = baseline_timestamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    source_rows = list(
+        reversed(store.list_broker_account_snapshots(limit=None, since=since))
+    )
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in source_rows:
+        grouped.setdefault(
+            str(row.get("run_id") or row.get("created_at") or row.get("id")),
+            [],
+        ).append(row)
+    baseline_components = {
+        str(currency): float(value)
+        for currency, value in _mapping(baseline.get("component_values")).items()
+    }
+    active_accounts = set(str(key) for key in _mapping(baseline.get("accounts")))
+    lifecycle_events = _account_lifecycle_events(store, after=baseline_timestamp)
+    cash_flows = _account_cash_flow_events(store, after=baseline_timestamp)
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    states = {
+        currency: {
+            "first_value": value,
+            "previous_value": value,
+            "peak_value": value,
+            "cumulative_cash_flow": 0.0,
+            "twr_growth": 1.0,
+            "twr_peak": 1.0,
+            "previous_timestamp": baseline_timestamp,
+            "cash_flow_events": [],
+            "mwr_flows": [(baseline_timestamp, -value)],
+        }
+        for currency, value in baseline_components.items()
+    }
+    latest_by_account: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    lifecycle_index = 0
+    previous_timestamp = baseline_timestamp
+    rows: list[dict[str, Any]] = []
+    for group_rows in grouped.values():
+        timestamp = _parse_timestamp(group_rows[-1].get("created_at"))
+        if timestamp is None or timestamp <= baseline_timestamp:
+            continue
+        started: set[str] = set()
+        ended: set[str] = set()
+        while (
+            lifecycle_index < len(lifecycle_events)
+            and lifecycle_events[lifecycle_index]["timestamp"] <= timestamp
+        ):
+            event = lifecycle_events[lifecycle_index]
+            account_id = event["account_id"]
+            if event["event_type"] == SystemEventType.ACCOUNT_TRACKING_STARTED:
+                if account_id not in active_accounts:
+                    active_accounts.add(account_id)
+                    started.add(account_id)
+            elif account_id in active_accounts:
+                active_accounts.discard(account_id)
+                ended.add(account_id)
+            lifecycle_index += 1
+        for row in group_rows:
+            account_id = _broker_snapshot_account_id(row)
+            if account_id:
+                latest_by_account[account_id] = row
+        if not active_accounts <= latest_by_account.keys():
+            continue
+        if any(
+            (snapshot_timestamp := _parse_timestamp(row.get("created_at"))) is None
+            or (timestamp - snapshot_timestamp).total_seconds() > 1200
+            for account_id, row in latest_by_account.items()
+            if account_id in active_accounts
+        ):
+            continue
+        values: dict[str, float] = {}
+        statuses = []
+        for account_id in active_accounts:
+            row = latest_by_account[account_id]
+            for currency, value in broker_snapshot_value_components(row).items():
+                values[currency] = values.get(currency, 0.0) + value
+            statuses.append(
+                _reconciliation_status(reconciliation_by_snapshot_id.get(str(row.get("id"))))
+            )
+        flow_by_currency: dict[str, float] = {}
+        period_events = _period_cash_flow_events(
+            cash_flows,
+            previous_timestamp,
+            timestamp,
+        )
+        for event in period_events:
+            flow_by_currency[event["currency"]] = (
+                flow_by_currency.get(event["currency"], 0.0) + event["signed_amount"]
+            )
+        for account_ids, sign in ((started, 1.0), (ended, -1.0)):
+            for account_id in account_ids:
+                row = latest_by_account.get(account_id)
+                if row is None:
+                    continue
+                for currency, value in broker_snapshot_value_components(row).items():
+                    flow_by_currency[currency] = (
+                        flow_by_currency.get(currency, 0.0) + sign * value
+                    )
+        for currency in sorted(set(values) | set(flow_by_currency)):
+            total_value = values.get(currency, 0.0)
+            new_currency = currency not in states
+            if new_currency:
+                states[currency] = {
+                    "first_value": total_value,
+                    "previous_value": total_value,
+                    "peak_value": total_value,
+                    "cumulative_cash_flow": 0.0,
+                    "twr_growth": 1.0,
+                    "twr_peak": 1.0,
+                    "previous_timestamp": timestamp,
+                    "cash_flow_events": [],
+                    "mwr_flows": [(timestamp, -total_value)],
+                }
+            state = states[currency]
+            currency_events = [
+                event for event in period_events if event["currency"] == currency
+            ]
+            cash_flow = 0.0 if new_currency else flow_by_currency.get(currency, 0.0)
+            performance = _advance_twr_performance_state(
+                state,
+                total_value,
+                cash_flow,
+                timestamp,
+                currency_events,
+            )
+            rows.append(
+                {
+                    "created_at": group_rows[-1].get("created_at"),
+                    "run_id": group_rows[-1].get("run_id"),
+                    "currency": currency,
+                    "total_value": total_value,
+                    "cash": None,
+                    "cash_flow": _round_money(cash_flow),
+                    "period_return": performance["period_return"],
+                    "daily_return": None,
+                    "cumulative_return": performance["twr"],
+                    "twr": performance["twr"],
+                    "mwr": performance["mwr"],
+                    "drawdown": performance["drawdown"],
+                    "reconciliation_status": _combined_reconciliation_status(statuses),
+                    "performance_status": "tracked",
+                    "baseline_id": baseline.get("baseline_id"),
+                    "baseline_at": baseline.get("effective_at"),
+                }
+            )
+        previous_timestamp = timestamp
+    for currency in states:
+        _assign_daily_returns([row for row in rows if row["currency"] == currency])
     return list(reversed(rows))
 
 
@@ -979,6 +1336,14 @@ def build_total_portfolio_performance_table(
     limit: int = 200,
     display_currency: str = "KRW",
 ) -> list[dict[str, Any]]:
+    baseline = store.load_latest_system_event(SystemEventType.PERFORMANCE_BASELINE_ADOPTED)
+    if baseline is not None:
+        return _build_baselined_total_portfolio_performance_table(
+            store,
+            baseline,
+            config=config,
+            display_currency=display_currency,
+        )
     disabled_ids = _disabled_native_account_ids(config)
     source_rows = [
         row
@@ -1082,9 +1447,270 @@ def build_total_portfolio_performance_table(
                 "cumulative_return": performance["cumulative_return"],
                 "drawdown": performance["drawdown"],
                 "reconciliation_status": _combined_reconciliation_status(reconciliation_statuses),
+                "performance_status": "legacy",
             }
         )
         previous_component_values = component_values
+    return list(reversed(rows))
+
+
+def _build_baselined_total_portfolio_performance_table(
+    store: StateStore,
+    baseline_row: dict[str, Any],
+    *,
+    config: MaestroConfig | None,
+    display_currency: str,
+) -> list[dict[str, Any]]:
+    baseline = _mapping(baseline_row.get("payload"))
+    baseline_timestamp = _parse_timestamp(
+        baseline.get("effective_at") or baseline_row.get("created_at")
+    )
+    if baseline_timestamp is None:
+        return []
+    baseline_text = baseline_timestamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    source_rows = store.list_broker_account_snapshots(limit=None, since=baseline_text)
+    grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    for row in reversed(source_rows):
+        group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
+        grouped.setdefault(group_key, []).append(row)
+
+    fx_events = _fx_rate_events(store)
+    baseline_components = {
+        str(currency): float(value)
+        for currency, value in _mapping(baseline.get("component_values")).items()
+    }
+    baseline_fx = _fx_snapshot_as_of(fx_events, baseline_timestamp)
+    baseline_value = _convert_components(baseline_components, display_currency, baseline_fx)
+    if baseline_value is None:
+        return []
+    baseline_accounts = _mapping(baseline.get("accounts"))
+    active_accounts = set(str(account_id) for account_id in baseline_accounts)
+    lifecycle_events = _account_lifecycle_events(store, after=baseline_timestamp)
+    cash_flow_events = _account_cash_flow_events(store, after=baseline_timestamp)
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    state = {
+        "first_value": baseline_value,
+        "previous_value": baseline_value,
+        "peak_value": baseline_value,
+        "cumulative_cash_flow": 0.0,
+        "twr_growth": 1.0,
+        "twr_peak": 1.0,
+        "previous_timestamp": baseline_timestamp,
+        "cash_flow_events": [],
+        "mwr_flows": [(baseline_timestamp, -baseline_value)],
+    }
+    latest_by_account: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    previous_component_values = baseline_components
+    rows: list[dict[str, Any]] = []
+    lifecycle_index = 0
+    for group_rows in grouped.values():
+        current_timestamp = _parse_timestamp(group_rows[-1].get("created_at"))
+        if current_timestamp is None or current_timestamp <= baseline_timestamp:
+            continue
+        started: set[str] = set()
+        ended: set[str] = set()
+        while (
+            lifecycle_index < len(lifecycle_events)
+            and lifecycle_events[lifecycle_index]["timestamp"] <= current_timestamp
+        ):
+            event = lifecycle_events[lifecycle_index]
+            if event["event_type"] == SystemEventType.ACCOUNT_TRACKING_STARTED:
+                if event["account_id"] not in active_accounts:
+                    active_accounts.add(event["account_id"])
+                    started.add(event["account_id"])
+            else:
+                if event["account_id"] in active_accounts:
+                    active_accounts.discard(event["account_id"])
+                    ended.add(event["account_id"])
+            lifecycle_index += 1
+        for row in group_rows:
+            account_id = _broker_snapshot_account_id(row)
+            if account_id:
+                latest_by_account[account_id] = row
+        missing_accounts = sorted(active_accounts - latest_by_account.keys())
+        stale_accounts = sorted(
+            account_id
+            for account_id in active_accounts & latest_by_account.keys()
+            if (
+                snapshot_timestamp := _parse_timestamp(
+                    latest_by_account[account_id].get("created_at")
+                )
+            )
+            is None
+            or (current_timestamp - snapshot_timestamp).total_seconds() > 1200
+        )
+        if missing_accounts or stale_accounts:
+            rows.append(
+                {
+                    "created_at": group_rows[-1].get("created_at"),
+                    "run_id": group_rows[-1].get("run_id"),
+                    "currency": display_currency,
+                    "display_currency": display_currency,
+                    "total_value": None,
+                    "component_values": {},
+                    "cash_flow": None,
+                    "period_return": None,
+                    "daily_return": None,
+                    "cumulative_return": None,
+                    "drawdown": None,
+                    "fx_status": "not_evaluated",
+                    "missing_fx": False,
+                    "stale_fx": False,
+                    "reconciliation_status": "partial",
+                    "performance_status": "partial",
+                    "baseline_id": baseline.get("baseline_id"),
+                    "baseline_at": baseline.get("effective_at"),
+                    "active_accounts": sorted(active_accounts),
+                    "missing_accounts": missing_accounts,
+                    "stale_accounts": stale_accounts,
+                    "unexplained_return": False,
+                }
+            )
+            continue
+
+        component_values: dict[str, float] = {}
+        reconciliation_statuses: list[str] = []
+        for account_id in sorted(active_accounts):
+            row = latest_by_account[account_id]
+            for currency, value in broker_snapshot_value_components(
+                row,
+                default_currency=display_currency,
+            ).items():
+                component_values[currency] = component_values.get(currency, 0.0) + value
+            reconciliation_statuses.append(
+                _reconciliation_status(reconciliation_by_snapshot_id.get(str(row.get("id"))))
+            )
+
+        period_events = _period_cash_flow_events(
+            cash_flow_events,
+            state.get("previous_timestamp"),
+            current_timestamp,
+        )
+        membership_components: dict[str, float] = {}
+        converted_event_payloads: list[dict[str, Any]] = []
+        converted_events: list[dict[str, Any]] = []
+        flow_conversion_failed = False
+        for event in period_events:
+            event_fx = _fx_snapshot_as_of(fx_events, event["timestamp"])
+            converted = _convert_components(
+                {event["currency"]: event["signed_amount"]},
+                display_currency,
+                event_fx,
+            )
+            if converted is None:
+                flow_conversion_failed = True
+                break
+            converted_payload = {
+                **event["payload"],
+                "display_amount": converted,
+                "display_currency": display_currency,
+                "fx_rate": _fx_rate(event["currency"], display_currency, event_fx),
+                "fx_as_of": event_fx.get("as_of"),
+                "fx_event_id": event_fx.get("event_id"),
+            }
+            converted_event_payloads.append(converted_payload)
+            converted_events.append(
+                {
+                    "timestamp": event["timestamp"],
+                    "signed_amount": converted,
+                    "payload": converted_payload,
+                }
+            )
+        for account_id in started:
+            row = latest_by_account.get(account_id)
+            if row is None:
+                flow_conversion_failed = True
+                continue
+            for currency, value in broker_snapshot_value_components(
+                row,
+                default_currency=display_currency,
+            ).items():
+                membership_components[currency] = (
+                    membership_components.get(currency, 0.0) + value
+                )
+        for account_id in ended:
+            row = latest_by_account.get(account_id)
+            if row is None:
+                continue
+            for currency, value in broker_snapshot_value_components(
+                row,
+                default_currency=display_currency,
+            ).items():
+                membership_components[currency] = (
+                    membership_components.get(currency, 0.0) - value
+                )
+
+        fx_snapshot = _fx_snapshot_as_of(fx_events, current_timestamp)
+        total_value = _convert_components(component_values, display_currency, fx_snapshot)
+        membership_flow = _convert_components(
+            membership_components,
+            display_currency,
+            fx_snapshot,
+        )
+        cash_flow = (
+            None
+            if flow_conversion_failed or membership_flow is None
+            else sum(event["signed_amount"] for event in converted_events)
+            + membership_flow
+        )
+        performance = _advance_twr_performance_state(
+            state,
+            total_value if cash_flow is not None else None,
+            cash_flow or 0.0,
+            current_timestamp,
+            converted_events,
+        )
+        local_return = _local_component_return(component_values, previous_component_values)
+        period_return = performance["period_return"]
+        unexplained_return = (
+            period_return is not None
+            and abs(period_return) > 0.15
+            and not period_events
+            and not started
+            and not ended
+        )
+        rows.append(
+            {
+                "created_at": group_rows[-1].get("created_at"),
+                "run_id": group_rows[-1].get("run_id"),
+                "currency": display_currency,
+                "display_currency": display_currency,
+                "total_value": total_value,
+                "component_values": dict(sorted(component_values.items())),
+                "cash_flow": _round_money(cash_flow),
+                "cumulative_cash_flow": performance["cumulative_cash_flow"],
+                "net_pnl": performance["net_pnl"],
+                "period_return": period_return,
+                "daily_return": None,
+                "cumulative_return": performance["twr"],
+                "twr": performance["twr"],
+                "mwr": performance["mwr"],
+                "drawdown": performance["drawdown"],
+                "local_return": local_return,
+                "fx_effect": (
+                    _round_ratio(period_return - local_return)
+                    if period_return is not None and local_return is not None
+                    else None
+                ),
+                "fx_status": fx_snapshot.get("status"),
+                "fx_source": fx_snapshot.get("source"),
+                "fx_rate": fx_snapshot.get("rate"),
+                "fx_timestamp": fx_snapshot.get("as_of"),
+                "missing_fx": total_value is None,
+                "stale_fx": fx_snapshot.get("status") == "stale",
+                "reconciliation_status": _combined_reconciliation_status(
+                    reconciliation_statuses
+                ),
+                "performance_status": "tracked",
+                "baseline_id": baseline.get("baseline_id"),
+                "baseline_at": baseline.get("effective_at"),
+                "active_accounts": sorted(active_accounts),
+                "cash_flow_events": converted_event_payloads,
+                "unexplained_return": unexplained_return,
+            }
+        )
+        previous_component_values = component_values
+    _assign_daily_returns(rows)
     return list(reversed(rows))
 
 
@@ -2541,16 +3167,32 @@ def _account_value_components(
     if reported_total is not None:
         return {account_currency: reported_total}
 
-    cash_balance = _mapping(account.get("cash_balance"))
-    cash_currency = str(cash_balance.get("currency") or account_currency)
     components: dict[str, float] = {}
-    cash = _float_or_none(account.get("cash"))
-    if cash is not None:
-        components[cash_currency] = components.get(cash_currency, 0.0) + cash
+    for currency, cash in _account_cash_components(
+        account,
+        payload,
+        default_currency=default_currency,
+    ).items():
+        components[currency] = components.get(currency, 0.0) + cash
     for position in positions:
         currency = _position_currency(position, account, payload, default_currency)
         components[currency] = components.get(currency, 0.0) + _position_market_value(position)
     return components
+
+
+def broker_snapshot_value_components(
+    row: dict[str, Any],
+    *,
+    default_currency: str = "KRW",
+) -> dict[str, float]:
+    payload = _mapping(row.get("payload"))
+    account = _mapping(payload.get("account"))
+    return _account_value_components(
+        account,
+        _positions(account),
+        payload,
+        default_currency=default_currency,
+    )
 
 
 def _expected_account_ids(source_rows: list[dict[str, Any]]) -> set[str]:
@@ -2599,6 +3241,13 @@ def _account_cash_components(
     default_currency: str = "KRW",
 ) -> dict[str, float]:
     """Cash-only counterpart to `_account_value_components` (no positions)."""
+    cash_by_currency = _mapping(account.get("cash_by_currency"))
+    if cash_by_currency:
+        return {
+            str(currency): cash
+            for currency, value in cash_by_currency.items()
+            if (cash := _float_or_none(value)) is not None
+        }
     account_currency = _snapshot_currency(account, payload)
     if account_currency == "UNKNOWN":
         account_currency = default_currency
@@ -2678,6 +3327,171 @@ def _strategy_cash_flows_by_strategy(store: StateStore) -> dict[str, list[dict[s
     return flows
 
 
+def _account_cash_flow_events(
+    store: StateStore,
+    *,
+    after: datetime | None = None,
+    exclude_internal_transfers: bool = True,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for row in store.list_system_events_by_type(SystemEventType.ACCOUNT_CASH_FLOW, limit=10000):
+        payload = _mapping(row.get("payload"))
+        amount = _float_or_none(payload.get("amount"))
+        timestamp = _parse_timestamp(payload.get("effective_at") or row.get("created_at"))
+        currency = str(payload.get("currency") or "").upper()
+        if amount is None or timestamp is None or not currency:
+            continue
+        if after is not None and timestamp <= after:
+            continue
+        flow_type = str(payload.get("flow_type") or "deposit").lower()
+        signed_amount = -abs(amount) if flow_type == "withdrawal" else abs(amount)
+        events.append(
+            {
+                "timestamp": timestamp,
+                "signed_amount": signed_amount,
+                "currency": currency,
+                "account_id": str(payload.get("account_id") or ""),
+                "transfer_id": payload.get("transfer_id"),
+                "payload": {
+                    **payload,
+                    "signed_amount": signed_amount,
+                    "run_id": row.get("run_id"),
+                },
+            }
+        )
+    transfer_signs: dict[str, set[int]] = {}
+    for event in events:
+        transfer_id = event.get("transfer_id")
+        if transfer_id:
+            transfer_signs.setdefault(str(transfer_id), set()).add(
+                1 if event["signed_amount"] > 0 else -1
+            )
+    internal_transfers = {
+        transfer_id for transfer_id, signs in transfer_signs.items() if signs == {-1, 1}
+    }
+    output = [
+        event
+        for event in events
+        if not exclude_internal_transfers
+        or not event.get("transfer_id")
+        or str(event["transfer_id"]) not in internal_transfers
+    ]
+    output.sort(key=lambda item: item["timestamp"])
+    return output
+
+
+def _account_lifecycle_events(
+    store: StateStore,
+    *,
+    after: datetime | None = None,
+) -> list[dict[str, Any]]:
+    events = []
+    for event_type in (
+        SystemEventType.ACCOUNT_TRACKING_STARTED,
+        SystemEventType.ACCOUNT_TRACKING_ENDED,
+    ):
+        for row in store.list_system_events_by_type(event_type, limit=10000):
+            payload = _mapping(row.get("payload"))
+            timestamp = _parse_timestamp(payload.get("effective_at") or row.get("created_at"))
+            account_id = str(payload.get("account_id") or "")
+            if timestamp is None or not account_id:
+                continue
+            if after is not None and timestamp <= after:
+                continue
+            events.append(
+                {
+                    "timestamp": timestamp,
+                    "event_type": str(event_type),
+                    "account_id": account_id,
+                }
+            )
+    events.sort(key=lambda item: item["timestamp"])
+    return events
+
+
+def _fx_rate_events(store: StateStore) -> list[dict[str, Any]]:
+    events = []
+    for row in store.list_system_events_by_type("fx_rate_snapshot", limit=10000):
+        payload = _mapping(row.get("payload"))
+        timestamp = _parse_timestamp(
+            payload.get("as_of") or payload.get("fetched_at") or row.get("created_at")
+        )
+        if timestamp is None:
+            continue
+        events.append(
+            {
+                "timestamp": timestamp,
+                "created_at": row.get("created_at"),
+                "payload": payload,
+                "event_id": row.get("id"),
+            }
+        )
+    events.sort(key=lambda item: item["timestamp"])
+    return events
+
+
+def _fx_snapshot_as_of(
+    events: list[dict[str, Any]],
+    timestamp: datetime,
+) -> dict[str, Any]:
+    selected = None
+    for event in events:
+        if event["timestamp"] > timestamp:
+            break
+        selected = event
+    if selected is None:
+        return {
+            "status": "missing",
+            "source": None,
+            "as_of": None,
+            "rate": None,
+            "rates": {},
+            "event_id": None,
+        }
+    payload = selected["payload"]
+    max_age_seconds = int(
+        payload.get("max_age_seconds") or payload.get("stale_after_seconds") or 86400
+    )
+    age_seconds = max(0.0, (timestamp - selected["timestamp"]).total_seconds())
+    rates = _mapping(payload.get("rates"))
+    return {
+        "status": "fresh" if age_seconds <= max_age_seconds else "stale",
+        "source": payload.get("source"),
+        "as_of": payload.get("as_of") or selected["created_at"],
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "rate": _first_float(payload, rates, ("USD/KRW", "USDKRW", "usd_krw")),
+        "rates": rates,
+        "event_id": selected["event_id"],
+    }
+
+
+def _assign_daily_returns(rows: list[dict[str, Any]]) -> None:
+    previous_close_growth: float | None = None
+    current_day = None
+    day_rows: list[dict[str, Any]] = []
+    for row in rows:
+        timestamp = _parse_timestamp(row.get("created_at"))
+        if timestamp is None:
+            continue
+        day = timestamp.astimezone(ZoneInfo("Asia/Seoul")).date()
+        if current_day is not None and day != current_day and day_rows:
+            close_return = _float_or_none(day_rows[-1].get("cumulative_return"))
+            if close_return is not None:
+                previous_close_growth = 1.0 + close_return
+            day_rows = []
+        current_day = day
+        day_rows.append(row)
+        cumulative_return = _float_or_none(row.get("cumulative_return"))
+        row["daily_return"] = (
+            _round_ratio((1.0 + cumulative_return) / previous_close_growth - 1.0)
+            if cumulative_return is not None
+            and previous_close_growth is not None
+            and previous_close_growth != 0
+            else None
+        )
+
+
 def _period_cash_flow_events(
     events: list[dict[str, Any]],
     previous_timestamp: datetime | None,
@@ -2720,16 +3534,14 @@ def _advance_twr_performance_state(
     if first_value is not None and total_value is not None:
         net_pnl = total_value - first_value - state["cumulative_cash_flow"]
     if total_value is not None:
-        state["peak_value"] = (
-            total_value if state["peak_value"] is None else max(state["peak_value"], total_value)
-        )
         state["previous_value"] = total_value
     if timestamp is not None:
         state["previous_timestamp"] = timestamp
-    drawdown = _safe_weight(total_value, state["peak_value"])
+    twr = state["twr_growth"] - 1.0 if first_value is not None else None
+    state["twr_peak"] = max(float(state.get("twr_peak") or 1.0), state["twr_growth"])
+    drawdown = _safe_weight(state["twr_growth"], state["twr_peak"])
     if drawdown is not None:
         drawdown -= 1.0
-    twr = state["twr_growth"] - 1.0 if first_value is not None else None
     mwr = _money_weighted_return(state["mwr_flows"], timestamp, total_value)
     return {
         "period_return": _round_ratio(period_return),

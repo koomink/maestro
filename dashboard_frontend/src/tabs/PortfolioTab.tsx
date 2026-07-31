@@ -38,6 +38,9 @@ export function PortfolioTab({
   // states a problem and leaves the operator to guess what to do about it.
   const nextCheck = String(snapshot.system_verdict.reason_rows[0]?.next_check ?? "");
   const rows = filterByPeriod(investment.total_portfolio_performance, period);
+  const coverageStart = String(investment.performance_snapshot.coverage_start || "").slice(0, 10);
+  const coverageEnd = String(investment.performance_snapshot.coverage_end || "").slice(0, 10);
+  const coverage = coverageStart && coverageEnd ? `${coverageStart}–${coverageEnd}` : "no history";
   const yKey = rows.some((row) => Number.isFinite(Number(row.total_value))) ? "total_value" : "current_value";
   return (
     <section className="tab-grid portfolio-grid">
@@ -47,7 +50,7 @@ export function PortfolioTab({
       </Panel>
       <Panel
         className="main-chart-panel"
-        title="Portfolio Value / Return / Cash Flow"
+        title={`Portfolio Value / Return / Cash Flow · ${coverage}`}
         aside={<Segmented values={periods} value={period} onChange={setPeriod} />}
       >
         <TerminalChart title="Portfolio Value" rows={rows} yKey={yKey} />

@@ -41,6 +41,12 @@ class SystemEventType(StrEnum):
     STRATEGY_CASH_FLOW = "strategy_cash_flow"
     STRATEGY_CASH_FLOW_PROPOSAL = "strategy_cash_flow_proposal"
     STRATEGY_CASH_FLOW_PROPOSAL_ACK = "strategy_cash_flow_proposal_ack"
+    ACCOUNT_CASH_FLOW = "account_cash_flow"
+    ACCOUNT_CASH_FLOW_PROPOSAL = "account_cash_flow_proposal"
+    ACCOUNT_CASH_FLOW_PROPOSAL_ACK = "account_cash_flow_proposal_ack"
+    ACCOUNT_TRACKING_STARTED = "account_tracking_started"
+    ACCOUNT_TRACKING_ENDED = "account_tracking_ended"
+    PERFORMANCE_BASELINE_ADOPTED = "performance_baseline_adopted"
     TELEGRAM_COMMAND = "telegram_command"
 
 
@@ -106,6 +112,31 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
         "allocations",
     ),
     SystemEventType.STRATEGY_CASH_FLOW_PROPOSAL_ACK: ("proposal_id", "status"),
+    SystemEventType.ACCOUNT_CASH_FLOW: (
+        "account_id",
+        "amount",
+        "currency",
+        "flow_type",
+        "effective_at",
+        "source",
+    ),
+    SystemEventType.ACCOUNT_CASH_FLOW_PROPOSAL: (
+        "proposal_id",
+        "account_id",
+        "amount",
+        "currency",
+        "flow_type",
+        "effective_at",
+    ),
+    SystemEventType.ACCOUNT_CASH_FLOW_PROPOSAL_ACK: ("proposal_id", "status"),
+    SystemEventType.ACCOUNT_TRACKING_STARTED: ("account_id", "effective_at"),
+    SystemEventType.ACCOUNT_TRACKING_ENDED: ("account_id", "effective_at"),
+    SystemEventType.PERFORMANCE_BASELINE_ADOPTED: (
+        "baseline_id",
+        "effective_at",
+        "accounts",
+        "component_values",
+    ),
     "fx_rate_snapshot": ("source", "as_of", "rates"),
     "fx_rate_snapshot_failed": ("provider", "pairs", "error_type", "checked_at"),
 }

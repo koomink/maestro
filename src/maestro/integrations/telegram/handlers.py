@@ -239,6 +239,19 @@ class TelegramOperatorCommandRouter:
                 self._record_update_failure(update_id, exc)
         return next_offset
 
+    def notify_pending_cash_flows(self) -> None:
+        account_ids = [
+            str(account_id)
+            for account_id, _ in broker_readonly_accounts(self.config)
+            if account_id is not None
+        ]
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            for account_id in account_ids:
+                self._send_voluntary_deposit_allocation_proposal(
+                    int(chat_id),
+                    account_id=account_id,
+                )
+
     def _process_callback(
         self,
         update: Mapping[str, Any],
@@ -1412,7 +1425,32 @@ class TelegramOperatorCommandRouter:
                 self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
                 return True
             allocations = [dict(allocation, amount=proposal.get("amount"))]
-        effective_at = utc_now().isoformat()
+        effective_at = str(proposal.get("effective_at") or utc_now().isoformat())
+        account_cash_flow_id = new_run_id()
+        flow_type = str(proposal.get("flow_type") or "deposit")
+        account_amount = abs(_float_or_none(proposal.get("amount")) or 0.0)
+        if flow_type == "withdrawal":
+            account_amount = -account_amount
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            account_cash_flow_id,
+            "account_cash_flow",
+            {
+                "account_id": proposal.get("account_id"),
+                "amount": account_amount,
+                "currency": proposal.get("currency"),
+                "flow_type": flow_type,
+                "effective_at": effective_at,
+                "source": "telegram_cash_flow_confirmation",
+                "proposal_id": proposal_id,
+                "broker_snapshot_id": proposal.get("broker_snapshot_id"),
+                "previous_broker_snapshot_id": proposal.get(
+                    "previous_broker_snapshot_id"
+                ),
+                "decided_by": username or str(user_id),
+            },
+        )
         for allocation in allocations:
             payload = {
                 "strategy_id": allocation.get("strategy_id"),
@@ -1420,10 +1458,11 @@ class TelegramOperatorCommandRouter:
                 "execution_sleeve": allocation.get("execution_sleeve"),
                 "amount": allocation.get("amount"),
                 "currency": proposal.get("currency"),
-                "flow_type": "deposit",
+                "flow_type": flow_type,
                 "effective_at": effective_at,
                 "source": "telegram_voluntary_deposit_allocation",
                 "proposal_id": proposal_id,
+                "account_cash_flow_id": account_cash_flow_id,
                 "decided_by": username or str(user_id),
             }
             save_audited_system_event(
@@ -1814,12 +1853,17 @@ class TelegramOperatorCommandRouter:
                 payload,
             )
 
-    def _send_voluntary_deposit_allocation_proposal(self, chat_id: int) -> None:
-        proposal = self._build_voluntary_deposit_proposal()
+    def _send_voluntary_deposit_allocation_proposal(
+        self,
+        chat_id: int,
+        *,
+        account_id: str | None = None,
+    ) -> None:
+        proposal = self._build_voluntary_deposit_proposal(account_id=account_id)
         if proposal is None:
             return
         lines = [
-            "Unattributed deposit detected",
+            f"Unattributed {proposal['flow_type']} detected",
             f"proposal_id: {proposal['proposal_id']}",
             f"account_id: {proposal['account_id']}",
             f"amount: {_money(proposal['amount'])} {proposal['currency']}",
@@ -1846,9 +1890,24 @@ class TelegramOperatorCommandRouter:
             "strategy_cash_flow_proposal",
             proposal,
         )
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "account_cash_flow_proposal",
+            proposal,
+        )
 
-    def _build_voluntary_deposit_proposal(self) -> dict[str, Any] | None:
-        snapshots = self.store.list_broker_account_snapshots(limit=20)
+    def _build_voluntary_deposit_proposal(
+        self,
+        *,
+        account_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        snapshots = self.store.list_broker_account_snapshots(limit=1000)
+        if account_id is not None:
+            snapshots = [
+                row for row in snapshots if _broker_snapshot_account_id(row) == account_id
+            ]
         if len(snapshots) < 2:
             return None
         latest = snapshots[0]
@@ -1873,25 +1932,41 @@ class TelegramOperatorCommandRouter:
             return None
         latest_cash = _cash_by_currency(latest_account)
         previous_cash = _cash_by_currency(previous_account)
-        for currency, cash in latest_cash.items():
-            increase = cash - previous_cash.get(currency, 0.0)
-            if increase <= 0:
+        latest_positions = {
+            str(row.get("symbol")): _float_or_none(row.get("quantity")) or 0.0
+            for row in latest_account.get("positions") or []
+            if isinstance(row, Mapping)
+        }
+        previous_positions = {
+            str(row.get("symbol")): _float_or_none(row.get("quantity")) or 0.0
+            for row in previous_account.get("positions") or []
+            if isinstance(row, Mapping)
+        }
+        if latest_positions != previous_positions:
+            return None
+        for currency in sorted(set(latest_cash) | set(previous_cash)):
+            delta = latest_cash.get(currency, 0.0) - previous_cash.get(currency, 0.0)
+            minimum_change = 1_000.0 if currency == "KRW" else 1.0
+            if abs(delta) < minimum_change:
                 continue
-            if self._cash_flow_proposal_exists(latest.get("id"), account_id, currency, increase):
+            amount = abs(delta)
+            if self._cash_flow_proposal_exists(latest.get("id"), account_id, currency, amount):
                 return None
-            allocations = self._target_cash_flow_allocations(account_id, increase)
-            if not allocations:
+            allocations = self._target_cash_flow_allocations(account_id, amount)
+            if delta > 0 and not allocations:
                 return None
+            flow_type = "deposit" if delta > 0 else "withdrawal"
             return {
                 "proposal_id": new_run_id(),
                 "status": "pending",
                 "account_id": account_id,
                 "broker_snapshot_id": latest.get("id"),
                 "previous_broker_snapshot_id": previous.get("id"),
-                "amount": increase,
+                "amount": amount,
                 "currency": currency,
-                "flow_type": "deposit",
-                "source": "broker_snapshot_cash_increase",
+                "flow_type": flow_type,
+                "source": "broker_snapshot_unexplained_cash_change",
+                "effective_at": str(latest.get("created_at") or utc_now().isoformat()),
                 "created_at": utc_now().isoformat(),
                 "allocations": allocations,
             }
@@ -1970,6 +2045,18 @@ class TelegramOperatorCommandRouter:
             self.audit,
             new_run_id(),
             "strategy_cash_flow_proposal_ack",
+            {
+                "proposal_id": proposal_id,
+                "status": status,
+                "decided_by": username or str(user_id),
+                **extra,
+            },
+        )
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "account_cash_flow_proposal_ack",
             {
                 "proposal_id": proposal_id,
                 "status": status,
@@ -2379,7 +2466,18 @@ class TelegramOperatorCommandRouter:
             if account.get("last_refresh_error"):
                 lines.append(f"  last error: {account['last_refresh_error']}")
         self._send(chat_id, "\n".join(lines))
-        self._send_voluntary_deposit_allocation_proposal(chat_id)
+        account_ids = [
+            str(account_id)
+            for account_id, _ in broker_readonly_accounts(self.config)
+            if account_id is not None
+        ]
+        if not account_ids:
+            self._send_voluntary_deposit_allocation_proposal(chat_id)
+        for account_id in account_ids:
+            self._send_voluntary_deposit_allocation_proposal(
+                chat_id,
+                account_id=account_id,
+            )
 
     def _process_account_refresh(self, text: str, chat_id: int) -> None:
         parts = text.split()

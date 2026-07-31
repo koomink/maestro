@@ -539,6 +539,10 @@ def test_dashboard_snapshot_includes_feature_parity_read_models(tmp_path):
     performance_snapshot = payload["investment_console"]["performance_snapshot"]
     assert performance_snapshot["schema_version"] == 1
     assert performance_snapshot["display_currency"] == "USD"
+    assert performance_snapshot["period"] == "30D"
+    assert performance_snapshot["rows_returned"] == len(
+        payload["investment_console"]["total_portfolio_performance"]
+    )
     assert set(performance_snapshot["latest"]) >= {
         "created_at",
         "run_id",
@@ -573,6 +577,16 @@ def test_dashboard_snapshot_includes_feature_parity_read_models(tmp_path):
     }
     assert isinstance(payload["virtuoso_apps"]["signal_freshness"]["strategies"], list)
     assert payload["audit_trail"]["run_index"]
+
+    all_response = client.get(
+        "/api/dashboard/snapshot?display_currency=USD&period=All"
+    )
+    assert all_response.status_code == 200
+    assert (
+        all_response.json()["investment_console"]["performance_snapshot"]["period"]
+        == "All"
+    )
+    assert client.get("/api/dashboard/snapshot?period=365D").status_code == 422
     if payload["audit_trail"]["system_events"]:
         event_row = payload["audit_trail"]["system_events"][0]
         assert "schema_status" in event_row

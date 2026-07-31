@@ -95,6 +95,7 @@ def refresh_readonly_accounts(
     for account_id, account in broker_readonly_accounts(config):
         logical_id = str(account_id or getattr(account, "account_id", None) or "default_kis")
         configured[logical_id] = (account_id, account)
+    full_refresh = account_ids is None
     selected = sorted(account_ids or configured)
     unknown = sorted(set(selected) - set(configured))
     if unknown:
@@ -133,7 +134,48 @@ def refresh_readonly_accounts(
         )
         for account_id in selected
     ]
+    if full_refresh:
+        _record_account_lifecycle(store, audit, run_id, set(selected))
     return ReadonlyRefreshReport(run_id=run_id, results=tuple(results))
+
+
+def _record_account_lifecycle(
+    store: StateStore,
+    audit: AuditLogger,
+    run_id: str,
+    configured_account_ids: set[str],
+) -> None:
+    active: set[str] = set()
+    events = [
+        *store.list_system_events_by_type(SystemEventType.ACCOUNT_TRACKING_STARTED, limit=1000),
+        *store.list_system_events_by_type(SystemEventType.ACCOUNT_TRACKING_ENDED, limit=1000),
+    ]
+    for row in sorted(events, key=lambda item: (str(item.get("created_at") or ""), item["id"])):
+        payload = row.get("payload") or {}
+        account_id = str(payload.get("account_id") or "")
+        if not account_id:
+            continue
+        if row.get("event_type") == SystemEventType.ACCOUNT_TRACKING_STARTED:
+            active.add(account_id)
+        else:
+            active.discard(account_id)
+    effective_at = utc_now().isoformat()
+    for account_id in sorted(configured_account_ids - active):
+        save_audited_system_event(
+            store,
+            audit,
+            run_id,
+            SystemEventType.ACCOUNT_TRACKING_STARTED,
+            {"account_id": account_id, "effective_at": effective_at, "source": "full_refresh"},
+        )
+    for account_id in sorted(active - configured_account_ids):
+        save_audited_system_event(
+            store,
+            audit,
+            run_id,
+            SystemEventType.ACCOUNT_TRACKING_ENDED,
+            {"account_id": account_id, "effective_at": effective_at, "source": "full_refresh"},
+        )
 
 
 def latest_snapshot_for_account(store: StateStore, account_id: str) -> dict[str, Any] | None:

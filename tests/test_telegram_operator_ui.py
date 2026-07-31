@@ -511,6 +511,12 @@ def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target
         event["payload"]["strategy_id"]: event["payload"]["amount"] for event in cash_flow_events
     }
     assert amounts_by_strategy == {"tranquillo": 600_000.0, "crescendo_us": 400_000.0}
+    account_flows = store.list_system_events_by_type("account_cash_flow", limit=10)
+    assert account_flows[0]["payload"]["account_id"] == "paper_cash"
+    assert account_flows[0]["payload"]["amount"] == 1_000_000.0
+    assert {
+        event["payload"]["account_cash_flow_id"] for event in cash_flow_events
+    } == {account_flows[0]["run_id"]}
     ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
     assert ack_events[0]["payload"]["status"] == "approved"
 
@@ -579,6 +585,49 @@ def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp
     ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
     assert ack_events[0]["payload"]["status"] == "assigned"
     assert ack_events[0]["payload"]["assigned_strategy_id"] == "crescendo_us"
+
+
+def test_telegram_operator_confirms_unexplained_withdrawal_as_account_flow(tmp_path):
+    config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    for run_id, cash in [("run_old", 2_000_000.0), ("run_new", 1_000_000.0)]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "paper_cash",
+            {
+                "account": {
+                    "account_id": "paper_cash",
+                    "currency": "KRW",
+                    "cash": cash,
+                    "total_value": cash,
+                    "positions": [],
+                    "source": "fixture",
+                }
+            },
+        )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(message_update("/account"))
+    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[
+        0
+    ]["payload"]
+    assert proposal["flow_type"] == "withdrawal"
+
+    assert router.process_update(
+        callback_update(f"operator:cash-flow:approve:{proposal['proposal_id']}")
+    )
+
+    account_flow = store.list_system_events_by_type("account_cash_flow", limit=1)[0][
+        "payload"
+    ]
+    assert account_flow["amount"] == -1_000_000.0
+    assert account_flow["flow_type"] == "withdrawal"
 
 
 def test_telegram_operator_accepts_legacy_strategy_id_assign_callback(tmp_path):

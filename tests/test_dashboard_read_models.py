@@ -1229,6 +1229,159 @@ def test_strategy_book_performance_uses_explicit_strategy_cash_flows_for_twr_and
     assert rows[1]["period_return"] == 0.1
 
 
+def test_baselined_portfolio_twr_excludes_account_cash_flows(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_system_event(
+        "baseline",
+        "performance_baseline_adopted",
+        {
+            "baseline_id": "baseline",
+            "effective_at": "2026-01-01T00:00:00+00:00",
+            "accounts": {
+                "acct": {"snapshot_id": 1, "components": {"KRW": 1_000.0}}
+            },
+            "component_values": {"KRW": 1_000.0},
+        },
+    )
+    store.save_system_event(
+        "deposit",
+        "account_cash_flow",
+        {
+            "account_id": "acct",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "effective_at": "2026-01-02T00:00:00+00:00",
+            "source": "test",
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_2",
+        "acct",
+        {
+            "account_id": "acct",
+            "account": {
+                "account_id": "native",
+                "cash": 1_500.0,
+                "cash_by_currency": {"KRW": 1_500.0},
+                "positions": [],
+            },
+        },
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = ? WHERE run_id = ?",
+            ("2026-01-02 00:01:00", "run_2"),
+        )
+
+    total = build_total_portfolio_performance_table(store)
+    account = build_account_performance_table(store)
+    sleeve = build_currency_sleeve_performance_table(store)
+
+    assert total[0]["cash_flow"] == 500.0
+    assert total[0]["cumulative_return"] == 0.0
+    assert total[0]["drawdown"] == 0.0
+    assert account[0]["cash_flow"] == 500.0
+    assert account[0]["cumulative_return"] == 0.0
+    assert sleeve[0]["cash_flow"] == 500.0
+    assert sleeve[0]["cumulative_return"] == 0.0
+
+
+def test_account_join_is_membership_flow_without_erasing_history(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_system_event(
+        "baseline",
+        "performance_baseline_adopted",
+        {
+            "baseline_id": "baseline",
+            "effective_at": "2026-01-01T00:00:00+00:00",
+            "accounts": {
+                "acct_a": {"snapshot_id": 1, "components": {"KRW": 1_000.0}}
+            },
+            "component_values": {"KRW": 1_000.0},
+        },
+    )
+    for run_id, created_at, values in [
+        ("run_1", "2026-01-02 00:00:00", {"acct_a": 1_000.0}),
+        (
+            "run_2",
+            "2026-01-03 00:00:00",
+            {"acct_a": 1_000.0, "acct_b": 500.0},
+        ),
+        ("run_3", "2026-01-04 00:00:00", {"acct_a": 1_000.0}),
+    ]:
+        for account_id, value in values.items():
+            store.save_broker_account_snapshot(
+                run_id,
+                account_id,
+                {
+                    "account_id": account_id,
+                    "account": {
+                        "account_id": account_id,
+                        "cash": value,
+                        "cash_by_currency": {"KRW": value},
+                        "positions": [],
+                    },
+                },
+            )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE broker_account_snapshots SET created_at = ? WHERE run_id = ?",
+                (created_at, run_id),
+            )
+    store.save_system_event(
+        "join",
+        "account_tracking_started",
+        {
+            "account_id": "acct_b",
+            "effective_at": "2026-01-03T00:00:00+00:00",
+        },
+    )
+    store.save_system_event(
+        "end",
+        "account_tracking_ended",
+        {
+            "account_id": "acct_b",
+            "effective_at": "2026-01-04T00:00:00+00:00",
+        },
+    )
+
+    rows = build_total_portfolio_performance_table(store)
+
+    assert [row["run_id"] for row in rows] == ["run_3", "run_2", "run_1"]
+    assert rows[0]["total_value"] == 1_000.0
+    assert rows[0]["cash_flow"] == -500.0
+    assert rows[0]["cumulative_return"] == 0.0
+    assert rows[1]["total_value"] == 1_500.0
+
+
+def test_broker_snapshot_history_query_uses_time_bounds(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for run_id, created_at in [
+        ("old", "2026-01-01 00:00:00"),
+        ("middle", "2026-02-01 00:00:00"),
+        ("new", "2026-03-01 00:00:00"),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "acct",
+            {"account_id": "acct", "account": {"account_id": "acct"}},
+        )
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE broker_account_snapshots SET created_at = ? WHERE run_id = ?",
+                (created_at, run_id),
+            )
+
+    rows = store.list_broker_account_snapshots(
+        limit=None,
+        since="2026-02-01 00:00:00",
+        before="2026-03-01 00:00:00",
+    )
+
+    assert [row["run_id"] for row in rows] == ["middle"]
+
+
 def test_broker_performance_prefers_broker_total_asset_value_and_currency(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     store.save_broker_account_snapshot(
@@ -1324,6 +1477,7 @@ def test_currency_sleeve_performance_splits_single_mixed_currency_account(tmp_pa
                 "account_id": "toss_brokerage",
                 "currency": "KRW",
                 "cash": 500_000.0,
+                "cash_by_currency": {"KRW": 500_000.0, "USD": 750.0},
                 "positions": [
                     {
                         "symbol": "QQQ",
@@ -1341,7 +1495,51 @@ def test_currency_sleeve_performance_splits_single_mixed_currency_account(tmp_pa
 
     assert set(by_currency) == {"KRW", "USD"}
     assert by_currency["KRW"]["total_value"] == 500_000.0
-    assert by_currency["USD"]["total_value"] == 5_000.0
+    assert by_currency["USD"]["total_value"] == 5_750.0
+    assert by_currency["USD"]["cash"] == 750.0
+
+
+def test_mixed_currency_cash_is_not_lost_or_double_counted(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_1",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "native-account",
+                "cash": 300_000.0,
+                "cash_by_currency": {"KRW": 300_000.0, "USD": 3_800.0},
+                "positions": [],
+            },
+        },
+    )
+
+    rows = build_currency_sleeve_performance_table(store)
+    by_currency = {row["currency"]: row for row in rows}
+
+    assert by_currency["KRW"]["total_value"] == 300_000.0
+    assert by_currency["USD"]["total_value"] == 3_800.0
+
+
+def test_account_performance_uses_logical_snapshot_account_id(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_broker_account_snapshot(
+        "run_1",
+        "native-account",
+        {
+            "account_id": "kis_isa",
+            "broker_account_id": "native-account",
+            "account": {
+                "account_id": "native-account",
+                "cash": 1_000.0,
+                "cash_by_currency": {"KRW": 1_000.0},
+                "positions": [],
+            },
+        },
+    )
+
+    assert build_account_performance_table(store)[0]["account_id"] == "kis_isa"
 
 
 def test_account_performance_drawdown_is_not_contaminated_across_accounts(tmp_path):

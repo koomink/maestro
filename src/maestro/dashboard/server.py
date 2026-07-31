@@ -120,9 +120,14 @@ def create_app(
     @app.get("/api/dashboard/snapshot")
     def snapshot(
         display_currency: Annotated[str, Query(pattern="^(KRW|USD|krw|usd)$")] = "KRW",
+        period: Annotated[str, Query(pattern="^(7D|30D|90D|All)$")] = "30D",
     ) -> dict[str, object]:
         try:
-            return build_dashboard_snapshot(resolved_config, display_currency=display_currency)
+            return build_dashboard_snapshot(
+                resolved_config,
+                display_currency=display_currency,
+                performance_period=period,
+            )
         except ValidationError as exc:
             raise config_invalid_error(exc) from exc
         except ValueError as exc:

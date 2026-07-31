@@ -1296,12 +1296,23 @@ Dashboard should show:
 - Telegram status
 - System health
 
-Planned KIS-backed performance tracking should use persisted broker snapshots,
-broker reconciliation, order/fill events, and Maestro strategy lineage. The
-dashboard should render graphs from persisted read models only, including stored
-FX source, rate, timestamp, and freshness status for converted views; it should
-not call KIS or FX endpoints during page rendering and should not expose trading
-or admin write controls.
+Account and total-portfolio performance uses persisted broker snapshots,
+reconciliation evidence, an operator-adopted `performance_baseline_adopted`
+event, and confirmed `account_cash_flow` events. Mixed-currency accounts prefer
+`cash_by_currency` over the scalar `cash` field so KRW and USD cash are neither
+lost nor double-counted. Before a baseline is adopted, historical returns are
+labelled legacy; adopt a fresh reconciled baseline with:
+
+```bash
+maestro performance-baseline adopt --config <readonly-config> --reason "<reason>"
+```
+
+Record a missing deposit or withdrawal with `maestro cash-flow record`.
+Confirmed account cash flows feed account/portfolio TWR; `strategy_cash_flow`
+remains the downstream strategy allocation. Portfolio drawdown is based on the
+chain-linked TWR index, and converted history uses the persisted FX snapshot
+available at each valuation time. The dashboard renders these persisted read
+models only and does not call broker or FX endpoints during page rendering.
 
 Virtuoso app performance uses strategy book snapshots as the app value series
 and explicit Telegram-attributed `strategy_cash_flow` events as the app-level

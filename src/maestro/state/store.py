@@ -182,6 +182,10 @@ class StateStore:
                 ")"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_broker_snapshots_created_at "
+                "ON broker_account_snapshots(created_at)"
+            )
+            conn.execute(
                 "CREATE TABLE IF NOT EXISTS risk_decisions "
                 "("
                 "id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -876,8 +880,39 @@ class StateStore:
     def list_approvals(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("approvals", limit)
 
-    def list_broker_account_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
-        return self._list_rows("broker_account_snapshots", limit)
+    def list_broker_account_snapshots(
+        self,
+        limit: int | None = 10,
+        *,
+        since: str | None = None,
+        before: str | None = None,
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        values: list[Any] = []
+        if since is not None:
+            clauses.append("created_at >= ?")
+            values.append(since)
+        if before is not None:
+            clauses.append("created_at < ?")
+            values.append(before)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        sql = (
+            "SELECT * FROM broker_account_snapshots"
+            + where
+            + " ORDER BY created_at DESC, id DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            values.append(limit)
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(sql, values).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item["payload"])
+            output.append(item)
+        return output
 
     def list_risk_decisions(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("risk_decisions", limit)

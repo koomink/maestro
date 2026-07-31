@@ -650,6 +650,11 @@
 - [x] Define the documented fallback attribution rule for shared holdings until
       lot-level strategy accounting exists
 - [x] Add account-level daily/cumulative return and drawdown calculations
+- [x] Preserve mixed-currency cash with `cash_by_currency` and logical account IDs
+- [x] Add audited account performance baselines and account cash-flow events
+- [x] Chain account/portfolio TWR from the adopted baseline with TWR-index drawdown
+- [x] Preserve account tracking start/end membership without rewriting old NAV
+- [x] Add time-period dashboard performance queries and actual coverage metadata
 - [ ] Add strategy-level daily/cumulative return and drawdown calculations
 - [x] Add currency-sleeve daily/cumulative return and drawdown calculations
 - [x] Add total portfolio daily/cumulative return and drawdown calculations

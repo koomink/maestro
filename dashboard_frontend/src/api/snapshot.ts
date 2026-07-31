@@ -1,7 +1,10 @@
 import type { DashboardRefreshResponse, DashboardSnapshot, GenerateSignalResponse, RunDetail } from "../types";
+import type { Period } from "../viewModel";
 
-export async function fetchSnapshot(currency: "KRW" | "USD"): Promise<DashboardSnapshot> {
-  const response = await fetch(`/api/dashboard/snapshot?display_currency=${currency}`);
+export async function fetchSnapshot(currency: "KRW" | "USD", period: Period): Promise<DashboardSnapshot> {
+  const response = await fetch(
+    `/api/dashboard/snapshot?display_currency=${currency}&period=${encodeURIComponent(period)}`,
+  );
   if (!response.ok) {
     throw new Error(await dashboardErrorMessage(response, "Dashboard snapshot is unavailable"));
   }

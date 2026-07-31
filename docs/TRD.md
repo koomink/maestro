@@ -1472,6 +1472,15 @@ daily return, cumulative return, drawdown, and reconciliation status. It does
 not persist a new broker-order path and does not call KIS during dashboard
 rendering.
 
+Mixed-currency snapshots use `cash_by_currency` as the authoritative cash
+breakdown when present and fall back to scalar `cash` only when it is absent.
+New performance chains start from an explicit, audited
+`performance_baseline_adopted` event. Confirmed `account_cash_flow` events are
+the account/portfolio funding ledger; strategy cash-flow events reference that
+ledger for downstream allocation. Account tracking start/end events define
+historical membership so disabling an account does not rewrite older NAV.
+Returns before the adopted baseline remain legacy/unverified.
+
 Currency-sleeve performance uses the same persisted broker snapshots grouped by
 snapshot currency, so KRW and USD returns remain separate. Total portfolio
 performance groups broker snapshots by run/as-of time; when more than one
@@ -1490,6 +1499,14 @@ requests are budget-throttled by `refresh_interval_seconds` separately from the
 dashboard freshness threshold; the default one-hour interval caps normal
 automated usage at about 744 requests in a 31-day month, while `maestro
 fx-refresh --force` is reserved for explicit operator checks.
+
+For baselined performance, each historical valuation and foreign-currency cash
+flow uses the nearest persisted FX snapshot at or before its effective time.
+Missing or stale as-of FX disables only the converted total; native currency
+sleeves remain available. Portfolio drawdown is measured from the TWR growth
+index rather than raw NAV so deposits and withdrawals do not create artificial
+drawdowns. Dashboard snapshot requests accept `period=7D|30D|90D|All` and report
+the actual returned coverage.
 
 Security:
 

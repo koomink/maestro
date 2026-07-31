@@ -69,7 +69,7 @@ export function App() {
         return;
       }
       try {
-        const next = await fetchSnapshot(displayCurrency);
+        const next = await fetchSnapshot(displayCurrency, period);
         if (cancelled) return;
         setSnapshot(next);
         setError(null);
@@ -103,7 +103,7 @@ export function App() {
       window.clearTimeout(handle);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [displayCurrency]);
+  }, [displayCurrency, period]);
 
   useEffect(() => {
     if (!snapshot) {
@@ -127,7 +127,7 @@ export function App() {
     setRefreshAction({ busy: true, message: "Updating…", tone: "primary" });
     try {
       const result = await refreshDashboardState();
-      setSnapshot(await fetchSnapshot(displayCurrency));
+      setSnapshot(await fetchSnapshot(displayCurrency, period));
       setError(null);
       setLastUpdatedAt(Date.now());
       const overall = result.signal_freshness?.overall || "unknown";
@@ -155,7 +155,7 @@ export function App() {
     });
     try {
       const result = await generateStrategySignal(strategyId);
-      setSnapshot(await fetchSnapshot(displayCurrency));
+      setSnapshot(await fetchSnapshot(displayCurrency, period));
       setSignalAction({
         busy: false,
         message: `Proposal signal ready${result.signal_run_id ? `: ${result.signal_run_id}` : ""}. ${result.orders_preview_count} preview order(s); no orders submitted.`,

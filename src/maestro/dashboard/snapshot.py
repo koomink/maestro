@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +43,45 @@ from maestro.state.store import StateStore
 DISPLAY_CURRENCIES = {"KRW", "USD"}
 
 
+def _filter_performance_period(
+    rows: list[dict[str, Any]],
+    period: str,
+) -> list[dict[str, Any]]:
+    if period == "All" or len(rows) < 2:
+        return rows
+    days = {"7D": 7, "30D": 30, "90D": 90}.get(period)
+    if days is None:
+        raise ValueError(f"Unsupported performance period: {period}")
+    timestamps = [
+        parsed
+        for row in rows
+        if (parsed := _snapshot_timestamp(row.get("created_at"))) is not None
+    ]
+    if not timestamps:
+        return rows
+    cutoff = max(timestamps) - timedelta(days=days)
+    return [
+        row
+        for row in rows
+        if (timestamp := _snapshot_timestamp(row.get("created_at"))) is not None
+        and timestamp >= cutoff
+    ]
+
+
+def _snapshot_timestamp(value: object) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def build_dashboard_snapshot(
     config_path: str | Path,
     display_currency: str = "KRW",
+    performance_period: str = "30D",
 ) -> dict[str, Any]:
     selected_currency = _display_currency(display_currency)
     config_path = Path(config_path)
@@ -103,6 +140,19 @@ def build_dashboard_snapshot(
         store,
         config,
         display_currency="USD",
+    )
+    account_performance = _filter_performance_period(account_performance, performance_period)
+    currency_sleeve_performance = _filter_performance_period(
+        currency_sleeve_performance,
+        performance_period,
+    )
+    total_portfolio_performance_krw = _filter_performance_period(
+        total_portfolio_performance_krw,
+        performance_period,
+    )
+    total_portfolio_performance_usd = _filter_performance_period(
+        total_portfolio_performance_usd,
+        performance_period,
     )
     total_portfolio_performance = {
         "KRW": total_portfolio_performance_krw,
@@ -272,6 +322,7 @@ def build_dashboard_snapshot(
                 strategy_book_performance,
                 strategy_attribution,
                 fx_snapshot,
+                performance_period,
             ),
             "fx_snapshot": fx_snapshot,
             "asset_summary_metrics": asset_summary_metrics,
@@ -1170,6 +1221,7 @@ def _performance_snapshot(
     strategy_book_performance: list[dict[str, Any]],
     strategy_attribution: list[dict[str, Any]],
     fx_snapshot: dict[str, Any],
+    performance_period: str,
 ) -> dict[str, Any]:
     latest_total = total_portfolio_performance[0] if total_portfolio_performance else {}
     latest_account = account_performance[0] if account_performance else {}
@@ -1177,6 +1229,18 @@ def _performance_snapshot(
     return {
         "schema_version": 1,
         "display_currency": display_currency,
+        "period": performance_period,
+        "coverage_start": (
+            total_portfolio_performance[-1].get("created_at")
+            if total_portfolio_performance
+            else None
+        ),
+        "coverage_end": (
+            total_portfolio_performance[0].get("created_at")
+            if total_portfolio_performance
+            else None
+        ),
+        "rows_returned": len(total_portfolio_performance),
         "latest": {
             "created_at": latest_total.get("created_at") or latest_account.get("created_at"),
             "run_id": latest_total.get("run_id") or latest_account.get("run_id"),
@@ -1219,8 +1283,12 @@ def _performance_snapshot(
                 "strategy_book_snapshots",
                 "strategy_runs",
             ],
-            "return_method": "time_series_return_with_cash_flow_adjustment",
-            "fx_policy": "converted_totals_require_fresh_persisted_fx",
+            "return_method": (
+                "chain_linked_twr_from_adopted_baseline"
+                if latest_total.get("performance_status") == "tracked"
+                else "legacy_window_return"
+            ),
+            "fx_policy": "converted_totals_require_fresh_as_of_persisted_fx",
         },
     }
 
@@ -1252,6 +1320,46 @@ def _performance_quality(
             {
                 "code": "stale_fx",
                 "message": "Converted total portfolio values are unavailable because FX is stale.",
+            }
+        )
+    if latest_total.get("performance_status") == "legacy":
+        reasons.append(
+            {
+                "code": "performance_baseline_required",
+                "message": (
+                    "Returns are legacy until a fresh reconciled performance baseline "
+                    "is adopted."
+                ),
+            }
+        )
+    if latest_total.get("performance_status") == "partial":
+        missing = ", ".join(
+            [
+                *latest_total.get("missing_accounts", []),
+                *latest_total.get("stale_accounts", []),
+            ]
+        )
+        reasons.append(
+            {
+                "code": "partial_portfolio",
+                "message": (
+                    "Portfolio performance is unavailable because account snapshots "
+                    f"are missing or stale: {missing or 'unknown'}."
+                ),
+            }
+        )
+    unexplained = next(
+        (row for row in total_portfolio_performance if row.get("unexplained_return")),
+        None,
+    )
+    if unexplained is not None:
+        reasons.append(
+            {
+                "code": "unexplained_return",
+                "message": (
+                    f"{unexplained.get('created_at')} has an unexplained "
+                    f"{float(unexplained.get('period_return') or 0.0):.1%} return."
+                ),
             }
         )
     if not reasons:

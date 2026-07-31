@@ -52,7 +52,11 @@ class KISReadOnlyService:
             unfilled_orders=self.client.get_unfilled_orders(),
         )
         payload = self._snapshot_payload(snapshot)
-        self.state_store.save_broker_account_snapshot(run_id, account.account_id, payload)
+        self.state_store.save_broker_account_snapshot(
+            run_id,
+            self.logical_account_id or account.account_id,
+            payload,
+        )
         self.audit_logger.log(
             run_id,
             "kis_readonly_snapshot",
@@ -115,7 +119,7 @@ class KISReadOnlyService:
         payload = self._snapshot_payload(snapshot)
         self.state_store.save_broker_account_snapshot(
             run_id,
-            snapshot.account.account_id,
+            self.logical_account_id or snapshot.account.account_id,
             payload,
         )
         self.audit_logger.log(run_id, "kis_readonly_snapshot", payload)
