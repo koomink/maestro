@@ -284,7 +284,8 @@ class MaestroOrchestrator:
                     decision,
                     signal_run_id=envelope.signal_run_id,
                 )
-                self.state_store.save_portfolio_snapshot(envelope.run_id, next_state)
+                if self.config.mode != RunMode.LIVE_APPROVAL:
+                    self.state_store.save_portfolio_snapshot(envelope.run_id, next_state)
             else:
                 self.state_store.save_system_event(
                     envelope.run_id,
@@ -789,7 +790,8 @@ class MaestroOrchestrator:
                     self.state_store.save_order(run_id, order.order_id, order_payload)
 
         approval_status = _combined_approval_status(approval_statuses)
-        self.state_store.save_portfolio_snapshot(run_id, next_state)
+        if self.config.mode != RunMode.LIVE_APPROVAL:
+            self.state_store.save_portfolio_snapshot(run_id, next_state)
         self.state_store.save_system_event(
             run_id,
             "signal_approval_completed",
@@ -1211,7 +1213,8 @@ class MaestroOrchestrator:
                     and self._effective_order_posture(order) == "dry_run"
                 ):
                     self.state_store.save_order(run_id, order.order_id, order_payload)
-            self.state_store.save_portfolio_snapshot(run_id, next_state)
+            if self.config.mode != RunMode.LIVE_APPROVAL:
+                self.state_store.save_portfolio_snapshot(run_id, next_state)
             strategy_book_snapshots = self._save_strategy_book_snapshots(
                 run_id,
                 valid_results,
@@ -1653,10 +1656,22 @@ class MaestroOrchestrator:
             snapshot = readonly_service.fetch_and_store_snapshot(
                 self.config.portfolio.allowed_symbols
             )
+            ledger_state = (
+                self.state_store.load_latest_account_portfolio_state(baseline_account_id)
+                if baseline_account_id
+                else None
+            )
+            state_kwargs = {
+                "allowed_symbols": self.config.portfolio.allowed_symbols,
+                "universe": self.config.universe,
+            }
+            if ledger_state is not None:
+                state_kwargs["ledger_state"] = ledger_state
+            elif str(snapshot.account.source).startswith("toss_"):
+                state_kwargs["allow_proxy_cash"] = False
             state = portfolio_state_from_broker_account(
                 snapshot.account.model_dump(mode="json"),
-                allowed_symbols=self.config.portfolio.allowed_symbols,
-                universe=self.config.universe,
+                **state_kwargs,
             )
         except (RuntimeError, TimeoutError, ValueError) as exc:
             self._record_event(
@@ -1671,13 +1686,6 @@ class MaestroOrchestrator:
             raise ValueError(
                 f"live_approval could not refresh broker snapshot before run_once: {exc}"
             ) from exc
-        if baseline_account_id:
-            self.state_store.save_portfolio_snapshot(
-                run_id,
-                state,
-                account_id=baseline_account_id,
-            )
-        self.state_store.save_portfolio_snapshot(run_id, state)
         self._record_event(
             run_id,
             SystemEventType.BROKER_SNAPSHOT_ADOPTED,
@@ -1707,13 +1715,15 @@ class MaestroOrchestrator:
                 raise ValueError(f"missing broker snapshot for required account: {account_id}")
             payload = row.get("payload") or {}
             account = payload.get("account") or {}
+            ledger_state = self.state_store.load_latest_account_portfolio_state(account_id)
             state = portfolio_state_from_broker_account(
                 account,
                 allowed_symbols=self.config.portfolio.allowed_symbols,
                 universe=self.config.universe,
+                ledger_state=ledger_state,
+                allow_proxy_cash=not str(account.get("source") or "").startswith("toss_"),
             )
             states.append(state)
-            self.state_store.save_portfolio_snapshot(run_id, state, account_id=account_id)
             adopted.append(
                 {
                     "account_id": account_id,
@@ -1722,7 +1732,6 @@ class MaestroOrchestrator:
                 }
             )
         merged = _merge_portfolio_states(states)
-        self.state_store.save_portfolio_snapshot(run_id, merged)
         self._record_event(
             run_id,
             SystemEventType.BROKER_SNAPSHOT_ADOPTED,
@@ -1746,7 +1755,6 @@ class MaestroOrchestrator:
         account_ids: list[str],
     ) -> PortfolioState:
         states = []
-        account_states: list[tuple[str, PortfolioState]] = []
         snapshot_events = []
         try:
             for account_id in account_ids:
@@ -1761,9 +1769,12 @@ class MaestroOrchestrator:
                     snapshot.account.model_dump(mode="json"),
                     allowed_symbols=self.config.portfolio.allowed_symbols,
                     universe=self.config.universe,
+                    ledger_state=self.state_store.load_latest_account_portfolio_state(
+                        account_id
+                    ),
+                    allow_proxy_cash=not str(snapshot.account.source).startswith("toss_"),
                 )
                 states.append(state)
-                account_states.append((account_id, state))
                 snapshot_events.append(
                     {
                         "account_id": account_id,
@@ -1794,13 +1805,6 @@ class MaestroOrchestrator:
                 f"run_once: {exc}"
             ) from exc
         state = _merge_portfolio_states(states)
-        for account_id, account_state in account_states:
-            self.state_store.save_portfolio_snapshot(
-                run_id,
-                account_state,
-                account_id=account_id,
-            )
-        self.state_store.save_portfolio_snapshot(run_id, state)
         self._record_event(
             run_id,
             SystemEventType.BROKER_SNAPSHOT_ADOPTED,
@@ -2373,7 +2377,6 @@ class MaestroOrchestrator:
             safety_state,
             blocked_at,
         )
-        self.state_store.save_portfolio_snapshot(run_id, current_state)
         strategy_book_snapshots = self._save_strategy_book_snapshots(
             run_id,
             valid_results,
@@ -3164,10 +3167,13 @@ class MaestroOrchestrator:
             if account_id not in account_id_set or account_id in states:
                 continue
             account_payload = payload.get("account") or payload
+            ledger_state = self.state_store.load_latest_account_portfolio_state(account_id)
             states[account_id] = portfolio_state_from_broker_account(
                 account_payload,
                 allowed_symbols=self.config.portfolio.allowed_symbols,
                 universe=self.config.universe,
+                ledger_state=ledger_state,
+                allow_proxy_cash=not str(account_payload.get("source") or "").startswith("toss_"),
             )
         if len(account_id_set) == 1 and not states:
             states[next(iter(account_id_set))] = fallback_state

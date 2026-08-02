@@ -805,6 +805,90 @@ def _account_currency_aware_total(
     return total_value, display_currency, cash
 
 
+def _ledger_account_snapshot_rows(store: StateStore) -> list[dict[str, Any]]:
+    """Return account-scoped ledger snapshots in chronological order.
+
+    Portfolio snapshots are the cash-ledger timeline. Broker snapshots remain
+    the source of historical prices and positions until valuation snapshots are
+    persisted natively.
+    """
+    rows = []
+    for row in store.list_portfolio_snapshots(limit=100000):
+        account_id = row.get("account_id")
+        if not account_id:
+            continue
+        rows.append(row)
+    return sorted(rows, key=lambda row: (str(row.get("created_at") or ""), int(row.get("id") or 0)))
+
+
+def _ledger_state_as_of(
+    rows: list[dict[str, Any]],
+    account_id: str,
+    broker_row: dict[str, Any],
+) -> dict[str, Any] | None:
+    broker_created_at = str(broker_row.get("created_at") or "")
+    selected = None
+    for row in rows:
+        if str(row.get("account_id") or "") != account_id:
+            continue
+        if str(row.get("created_at") or "") > broker_created_at:
+            break
+        selected = row
+    return (selected or {}).get("payload") if selected is not None else None
+
+
+def _account_with_ledger_cash(
+    account: dict[str, Any],
+    ledger_payload: dict[str, Any],
+) -> dict[str, Any]:
+    cash_by_currency = _mapping(ledger_payload.get("cash_by_currency"))
+    cash = _float_or_none(ledger_payload.get("cash"))
+    updated = dict(account)
+    if cash_by_currency:
+        updated["cash_by_currency"] = cash_by_currency
+    if cash is not None:
+        updated["cash"] = cash
+    updated["ledger_cash_by_currency"] = cash_by_currency or None
+    return updated
+
+
+def _broker_rows_with_ledger_cash(
+    store: StateStore,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    ledger_rows = _ledger_account_snapshot_rows(store)
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        ledger = _ledger_state_as_of(ledger_rows, _broker_snapshot_account_id(row), row)
+        if ledger is None:
+            output.append(row)
+            continue
+        updated = dict(row)
+        payload = dict(_mapping(row.get("payload")))
+        payload["account"] = _account_with_ledger_cash(
+            _mapping(payload.get("account")),
+            ledger,
+        )
+        updated["payload"] = payload
+        output.append(updated)
+    return output
+
+
+def _performance_quality(rows: list[dict[str, Any]]) -> str:
+    flags = [
+        _mapping(_mapping(row.get("payload")).get("account")).get(
+            "ledger_cash_by_currency"
+        )
+        is not None
+        for row in rows
+    ]
+    if flags and all(flags):
+        return "confirmed"
+    if any(flags):
+        return "degraded"
+    return "provisional"
+
+
 def build_account_performance_table(
     store: StateStore,
     config: MaestroConfig | None = None,
@@ -825,7 +909,9 @@ def build_account_performance_table(
         for row in store.list_broker_account_snapshots(limit=limit)
         if _broker_snapshot_account_id(row) not in disabled_ids
     ]
+    source_rows = _broker_rows_with_ledger_cash(store, source_rows)
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    ledger_rows = _ledger_account_snapshot_rows(store)
     fx_snapshot = build_fx_rate_snapshot_card(store)
     # Performance state (first/previous/peak value) is tracked PER ACCOUNT —
     # a shared/global state across interleaved multi-account rows would
@@ -839,6 +925,9 @@ def build_account_performance_table(
     for row in reversed(source_rows):
         payload = _mapping(row.get("payload"))
         account = _mapping(payload.get("account"))
+        ledger_state = _ledger_state_as_of(ledger_rows, _broker_snapshot_account_id(row), row)
+        if ledger_state is not None:
+            account = _account_with_ledger_cash(account, ledger_state)
         positions = _positions(account)
         account_id = _broker_snapshot_account_id(row)
         total_value, currency, cash = _account_currency_aware_total(
@@ -885,6 +974,9 @@ def build_account_performance_table(
                 "reconciliation_created_at": (reconciliation or {}).get("created_at"),
                 "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
                 "source": account.get("source") or payload.get("source"),
+                "performance_status": (
+                    "confirmed" if ledger_state is not None else "provisional"
+                ),
             }
         )
     return list(reversed(rows))
@@ -907,6 +999,7 @@ def _build_baselined_account_performance_table(
     source_rows = list(
         reversed(store.list_broker_account_snapshots(limit=None, since=since))
     )
+    source_rows = _broker_rows_with_ledger_cash(store, source_rows)
     fx_events = _fx_rate_events(store)
     baseline_fx = _fx_snapshot_as_of(fx_events, baseline_timestamp)
     baseline_accounts = _mapping(baseline.get("accounts"))
@@ -922,6 +1015,7 @@ def _build_baselined_account_performance_table(
         exclude_internal_transfers=False,
     )
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    ledger_rows = _ledger_account_snapshot_rows(store)
     states: dict[str, dict[str, Any]] = {}
     rows = []
     for row in source_rows:
@@ -933,6 +1027,9 @@ def _build_baselined_account_performance_table(
             continue
         payload = _mapping(row.get("payload"))
         account = _mapping(payload.get("account"))
+        ledger_state = _ledger_state_as_of(ledger_rows, account_id, row)
+        if ledger_state is not None:
+            account = _account_with_ledger_cash(account, ledger_state)
         positions = _positions(account)
         fx_snapshot = _fx_snapshot_as_of(fx_events, timestamp)
         total_value, currency, cash = _account_currency_aware_total(
@@ -1056,10 +1153,12 @@ def _build_baselined_account_performance_table(
                 "reconciliation_created_at": (reconciliation or {}).get("created_at"),
                 "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
                 "source": account.get("source") or payload.get("source"),
-                "performance_status": "tracked",
                 "baseline_id": baseline.get("baseline_id"),
                 "baseline_at": baseline.get("effective_at"),
                 "cash_flow_events": [event["payload"] for event in converted_events],
+                "performance_status": (
+                    "confirmed" if ledger_state is not None else "provisional"
+                ),
             }
         )
     for account_id in states:
@@ -1095,6 +1194,7 @@ def build_currency_sleeve_performance_table(
         for row in store.list_broker_account_snapshots(limit=limit)
         if _broker_snapshot_account_id(row) not in disabled_ids
     ]
+    source_rows = _broker_rows_with_ledger_cash(store, source_rows)
     expected_accounts = _expected_account_ids(source_rows)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):
@@ -1162,7 +1262,9 @@ def build_currency_sleeve_performance_table(
                     "cumulative_return": performance["cumulative_return"],
                     "drawdown": performance["drawdown"],
                     "reconciliation_status": combined_reconciliation,
-                    "performance_status": "legacy",
+                    "performance_status": _performance_quality(
+                        list(latest_by_account.values())
+                    ),
                 }
             )
     return list(reversed(rows))
@@ -1184,6 +1286,7 @@ def _build_baselined_currency_sleeve_performance_table(
     source_rows = list(
         reversed(store.list_broker_account_snapshots(limit=None, since=since))
     )
+    source_rows = _broker_rows_with_ledger_cash(store, source_rows)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in source_rows:
         grouped.setdefault(
@@ -1319,7 +1422,9 @@ def _build_baselined_currency_sleeve_performance_table(
                     "mwr": performance["mwr"],
                     "drawdown": performance["drawdown"],
                     "reconciliation_status": _combined_reconciliation_status(statuses),
-                    "performance_status": "tracked",
+                    "performance_status": _performance_quality(
+                        [latest_by_account[account_id] for account_id in active_accounts]
+                    ),
                     "baseline_id": baseline.get("baseline_id"),
                     "baseline_at": baseline.get("effective_at"),
                 }
@@ -1350,6 +1455,7 @@ def build_total_portfolio_performance_table(
         for row in store.list_broker_account_snapshots(limit=limit)
         if _broker_snapshot_account_id(row) not in disabled_ids
     ]
+    source_rows = _broker_rows_with_ledger_cash(store, source_rows)
     expected_accounts = _expected_account_ids(source_rows)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):
@@ -1447,7 +1553,9 @@ def build_total_portfolio_performance_table(
                 "cumulative_return": performance["cumulative_return"],
                 "drawdown": performance["drawdown"],
                 "reconciliation_status": _combined_reconciliation_status(reconciliation_statuses),
-                "performance_status": "legacy",
+                "performance_status": _performance_quality(
+                    list(latest_by_account.values())
+                ),
             }
         )
         previous_component_values = component_values
@@ -1469,6 +1577,7 @@ def _build_baselined_total_portfolio_performance_table(
         return []
     baseline_text = baseline_timestamp.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
     source_rows = store.list_broker_account_snapshots(limit=None, since=baseline_text)
+    source_rows = _broker_rows_with_ledger_cash(store, source_rows)
     grouped: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
     for row in reversed(source_rows):
         group_key = str(row.get("run_id") or row.get("created_at") or row.get("id"))
@@ -1701,7 +1810,9 @@ def _build_baselined_total_portfolio_performance_table(
                 "reconciliation_status": _combined_reconciliation_status(
                     reconciliation_statuses
                 ),
-                "performance_status": "tracked",
+                "performance_status": _performance_quality(
+                    [latest_by_account[account_id] for account_id in active_accounts]
+                ),
                 "baseline_id": baseline.get("baseline_id"),
                 "baseline_at": baseline.get("effective_at"),
                 "active_accounts": sorted(active_accounts),
@@ -2505,6 +2616,7 @@ def build_latest_reconciliation_card(store: StateStore) -> dict[str, Any]:
             "created_at": None,
             "passed": None,
             "issues_count": 0,
+            "observations_count": 0,
             "cash_difference": None,
             "broker_account_id": None,
         }
@@ -2513,6 +2625,7 @@ def build_latest_reconciliation_card(store: StateStore) -> dict[str, Any]:
         "created_at": latest.get("created_at"),
         "passed": payload.get("passed"),
         "issues_count": len(payload.get("issues", [])),
+        "observations_count": len(payload.get("observations", [])),
         "cash_difference": payload.get("cash_difference"),
         "broker_account_id": payload.get("broker_account_id"),
     }
@@ -3683,6 +3796,7 @@ def _reconciliation_by_snapshot_id(store: StateStore) -> dict[str, dict[str, Any
             "created_at": row.get("created_at"),
             "passed": payload.get("passed"),
             "issues_count": len(payload.get("issues", [])),
+            "observations_count": len(payload.get("observations", [])),
         }
     return output
 
@@ -3691,7 +3805,11 @@ def _reconciliation_status(reconciliation: dict[str, Any] | None) -> str:
     if reconciliation is None:
         return "unreconciled"
     if reconciliation.get("passed") is True:
-        return "passed"
+        return (
+            "passed_with_observations"
+            if reconciliation.get("observations_count", 0)
+            else "passed"
+        )
     if reconciliation.get("passed") is False:
         return "failed"
     return "unknown"

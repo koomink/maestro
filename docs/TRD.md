@@ -411,6 +411,33 @@ the same `signal_run_id`.
 - `maestro reconcile` compares Maestro portfolio state with the latest broker account snapshot and persists a `broker_reconciliation` system event plus audit event.
 - v0.5 exposes no callable KIS order submission, cancel, amend, buy, or sell path.
 
+### 3.5.1 Cash ledger contract
+
+- `BrokerAccountSnapshot.ledger_cash_by_currency` is the accounting cash
+  contract. `buying_power_by_currency` is capacity only; Toss explicitly sets
+  ledger cash to `null` because `cashBuyingPower` is not settled cash.
+- Toss buying-power drift is persisted as `cash_drift_observed` and remains an
+  observation. It cannot satisfy or fail a strict ledger cash comparison and
+  cannot enter TWR as a cash flow or return.
+- A Toss account must have an operator-confirmed `ledger open-baseline` before
+  future signal/approval runs can reuse its cash state. Broker snapshot
+  adoption is positions-only by default; `--include-cash` is an explicit
+  classified exception.
+- Verified account cash flows advance the account-scoped ledger. Fill and cost
+  updates use broker-order watermarks, so repeated status/history reads are
+  idempotent. KIS `transaction_costs_today` remains KIS-only.
+- Every Toss snapshot refresh reads OPEN/CLOSED history before persisting the
+  snapshot and reconciliation evidence. `ledger backfill-orders` remains the
+  operator repair entrypoint. Baseline/adoption cutoffs prevent historical
+  principal, positions, and costs from being applied twice.
+- Signal generation consumes broker positions plus ledger cash without writing
+  a portfolio-ledger snapshot. Dashboard account, currency-sleeve, and total
+  performance report `confirmed`, `provisional`, or `degraded`; buying-power-only
+  changes do not change confirmed NAV or TWR.
+- Telegram `/cash_drift` exposes the same suspense rows with stale-snapshot
+  callback protection. Classification is audited but never silently writes an
+  account cash flow.
+
 ### 3.6 Current Live Approval Order Foundation
 
 - `RunMode.LIVE_APPROVAL` is defined for approval-gated live trading work. There is
@@ -483,6 +510,23 @@ the same `signal_run_id`.
   later orders; transport/parse failures remain ambiguous `halted` recovery
   cases. An approved recovery ack supersedes its source contribution order so
   monthly idempotency is determined by the replacement lifecycle.
+- Toss HTTP `400`, `401`, `403`, `404`, `422`, and `429` order responses are
+  definitive rejections and preserve HTTP status, Toss error code, request ID,
+  and structured error data. They are isolated to the affected order while the
+  sequential batch continues. HTTP `409`, `5xx`, network failures, and response
+  parse failures remain ambiguous `halted` recovery cases and stop later
+  submissions. Recovery quotes are rounded down to the instrument `price_tick`
+  before capacity, notional, and live gates are recalculated.
+- `WorkflowRecoveryService` is the shared CLI/Telegram recovery boundary. It
+  fingerprints all unresolved submit, recovery-required, and incomplete-
+  lifecycle evidence under the live-order lock; stale callbacks fail closed.
+  It resolves broker status, applies fills, refreshes affected account
+  snapshots, and requires account-scoped reconciliation before recording
+  completion. Open recovered orders return to tracking-resume.
+- Toss snapshots collect both OPEN and current-day paginated CLOSED order
+  history. Ambiguous submissions without an order ID use a unique
+  account/symbol/side/quantity/price/±5-minute match; zero or multiple matches
+  require an audited Telegram broker-app attestation and never resubmit.
 - KIS overseas order status lookup uses the broker submission timestamp to query
   the corresponding US exchange-local date range, reducing false unknown states
   around Korea/US date boundaries.
@@ -1272,12 +1316,14 @@ Requirements:
   commands run one selected signal-enabled strategy, persist a signal package
   visible to Dashboard freshness/read models, and do not create approvals or
   submit broker orders.
-- Require confirmation callbacks for `/pause` and `/kill_switch`.
+- Require confirmation callbacks for `/pause`, `/clear_halt`, `/recovery`, and
+  `/kill_switch`. Recovery alerts are deduplicated by blocker fingerprint.
 - Persist Telegram command execution to audit/system events.
 - Do not allow Telegram commands to submit or cancel broker orders without a
   dedicated approval callback, disable risk limits, enable live mode, disable
-  dry-run mode, change risk limits, resume, clear halted state, or trigger
-  broker sync/reconciliation.
+  dry-run mode, change risk limits, resume paused execution, or release a kill
+  switch. Recovery may run only its fixed snapshot/fill/reconciliation
+  preflight and cannot bypass ordinary live gates.
 
 ## 16. KIS Adapter Future Design
 

@@ -137,9 +137,12 @@ def _seed_broker_baseline(
     cash: float,
     positions: dict[str, float] | None = None,
 ) -> None:
+    state = PortfolioState(cash=cash, positions=positions or {})
+    store.save_portfolio_snapshot("run_adopted_broker_baseline", state)
     store.save_portfolio_snapshot(
         "run_adopted_broker_baseline",
-        PortfolioState(cash=cash, positions=positions or {}),
+        state,
+        account_id="default_kis",
     )
 
 
@@ -387,7 +390,7 @@ def test_live_approval_order_generation_fills_position_prices_from_broker_snapsh
     assert proposal_snapshot["prices"]["MOCK_LEGACY"] == 777.0
 
 
-def test_live_approval_refreshes_broker_cash_before_order_generation(
+def test_live_approval_refresh_does_not_persist_signal_portfolio_state(
     tmp_path,
     monkeypatch,
 ):
@@ -424,10 +427,10 @@ def test_live_approval_refreshes_broker_cash_before_order_generation(
     adopted = orchestrator.state_store.list_system_events_by_type("broker_snapshot_adopted")[0][
         "payload"
     ]
-    assert summary.cash == 900.0
-    assert latest_state.cash == 900.0
-    assert dry_run["request"]["quantity"] == 1.0
-    assert adopted["cash"] == 900.0
+    assert summary.cash == 1000.0
+    assert latest_state.cash == 1000.0
+    assert dry_run["request"]["quantity"] == 2.0
+    assert adopted["cash"] == 1000.0
 
 
 def test_live_approval_run_once_auto_reconciles_refreshed_broker_snapshot(
@@ -457,6 +460,7 @@ def test_live_approval_run_once_auto_reconciles_refreshed_broker_snapshot(
         "broker_reconciliation",
         {"passed": True},
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=900.0)
     with sqlite3.connect(orchestrator.state_store.path) as conn:
         conn.execute(
             "UPDATE system_events SET created_at = ? WHERE event_type = ?",
@@ -493,19 +497,12 @@ def test_live_approval_run_once_auto_reconciliation_failure_blocks_approval(
         return snapshot
 
     monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
-    monkeypatch.setattr(
-        "maestro.orchestration.orchestrator.portfolio_state_from_broker_account",
-        lambda account, *, allowed_symbols, universe: PortfolioState(
-            cash=800.0,
-            cash_by_currency={"USD": 800.0},
-            positions={},
-        ),
-    )
     config_path = _overseas_live_approval_config(tmp_path, dry_run=True)
     orchestrator = MaestroOrchestrator(
         load_config(config_path),
         telegram_client=telegram_client,
     )
+    _seed_broker_baseline(orchestrator.state_store, cash=800.0)
 
     summary = orchestrator.run_once()
 

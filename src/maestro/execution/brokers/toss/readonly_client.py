@@ -1,5 +1,7 @@
 import os
+from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from maestro.config.broker import BrokerAccountConfig
 from maestro.execution.brokers.readonly import (
@@ -10,7 +12,8 @@ from maestro.execution.brokers.readonly import (
     BrokerReadOnlyClient,
 )
 from maestro.execution.brokers.toss.auth import TossAuthManager
-from maestro.execution.brokers.toss.parsers import toss_snapshot_from_payloads
+from maestro.execution.brokers.toss.order_history import list_toss_orders
+from maestro.execution.brokers.toss.parsers import toss_order_summaries, toss_snapshot_from_payloads
 from maestro.execution.brokers.toss.transport import TossRestTransport
 
 
@@ -64,10 +67,30 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
         return {symbol: prices[symbol] for symbol in symbols if symbol in prices}
 
     def get_order_fills(self) -> list[BrokerOrderSummary]:
-        return []
+        return list(self._read_snapshot().order_fills)
 
     def get_unfilled_orders(self) -> list[BrokerOrderSummary]:
         return list(self._read_snapshot().unfilled_orders)
+
+    def list_orders(
+        self,
+        *,
+        status: str,
+        symbol: str | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[BrokerOrderSummary]:
+        if status not in {"OPEN", "CLOSED"}:
+            raise ValueError("Toss order history status must be OPEN or CLOSED")
+        orders = list_toss_orders(
+            self.transport,
+            self.account_seq,
+            status=status,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        return toss_order_summaries(orders, [])
 
     def _read_snapshot(self):
         if self._snapshot is None:
@@ -83,11 +106,19 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
                 )["result"]
                 for currency in ("KRW", "USD")
             ]
-            open_orders_payload = self.transport.get(
-                "/api/v1/orders",
-                {"status": "OPEN"},
-                account_seq=self.account_seq,
-            )["result"]
+            today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+            open_orders = list_toss_orders(
+                self.transport,
+                self.account_seq,
+                status="OPEN",
+            )
+            closed_orders = list_toss_orders(
+                self.transport,
+                self.account_seq,
+                status="CLOSED",
+                from_date=today,
+                to_date=today,
+            )
             commissions = self.transport.get(
                 "/api/v1/commissions",
                 account_seq=self.account_seq,
@@ -108,7 +139,8 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
                 account=account,
                 holdings=holdings,
                 buying_powers=buying_powers,
-                open_orders=list(open_orders_payload.get("orders", [])),
+                open_orders=open_orders,
+                closed_orders=closed_orders,
                 commissions=list(commissions),
                 prices=prices,
             )

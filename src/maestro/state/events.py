@@ -25,6 +25,8 @@ class SystemEventType(StrEnum):
     LIVE_ORDER_TRACKING_INCOMPLETE = "live_order_tracking_incomplete"
     LIVE_ORDER_TRACKING_RESOLVED = "live_order_tracking_resolved"
     LIVE_ORDER_RECOVERY_REQUIRED = "live_order_recovery_required"
+    LIVE_ORDER_RECOVERY_RESOLUTION = "live_order_recovery_resolution"
+    LIVE_ORDER_RECOVERY_ATTESTATION = "live_order_recovery_attestation"
     LIVE_ORDER_RECOVERY_COMPLETED = "live_order_recovery_completed"
     LIVE_ORDER_RECOVERY_HALT = "live_order_recovery_halt"
     LIVE_ORDER_LIMIT_HALT = "live_order_limit_halt"
@@ -47,7 +49,12 @@ class SystemEventType(StrEnum):
     ACCOUNT_TRACKING_STARTED = "account_tracking_started"
     ACCOUNT_TRACKING_ENDED = "account_tracking_ended"
     PERFORMANCE_BASELINE_ADOPTED = "performance_baseline_adopted"
+    LEDGER_OPENING_BASELINE = "ledger_opening_baseline"
+    CASH_DRIFT_OBSERVED = "cash_drift_observed"
+    CASH_DRIFT_CLASSIFIED = "cash_drift_classified"
+    BROKER_ORDER_HISTORY_BACKFILL = "broker_order_history_backfill"
     TELEGRAM_COMMAND = "telegram_command"
+    TELEGRAM_RECOVERY_NOTICE = "telegram_recovery_notice"
 
 
 SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
@@ -136,6 +143,35 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
         "effective_at",
         "accounts",
         "component_values",
+    ),
+    SystemEventType.LEDGER_OPENING_BASELINE: (
+        "account_id",
+        "currency",
+        "amount",
+        "source",
+        "effective_at",
+    ),
+    SystemEventType.CASH_DRIFT_OBSERVED: (
+        "account_id",
+        "currency",
+        "difference",
+        "snapshot_id",
+        "observed_at",
+    ),
+    SystemEventType.CASH_DRIFT_CLASSIFIED: (
+        "account_id",
+        "currency",
+        "classification",
+        "snapshot_id",
+        "decided_at",
+    ),
+    SystemEventType.BROKER_ORDER_HISTORY_BACKFILL: (
+        "account_id",
+        "from_date",
+        "to_date",
+        "orders_checked",
+        "applied_count",
+        "checked_at",
     ),
     "fx_rate_snapshot": ("source", "as_of", "rates"),
     "fx_rate_snapshot_failed": ("provider", "pairs", "error_type", "checked_at"),

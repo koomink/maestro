@@ -20,6 +20,7 @@ def toss_snapshot_from_payloads(
     buying_power: dict[str, Any] | None = None,
     buying_powers: list[dict[str, Any]] | None = None,
     open_orders: list[dict[str, Any]] | None = None,
+    closed_orders: list[dict[str, Any]] | None = None,
     commissions: list[dict[str, Any]] | None = None,
     prices: list[dict[str, Any]] | None = None,
     fetched_at: datetime | None = None,
@@ -33,19 +34,20 @@ def toss_snapshot_from_payloads(
     available_by_currency = {
         model.source_currency: model.cash_buying_power for model in power_models
     }
-    pending_orders = _pending_orders(open_orders or [], commissions or [])
+    pending_orders = toss_order_summaries(open_orders or [], commissions or [])
+    completed_orders = toss_order_summaries(closed_orders or [], commissions or [])
     reserved_by_currency: dict[str, float] = {}
     for order in pending_orders:
         if order.currency and order.reserved_cash is not None:
             reserved_by_currency[order.currency] = (
                 reserved_by_currency.get(order.currency, 0.0) + order.reserved_cash
             )
-    cash_by_currency = {
-        currency: available + reserved_by_currency.get(currency, 0.0)
-        for currency, available in available_by_currency.items()
-    }
-    primary_currency = "KRW" if "KRW" in cash_by_currency else power_models[0].source_currency
-    cash = cash_by_currency[primary_currency]
+    # `cashBuyingPower` is a capacity observation.  Keep open-buy reservation
+    # estimates in the explicit reserved-capacity fields only; never fold them
+    # into a cash/ledger-shaped field.
+    cash_by_currency = dict(available_by_currency)
+    primary_currency = "KRW" if "KRW" in available_by_currency else power_models[0].source_currency
+    cash = available_by_currency[primary_currency]
     available_cash = available_by_currency[primary_currency]
     reserved_cash = reserved_by_currency.get(primary_currency, 0.0)
     positions = [_position(item) for item in holdings.get("items", [])]
@@ -61,7 +63,7 @@ def toss_snapshot_from_payloads(
         reserved_cash=reserved_cash,
         available_cash_by_currency=available_by_currency,
         reserved_cash_by_currency=reserved_by_currency,
-        cash_semantics="available_plus_open_buy_reservations",
+        cash_semantics="buying_power_observation",
     )
     return BrokerReadOnlySnapshot(
         account=BrokerAccountSnapshot(
@@ -76,11 +78,13 @@ def toss_snapshot_from_payloads(
                 source="toss_openapi_readonly",
             ),
             daily_pnl_by_currency=_pnl_by_currency(holdings.get("dailyProfitLoss")),
+            ledger_cash_by_currency=None,
+            buying_power_by_currency=available_by_currency,
             fetched_at=fetched_at or utc_now(),
             source="toss_openapi_readonly",
         ),
         current_prices=current_prices,
-        order_fills=[],
+        order_fills=completed_orders,
         unfilled_orders=pending_orders,
     )
 
@@ -110,7 +114,7 @@ def _position(item: dict[str, Any]) -> BrokerPosition:
     )
 
 
-def _pending_orders(
+def toss_order_summaries(
     orders: list[dict[str, Any]],
     commissions: list[dict[str, Any]],
 ) -> list[BrokerOrderSummary]:
@@ -158,6 +162,8 @@ def _pending_orders(
                 estimated_commission=(
                     estimated_commission if estimated_commission > 0 else None
                 ),
+                cumulative_commission=_optional_decimal(execution.get("commission")),
+                cumulative_tax=_optional_decimal(execution.get("tax")),
             )
         )
     return output
@@ -203,4 +209,4 @@ def _optional_decimal(value: Any) -> float | None:
     return _decimal(value)
 
 
-__all__ = ["toss_snapshot_from_payloads"]
+__all__ = ["toss_order_summaries", "toss_snapshot_from_payloads"]

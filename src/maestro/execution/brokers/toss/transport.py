@@ -30,8 +30,17 @@ class TossRateLimitError(TossTransportError):
         *,
         retry_after: int | None = None,
         rate_limit_remaining: int | None = None,
+        error_code: str | None = None,
+        request_id: str | None = None,
+        data: dict[str, Any] | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(
+            message,
+            status_code=429,
+            error_code=error_code,
+            request_id=request_id,
+            data=data,
+        )
         self.retry_after = retry_after
         self.rate_limit_remaining = rate_limit_remaining
 
@@ -97,23 +106,34 @@ class TossRestTransport:
             with self.opener.open(request, timeout=self.timeout_seconds) as response:
                 body = response.read()
         except HTTPError as exc:
+            error_payload = _http_error_payload(exc)
+            error = error_payload.get("error") if isinstance(error_payload, dict) else None
+            error = error if isinstance(error, dict) else {}
+            message = str(
+                error.get("message") or f"Toss OpenAPI request failed: HTTP {exc.code}"
+            )
+            error_code = _optional_str(error.get("code"))
+            request_id = _optional_str(
+                error.get("requestId") or exc.headers.get("X-Request-Id")
+            )
+            data = error.get("data") if isinstance(error.get("data"), dict) else None
             if exc.code == 429:
                 raise TossRateLimitError(
-                    "Toss OpenAPI rate limit exceeded",
+                    message,
                     retry_after=_optional_int(exc.headers.get("Retry-After")),
                     rate_limit_remaining=_optional_int(
                         exc.headers.get("X-RateLimit-Remaining")
                     ),
+                    error_code=error_code,
+                    request_id=request_id,
+                    data=data,
                 ) from exc
-            error_payload = _http_error_payload(exc)
-            error = error_payload.get("error") if isinstance(error_payload, dict) else None
-            error = error if isinstance(error, dict) else {}
             raise TossTransportError(
-                str(error.get("message") or f"Toss OpenAPI request failed: HTTP {exc.code}"),
+                message,
                 status_code=exc.code,
-                error_code=_optional_str(error.get("code")),
-                request_id=_optional_str(error.get("requestId")),
-                data=error.get("data") if isinstance(error.get("data"), dict) else None,
+                error_code=error_code,
+                request_id=request_id,
+                data=data,
             ) from exc
         except URLError as exc:
             raise TossTransportError(f"Toss OpenAPI request failed: {exc.reason}") from exc

@@ -148,6 +148,156 @@ def test_reconciliation_cash_mismatch_fails(tmp_path):
     assert result.cash_difference == -100.0
 
 
+def test_toss_buying_power_drift_is_observational(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    store.save_portfolio_snapshot(
+        new_run_id(),
+        PortfolioState(cash=1000.0, cash_by_currency={"USD": 1000.0}, positions={}),
+        account_id="toss_brokerage",
+    )
+    store.save_broker_account_snapshot(
+        new_run_id(),
+        "toss_brokerage",
+        {
+            "account": {
+                "account_id": "toss-1",
+                "cash": 1002.0,
+                "cash_by_currency": {"USD": 1002.0},
+                "ledger_cash_by_currency": None,
+                "buying_power_by_currency": {"USD": 1002.0},
+                "buying_power": 1002.0,
+                "positions": [],
+                "fetched_at": "2026-05-07T00:00:00+00:00",
+                "source": "toss_openapi_readonly",
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        account_ids=["toss_brokerage"],
+    ).reconcile_latest()
+
+    assert result.passed is True
+    assert result.issues == []
+    assert result.observations[0].issue_type == "buying_power_drift"
+    assert result.observations[0].difference == 2.0
+    suspense = store.list_cash_suspense(account_id="toss_brokerage")
+    assert suspense[0]["amount"] == 2.0
+    assert suspense[0]["status"] == "open"
+    assert result.account_results[0]["observations"][0]["issue_type"] == (
+        "buying_power_drift"
+    )
+
+
+def test_known_1343_krw_drift_replays_as_l1_without_blocking(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    store.save_portfolio_snapshot(
+        new_run_id(),
+        PortfolioState(
+            cash=10_000_000.0,
+            cash_by_currency={"KRW": 10_000_000.0},
+            positions={"QQQ": 1.0},
+        ),
+        account_id="toss_brokerage",
+    )
+    store.save_broker_account_snapshot(
+        new_run_id(),
+        "toss_brokerage",
+        {
+            "account": {
+                "account_id": "toss-1",
+                "cash": 10_001_343.0,
+                "cash_by_currency": {"KRW": 10_001_343.0},
+                "ledger_cash_by_currency": None,
+                "buying_power_by_currency": {"KRW": 10_001_343.0},
+                "buying_power": 10_001_343.0,
+                "positions": [
+                    {
+                        "symbol": "QQQ",
+                        "quantity": 1.0,
+                        "average_price": 1_000_000.0,
+                        "current_price": 1_000_000.0,
+                    }
+                ],
+                "fetched_at": "2026-07-02T00:00:00+00:00",
+                "source": "toss_openapi_readonly",
+            },
+            "current_prices": {"QQQ": 1_000_000.0},
+            "order_fills": [
+                {
+                    "order_id": "recent",
+                    "symbol": "QQQ",
+                    "side": "buy",
+                    "quantity": 1.0,
+                    "filled_quantity": 1.0,
+                    "average_fill_price": 1_000_000.0,
+                    "status": "FILLED",
+                    "submitted_at": "2026-07-01T00:00:00+00:00",
+                }
+            ],
+            "unfilled_orders": [],
+        },
+    )
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        account_ids=["toss_brokerage"],
+    ).reconcile_latest()
+
+    assert result.passed is True
+    assert result.observations[0].difference == 1_343.0
+    assert result.observations[0].drift_level == "L1"
+
+
+def test_toss_reconciliation_requires_coupled_order_history_evidence(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    store.save_portfolio_snapshot(
+        "ledger",
+        PortfolioState(cash=100.0, cash_by_currency={"USD": 100.0}, positions={}),
+        account_id="toss_brokerage",
+    )
+    store.save_broker_account_snapshot(
+        "snapshot-run",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "order_history_backfill_run_id": "snapshot-run",
+            "account": {
+                "account_id": "toss-1",
+                "cash": 100.0,
+                "cash_by_currency": {"USD": 100.0},
+                "ledger_cash_by_currency": None,
+                "buying_power_by_currency": {"USD": 100.0},
+                "buying_power": 100.0,
+                "positions": [],
+                "fetched_at": "2026-07-02T00:00:00+00:00",
+                "source": "toss_openapi_readonly",
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
+    )
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        account_ids=["toss_brokerage"],
+    ).reconcile_latest()
+
+    assert result.passed is False
+    assert result.issues[0].issue_type == "order_history_unverified"
+
+
 def test_reconciliation_position_quantity_mismatch_fails(tmp_path):
     config, store, audit = _reconciliation_context(tmp_path)
     _save_portfolio_and_broker(

@@ -1285,7 +1285,7 @@ def _performance_snapshot(
             ],
             "return_method": (
                 "chain_linked_twr_from_adopted_baseline"
-                if latest_total.get("performance_status") == "tracked"
+                if latest_total.get("baseline_id")
                 else "legacy_window_return"
             ),
             "fx_policy": "converted_totals_require_fresh_as_of_persisted_fx",
@@ -1322,14 +1322,21 @@ def _performance_quality(
                 "message": "Converted total portfolio values are unavailable because FX is stale.",
             }
         )
-    if latest_total.get("performance_status") == "legacy":
+    if latest_total.get("performance_status") == "provisional":
         reasons.append(
             {
                 "code": "performance_baseline_required",
                 "message": (
-                    "Returns are legacy until a fresh reconciled performance baseline "
-                    "is adopted."
+                    "Performance is provisional because a ledger cash timeline is "
+                    "not available for every account."
                 ),
+            }
+        )
+    if latest_total.get("performance_status") == "degraded":
+        reasons.append(
+            {
+                "code": "performance_ledger_partial",
+                "message": "Performance is degraded because only some accounts have ledger cash.",
             }
         )
     if latest_total.get("performance_status") == "partial":

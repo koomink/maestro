@@ -57,6 +57,15 @@ class StateStore:
             if "account_id" not in columns:
                 conn.execute("ALTER TABLE portfolio_snapshots ADD COLUMN account_id TEXT")
             conn.execute(
+                "CREATE TABLE IF NOT EXISTS cash_suspense "
+                "(account_id TEXT NOT NULL, currency TEXT NOT NULL, amount REAL NOT NULL, "
+                "first_snapshot_id INTEGER, last_snapshot_id INTEGER, "
+                "first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL, "
+                "candidate_label TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (account_id, currency))"
+            )
+            conn.execute(
                 "CREATE TABLE IF NOT EXISTS fill_watermarks "
                 "("
                 "broker_order_id TEXT PRIMARY KEY, "
@@ -411,6 +420,277 @@ class StateStore:
         account_id: str | None = None,
     ) -> None:
         self._insert("portfolio_snapshots", run_id, account_id, state.model_dump(mode="json"))
+
+    def apply_account_cash_flow(
+        self,
+        run_id: str,
+        account_id: str,
+        amount: float,
+        currency: str,
+    ) -> bool:
+        """Apply a verified external cash flow to the account ledger.
+
+        Broker snapshots are never used as a cash source here.  The method
+        advances the latest account-scoped ledger state and leaves the global
+        portfolio snapshot untouched; fills continue to update both views via
+        ``apply_fill_reconciliation``.
+        """
+        normalized_currency = str(currency).upper()
+        with self.writer_lock("apply_account_cash_flow"):
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT payload FROM portfolio_snapshots "
+                    "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                    (account_id,),
+                ).fetchone()
+                if row is None:
+                    return False
+                state = PortfolioState.model_validate(json.loads(row[0]))
+                cash_by_currency = dict(state.cash_by_currency)
+                if not cash_by_currency:
+                    cash_by_currency = {normalized_currency: float(state.cash)}
+                cash_by_currency[normalized_currency] = (
+                    float(cash_by_currency.get(normalized_currency, 0.0)) + float(amount)
+                )
+                if "KRW" in cash_by_currency:
+                    cash = float(cash_by_currency["KRW"])
+                else:
+                    cash = float(sum(cash_by_currency.values()))
+                next_state = state.model_copy(
+                    update={"cash": cash, "cash_by_currency": cash_by_currency},
+                    deep=True,
+                )
+                conn.execute(
+                    "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
+                    "VALUES (?, ?, ?)",
+                    (
+                        run_id,
+                        account_id,
+                        json.dumps(next_state.model_dump(mode="json"), default=str),
+                    ),
+                )
+                return True
+
+    def upsert_cash_suspense(
+        self,
+        *,
+        account_id: str,
+        currency: str,
+        amount: float,
+        snapshot_id: int | None,
+        observed_at: str,
+        candidate_label: str = "unexplained",
+    ) -> None:
+        with self.writer_lock("upsert_cash_suspense"):
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO cash_suspense "
+                    "(account_id, currency, amount, first_snapshot_id, last_snapshot_id, "
+                    "first_observed_at, last_observed_at, candidate_label, status, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(account_id, currency) DO UPDATE SET "
+                    "amount = excluded.amount, "
+                    "last_snapshot_id = excluded.last_snapshot_id, "
+                    "last_observed_at = excluded.last_observed_at, "
+                    "candidate_label = excluded.candidate_label, "
+                    "status = 'open', updated_at = CURRENT_TIMESTAMP",
+                    (
+                        account_id,
+                        str(currency).upper(),
+                        float(amount),
+                        snapshot_id,
+                        snapshot_id,
+                        observed_at,
+                        observed_at,
+                        candidate_label,
+                    ),
+                )
+
+    def classify_cash_suspense(
+        self,
+        *,
+        account_id: str,
+        currency: str,
+        classification: str,
+    ) -> bool:
+        with self.writer_lock("classify_cash_suspense"):
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "UPDATE cash_suspense SET candidate_label = ?, status = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE account_id = ? AND currency = ?",
+                    (
+                        classification,
+                        "classified",
+                        account_id,
+                        str(currency).upper(),
+                    ),
+                )
+                return cursor.rowcount > 0
+
+    def list_cash_suspense(self, *, account_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM cash_suspense"
+        params: tuple[Any, ...] = ()
+        if account_id is not None:
+            query += " WHERE account_id = ?"
+            params = (account_id,)
+        query += " ORDER BY account_id, currency"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+    def apply_broker_order_history_delta(
+        self,
+        run_id: str,
+        *,
+        account_id: str,
+        broker_order_id: str,
+        symbol: str,
+        side: str,
+        currency: str,
+        cumulative_quantity: float,
+        cumulative_notional: float,
+        cumulative_commission: float | None = None,
+        cumulative_tax: float | None = None,
+    ) -> dict[str, float | bool]:
+        """Apply an idempotent broker-history fill/cost delta to the ledger."""
+        normalized_side = str(side).lower()
+        signed = 1.0 if normalized_side == "buy" else -1.0
+        with self.writer_lock("apply_broker_order_history"):
+            with self._connect() as conn:
+                account_row = conn.execute(
+                    "SELECT payload FROM portfolio_snapshots "
+                    "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                    (account_id,),
+                ).fetchone()
+                if account_row is None:
+                    return {
+                        "applied": False,
+                        "quantity_delta": 0.0,
+                        "notional_delta": 0.0,
+                        "cost_delta": 0.0,
+                    }
+                watermark = conn.execute(
+                    "SELECT cumulative_quantity, cumulative_notional, "
+                    "cumulative_commission, cumulative_tax "
+                    "FROM fill_watermarks WHERE broker_order_id = ?",
+                    (broker_order_id,),
+                ).fetchone()
+                previous_quantity = float(watermark[0]) if watermark else 0.0
+                previous_notional = float(watermark[1]) if watermark else 0.0
+                previous_commission = float(watermark[2]) if watermark else 0.0
+                previous_tax = float(watermark[3]) if watermark else 0.0
+                next_commission = (
+                    max(previous_commission, float(cumulative_commission))
+                    if cumulative_commission is not None
+                    else previous_commission
+                )
+                next_tax = (
+                    max(previous_tax, float(cumulative_tax))
+                    if cumulative_tax is not None
+                    else previous_tax
+                )
+                quantity_delta = max(float(cumulative_quantity) - previous_quantity, 0.0)
+                notional_delta = max(float(cumulative_notional) - previous_notional, 0.0)
+                cost_delta = (next_commission - previous_commission) + (
+                    next_tax - previous_tax
+                )
+                changed = (
+                    quantity_delta > 1e-12
+                    or notional_delta > 1e-12
+                    or cost_delta > 1e-12
+                )
+                if changed:
+                    normalized_currency = str(currency).upper()
+
+                    def advance_state(raw_state: str) -> PortfolioState:
+                        state = PortfolioState.model_validate(json.loads(raw_state))
+                        cash_by_currency = dict(state.cash_by_currency)
+                        if not cash_by_currency:
+                            cash_by_currency = {normalized_currency: float(state.cash)}
+                        cash_by_currency[normalized_currency] = (
+                            float(cash_by_currency.get(normalized_currency, 0.0))
+                            - signed * notional_delta
+                            - cost_delta
+                        )
+                        positions = dict(state.positions)
+                        next_quantity = positions.get(symbol, 0.0) + signed * quantity_delta
+                        if abs(next_quantity) < 1e-12:
+                            positions.pop(symbol, None)
+                        else:
+                            positions[symbol] = next_quantity
+                        cash = (
+                            float(cash_by_currency["KRW"])
+                            if "KRW" in cash_by_currency
+                            else float(sum(cash_by_currency.values()))
+                        )
+                        return state.model_copy(
+                            update={
+                                "cash": cash,
+                                "cash_by_currency": cash_by_currency,
+                                "positions": positions,
+                            },
+                            deep=True,
+                        )
+
+                    next_state = advance_state(account_row[0])
+                    for target_account_id, raw_state in [
+                        (account_id, account_row[0]),
+                        (
+                            None,
+                            (
+                                conn.execute(
+                                    "SELECT payload FROM portfolio_snapshots "
+                                    "WHERE account_id IS NULL ORDER BY id DESC LIMIT 1"
+                                ).fetchone()
+                                or [None]
+                            )[0],
+                        ),
+                    ]:
+                        if raw_state is None:
+                            continue
+                        target_state = (
+                            next_state
+                            if target_account_id == account_id
+                            else advance_state(raw_state)
+                        )
+                        conn.execute(
+                            "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
+                            "VALUES (?, ?, ?)",
+                            (
+                                run_id,
+                                target_account_id,
+                                json.dumps(target_state.model_dump(mode="json"), default=str),
+                            ),
+                        )
+                conn.execute(
+                    "INSERT INTO fill_watermarks "
+                    "(broker_order_id, cumulative_quantity, cumulative_notional, "
+                    "cumulative_commission, cumulative_tax, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(broker_order_id) DO UPDATE SET "
+                    "cumulative_quantity = MAX(fill_watermarks.cumulative_quantity, "
+                    "excluded.cumulative_quantity), "
+                    "cumulative_notional = MAX(fill_watermarks.cumulative_notional, "
+                    "excluded.cumulative_notional), "
+                    "cumulative_commission = MAX(fill_watermarks.cumulative_commission, "
+                    "excluded.cumulative_commission), "
+                    "cumulative_tax = MAX(fill_watermarks.cumulative_tax, "
+                    "excluded.cumulative_tax), "
+                    "updated_at = CURRENT_TIMESTAMP",
+                    (
+                        broker_order_id,
+                        max(previous_quantity, float(cumulative_quantity)),
+                        max(previous_notional, float(cumulative_notional)),
+                        next_commission,
+                        next_tax,
+                    ),
+                )
+                return {
+                    "applied": changed,
+                    "quantity_delta": quantity_delta,
+                    "notional_delta": notional_delta,
+                    "cost_delta": cost_delta,
+                }
 
     def save_strategy_run(self, run_id: str, strategy_id: str, payload: dict[str, Any]) -> None:
         self._insert("strategy_runs", run_id, strategy_id, payload)

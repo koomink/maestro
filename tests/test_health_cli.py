@@ -2,6 +2,7 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 from typer.testing import CliRunner
@@ -865,7 +866,10 @@ def test_structured_logging_redacts_secret_fields():
     assert "AAPL" in output
 
 
-def test_recover_live_order_cli_records_completion_after_reconciliation(tmp_path):
+def test_recover_live_order_cli_records_completion_after_reconciliation(
+    monkeypatch,
+    tmp_path,
+):
     config_path = _live_approval_config(tmp_path)
     config = load_config(config_path)
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -885,6 +889,25 @@ def test_recover_live_order_cli_records_completion_after_reconciliation(tmp_path
         },
     )
     store.save_system_event("run_reconcile", "broker_reconciliation", {"passed": True})
+
+    def recover_live_orders(**kwargs):
+        store.save_system_event(
+            "run_recovery",
+            "live_order_recovery_completed",
+            {"reason": kwargs["reason"]},
+        )
+        return SimpleNamespace(
+            run_id="run_recovery",
+            broker_snapshot_ids=[1],
+            applied_fill_count=0,
+        )
+
+    monkeypatch.setattr(
+        "maestro.cli.WorkflowRecoveryService",
+        lambda *args, **kwargs: SimpleNamespace(
+            recover_live_orders=recover_live_orders,
+        ),
+    )
 
     result = CliRunner().invoke(
         app,

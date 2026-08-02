@@ -1,5 +1,7 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from io import BytesIO
 from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -12,9 +14,14 @@ from maestro.execution.brokers.readonly_factory import (
     broker_readonly_accounts,
     build_broker_readonly_service,
 )
+from maestro.execution.brokers.toss.order_history import list_toss_orders
 from maestro.execution.brokers.toss.parsers import toss_snapshot_from_payloads
 from maestro.execution.brokers.toss.readonly_client import TossReadOnlyClient
-from maestro.execution.brokers.toss.transport import TossRateLimitError, TossRestTransport
+from maestro.execution.brokers.toss.transport import (
+    TossRateLimitError,
+    TossRestTransport,
+    TossTransportError,
+)
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 
@@ -111,6 +118,8 @@ def test_toss_payloads_normalize_to_broker_snapshot():
     assert snapshot.account.cash == 5_000_000.0
     assert snapshot.account.buying_power == 5_000_000.0
     assert snapshot.account.cash_by_currency == {"KRW": 5_000_000.0}
+    assert snapshot.account.ledger_cash_by_currency is None
+    assert snapshot.account.buying_power_by_currency == {"KRW": 5_000_000.0}
     assert snapshot.current_prices == {"005930": 72000.0, "AAPL": 185.70}
     assert [position.symbol for position in snapshot.account.positions] == ["005930", "AAPL"]
     assert snapshot.account.positions[1].quantity == 1.5
@@ -134,7 +143,7 @@ def test_toss_daily_profit_loss_normalizes_to_daily_pnl_by_currency():
     assert snapshot.account.daily_pnl_by_currency == {"KRW": -15_000.0, "USD": 1.5}
 
 
-def test_toss_snapshot_reconstructs_cash_by_currency_from_open_buy_reservations():
+def test_toss_snapshot_keeps_open_buy_reservations_out_of_cash_fields():
     snapshot = toss_snapshot_from_payloads(
         account={"accountNo": "12345678901", "accountSeq": 7},
         holdings={"items": []},
@@ -175,7 +184,7 @@ def test_toss_snapshot_reconstructs_cash_by_currency_from_open_buy_reservations(
         ],
     )
 
-    assert snapshot.account.cash_by_currency == {"KRW": 5_000_000.0, "USD": 1_000.0}
+    assert snapshot.account.cash_by_currency == {"KRW": 4_299_895.0, "USD": 814.56475}
     assert snapshot.account.buying_power == 4_299_895.0
     assert snapshot.account.cash_balance is not None
     assert snapshot.account.cash_balance.available_cash_by_currency == {
@@ -229,12 +238,23 @@ def test_toss_readonly_client_fetches_account_snapshot_with_account_header():
     account_snapshot = TossReadOnlyClient(account, transport=transport).get_account_snapshot()
 
     assert account_snapshot.account_id == "12345678901"
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
     assert transport.calls == [
         ("/api/v1/accounts", {}, None),
         ("/api/v1/holdings", {}, 7),
         ("/api/v1/buying-power", {"currency": "KRW"}, 7),
         ("/api/v1/buying-power", {"currency": "USD"}, 7),
         ("/api/v1/orders", {"status": "OPEN"}, 7),
+        (
+            "/api/v1/orders",
+            {
+                "status": "CLOSED",
+                "from": today,
+                "to": today,
+                "limit": 100,
+            },
+            7,
+        ),
         ("/api/v1/commissions", {}, 7),
     ]
 
@@ -296,14 +316,57 @@ def test_toss_readonly_client_ignores_non_toss_symbols_for_price_refresh():
     )
 
     assert prices == {"AAPL": 185.70, "CASH_KRW": 1.0}
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
     assert transport.calls == [
         ("/api/v1/accounts", {}, None),
         ("/api/v1/holdings", {}, 7),
         ("/api/v1/buying-power", {"currency": "KRW"}, 7),
         ("/api/v1/buying-power", {"currency": "USD"}, 7),
         ("/api/v1/orders", {"status": "OPEN"}, 7),
+        (
+            "/api/v1/orders",
+            {
+                "status": "CLOSED",
+                "from": today,
+                "to": today,
+                "limit": 100,
+            },
+            7,
+        ),
         ("/api/v1/commissions", {}, 7),
         ("/api/v1/prices", {"symbols": "AAPL"}, None),
+    ]
+
+
+def test_toss_closed_order_history_follows_cursor_pagination():
+    transport = CursorOrderHistoryTransport()
+
+    orders = list_toss_orders(
+        transport,
+        7,
+        status="CLOSED",
+        symbol="PDBC",
+        from_date=date(2026, 7, 30),
+        to_date=date(2026, 7, 31),
+    )
+
+    assert [order["orderId"] for order in orders] == ["TOSS-1", "TOSS-2"]
+    assert transport.calls == [
+        {
+            "status": "CLOSED",
+            "symbol": "PDBC",
+            "from": "2026-07-30",
+            "to": "2026-07-31",
+            "limit": 100,
+        },
+        {
+            "status": "CLOSED",
+            "symbol": "PDBC",
+            "from": "2026-07-30",
+            "to": "2026-07-31",
+            "limit": 100,
+            "cursor": "next-1",
+        },
     ]
 
 
@@ -337,6 +400,34 @@ def test_toss_transport_raises_rate_limit_error_with_retry_after():
 
     assert exc_info.value.retry_after == 1
     assert exc_info.value.rate_limit_remaining == 0
+
+
+def test_toss_transport_preserves_http_error_evidence():
+    opener = ErrorOpener(
+        422,
+        {
+            "error": {
+                "code": "prerequisite-required",
+                "message": "위험고지 등록이 필요합니다",
+                "data": {"prerequisite": "risk-disclosure"},
+            }
+        },
+        {"X-Request-Id": "req-422"},
+    )
+    transport = TossRestTransport(
+        base_url="https://openapi.tossinvest.com",
+        access_token_provider=lambda: "token-123",
+        timeout_seconds=3,
+        opener=opener,
+    )
+
+    with pytest.raises(TossTransportError) as exc_info:
+        transport.post("/api/v1/orders", {}, account_seq=7)
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.error_code == "prerequisite-required"
+    assert exc_info.value.request_id == "req-422"
+    assert exc_info.value.data == {"prerequisite": "risk-disclosure"}
 
 
 def test_broker_readonly_service_stores_toss_snapshot(tmp_path):
@@ -523,6 +614,32 @@ class RecordingOpener:
         return JsonResponse(self.payload)
 
 
+class CursorOrderHistoryTransport:
+    def __init__(self):
+        self.calls = []
+
+    def get(self, path, params=None, *, account_seq=None):
+        assert path == "/api/v1/orders"
+        assert account_seq == 7
+        params = dict(params or {})
+        self.calls.append(params)
+        if "cursor" not in params:
+            return {
+                "result": {
+                    "orders": [{"orderId": "TOSS-1"}],
+                    "hasNext": True,
+                    "nextCursor": "next-1",
+                }
+            }
+        return {
+            "result": {
+                "orders": [{"orderId": "TOSS-2"}],
+                "hasNext": False,
+                "nextCursor": None,
+            }
+        }
+
+
 class RateLimitOpener:
     def open(self, request, timeout):
         raise HTTPError(
@@ -531,6 +648,24 @@ class RateLimitOpener:
             "Too Many Requests",
             {"Retry-After": "1", "X-RateLimit-Remaining": "0"},
             None,
+        )
+
+
+class ErrorOpener:
+    def __init__(self, status_code, payload, headers):
+        self.status_code = status_code
+        self.payload = payload
+        self.headers = headers
+
+    def open(self, request, timeout):
+        import json
+
+        raise HTTPError(
+            request.full_url,
+            self.status_code,
+            "request failed",
+            self.headers,
+            BytesIO(json.dumps(self.payload).encode("utf-8")),
         )
 
 

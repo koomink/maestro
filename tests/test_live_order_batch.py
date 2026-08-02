@@ -93,6 +93,43 @@ def test_batch_continues_after_definitive_broker_rejection(tmp_path):
     ]
 
 
+def test_batch_isolates_pdbc_rejection_and_submits_remaining_six_orders(tmp_path):
+    calls: list[str] = []
+    service, fill_service = _batch_service(tmp_path)
+    items = [
+        (
+            _request("ord_pdbc", symbol="PDBC"),
+            _dependencies(_RejectedSafetyService(calls), calls, fill_service),
+        ),
+        *[
+            (
+                _request(f"ord_{index}", symbol=f"ETF_{index}"),
+                _dependencies(_SafetyService(calls), calls, fill_service),
+            )
+            for index in range(1, 7)
+        ],
+    ]
+
+    result = service.run(items, _approval())
+
+    assert calls[:7] == [
+        "submit:ord_pdbc",
+        "submit:ord_1",
+        "submit:ord_2",
+        "submit:ord_3",
+        "submit:ord_4",
+        "submit:ord_5",
+        "submit:ord_6",
+    ]
+    assert result.items[0].lifecycle.final_status == OrderStatus.REJECTED
+    assert all(
+        item.lifecycle.final_status == OrderStatus.OPEN for item in result.items[1:]
+    )
+    assert all(
+        item.lifecycle.final_status != OrderStatus.HALTED for item in result.items
+    )
+
+
 def test_batch_stops_later_submissions_after_ambiguous_halt(tmp_path):
     calls: list[str] = []
     service, fill_service = _batch_service(tmp_path)
@@ -135,10 +172,10 @@ def _dependencies(safety_service, calls, fill_service):
     )
 
 
-def _request(order_id: str) -> LiveOrderRequest:
+def _request(order_id: str, *, symbol: str = "005930") -> LiveOrderRequest:
     return LiveOrderRequest(
         order_id=order_id,
-        symbol="005930",
+        symbol=symbol,
         side=OrderSide.BUY,
         quantity=2,
         limit_price=70_000,

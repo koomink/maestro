@@ -383,6 +383,35 @@ def test_live_order_records_definitive_broker_rejection_without_recovery(tmp_pat
     assert event["result"]["status"] == "rejected"
 
 
+def test_live_order_persists_toss_rejection_evidence_without_recovery(tmp_path):
+    broker = FakeTossRejectedLiveOrderClient()
+    service, request, approval, _ = _context(tmp_path, broker=broker)
+    _save_passed_reconciliation(service.state_store, request.run_id)
+
+    result = service.submit_approved_order(request, approval)
+
+    assert result.status == OrderStatus.REJECTED
+    assert result.raw == {
+        "broker_rejection": True,
+        "broker": "toss",
+        "code": "prerequisite-required",
+        "message": "위험고지 등록이 필요합니다",
+        "status_code": 422,
+        "request_id": "req-422",
+        "data": {"prerequisite": "risk-disclosure"},
+    }
+    assert service.state_store.list_system_events_by_type(
+        "live_order_recovery_required"
+    ) == []
+    event = service.state_store.list_system_events_by_type("live_order_result")[0][
+        "payload"
+    ]
+    assert event["result"]["raw"] == result.raw
+    audit_text = service.audit_logger.path.read_text()
+    assert "prerequisite-required" in audit_text
+    assert "req-422" in audit_text
+
+
 def test_live_order_status_service_persists_status_snapshot(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
@@ -542,6 +571,19 @@ class FakeRejectedLiveOrderClient(LiveOrderClient):
     def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
         del request
         raise BrokerOrderRejectedError("kis", "APBK1497", "파생ETF 거래 불가")
+
+
+class FakeTossRejectedLiveOrderClient(LiveOrderClient):
+    def submit_limit_order(self, request: LiveOrderRequest) -> LiveOrderResult:
+        del request
+        raise BrokerOrderRejectedError(
+            "toss",
+            "prerequisite-required",
+            "위험고지 등록이 필요합니다",
+            status_code=422,
+            request_id="req-422",
+            data={"prerequisite": "risk-disclosure"},
+        )
 
 
 class FakePreSubmitRejectingClient(FakeLiveOrderClient, LiveOrderPreSubmitValidator):

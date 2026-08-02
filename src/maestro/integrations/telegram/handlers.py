@@ -59,11 +59,13 @@ from maestro.execution.live_order_models import (
     LiveOrderRequest,
     LiveOrderStatusSnapshot,
 )
+from maestro.execution.order_builder import round_price_to_tick
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
+from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
@@ -88,6 +90,7 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("signal", "Show latest Symphony signal package"),
     ("account", "Show stored broker account freshness"),
     ("account_refresh", "Refresh broker account: /account_refresh [account_id]"),
+    ("cash_drift", "Review Toss buying-power cash suspense"),
     ("portfolio", "Show Maestro portfolio state"),
     ("apps", "Show configured strategy apps"),
     ("orders", "Show recent orders"),
@@ -97,6 +100,7 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("modify", "Propose order modification: /modify <broker_order_id> <price> [quantity]"),
     ("retry_order", "Retry a capacity-blocked order with a corrected quantity"),
     ("pause", "Confirm pause of live approval execution"),
+    ("recovery", "Show blocked workflows and safe recovery actions"),
     ("clear_halt", "Confirm recovery from a safety halt (runs preflight)"),
     ("kill_switch", "Confirm emergency live execution stop"),
 )
@@ -182,6 +186,10 @@ class TelegramOperatorCommandRouter:
             self._process_account_refresh(text, chat_id)
             self._record(command, chat_id, user_id, username, "handled")
             return True
+        if command == "/cash_drift":
+            self._cash_drift(chat_id)
+            self._record(command, chat_id, user_id, username, "handled")
+            return True
 
         handler = {
             f"/{command}": handler
@@ -197,6 +205,7 @@ class TelegramOperatorCommandRouter:
                 "orders": self._orders,
                 "approvals": self._approvals,
                 "pause": self._pause,
+                "recovery": self._recovery,
                 "clear-halt": self._clear_halt,
                 "clear_halt": self._clear_halt,
                 "kill-switch": self._kill_switch,
@@ -214,6 +223,7 @@ class TelegramOperatorCommandRouter:
 
     def poll_once(self, *, offset: int | None = None, timeout_seconds: int = 0) -> int | None:
         self._sweep_pending_approvals()
+        self._sweep_recovery_notifications()
         response = self.client.get_updates(
             offset=offset,
             timeout_seconds=timeout_seconds,
@@ -306,6 +316,14 @@ class TelegramOperatorCommandRouter:
                 user_id,
                 username,
             )
+        if action.startswith("cash-drift:"):
+            return self._process_cash_drift_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
         if action.startswith("attribution:"):
             return self._process_attribution_callback(
                 callback,
@@ -348,6 +366,14 @@ class TelegramOperatorCommandRouter:
             )
         if action.startswith("recover:"):
             return self._process_recovery_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("wfrec:"):
+            return self._process_workflow_recovery_callback(
                 callback,
                 action,
                 chat_id,
@@ -425,6 +451,80 @@ class TelegramOperatorCommandRouter:
             f"Safety state changed: {snapshot.state.value}\nreason: {snapshot.reason}",
         )
         self._record(command, chat_id, user_id, username, "confirmed")
+        return True
+
+    def _process_workflow_recovery_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        if action == "wfrec:orders":
+            self._answer(callback, "Opening recoverable orders.")
+            self._orders(chat_id)
+            self._record("/recovery", chat_id, user_id, username, "orders_opened")
+            return True
+        parts = action.split(":")
+        if len(parts) != 3 or parts[1] not in {"auto", "attest"}:
+            self._answer(callback, "This recovery action is no longer active.")
+            self._record("/recovery", chat_id, user_id, username, "stale_callback")
+            return True
+        mode, fingerprint = parts[1], parts[2]
+        decided_by = f"telegram:{username or user_id}"
+        try:
+            result = WorkflowRecoveryService(
+                self.config,
+                self.store,
+                self.audit,
+            ).recover_live_orders(
+                reason=f"Telegram recovery confirmed by {username or user_id}",
+                decided_by=decided_by,
+                expected_fingerprint=fingerprint,
+                manual_attestation=mode == "attest",
+            )
+        except Exception as exc:  # noqa: BLE001 - recovery must report any failed preflight
+            self._answer(callback, "Recovery remains blocked.")
+            self._edit_callback_message(callback, f"Recovery blocked: {exc}")
+            self._record("/recovery", chat_id, user_id, username, "failed")
+            return True
+        if result.status == "attestation_required":
+            lines = [
+                "Automatic order matching was inconclusive.",
+                "Check the broker app and confirm that every listed order was "
+                "neither accepted nor filled.",
+            ]
+            for item in result.unmatched_orders:
+                lines.append(
+                    f"- {item.get('order_id') or 'unknown'} "
+                    f"account={item.get('account_id') or 'unknown'} "
+                    f"candidates={len(item.get('candidate_orders') or [])}"
+                )
+            self._answer(callback, "Broker verification required.")
+            self._edit_callback_message(
+                callback,
+                "\n".join(lines),
+                reply_markup=_workflow_recovery_markup(
+                    result.fingerprint,
+                    attestation=True,
+                ),
+            )
+            self._record("/recovery", chat_id, user_id, username, "attestation_required")
+            return True
+        self._answer(callback, "Recovery completed.")
+        self._edit_callback_message(
+            callback,
+            "\n".join(
+                [
+                    "Live-order recovery completed.",
+                    f"resolved_orders: {len(result.resolved_orders)}",
+                    f"applied_fills: {result.applied_fill_count}",
+                    "Use /recovery again if a separate safety halt remains.",
+                ]
+            ),
+        )
+        self._record("/recovery", chat_id, user_id, username, "confirmed")
         return True
 
     def _process_attribution_command(
@@ -696,6 +796,10 @@ class TelegramOperatorCommandRouter:
         if not isfinite(quantity) or quantity <= 0 or quantity > original.quantity:
             raise ValueError("retry quantity must be positive and no greater than planned")
         retry_price = price if price is not None else self._lookup_retry_price(config, original)
+        retry_price = round_price_to_tick(
+            retry_price,
+            config.universe.get(original.symbol),
+        )
         if not isfinite(retry_price) or retry_price <= 0:
             raise ValueError("retry price must be a positive finite number")
         proposal_id = new_run_id()
@@ -1292,6 +1396,39 @@ class TelegramOperatorCommandRouter:
                 )
                 reminders.add(key)
 
+    def _sweep_recovery_notifications(self) -> None:
+        safety = SafetyControlService(self.store, self.audit).current_state()
+        preview = WorkflowRecoveryService(self.config, self.store, self.audit).preview()
+        if safety.state not in {SafetyState.HALTED, SafetyState.KILLED} and not preview.blockers:
+            return
+        notice_key = (
+            f"{safety.state.value}:"
+            f"{safety.updated_at if safety.state != SafetyState.ACTIVE else ''}:"
+            f"{preview.fingerprint}"
+        )
+        notices = self.store.list_system_events_by_type(
+            SystemEventType.TELEGRAM_RECOVERY_NOTICE,
+            limit=1000,
+        )
+        if any(row["payload"].get("notice_key") == notice_key for row in notices):
+            return
+        text, markup = self._recovery_message()
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            self._send(int(chat_id), text, reply_markup=markup)
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            SystemEventType.TELEGRAM_RECOVERY_NOTICE,
+            {
+                "notice_key": notice_key,
+                "recovery_fingerprint": preview.fingerprint,
+                "recovery_event_ids": [blocker.event_id for blocker in preview.blockers],
+                "safety_state": safety.state.value,
+                "sent_at": utc_now().isoformat(),
+            },
+        )
+
     def _ack_retry_proposal(
         self,
         proposal: Mapping[str, Any],
@@ -1356,7 +1493,13 @@ class TelegramOperatorCommandRouter:
         price = float(prices.get(order.symbol, 0.0))
         if price <= 0:
             raise ValueError(f"latest broker quote is unavailable for {order.symbol}")
-        return price
+        normalized_price = round_price_to_tick(
+            price,
+            config.universe.get(order.symbol),
+        )
+        if normalized_price <= 0:
+            raise ValueError(f"latest broker quote is unavailable for {order.symbol}")
+        return normalized_price
 
     def _validate_recovery_window(
         self,
@@ -1377,6 +1520,73 @@ class TelegramOperatorCommandRouter:
             return
         if created_date != current_date:
             raise ValueError("rebalancing recovery orders can only be retried the same trading day")
+
+    def _process_cash_drift_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":")
+        if len(parts) != 6 or parts[1] != "classify":
+            self._answer(callback, "This cash-drift action is no longer active.")
+            return True
+        _, _, account_id, currency, classification, snapshot_id = parts
+        classification = {
+            "s": "settlement_candidate",
+            "t": "transfer_candidate",
+            "u": "unexplained",
+        }.get(classification, classification)
+        if classification not in {"settlement_candidate", "transfer_candidate", "unexplained"}:
+            self._answer(callback, "This cash-drift action is no longer active.")
+            return True
+        row = next(
+            (
+                item
+                for item in self.store.list_cash_suspense(account_id=account_id)
+                if str(item.get("currency") or "").upper() == currency.upper()
+            ),
+            None,
+        )
+        if row is None or str(row.get("last_snapshot_id")) != snapshot_id:
+            self._answer(callback, "This cash-drift action is stale.")
+            self._record("/cash_drift", chat_id, user_id, username, "stale_callback")
+            return True
+        self.store.classify_cash_suspense(
+            account_id=account_id,
+            currency=currency,
+            classification=classification,
+        )
+        run_id = new_run_id()
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            run_id,
+            SystemEventType.CASH_DRIFT_CLASSIFIED,
+            {
+                "account_id": account_id,
+                "currency": currency.upper(),
+                "classification": classification,
+                "snapshot_id": int(snapshot_id),
+                "decided_at": utc_now().isoformat(),
+                "decided_by": username or str(user_id),
+                "previous_amount": row.get("amount"),
+                "source": "telegram_cash_drift",
+            },
+        )
+        self._answer(callback, "Cash-drift classification recorded.")
+        self._edit_callback_message(
+            callback,
+            "Cash-drift classification recorded\n"
+            f"account_id: {_mask_identifier(account_id)}\n"
+            f"currency: {currency.upper()}\n"
+            f"classification: {classification}\n"
+            "Ledger cash unchanged; verify the broker before recording a flow.",
+        )
+        self._record("/cash_drift", chat_id, user_id, username, "classified")
+        return True
 
     def _process_cash_flow_callback(
         self,
@@ -1450,6 +1660,12 @@ class TelegramOperatorCommandRouter:
                 ),
                 "decided_by": username or str(user_id),
             },
+        )
+        self.store.apply_account_cash_flow(
+            account_cash_flow_id,
+            str(proposal.get("account_id") or ""),
+            account_amount,
+            str(proposal.get("currency") or "KRW"),
         )
         for allocation in allocations:
             payload = {
@@ -1918,6 +2134,15 @@ class TelegramOperatorCommandRouter:
         if not isinstance(latest_account, Mapping):
             return None
         account_id = _broker_snapshot_account_id(latest)
+        if (
+            str(latest_account.get("source") or "").startswith("toss_")
+            and "ledger_cash_by_currency" in latest_account
+            and latest_account.get("ledger_cash_by_currency") is None
+        ):
+            # Toss buying power is capacity, not a verified deposit/withdrawal.
+            # Keep it in cash suspense until an operator classifies the drift;
+            # do not turn it into an account cash-flow proposal automatically.
+            return None
         previous = next(
             (row for row in snapshots[1:] if _broker_snapshot_account_id(row) == account_id),
             None,
@@ -2479,6 +2704,24 @@ class TelegramOperatorCommandRouter:
                 account_id=account_id,
             )
 
+    def _cash_drift(self, chat_id: int) -> None:
+        rows = self.store.list_cash_suspense()
+        if not rows:
+            self._send(chat_id, "Cash suspense: none")
+            return
+        for row in rows:
+            self._send(
+                chat_id,
+                "Cash suspense (buying power is not ledger cash)\n"
+                f"account_id: {_mask_identifier(str(row['account_id']))}\n"
+                f"currency: {row['currency']}\n"
+                f"difference: {_money(float(row['amount']))}\n"
+                f"candidate: {row['candidate_label']}\n"
+                f"status: {row['status']}\n"
+                "Classification does not change the ledger automatically.",
+                reply_markup=_cash_drift_markup(row),
+            )
+
     def _process_account_refresh(self, text: str, chat_id: int) -> None:
         parts = text.split()
         account_ids = [parts[1]] if len(parts) > 1 else None
@@ -2571,14 +2814,8 @@ class TelegramOperatorCommandRouter:
     def _orders(self, chat_id: int) -> None:
         open_statuses = self._refresh_open_order_statuses()
         rows = build_orders_table(self.store, limit=5)
-        recoverable = []
-        for row in self.store.list_orders(limit=5000):
-            order_id = str(row.get("order_id") or "")
-            candidate = self._pending_recovery_candidate(order_id)
-            if candidate is not None:
-                recoverable.append(candidate)
-            if len(recoverable) >= 5:
-                break
+        recoverable = self._pending_recovery_candidates()
+
         if not rows and not open_statuses and not recoverable:
             self._send(chat_id, "Recent orders: none")
             return
@@ -2619,6 +2856,17 @@ class TelegramOperatorCommandRouter:
             "\n".join(lines),
             reply_markup=(_recoverable_orders_markup(recoverable) if recoverable else None),
         )
+
+    def _pending_recovery_candidates(self) -> list[LiveOrderRecoveryCandidate]:
+        recoverable: list[LiveOrderRecoveryCandidate] = []
+        for row in self.store.list_orders(limit=5000):
+            order_id = str(row.get("order_id") or "")
+            candidate = self._pending_recovery_candidate(order_id)
+            if candidate is not None:
+                recoverable.append(candidate)
+            if len(recoverable) >= 5:
+                break
+        return recoverable
 
     def _refresh_open_order_statuses(self) -> list[LiveOrderStatusSnapshot]:
         latest_by_broker: dict[str, LiveOrderStatusSnapshot] = {}
@@ -2709,6 +2957,55 @@ class TelegramOperatorCommandRouter:
             chat_id,
             "Confirm pause. This blocks live approval execution.",
             reply_markup=_confirmation_markup("pause"),
+        )
+
+    def _recovery(self, chat_id: int) -> None:
+        text, markup = self._recovery_message()
+        self._send(chat_id, text, reply_markup=markup)
+
+    def _recovery_message(self) -> tuple[str, dict[str, Any] | None]:
+        safety = SafetyControlService(self.store, self.audit).current_state()
+        preview = WorkflowRecoveryService(self.config, self.store, self.audit).preview()
+        recoverable_orders = self._pending_recovery_candidates()
+        health = HealthService(self.config, self.store).run()
+        health_checks = {check.name: check for check in health.checks}
+        broker_snapshot = health_checks.get("broker_snapshot")
+        reconciliation = health_checks.get("reconciliation")
+        lines = [
+            "Maestro Recovery Center",
+            f"safety: {safety.state.value}",
+            f"safety_reason: {safety.reason}",
+            f"health: {health.status}",
+            "broker_snapshot: "
+            + (
+                f"{broker_snapshot.status}/{broker_snapshot.message}"
+                if broker_snapshot is not None
+                else "unknown"
+            ),
+            "reconciliation: "
+            + (
+                f"{reconciliation.status}/{reconciliation.message}"
+                if reconciliation is not None
+                else "unknown"
+            ),
+            f"live_order_blockers: {len(preview.blockers)}",
+            f"retryable_orders: {len(recoverable_orders)}",
+        ]
+        for blocker in preview.blockers[:10]:
+            lines.append(
+                f"- {blocker.detail_reason or blocker.reason} "
+                f"order={blocker.order_id or 'unknown'} "
+                f"account={blocker.account_id or 'unknown'}"
+            )
+        if safety.state == SafetyState.KILLED:
+            lines.append("Kill switch release remains CLI-only: maestro release-kill")
+        if safety.state == SafetyState.ACTIVE and not preview.blockers:
+            lines.append("No blocked workflow requires recovery.")
+        return "\n".join(lines), _workflow_recovery_center_markup(
+            preview.fingerprint,
+            safety_state=safety.state,
+            has_live_order_blockers=bool(preview.blockers),
+            has_retryable_orders=bool(recoverable_orders),
         )
 
     def _clear_halt(self, chat_id: int) -> None:
@@ -2889,7 +3186,13 @@ class TelegramOperatorCommandRouter:
             # downtime); the command result must still be processed.
             return
 
-    def _edit_callback_message(self, callback: Mapping[str, Any], text: str) -> None:
+    def _edit_callback_message(
+        self,
+        callback: Mapping[str, Any],
+        text: str,
+        *,
+        reply_markup: Mapping[str, Any] | None = None,
+    ) -> None:
         message = callback.get("message")
         if not isinstance(message, Mapping):
             return
@@ -2899,7 +3202,7 @@ class TelegramOperatorCommandRouter:
         if chat_id is None or not isinstance(message_id, int) or not callable(edit_message_text):
             return
         try:
-            edit_message_text(chat_id, message_id, text, reply_markup=None)
+            edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
         except (RuntimeError, TimeoutError, TypeError, ValueError):
             return
 
@@ -3203,6 +3506,68 @@ def _confirmation_markup(action: str) -> dict[str, Any]:
     }
 
 
+def _workflow_recovery_center_markup(
+    fingerprint: str,
+    *,
+    safety_state: SafetyState,
+    has_live_order_blockers: bool,
+    has_retryable_orders: bool,
+) -> dict[str, Any] | None:
+    rows: list[list[dict[str, str]]] = []
+    if has_live_order_blockers:
+        rows.append(
+            [
+                {
+                    "text": "주문 상태 확인 및 복구",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}wfrec:auto:{fingerprint}",
+                }
+            ]
+        )
+    if safety_state == SafetyState.HALTED:
+        rows.append(
+            [
+                {
+                    "text": "Safety halt 해제",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}confirm:clear-halt",
+                }
+            ]
+        )
+    if has_retryable_orders:
+        rows.append(
+            [
+                {
+                    "text": "재주문 검토 보기",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}wfrec:orders",
+                }
+            ]
+        )
+    return {"inline_keyboard": rows} if rows else None
+
+
+def _workflow_recovery_markup(
+    fingerprint: str,
+    *,
+    attestation: bool,
+) -> dict[str, Any]:
+    action = "attest" if attestation else "auto"
+    text = (
+        "브로커에서 미접수·미체결 확인 후 해제"
+        if attestation
+        else "주문 상태 확인 및 복구"
+    )
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": text,
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}wfrec:{action}:{fingerprint}",
+                }
+            ],
+            [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
+        ]
+    }
+
+
 def _async_approval_markup(approval_id: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -3372,6 +3737,41 @@ def _cash_flow_proposal_markup(proposal: Mapping[str, Any]) -> dict[str, Any]:
             ]
         )
     return {"inline_keyboard": keyboard}
+
+
+def _cash_drift_markup(row: Mapping[str, Any]) -> dict[str, Any]:
+    account_id = str(row.get("account_id") or "")
+    currency = str(row.get("currency") or "").upper()
+    snapshot_id = str(row.get("last_snapshot_id") or "")
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "정산 후보",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
+                        f"{account_id}:{currency}:s:{snapshot_id}"
+                    ),
+                },
+                {
+                    "text": "입출금 후보",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
+                        f"{account_id}:{currency}:t:{snapshot_id}"
+                    ),
+                },
+            ],
+            [
+                {
+                    "text": "미분류 유지",
+                    "callback_data": (
+                        f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
+                        f"{account_id}:{currency}:u:{snapshot_id}"
+                    ),
+                }
+            ],
+        ]
+    }
 
 
 def _assigned_strategy_id_from_token(

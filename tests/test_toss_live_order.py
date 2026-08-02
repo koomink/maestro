@@ -1,3 +1,5 @@
+import pytest
+
 from maestro.config.broker import BrokerAccountConfig
 from maestro.core.enums import (
     AssetType,
@@ -11,6 +13,8 @@ from maestro.core.enums import (
 )
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.toss.live_order_client import TossLiveOrderClient
+from maestro.execution.brokers.toss.transport import TossTransportError
+from maestro.execution.live_order_errors import BrokerOrderRejectedError
 from maestro.execution.live_order_models import (
     BrokerOrderRequest,
     LiveOrderCancelRequest,
@@ -49,6 +53,41 @@ def test_toss_limit_order_uses_account_header_and_deterministic_client_order_id(
             7,
         )
     ]
+
+
+def test_toss_definitive_http_rejection_preserves_broker_evidence():
+    transport = RecordingTransport(
+        {
+            ("POST", "/api/v1/orders"): TossTransportError(
+                "위험고지 등록이 필요합니다",
+                status_code=422,
+                error_code="prerequisite-required",
+                request_id="req-422",
+                data={"prerequisite": "risk-disclosure"},
+            )
+        }
+    )
+    client = TossLiveOrderClient(_account(), transport=transport)
+
+    with pytest.raises(BrokerOrderRejectedError) as exc_info:
+        client.submit_limit_order(_live_request())
+
+    assert exc_info.value.code == "prerequisite-required"
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.request_id == "req-422"
+    assert exc_info.value.data == {"prerequisite": "risk-disclosure"}
+
+
+@pytest.mark.parametrize("status_code", [409, 500])
+def test_toss_ambiguous_http_failure_is_not_converted_to_rejection(status_code):
+    error = TossTransportError("ambiguous", status_code=status_code)
+    transport = RecordingTransport({("POST", "/api/v1/orders"): error})
+    client = TossLiveOrderClient(_account(), transport=transport)
+
+    with pytest.raises(TossTransportError) as exc_info:
+        client.submit_limit_order(_live_request())
+
+    assert exc_info.value is error
 
 
 def test_toss_adapter_supports_us_amount_market_order():
@@ -236,6 +275,56 @@ def test_toss_unknown_status_maps_to_unknown():
     assert status.raw_status == "NEW_FUTURE_STATUS"
 
 
+@pytest.mark.parametrize(
+    ("raw_status", "expected"),
+    [
+        ("FILLED", OrderStatus.FILLED),
+        ("PARTIAL_FILLED", OrderStatus.PARTIALLY_FILLED),
+        ("CANCELED", OrderStatus.CANCELED),
+        ("REJECTED", OrderStatus.REJECTED),
+    ],
+)
+def test_toss_order_history_normalizes_terminal_and_partial_statuses(
+    raw_status,
+    expected,
+):
+    transport = RecordingTransport(
+        {
+            ("GET", "/api/v1/orders"): {
+                "result": {
+                    "orders": [
+                        {
+                            "orderId": "TOSS-HISTORY-1",
+                            "symbol": "AAPL",
+                            "side": "BUY",
+                            "status": raw_status,
+                            "quantity": "2",
+                            "price": "185.5",
+                            "orderedAt": "2026-07-31T22:30:00+09:00",
+                            "execution": {
+                                "filledQuantity": (
+                                    "2" if raw_status == "FILLED" else "1"
+                                    if raw_status == "PARTIAL_FILLED"
+                                    else "0"
+                                ),
+                                "averageFilledPrice": "185.25",
+                                "filledAmount": "185.25",
+                                "filledAt": "2026-07-31T22:31:00+09:00",
+                            },
+                        }
+                    ],
+                    "hasNext": False,
+                }
+            }
+        }
+    )
+    client = TossLiveOrderClient(_account(), transport=transport)
+
+    snapshots = client.list_orders(status="CLOSED")
+
+    assert snapshots[0].status == expected
+
+
 def test_toss_pre_submit_rejects_insufficient_buying_power():
     transport = RecordingTransport(
         {
@@ -306,4 +395,7 @@ class RecordingTransport:
 
     def post(self, path, payload=None, *, account_seq=None):
         self.calls.append(("POST", path, dict(payload or {}), account_seq))
-        return self.responses[("POST", path)]
+        response = self.responses[("POST", path)]
+        if isinstance(response, Exception):
+            raise response
+        return response

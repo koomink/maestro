@@ -10,6 +10,7 @@ from maestro.core.trading_day import trading_day_bounds_utc_str
 from maestro.execution.base import OrderIntent
 from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.store import StateStore
 
@@ -193,63 +194,23 @@ class LiveExecutionGateService:
         return None
 
     def _live_recovery_block(self) -> dict[str, Any] | None:
-        latest_completion = self.state_store.load_latest_system_event(
-            SystemEventType.LIVE_ORDER_RECOVERY_COMPLETED
-        )
-        completed_after_event_id = int(latest_completion["id"]) if latest_completion else 0
-        latest_required = self.state_store.load_latest_system_event(
-            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED
-        )
-        if latest_required is not None and int(latest_required["id"]) > completed_after_event_id:
-            payload = latest_required["payload"]
-            request = payload.get("request", {})
-            result = payload.get("result", {})
-            return {
-                "reason": "live_order_recovery_required",
-                "recovery_event_id": latest_required["id"],
-                "order_id": request.get("order_id"),
-                "broker_order_id": (result.get("broker_order") or {}).get("broker_order_id"),
-                "message": result.get("message"),
-            }
-
-        intent_rows = self.state_store.list_system_events_by_type(
-            "live_order_submit_intent",
-            limit=1000,
-        )
-        for row in intent_rows:
-            if int(row["id"]) <= completed_after_event_id:
-                continue
-            payload = row["payload"]
-            intent_duplicate_key = str(payload.get("duplicate_key") or "")
-            if intent_duplicate_key.startswith("intent:"):
-                result_duplicate_key = intent_duplicate_key.removeprefix("intent:")
-                if not self.state_store.duplicate_key_exists(result_duplicate_key):
-                    request = payload.get("request", {})
-                    return {
-                        "reason": "live_order_intent_without_result",
-                        "intent_event_id": row["id"],
-                        "order_id": request.get("order_id"),
-                    }
-
-        lifecycle_order_ids = self.state_store.list_order_ids_for_event_type(
-            str(SystemEventType.LIVE_ORDER_LIFECYCLE)
-        )
-        for row in self.state_store.list_system_events_by_type(
-            SystemEventType.LIVE_ORDER_RESULT, limit=1000
-        ):
-            if int(row["id"]) <= completed_after_event_id:
-                continue
-            request = row["payload"].get("request", {})
-            order_id = str(request.get("order_id") or "")
-            if order_id and order_id not in lifecycle_order_ids:
-                result = row["payload"].get("result", {})
-                return {
-                    "reason": "live_order_lifecycle_incomplete",
-                    "live_order_result_event_id": row["id"],
-                    "order_id": order_id,
-                    "broker_order_id": (result.get("broker_order") or {}).get("broker_order_id"),
-                }
-        return None
+        preview = WorkflowRecoveryService(
+            self.config,
+            self.state_store,
+            self.audit,
+            now_fn=self._now,
+        ).preview()
+        if not preview.blockers:
+            return None
+        blocker = preview.blockers[0]
+        return {
+            "reason": blocker.reason,
+            "recovery_event_id": blocker.event_id,
+            "recovery_fingerprint": preview.fingerprint,
+            "order_id": blocker.order_id,
+            "broker_order_id": blocker.broker_order_id,
+            "pending_recovery_count": len(preview.blockers),
+        }
 
     def _reconciliation_block(
         self,
@@ -301,6 +262,17 @@ class LiveExecutionGateService:
                         "account_id": account_id,
                         "reconciliation": item["result"],
                     }
+                drift_levels = {
+                    str(observation.get("drift_level") or "")
+                    for observation in item["result"].get("observations") or []
+                }
+                if drift_levels & {"L3"}:
+                    return {
+                        "reason": "buying_power_drift_requires_review",
+                        "account_id": account_id,
+                        "drift_levels": sorted(drift_levels & {"L3"}),
+                        "reconciliation": item["result"],
+                    }
                 created_at = _parse_store_created_at(item["event"]["created_at"])
                 age_seconds = (self._now() - created_at).total_seconds()
                 if age_seconds > self.config.reconciliation.max_age_seconds:
@@ -318,6 +290,16 @@ class LiveExecutionGateService:
         if latest["payload"].get("passed") is not True:
             return {
                 "reason": "failed_reconciliation",
+                "reconciliation": latest["payload"],
+            }
+        drift_levels = {
+            str(observation.get("drift_level") or "")
+            for observation in latest["payload"].get("observations") or []
+        }
+        if drift_levels & {"L3"}:
+            return {
+                "reason": "buying_power_drift_requires_review",
+                "drift_levels": sorted(drift_levels & {"L3"}),
                 "reconciliation": latest["payload"],
             }
         created_at = _parse_store_created_at(latest["created_at"])
@@ -626,6 +608,11 @@ class LiveExecutionGateService:
         current_prices = snapshot.get("current_prices", {})
         cash = float(account.get("cash", 0.0))
         buying_power = float(account.get("buying_power", 0.0))
+        ledgerless_cash = (
+            str(account.get("source") or "").startswith("toss_")
+            and "ledger_cash_by_currency" in account
+            and account.get("ledger_cash_by_currency") is None
+        )
         buy_notional = sum(order.notional for order in orders if order.side == OrderSide.BUY)
         sell_notional = sum(order.notional for order in orders if order.side == OrderSide.SELL)
         fee_buffer = (
@@ -645,7 +632,7 @@ class LiveExecutionGateService:
                     "buying_power": buying_power,
                 }
             )
-        if cash_after_orders < 0:
+        if not ledgerless_cash and cash_after_orders < 0:
             issues.append(
                 {
                     "reason": "cash_exceeded",

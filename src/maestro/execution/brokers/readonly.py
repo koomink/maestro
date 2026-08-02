@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from pydantic import BaseModel, Field
 
@@ -54,6 +54,11 @@ class BrokerAccountSnapshot(BaseModel):
     positions: list[BrokerPosition] = Field(default_factory=list)
     cash_balance: BrokerCashBalance | None = None
     buying_power_detail: BrokerBuyingPower | None = None
+    # Legacy cash fields remain serialized for compatibility.  Accounting
+    # consumers must use ledger_cash_by_currency when it is present; a null
+    # value explicitly means that the broker exposes no authoritative ledger.
+    ledger_cash_by_currency: dict[str, float] | None = None
+    buying_power_by_currency: dict[str, float] = Field(default_factory=dict)
     # Account-level daily PnL as reported by the broker. The live daily-loss
     # gate (`maestro.orchestration.live_gates`) reads these keys from the
     # stored snapshot payload; without them an all-cash account has no
@@ -87,6 +92,8 @@ class BrokerOrderSummary(BaseModel):
     limit_price: float | None = None
     reserved_cash: float | None = None
     estimated_commission: float | None = None
+    cumulative_commission: float | None = None
+    cumulative_tax: float | None = None
 
 
 class BrokerReadOnlySnapshot(BaseModel):
@@ -164,6 +171,52 @@ class BrokerReadOnlyService:
             unfilled_orders=self.client.get_unfilled_orders(),
         )
         payload = self._snapshot_payload(snapshot)
+        if self.client.__class__.__name__ == "TossReadOnlyClient":
+            # Import locally to avoid a model/backfill import cycle.
+            from maestro.execution.brokers.toss.order_history_backfill import (
+                TossOrderHistoryBackfillService,
+            )
+
+            account_id = self.logical_account_id or account.account_id
+            from_date = date.today() - timedelta(days=7)
+            baseline_date: date | None = None
+            for row in self.state_store.list_system_events_by_type(
+                "ledger_opening_baseline",
+                limit=2000,
+            ):
+                baseline = row.get("payload") or {}
+                if str(baseline.get("account_id") or "") != account_id:
+                    continue
+                value = baseline.get("effective_at") or row.get("created_at")
+                if value:
+                    baseline_date = datetime.fromisoformat(
+                        str(value).replace("Z", "+00:00")
+                    ).date()
+                    from_date = baseline_date
+                break
+            for row in self.state_store.list_system_events_by_type(
+                "broker_order_history_backfill",
+                limit=2000,
+            ):
+                previous = row.get("payload") or {}
+                if str(previous.get("account_id") or "") != account_id:
+                    continue
+                previous_to = previous.get("to_date")
+                if previous_to:
+                    overlap_start = date.fromisoformat(str(previous_to)) - timedelta(days=2)
+                    from_date = max(baseline_date or from_date, overlap_start)
+                break
+            TossOrderHistoryBackfillService(
+                self.client,
+                self.state_store,
+                self.audit_logger,
+            ).backfill(
+                account_id,
+                from_date=from_date,
+                to_date=date.today(),
+                run_id=run_id,
+            )
+            payload["order_history_backfill_run_id"] = run_id
         self.state_store.save_broker_account_snapshot(
             run_id,
             self.logical_account_id or account.account_id,

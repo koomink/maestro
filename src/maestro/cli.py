@@ -4,6 +4,7 @@ import os
 import subprocess
 import time
 from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TypeVar
 
@@ -26,6 +27,9 @@ from maestro.execution.brokers.readonly_factory import (
     broker_readonly_account_ids,
     broker_readonly_accounts,
     build_broker_readonly_services,
+)
+from maestro.execution.brokers.toss.order_history_backfill import (
+    TossOrderHistoryBackfillService,
 )
 from maestro.execution.budget_requests import (
     budget_request_reply_markup,
@@ -55,6 +59,7 @@ from maestro.monitoring.logging import configure_structured_logging
 from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
 from maestro.ops.readonly_refresh import latest_snapshot_for_account, refresh_readonly_accounts
+from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.orchestration.orchestrator import (
     MaestroOrchestrator,
     signal_contract_fingerprint_diff,
@@ -69,8 +74,12 @@ from maestro.state.store import StateStore
 app = typer.Typer()
 performance_baseline_app = typer.Typer()
 cash_flow_app = typer.Typer()
+ledger_app = typer.Typer()
+cash_drift_app = typer.Typer()
 app.add_typer(performance_baseline_app, name="performance-baseline")
 app.add_typer(cash_flow_app, name="cash-flow")
+app.add_typer(ledger_app, name="ledger")
+app.add_typer(cash_drift_app, name="cash-drift")
 
 CONFIG_ENV_VAR = "MAESTRO_CONFIG"
 CONFIG_OPTION = typer.Option(
@@ -1586,6 +1595,7 @@ def reconcile(config: Path | None = CONFIG_OPTION) -> None:
     status = "passed" if result.passed else "failed"
     typer.echo(
         f"status={status} issues={len(result.issues)} "
+        f"observations={len(result.observations)} "
         f"cash_difference={result.cash_difference or 0.0:.2f} "
         f"broker_account_id={result.broker_account_id or 'none'}"
     )
@@ -1593,6 +1603,9 @@ def reconcile(config: Path | None = CONFIG_OPTION) -> None:
         for issue in result.issues:
             symbol = f" symbol={issue.symbol}" if issue.symbol else ""
             typer.echo(f"issue={issue.issue_type}{symbol} message={issue.message}")
+        for issue in result.observations:
+            symbol = f" symbol={issue.symbol}" if issue.symbol else ""
+            typer.echo(f"observation={issue.issue_type}{symbol} message={issue.message}")
         raise typer.Exit(1)
 
 
@@ -1715,6 +1728,15 @@ def record_account_cash_flow(
         "transfer_id": transfer_id,
         "decided_by": "operator_cli",
     }
+    if not store.apply_account_cash_flow(
+        run_id,
+        account_id,
+        signed_amount,
+        normalized_currency,
+    ):
+        raise typer.BadParameter(
+            "account ledger is not established; run `maestro ledger open-baseline` first"
+        )
     save_audited_system_event(
         store,
         audit,
@@ -1728,11 +1750,270 @@ def record_account_cash_flow(
     )
 
 
+@ledger_app.command("open-baseline")
+def open_ledger_baseline(
+    account_id: str = typer.Option(..., "--account-id"),
+    reason: str = typer.Option(..., "--reason"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Create the one-time ledger opening baseline for an account."""
+    maestro_config, identity = _load_operator_config(config)
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter("ledger open-baseline requires live_readonly or live_approval")
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    existing = store.list_system_events_by_type(
+        str(SystemEventType.LEDGER_OPENING_BASELINE), limit=1000
+    )
+    if any(str(row["payload"].get("account_id")) == account_id for row in existing):
+        raise typer.BadParameter(
+            "ledger opening baseline already exists for "
+            f"account_id={account_id}"
+        )
+    snapshot = latest_snapshot_for_account(store, account_id)
+    if snapshot is None:
+        raise typer.BadParameter(f"latest broker snapshot missing for account_id={account_id}")
+    account = snapshot["payload"].get("account") or {}
+    state = portfolio_state_from_broker_account(
+        account,
+        allowed_symbols=maestro_config.portfolio.allowed_symbols,
+        universe=maestro_config.universe,
+    )
+    run_id = new_run_id()
+    store.save_portfolio_snapshot(run_id, state, account_id=account_id)
+    ledger_cash = state.cash_by_currency or {maestro_config.portfolio.base_currency: state.cash}
+    effective_at = str(snapshot.get("created_at") or utc_now().isoformat())
+    for currency, amount in sorted(ledger_cash.items()):
+        save_audited_system_event(
+            store,
+            audit,
+            run_id,
+            SystemEventType.LEDGER_OPENING_BASELINE,
+            {
+                "account_id": account_id,
+                "currency": currency,
+                "amount": float(amount),
+                "source": "buying_power_proxy",
+                "provenance": "operator_confirmed_opening_baseline",
+                "snapshot_id": snapshot["id"],
+                "effective_at": effective_at,
+                "reason": reason,
+            },
+        )
+    typer.echo(
+        f"opened ledger_baseline run_id={run_id} account_id={account_id} "
+        f"snapshot_id={snapshot['id']} currencies={len(ledger_cash)} source=buying_power_proxy"
+    )
+
+
+@ledger_app.command("backfill-orders")
+def ledger_backfill_orders(
+    account_id: str = typer.Option(..., "--account-id"),
+    from_date: str = typer.Option(..., "--from-date", help="YYYY-MM-DD"),
+    to_date: str | None = typer.Option(None, "--to-date", help="YYYY-MM-DD"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Backfill Toss OPEN/CLOSED order history into the cash ledger."""
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    try:
+        start = date.fromisoformat(from_date)
+        end = date.fromisoformat(to_date) if to_date else date.today()
+    except ValueError as exc:
+        raise typer.BadParameter("order history dates must use YYYY-MM-DD") from exc
+    services = dict(build_broker_readonly_services(maestro_config, store, audit))
+    service = services.get(account_id)
+    while service is not None and hasattr(service, "inner"):
+        service = service.inner
+    if service is None or not hasattr(service, "client"):
+        raise typer.BadParameter(f"account_id={account_id} is not a configured readonly account")
+    client = service.client
+    if not hasattr(client, "list_orders"):
+        raise typer.BadParameter("ledger order backfill is supported for Toss accounts only")
+    payload = TossOrderHistoryBackfillService(client, store, audit).backfill(
+        account_id,
+        from_date=start,
+        to_date=end,
+    )
+    typer.echo(json.dumps(payload, default=str))
+
+
+@cash_drift_app.command("report")
+def cash_drift_report(
+    account_id: str = typer.Option(..., "--account-id"),
+    days: int = typer.Option(7, "--days", min=1),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Report buying-power versus ledger drift without changing state."""
+    from datetime import timedelta
+
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    now = utc_now()
+    since = (now - timedelta(days=days)).isoformat(sep=" ")
+    rows = [
+        row
+        for row in store.list_broker_account_snapshots(limit=None, since=since)
+        if str(row.get("account_id") or row["payload"].get("account_id") or "")
+        == account_id
+    ]
+    rows.reverse()
+    if not rows:
+        raise typer.BadParameter(
+            f"no broker snapshots for account_id={account_id} in last {days} days"
+        )
+    ledger_rows = sorted(
+        [
+            row
+            for row in store.list_portfolio_snapshots(limit=None)
+            if str(row.get("account_id") or "") == account_id
+        ],
+        key=lambda row: (str(row.get("created_at") or ""), int(row.get("id") or 0)),
+    )
+    print_rows = []
+    for row in rows:
+        account = row["payload"].get("account") or {}
+        buying_power = account.get("buying_power_by_currency") or {}
+        if not buying_power:
+            buying_power = account.get("cash_by_currency") or {}
+        broker_created_at = str(row.get("created_at") or "")
+        ledger_payload = None
+        for ledger_row in ledger_rows:
+            if str(ledger_row.get("created_at") or "") > broker_created_at:
+                break
+            ledger_payload = ledger_row.get("payload") or {}
+        ledger = {}
+        if ledger_payload is not None:
+            ledger = dict(ledger_payload.get("cash_by_currency") or {})
+            if not ledger:
+                ledger = {
+                    maestro_config.portfolio.base_currency: float(
+                        ledger_payload.get("cash") or 0.0
+                    )
+                }
+        drift = (
+            {
+                currency: float(buying_power.get(currency, 0.0))
+                - float(ledger.get(currency, 0.0))
+                for currency in sorted(set(ledger) | set(buying_power))
+            }
+            if ledger_payload is not None
+            else {}
+        )
+        fill_times = [
+            str(item.get("submitted_at") or "")
+            for item in row["payload"].get("order_fills") or []
+            if item.get("submitted_at")
+        ]
+        last_fill_at = max(fill_times) if fill_times else None
+        settlement_elapsed_days = None
+        if last_fill_at:
+            try:
+                fill_timestamp = datetime.fromisoformat(last_fill_at.replace("Z", "+00:00"))
+                if fill_timestamp.tzinfo is None:
+                    fill_timestamp = fill_timestamp.replace(tzinfo=UTC)
+                snapshot_timestamp = datetime.fromisoformat(
+                    broker_created_at.replace("Z", "+00:00")
+                )
+                if snapshot_timestamp.tzinfo is None:
+                    snapshot_timestamp = snapshot_timestamp.replace(tzinfo=UTC)
+                settlement_elapsed_days = max(
+                    (snapshot_timestamp - fill_timestamp).total_seconds() / 86400.0,
+                    0.0,
+                )
+            except ValueError:
+                settlement_elapsed_days = None
+        print_rows.append(
+            {
+                "snapshot_id": row["id"],
+                "created_at": row.get("created_at"),
+                "ledger_available": ledger_payload is not None,
+                "ledger_cash_by_currency": ledger,
+                "buying_power_by_currency": buying_power,
+                "drift_by_currency": drift,
+                "fills": len(row["payload"].get("order_fills") or []),
+                "last_fill_at": last_fill_at,
+                "settlement_elapsed_days": settlement_elapsed_days,
+                "unfilled_orders": len(row["payload"].get("unfilled_orders") or []),
+            }
+        )
+    typer.echo(
+        json.dumps(
+            {
+                "account_id": account_id,
+                "days": days,
+                "rows": print_rows,
+                "suspense": store.list_cash_suspense(account_id=account_id),
+            },
+            default=str,
+        )
+    )
+
+
+@cash_drift_app.command("classify")
+def cash_drift_classify(
+    account_id: str = typer.Option(..., "--account-id"),
+    currency: str = typer.Option(..., "--currency"),
+    classification: str = typer.Option(..., "--classification"),
+    reason: str = typer.Option(..., "--reason"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Classify a suspense observation without silently changing the ledger."""
+    allowed = {"settlement_candidate", "transfer_candidate", "unexplained"}
+    normalized = classification.strip().lower()
+    if normalized not in allowed:
+        raise typer.BadParameter(f"--classification must be one of {sorted(allowed)}")
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    if not store.classify_cash_suspense(
+        account_id=account_id,
+        currency=currency,
+        classification=normalized,
+    ):
+        raise typer.BadParameter("no open cash suspense exists for that account/currency")
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    run_id = new_run_id()
+    suspense = next(
+        (
+            row
+            for row in store.list_cash_suspense(account_id=account_id)
+            if str(row.get("currency")) == currency.strip().upper()
+        ),
+        None,
+    )
+    save_audited_system_event(
+        store,
+        audit,
+        run_id,
+        SystemEventType.CASH_DRIFT_CLASSIFIED,
+        {
+            "account_id": account_id,
+            "currency": currency.strip().upper(),
+            "classification": normalized,
+            "snapshot_id": suspense.get("last_snapshot_id") if suspense else None,
+            "decided_at": utc_now().isoformat(),
+            "decided_by": "operator_cli",
+            "reason": reason,
+            "previous_amount": suspense.get("amount") if suspense else None,
+        },
+    )
+    typer.echo(
+        f"classified account_id={account_id} currency={currency.strip().upper()} "
+        f"classification={normalized}"
+    )
+
+
 @app.command("adopt-broker-snapshot")
 def adopt_broker_snapshot(
     config: Path | None = CONFIG_OPTION,
     reason: str = typer.Option(..., "--reason"),
     account_id: str | None = typer.Option(None, "--account-id"),
+    include_cash: bool = typer.Option(
+        False,
+        "--include-cash",
+        help="Adopt broker cash only after explicitly classifying the drift.",
+    ),
 ) -> None:
     maestro_config, identity = _load_operator_config(config)
     if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
@@ -1751,25 +2032,68 @@ def adopt_broker_snapshot(
         )
 
     account = latest["payload"]["account"]
+    adopted_account_id = str(
+        latest["payload"].get("account_id") or latest.get("account_id") or ""
+    )
+    existing_ledger = (
+        store.load_latest_account_portfolio_state(adopted_account_id)
+        if adopted_account_id
+        else None
+    )
+    if include_cash and adopted_account_id:
+        suspense = store.list_cash_suspense(account_id=adopted_account_id)
+        classified_snapshot_ids = {
+            int(row["last_snapshot_id"])
+            for row in suspense
+            if row.get("last_snapshot_id") is not None
+            and row.get("status") == "classified"
+            and row.get("candidate_label") != "unexplained"
+        }
+        if int(latest["id"]) not in classified_snapshot_ids:
+            raise typer.BadParameter(
+                "--include-cash requires a non-unexplained cash-drift classification "
+                "for the latest broker snapshot"
+            )
+    if (
+        str(account.get("source") or "").startswith("toss_")
+        and "ledger_cash_by_currency" in account
+        and account.get("ledger_cash_by_currency") is None
+        and not include_cash
+        and adopted_account_id
+        and existing_ledger is None
+    ):
+        raise typer.BadParameter(
+            "ledger cash is not established; run `maestro ledger open-baseline` "
+            "or pass --include-cash after explicit classification"
+        )
     state = _portfolio_state_from_broker_account(
         account,
         allowed_symbols=maestro_config.portfolio.allowed_symbols,
         universe=maestro_config.universe,
         unknown_symbol_policy=maestro_config.portfolio.unknown_broker_position_policy,
     )
+    if existing_ledger is not None and not include_cash:
+        state = PortfolioState(
+            cash=existing_ledger.cash,
+            cash_by_currency=dict(existing_ledger.cash_by_currency),
+            positions=state.positions,
+        )
     run_id = new_run_id()
-    adopted_account_id = str(
-        latest["payload"].get("account_id") or latest.get("account_id") or ""
-    )
     if adopted_account_id:
         store.save_portfolio_snapshot(run_id, state, account_id=adopted_account_id)
     if account_id is None:
         store.save_portfolio_snapshot(run_id, state)
     payload = {
         "reason": reason,
+        "include_cash": include_cash,
         "broker_snapshot_id": latest["id"],
         "account_id": adopted_account_id or None,
         "broker_account_id": account.get("account_id"),
+        "previous_ledger_cash_by_currency": (
+            dict(existing_ledger.cash_by_currency) if existing_ledger is not None else None
+        ),
+        "broker_observed_cash_by_currency": dict(account.get("cash_by_currency") or {}),
+        "decided_by": "operator_cli",
         "cash": state.cash,
         "cash_by_currency": state.cash_by_currency,
         "positions": state.positions,
@@ -1900,31 +2224,21 @@ def recover_live_order(
     reason: str = typer.Option(..., "--reason"),
 ) -> None:
     maestro_config, identity = _load_operator_config(config)
-    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
-        raise typer.BadParameter("recover-live-order requires live_readonly or live_approval")
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    latest_snapshot = store.load_latest_broker_account_snapshot()
-    if latest_snapshot is None:
-        raise typer.BadParameter("recover-live-order requires a latest broker snapshot")
-    latest_reconciliation = store.load_latest_system_event("broker_reconciliation")
-    if latest_reconciliation is None or latest_reconciliation["payload"].get("passed") is not True:
-        raise typer.BadParameter("recover-live-order requires a passing broker reconciliation")
-
-    run_id = new_run_id()
-    fill_result = PartialFillReconciliationService(store, audit).reconcile_latest(run_id)
-    payload = {
-        "reason": reason,
-        "broker_snapshot_id": latest_snapshot["id"],
-        "broker_reconciliation_event_id": latest_reconciliation["id"],
-        "fill_reconciliation": fill_result.model_dump(mode="json"),
-    }
-    store.save_system_event(run_id, "live_order_recovery_completed", payload)
-    audit.log(run_id, "live_order_recovery_completed", payload)
+    try:
+        result = WorkflowRecoveryService(maestro_config, store, audit).recover_live_orders(
+            reason=reason,
+            decided_by="cli",
+            manual_attestation=True,
+            allow_without_blockers=True,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(
-        f"recovery_completed run_id={run_id} broker_snapshot_id={latest_snapshot['id']} "
-        f"applied_fills={len(fill_result.applied_fills)} "
-        f"skipped_fills={len(fill_result.skipped_fills)}"
+        f"recovery_completed run_id={result.run_id} "
+        f"broker_snapshot_ids={','.join(map(str, result.broker_snapshot_ids)) or 'none'} "
+        f"applied_fills={result.applied_fill_count}"
     )
 
 

@@ -62,6 +62,58 @@ def test_build_overview_works_with_empty_db(tmp_path):
     assert overview["latest_run_id"] is None
 
 
+def test_toss_buying_power_drift_does_not_change_ledger_performance(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=100.0)
+    store.save_portfolio_snapshot(
+        "ledger_open",
+        PortfolioState(cash=100.0, cash_by_currency={"USD": 100.0}, positions={}),
+        account_id="toss_brokerage",
+    )
+    for run_id, proxy_cash in (("broker_1", 100.0), ("broker_2", 120.0)):
+        store.save_broker_account_snapshot(
+            run_id,
+            "toss_brokerage",
+            {
+                "account_id": "toss_brokerage",
+                "account": {
+                    "account_id": "TOSS-1",
+                    "cash": proxy_cash,
+                    "cash_by_currency": {"USD": proxy_cash},
+                    "ledger_cash_by_currency": None,
+                    "buying_power_by_currency": {"USD": proxy_cash},
+                    "buying_power": proxy_cash,
+                    "positions": [],
+                    "source": "toss_openapi_readonly",
+                },
+                "current_prices": {},
+            },
+        )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE portfolio_snapshots SET created_at = '2026-07-01 00:00:00' "
+            "WHERE run_id = 'ledger_open'"
+        )
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = '2026-07-01 00:00:01' "
+            "WHERE run_id = 'broker_1'"
+        )
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = '2026-07-02 00:00:01' "
+            "WHERE run_id = 'broker_2'"
+        )
+
+    rows = build_account_performance_table(store)
+
+    assert [row["total_value"] for row in rows] == [100.0, 100.0]
+    assert all(row["performance_status"] == "confirmed" for row in rows)
+    currency_rows = build_currency_sleeve_performance_table(store)
+    total_rows = build_total_portfolio_performance_table(store, display_currency="USD")
+    assert [row["total_value"] for row in currency_rows] == [100.0, 100.0]
+    assert [row["total_value"] for row in total_rows] == [100.0, 100.0]
+    assert all(row["performance_status"] == "confirmed" for row in currency_rows)
+    assert all(row["performance_status"] == "confirmed" for row in total_rows)
+
+
 def test_latest_signal_package_card_exposes_actionable_signal_run_id(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
     store.save_signal_package(

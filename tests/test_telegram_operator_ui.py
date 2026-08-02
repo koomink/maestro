@@ -1,5 +1,6 @@
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -1771,6 +1772,140 @@ def test_telegram_clear_halt_requires_confirmation_and_recovers(tmp_path):
     assert "confirmed" in statuses
 
 
+def test_telegram_recovery_center_shows_halt_and_live_order_actions(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    SafetyControlService(store, audit).halt(new_run_id(), "test halt")
+    store.save_system_event(
+        "run_ambiguous",
+        "live_order_recovery_required",
+        {"reason": "ambiguous_submit", "order_id": "ord_ambiguous"},
+    )
+
+    assert router.process_update(message_update("/recovery"))
+
+    message = client.sent_messages[-1]
+    assert "Maestro Recovery Center" in message["text"]
+    assert "health:" in message["text"]
+    assert "broker_snapshot:" in message["text"]
+    assert "reconciliation:" in message["text"]
+    assert "live_order_blockers: 1" in message["text"]
+    buttons = [row[0] for row in message["reply_markup"]["inline_keyboard"]]
+    assert [button["text"] for button in buttons] == [
+        "주문 상태 확인 및 복구",
+        "Safety halt 해제",
+    ]
+
+
+def test_telegram_recovery_center_links_retryable_orders(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+    order = _pending_approval_envelope().orders[0]
+    store.save_order("run_rejected", order["order_id"], order)
+    store.save_system_event(
+        "run_rejected",
+        "live_order_recovery_candidate",
+        {
+            "source_order_id": order["order_id"],
+            "order": order,
+            "source_type": "definitive_rejection",
+            "reason": "prerequisite-required",
+            "created_at": utc_now().isoformat(),
+        },
+    )
+
+    assert router.process_update(message_update("/recovery"))
+
+    message = client.sent_messages[-1]
+    assert "retryable_orders: 1" in message["text"]
+    button = message["reply_markup"]["inline_keyboard"][0][0]
+    assert button == {
+        "text": "재주문 검토 보기",
+        "callback_data": "operator:wfrec:orders",
+    }
+
+    assert router.process_update(callback_update("operator:wfrec:orders"))
+    assert "Recoverable orders" in client.sent_messages[-1]["text"]
+
+
+def test_telegram_recovery_callback_requests_broker_attestation(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.WorkflowRecoveryService",
+        lambda *args, **kwargs: SimpleNamespace(
+            recover_live_orders=lambda **kwargs: SimpleNamespace(
+                status="attestation_required",
+                fingerprint="0123456789abcdef",
+                unmatched_orders=[
+                    {
+                        "order_id": "ord_ambiguous",
+                        "account_id": "toss_brokerage",
+                        "candidate_orders": [],
+                    }
+                ],
+            )
+        ),
+    )
+
+    assert router.process_update(
+        callback_update("operator:wfrec:auto:0123456789abcdef")
+    )
+
+    edited = client.edited_messages[-1]
+    assert "Automatic order matching was inconclusive" in edited["text"]
+    button = edited["reply_markup"]["inline_keyboard"][0][0]
+    assert button["text"] == "브로커에서 미접수·미체결 확인 후 해제"
+    assert button["callback_data"] == "operator:wfrec:attest:0123456789abcdef"
+
+
+def test_telegram_recovery_notification_is_idempotent(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    SafetyControlService(store, audit).halt(new_run_id(), "notification halt")
+
+    router.poll_once()
+    router.poll_once()
+
+    notices = [
+        message
+        for message in client.sent_messages
+        if "Maestro Recovery Center" in message["text"]
+    ]
+    assert len(notices) == 1
+    assert len(store.list_system_events_by_type("telegram_recovery_notice")) == 1
+
+
 def test_telegram_clear_halt_rejected_when_not_halted(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -2230,6 +2365,36 @@ def test_recovery_review_shows_original_max_and_direct_input(monkeypatch, tmp_pa
         "직접 수량 입력",
     ]
     assert all(len(button["callback_data"]) <= 64 for button in buttons)
+
+
+def test_retry_quote_is_normalized_to_instrument_tick(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=FakeTelegramClient(),
+    )
+    order = _store_recoverable_order(store).model_copy(update={"symbol": "PDBC"})
+    retry_config = SimpleNamespace(
+        universe=SimpleNamespace(
+            get=lambda symbol: SimpleNamespace(price_tick=0.01)
+            if symbol == "PDBC"
+            else None
+        )
+    )
+    readonly_service = SimpleNamespace(
+        client=SimpleNamespace(
+            get_current_prices=lambda symbols: {"PDBC": 17.465}
+        )
+    )
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.build_broker_readonly_service",
+        lambda *args, **kwargs: readonly_service,
+    )
+
+    assert router._lookup_retry_price(retry_config, order) == 17.46
 
 
 def test_direct_quantity_reply_creates_one_retry_proposal(monkeypatch, tmp_path):

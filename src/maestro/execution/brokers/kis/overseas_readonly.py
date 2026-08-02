@@ -40,6 +40,8 @@ class KISRestOverseasStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
             positions=positions,
             cash_balance=cash_balance,
             buying_power_detail=buying_power,
+            ledger_cash_by_currency={"USD": cash_balance.cash},
+            buying_power_by_currency={"USD": buying_power.cash_buying_power},
             fetched_at=utc_now(),
             source="kis_overseas_stock_readonly",
         )

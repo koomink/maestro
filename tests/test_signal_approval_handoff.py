@@ -39,6 +39,7 @@ from maestro.sdk import (
     StrategyManifest,
     TargetAllocationResult,
 )
+from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 
@@ -1488,6 +1489,20 @@ def _mock_kis_snapshot_refresh(monkeypatch) -> None:
         self.instruments = instruments or []
         self.logical_account_id = logical_account_id
         self.client = client
+        if logical_account_id and state_store.load_latest_account_portfolio_state(
+            logical_account_id
+        ) is None:
+            baseline = PortfolioState(
+                cash=10_000_000.0,
+                cash_by_currency={"KRW": 10_000_000.0},
+                positions={},
+            )
+            state_store.save_portfolio_snapshot(
+                "run_mock_ledger_baseline",
+                baseline,
+                account_id=logical_account_id,
+            )
+            state_store.save_portfolio_snapshot("run_mock_ledger_baseline", baseline)
 
     def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
         portfolio = self.state_store.load_latest_account_portfolio_state(

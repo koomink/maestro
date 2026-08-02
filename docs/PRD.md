@@ -362,10 +362,12 @@ Requirements:
 - Trading approval requests must include proposal ID, portfolio changes, risk result, estimated order list, and approval buttons.
 - Approval must expire after a configured timeout.
 - Rejected, expired, and approved proposals must be logged.
-- Telegram operator commands may expose read-only state and the limited
-  `/pause` and `/kill_switch` safety controls.
-- Telegram must not expose live enablement, dry-run disablement, broker sync,
-  direct trading, recovery, or risk-limit changes.
+- Telegram operator commands may expose read-only state, `/pause`,
+  `/kill_switch`, guarded `/clear_halt`, and the `/recovery` center.
+- Telegram recovery must use a whitelisted user, confirmation callback, fresh
+  broker evidence, fill reconciliation, and passing account reconciliation. It
+  must not expose live enablement, dry-run disablement, direct trading,
+  kill-switch release, unrestricted broker sync, or risk-limit changes.
 
 ### 8.8 Dashboard
 
@@ -406,6 +408,9 @@ Future requirement:
 - Live trading should initially be `live_approval`, not `live_auto`.
 - Only limit orders should be allowed initially.
 - All broker state should be reconciled against internal state.
+- Toss `cashBuyingPower` must remain a capacity-only signal. Maestro must keep
+  an auditable account cash ledger (opening baseline, verified flows, fills,
+  and costs) and must not convert buying-power drift into return.
 - The target multi-account operator workflow should separate broker observation,
   strategy signal generation, and approval-gated execution. `live_readonly`
   remains pure broker read-only. Strategy signal generation should persist an
@@ -506,6 +511,8 @@ Future requirement:
 - Required DataHub prices are fresh, auditable, and valid for the market session.
 - Broker reconciliation, fill reconciliation, and dashboard state match broker
   truth after each live approval order.
+- Toss order-history backfill and idempotent fill/cost watermarks must be used
+  to repair historical gaps before a ledger is treated as fully tracked.
 - Account, strategy, currency-sleeve, and total portfolio performance views are
   computed from reconciled broker snapshots and persisted Maestro events, with
   stale/unreconciled periods clearly labeled.

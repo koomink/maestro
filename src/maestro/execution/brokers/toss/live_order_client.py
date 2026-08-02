@@ -1,6 +1,7 @@
 import hashlib
 import re
 from collections.abc import Callable
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
@@ -9,8 +10,10 @@ from maestro.core.clock import utc_now
 from maestro.core.enums import Currency, OrderSide, OrderStatus, OrderType
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.toss.auth import TossAuthManager
+from maestro.execution.brokers.toss.order_history import list_toss_orders
 from maestro.execution.brokers.toss.readonly_client import _resolve_account_seq
-from maestro.execution.brokers.toss.transport import TossRestTransport
+from maestro.execution.brokers.toss.transport import TossRestTransport, TossTransportError
+from maestro.execution.live_order_errors import BrokerOrderRejectedError
 from maestro.execution.live_order_models import (
     BrokerOrderId,
     BrokerOrderRequest,
@@ -117,11 +120,23 @@ class TossLiveOrderClient(
             payload["orderAmount"] = _decimal_string(request.order_amount)
         if request.limit_price is not None:
             payload["price"] = _decimal_string(request.limit_price)
-        response = self.transport.post(
-            "/api/v1/orders",
-            payload,
-            account_seq=self.account_seq,
-        )
+        try:
+            response = self.transport.post(
+                "/api/v1/orders",
+                payload,
+                account_seq=self.account_seq,
+            )
+        except TossTransportError as exc:
+            if exc.status_code in {400, 401, 403, 404, 422, 429}:
+                raise BrokerOrderRejectedError(
+                    "toss",
+                    exc.error_code or f"http-{exc.status_code}",
+                    str(exc),
+                    status_code=exc.status_code,
+                    request_id=exc.request_id,
+                    data=exc.data,
+                ) from exc
+            raise
         result = _result_dict(response)
         broker_order_id = str(result.get("orderId") or "")
         broker_order = (
@@ -150,19 +165,28 @@ class TossLiveOrderClient(
         )
 
     def get_open_orders(self, symbol: str | None = None) -> list[LiveOrderStatusSnapshot]:
-        params = {"status": "OPEN"}
-        if symbol:
-            params["symbol"] = symbol
-        response = self.transport.get(
-            "/api/v1/orders",
-            params,
-            account_seq=self.account_seq,
+        return self.list_orders(status="OPEN", symbol=symbol)
+
+    def list_orders(
+        self,
+        *,
+        status: str,
+        symbol: str | None = None,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> list[LiveOrderStatusSnapshot]:
+        if status not in {"OPEN", "CLOSED"}:
+            raise ValueError("Toss order history status must be OPEN or CLOSED")
+        orders = list_toss_orders(
+            self.transport,
+            self.account_seq,
+            status=status,
+            symbol=symbol,
+            from_date=from_date,
+            to_date=to_date,
         )
-        result = _result_dict(response)
         output = []
-        for order in result.get("orders", []):
-            if not isinstance(order, dict):
-                continue
+        for order in orders:
             broker_order = self._broker_order("", str(order.get("orderId") or ""))
             output.append(
                 _status_snapshot(

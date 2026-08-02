@@ -789,6 +789,15 @@
       source contribution orders in monthly idempotency checks
 - [x] Record audited run provenance for signal, approval, and `run_once` with
       deployment commit/source hash and prepared/runtime config fingerprints
+- [x] Add an audited Telegram `/recovery` center with deduplicated halt alerts,
+      guarded safety-halt clearing, Toss OPEN/CLOSED history resolution,
+      broker-attestation fallback, and shared CLI recovery preflight
+- [x] Separate Toss buying power from the account cash ledger, add an audited
+      opening baseline and drift report, make cash-flow/fill updates idempotent,
+      backfill Toss order history, and keep ledger cash separate from TWR
+- [x] Make signal refresh ledger-read-only, couple Toss snapshots to successful
+      OPEN/CLOSED history backfill, protect pre-baseline replay, and use ledger
+      cash for account, currency-sleeve, and total confirmed performance
 
 ## Completed / Historical Notes
 

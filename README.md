@@ -905,11 +905,10 @@ maestro beta-preflight --config configs/live_approval.yaml
 maestro health --config configs/live_readonly.yaml
 ```
 
-`recover-live-order` is an operator recovery marker, not a broker action. It
-requires a latest broker snapshot and a passing broker reconciliation, reruns
-fill reconciliation, records `live_order_recovery_completed`, and allows future
-live approval proposals after `live_order_recovery_required` or incomplete
-lifecycle state has blocked them.
+`recover-live-order` does not submit a new broker order. It resolves recoverable
+order state from broker history when possible, reconciles fills, forces fresh
+broker snapshots, requires passing account reconciliation, and only then records
+`live_order_recovery_completed`. Telegram `/recovery` runs the same workflow.
 
 `adopt-broker-snapshot` is also a state-only operator action. It copies the
 latest read-only broker snapshot into Maestro's portfolio state after the
@@ -1365,6 +1364,8 @@ Implemented operator commands:
 - `/orders`
 - `/approvals`
 - `/pause`
+- `/recovery`
+- `/clear_halt`
 - `/kill_switch`
 
 Telegram operator commands are intentionally constrained. Most read commands use
@@ -1378,8 +1379,10 @@ snapshot timestamp instead of the internal dry-run portfolio cash.
 `/signal` shows the latest persisted signal package. `/signal_<strategy>` uses the
 separate signal config to run one selected strategy only, persists a proposal
 signal package, and does not create approval requests or submit broker orders.
-`/pause` and `/kill_switch` require a whitelisted user, confirmation button, and
-persisted audit/system event.
+`/pause`, `/clear_halt`, `/recovery`, and `/kill_switch` require a whitelisted
+user and audited confirmation. `/recovery` resolves ambiguous broker orders,
+fills, snapshots, and reconciliation without submitting a replacement order.
+The kill switch can be released only through the CLI.
 Run the polling operator UI with:
 
 ```bash
@@ -1387,8 +1390,8 @@ maestro telegram-set-commands --config <operator-readonly-config> --signal-confi
 maestro telegram-operator --config <operator-readonly-config> --signal-config <operator-signal-config>
 ```
 
-Excluded Telegram commands include `/resume`, `/clear-halt`, `/live-on`,
-`/dry-run-off`, `/buy`, `/sell`, `/cancel`, reconciliation triggers, direct
+Excluded Telegram commands include `/resume`, `/release-kill`, `/live-on`,
+`/dry-run-off`, `/buy`, `/sell`, `/cancel`, unrestricted reconciliation or
 broker sync, and risk limit changes. High-risk actions such as enabling live
 auto mode or changing risk limits should not be available through Telegram.
 
@@ -1432,6 +1435,37 @@ positions, buying power, fills, broker state, order submission behind the safety
 contract, and reconciliation. KIS current price lookup can support broker-side
 quote/reference checks, but strategy research data should come through DataHub
 providers rather than KIS.
+
+## Cash ledger and Toss buying power
+
+Toss `cashBuyingPower` is a capacity signal, not settled cash. Maestro stores
+it as `buying_power_by_currency` and keeps the legacy `cash` fields marked as an
+observational proxy. A Toss account's accounting cash is established once from
+an operator-confirmed opening baseline, then advanced only by reconciled fills,
+verified costs, and audited account cash-flow events. Signal and read-only
+refresh paths never persist portfolio-ledger snapshots. Buying-power drift is
+reported as a non-blocking observation unless a live risk gate independently
+finds insufficient current buying power.
+
+```bash
+maestro ledger open-baseline --config <config> \
+  --account-id toss_brokerage --reason "operator verified opening state"
+maestro cash-drift report --config <config> \
+  --account-id toss_brokerage --days 7
+maestro ledger backfill-orders --config <config> \
+  --account-id toss_brokerage --from-date YYYY-MM-DD
+```
+
+Every Toss snapshot refresh backfills OPEN/CLOSED history before reconciliation;
+the CLI command is retained for explicit historical repair. Orders at or before
+the opening baseline are watermarked without reapplying principal, position, or
+cost. `adopt-broker-snapshot` changes positions only after a ledger exists. Use
+`--include-cash` only for a non-unexplained classification on the latest snapshot.
+The dashboard reports `confirmed`, `provisional`, or `degraded` performance;
+confirmed TWR uses ledger cash and does not treat buying-power drift as return.
+Telegram operators can inspect and classify open suspense observations with
+`/cash_drift`; classification is audited and leaves the ledger unchanged until
+the broker evidence supports an explicit cash-flow record.
 
 ## Development Rule
 

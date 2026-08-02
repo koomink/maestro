@@ -13,6 +13,8 @@ def portfolio_state_from_broker_account(
     allowed_symbols: list[str],
     universe: UniverseConfig | None = None,
     unknown_symbol_policy: UnknownBrokerPositionPolicy = "fail_closed",
+    ledger_state: PortfolioState | None = None,
+    allow_proxy_cash: bool = True,
 ) -> PortfolioState:
     positions: dict[str, float] = {}
     unknown_symbols: list[str] = []
@@ -54,9 +56,31 @@ def portfolio_state_from_broker_account(
         raise ValueError(
             "broker snapshot contains positions rejected by universe.policy: " + ";".join(details)
         )
+    explicit_ledger_cash = account.get("ledger_cash_by_currency")
+    if explicit_ledger_cash is None and "ledger_cash_by_currency" in account:
+        if ledger_state is not None:
+            cash = ledger_state.cash
+            cash_by_currency = dict(ledger_state.cash_by_currency)
+        elif not allow_proxy_cash:
+            raise ValueError(
+                "broker snapshot does not provide ledger cash; establish an account "
+                "ledger baseline before composing portfolio state"
+            )
+        else:
+            # Keep legacy callers readable while making the missing ledger
+            # explicit. New orchestration paths pass the account ledger state.
+            cash = float(account.get("cash", 0.0))
+            cash_by_currency = dict(account.get("cash_by_currency") or {})
+    else:
+        cash_by_currency = dict(
+            explicit_ledger_cash
+            if explicit_ledger_cash is not None
+            else account.get("cash_by_currency") or {}
+        )
+        cash = float(account.get("cash", 0.0))
     return PortfolioState(
-        cash=float(account.get("cash", 0.0)),
-        cash_by_currency=dict(account.get("cash_by_currency") or {}),
+        cash=cash,
+        cash_by_currency=cash_by_currency,
         positions=positions,
     )
 

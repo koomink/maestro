@@ -166,6 +166,14 @@ def _merge_snapshots(snapshots: list[KISReadOnlySnapshot]) -> KISReadOnlySnapsho
         cash=sum(cash_by_currency.values()),
         cash_by_currency=cash_by_currency,
         buying_power=sum(snapshot.account.buying_power for snapshot in snapshots),
+        ledger_cash_by_currency=cash_by_currency,
+        buying_power_by_currency={
+            currency: sum(
+                snapshot.account.buying_power_by_currency.get(currency, 0.0)
+                for snapshot in snapshots
+            )
+            for currency in cash_by_currency
+        },
         positions=positions,
         cash_balance=None,
         buying_power_detail=None,

@@ -59,17 +59,24 @@ class LiveOrderSafetyService:
         try:
             result = self.broker_client.submit_limit_order(request)
         except BrokerOrderRejectedError as exc:
+            raw = {
+                "broker_rejection": True,
+                "broker": exc.broker,
+                "code": exc.code,
+                "message": exc.message,
+            }
+            if exc.status_code is not None:
+                raw["status_code"] = exc.status_code
+            if exc.request_id is not None:
+                raw["request_id"] = exc.request_id
+            if exc.data:
+                raw["data"] = exc.data
             rejected = LiveOrderResult(
                 order_id=request.order_id,
                 status=OrderStatus.REJECTED,
                 signal_run_id=request.signal_run_id,
                 message=str(exc),
-                raw={
-                    "broker_rejection": True,
-                    "broker": exc.broker,
-                    "code": exc.code,
-                    "message": exc.message,
-                },
+                raw=raw,
             )
             self._persist(SystemEventType.LIVE_ORDER_RESULT, request, rejected)
             return rejected
@@ -182,6 +189,21 @@ class LiveOrderSafetyService:
             if latest is None or latest["payload"].get("passed") is not True:
                 raise ValueError(
                     "Latest broker reconciliation must pass before live order submission"
+                )
+            payload = latest["payload"]
+            observations = payload.get("observations") or []
+            for account_result in payload.get("account_results") or []:
+                if str(account_result.get("account_id") or "") == str(
+                    request.account_id or ""
+                ):
+                    observations = account_result.get("observations") or []
+                    break
+            drift_levels = {
+                str(observation.get("drift_level") or "") for observation in observations
+            }
+            if drift_levels & {"L2", "L3"}:
+                raise ValueError(
+                    "Buying-power drift requires operator review before live submission"
                 )
 
     def _validate_instrument_contract(self, request: LiveOrderRequest) -> None:

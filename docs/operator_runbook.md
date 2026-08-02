@@ -70,6 +70,17 @@ maestro reconcile-fills --config <config>
 
 6. If live order recovery was required, record recovery completion:
 
+Use Telegram `/recovery` or the recovery button in the automatic halt alert.
+Maestro first queries broker order history, reconciles any recovered fills,
+forces fresh snapshots, and requires account reconciliation to pass. A Toss
+order without a returned broker order ID is matched only when account, symbol,
+side, quantity, limit price, and submit time (within five minutes) identify one
+unique OPEN/CLOSED order. If no unique match exists, the final Telegram button
+is an explicit attestation that the operator verified no acceptance or fill in
+the broker app.
+
+The CLI remains available as a fallback:
+
 ```bash
 maestro recover-live-order --config <config> --reason "broker truth reconciled"
 ```
@@ -98,6 +109,9 @@ recorded as definitive `rejected` orders. Network timeouts and malformed
 responses remain `halted` and require operator recovery. When an operator
 approves `/retry_order`, the source contribution order is superseded; the new
 order's result becomes the monthly contribution idempotency source of truth.
+The latest quote used by recovery review is rounded down to the instrument's
+configured `price_tick` before quantity, notional, buying power, and live gates
+are recalculated.
 
 For a broker-accepted order that remains `open` or `partially_filled`, use
 `/orders` to refresh its status and copy the displayed command:
@@ -118,7 +132,8 @@ is blocked and broker truth must be reconciled manually.
 maestro clear-halt --config <config> --reason "operator reviewed broker state and reconciliation passed"
 ```
 
-The command re-runs health checks and refuses to clear the halt while any
+Telegram `/clear_halt` and the Recovery Center's `Safety halt 해제` button run
+the same health preflight as the CLI and refuse to clear the halt while any
 non-safety check is failing.
 
 `resume` must not clear `killed`. `clear-halt` must not clear `killed`. A kill
@@ -245,6 +260,62 @@ live gates before approval or broker submission.
 If a broker status poll returns an unknown order state, Maestro records
 `live_order_recovery_required`; the next live approval run remains blocked until
 operator recovery is completed.
+
+Toss order submission errors use the following fail-closed classification:
+
+| Toss outcome | Maestro result | Batch behavior |
+| --- | --- | --- |
+| HTTP `400`, `401`, `403`, `404`, `422`, or `429` | definitive `rejected`; preserve status, Toss error code, request ID, and error data when returned | isolate that symbol and continue sequential submission |
+| HTTP `409` or `5xx` | ambiguous `halted` with `live_order_recovery_required` | stop later submissions |
+| Network timeout/disconnect or response parse failure | ambiguous `halted` with `live_order_recovery_required` | stop later submissions |
+
+For example, `422 prerequisite-required` means Toss did not accept that order.
+Only the affected symbol becomes a recovery-review candidate; it does not halt
+the remaining batch. Do not infer the same for `409`, server failures, or a
+missing/unreadable response, because broker acceptance cannot be ruled out.
+
+## Toss cash ledger operations
+
+Toss `cashBuyingPower` is used only for current order capacity. It is not
+adopted as settled cash on every refresh. Establish the one-time account ledger
+after reviewing the broker snapshot:
+
+```bash
+maestro ledger open-baseline \
+  --config <approval-config> \
+  --account-id toss_brokerage \
+  --reason "operator verified opening cash and positions"
+```
+
+Inspect subsequent buying-power drift without changing state:
+
+```bash
+maestro cash-drift report --config <approval-config> \
+  --account-id toss_brokerage --days 7
+```
+
+The Telegram operator's `/cash_drift` command shows the same suspense rows.
+Its settlement/transfer/unexplained buttons only classify the observation;
+they do not write an account cash flow or alter the ledger.
+
+Normal Toss refreshes backfill OPEN/CLOSED orders automatically and fail closed
+before reconciliation when history cannot be verified. Use this command only
+for an explicit historical repair; baseline/adoption cutoffs prevent replay of
+already represented principal, positions, and costs:
+
+```bash
+maestro ledger backfill-orders --config <approval-config> \
+  --account-id toss_brokerage --from-date YYYY-MM-DD
+```
+
+Record an operator-verified deposit or withdrawal through `cash-flow record`.
+It advances the account ledger and emits the audited flow used by baselined TWR.
+`adopt-broker-snapshot` preserves ledger cash by default and adopts positions;
+use `--include-cash` only after a non-unexplained classification for the latest
+broker snapshot.
+Before a live run, confirm the latest reconciliation and that current Toss
+buying power covers each order; buying-power drift alone is observational and
+must not be described as investment return.
 
 ## KIS Read-only Reconciliation
 
