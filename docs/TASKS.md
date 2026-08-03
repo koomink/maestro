@@ -800,6 +800,8 @@
       cash for account, currency-sleeve, and total confirmed performance
 - [x] Detect stable unexplained Toss buying-power steps, request guarded Telegram
       cash-flow confirmation, and record operator-verified flows idempotently
+- [x] Validate linked cash-flow cardinality and scope, record internal transfers
+      atomically, and remove the fixed event-history limit from performance reads
 
 ## Completed / Historical Notes
 

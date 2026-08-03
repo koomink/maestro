@@ -75,6 +75,7 @@ from maestro.state.events import (
     CASH_SUSPENSE_CLASSIFICATIONS,
     EXTERNAL_TRANSFER,
     FX_CONVERSION,
+    INTERNAL_TRANSFER,
     SystemEventType,
     flow_class_for_cash_suspense,
     save_audited_system_event,
@@ -1715,8 +1716,8 @@ def record_account_cash_flow(
         EXTERNAL_TRANSFER,
         "--flow-class",
         help=(
-            "What the money was: external_transfer, internal_transfer, "
-            "investment_income or cost. Only transfers are removed from the return."
+            "What the money was: external_transfer, investment_income or cost. "
+            "Use cash-flow transfer/convert for linked movements."
         ),
     ),
     effective_at: str | None = typer.Option(None, "--effective-at"),
@@ -1735,6 +1736,10 @@ def record_account_cash_flow(
         # A conversion is two legs whose amounts have to agree; recording one
         # side here would leave a permanently unpaired flow.
         raise typer.BadParameter("use `maestro cash-flow convert` to record a conversion")
+    if normalized_class == INTERNAL_TRANSFER:
+        raise typer.BadParameter(
+            "use `maestro cash-flow transfer` to record both sides atomically"
+        )
     normalized_currency = currency.strip().upper()
     timestamp = effective_at or utc_now().isoformat()
     store = _state_store(maestro_config, identity)
@@ -1782,7 +1787,7 @@ def record_currency_conversion(
         ...,
         "--to-amount",
         min=0.000001,
-        help="Amount that actually arrived, excluding any spread or commission.",
+        help="Net target-currency amount that arrived after the stated fee.",
     ),
     transfer_id: str = typer.Option(
         ...,
@@ -1833,6 +1838,54 @@ def record_currency_conversion(
         f"account_id={account_id} "
         f"{from_amount:.6f} {from_currency.strip().upper()} -> "
         f"{to_amount:.6f} {to_currency.strip().upper()} fee={fee:.6f}"
+    )
+
+
+@cash_flow_app.command("transfer")
+def record_internal_transfer(
+    from_account_id: str = typer.Option(..., "--from-account-id"),
+    from_currency: str = typer.Option(..., "--from-currency"),
+    from_amount: float = typer.Option(..., "--from-amount", min=0.000001),
+    to_account_id: str = typer.Option(..., "--to-account-id"),
+    to_currency: str = typer.Option(..., "--to-currency"),
+    to_amount: float = typer.Option(..., "--to-amount", min=0.000001),
+    transfer_id: str = typer.Option(
+        ...,
+        "--transfer-id",
+        help="Names both transfer legs so retrying the command is a no-op.",
+    ),
+    reason: str = typer.Option(..., "--reason"),
+    effective_at: str | None = typer.Option(None, "--effective-at"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Record both sides of an account-to-account transfer atomically."""
+    maestro_config, identity = _load_operator_config(config)
+    known_accounts = set(broker_readonly_account_ids(maestro_config))
+    unknown_accounts = sorted({from_account_id, to_account_id} - known_accounts)
+    if unknown_accounts:
+        raise typer.BadParameter(f"unknown account_id={','.join(unknown_accounts)}")
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    try:
+        result = AccountCashFlowService(store, audit).record_internal_transfer(
+            from_account_id=from_account_id,
+            from_currency=from_currency,
+            from_amount=from_amount,
+            to_account_id=to_account_id,
+            to_currency=to_currency,
+            to_amount=to_amount,
+            transfer_id=transfer_id,
+            effective_at=effective_at or utc_now().isoformat(),
+            source="operator_cli",
+            reason=reason,
+            decided_by="operator_cli",
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(
+        f"transferred cash_flow_id={result.run_id} created={result.created} "
+        f"{from_account_id}:{from_amount:.6f} {from_currency.strip().upper()} -> "
+        f"{to_account_id}:{to_amount:.6f} {to_currency.strip().upper()}"
     )
 
 

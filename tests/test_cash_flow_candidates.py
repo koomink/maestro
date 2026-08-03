@@ -267,28 +267,19 @@ def test_both_legs_of_one_transfer_are_recorded(tmp_path):
     _open_ledger(store, "acct_to", 0)
     service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
 
-    legs = [
-        ("acct_from", "withdrawal"),
-        ("acct_to", "deposit"),
-    ]
-    results = [
-        service.record(
-            account_id=account_id,
-            amount=250_000,
-            currency="KRW",
-            flow_type=flow_type,
-            effective_at="2026-08-02T12:00:00+00:00",
-            source="operator_cli",
-            transfer_id="move-1",
-            flow_class="internal_transfer",
-            duplicate_key=account_cash_flow_leg_duplicate_key(
-                "move-1", account_id, "KRW", flow_type
-            ),
-        )
-        for account_id, flow_type in legs
-    ]
+    result = service.record_internal_transfer(
+        from_account_id="acct_from",
+        from_currency="KRW",
+        from_amount=250_000,
+        to_account_id="acct_to",
+        to_currency="KRW",
+        to_amount=250_000,
+        effective_at="2026-08-02T12:00:00+00:00",
+        source="operator_cli",
+        transfer_id="move-1",
+    )
 
-    assert [result.created for result in results] == [True, True]
+    assert result.created is True
     events = store.list_system_events_by_type("account_cash_flow", limit=10)
     assert len(events) == 2
     assert {event["payload"]["account_id"] for event in events} == {
@@ -299,38 +290,30 @@ def test_both_legs_of_one_transfer_are_recorded(tmp_path):
     assert _ledger_krw(store, "acct_to") == 250_000
 
 
-def test_replaying_one_leg_does_not_apply_it_twice(tmp_path):
+def test_replaying_an_internal_transfer_does_not_apply_it_twice(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
     _open_ledger(store, "acct_from", 1_000_000)
+    _open_ledger(store, "acct_to", 0)
     service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
-    key = account_cash_flow_leg_duplicate_key("move-1", "acct_from", "KRW", "withdrawal")
 
-    first = service.record(
-        account_id="acct_from",
-        amount=250_000,
-        currency="KRW",
-        flow_type="withdrawal",
-        effective_at="2026-08-02T12:00:00+00:00",
-        source="operator_cli",
-        transfer_id="move-1",
-        flow_class="internal_transfer",
-        duplicate_key=key,
-    )
-    second = service.record(
-        account_id="acct_from",
-        amount=250_000,
-        currency="KRW",
-        flow_type="withdrawal",
-        effective_at="2026-08-02T12:00:00+00:00",
-        source="operator_cli",
-        transfer_id="move-1",
-        flow_class="internal_transfer",
-        duplicate_key=key,
-    )
+    kwargs = {
+        "from_account_id": "acct_from",
+        "from_currency": "KRW",
+        "from_amount": 250_000,
+        "to_account_id": "acct_to",
+        "to_currency": "KRW",
+        "to_amount": 250_000,
+        "effective_at": "2026-08-02T12:00:00+00:00",
+        "source": "operator_cli",
+        "transfer_id": "move-1",
+    }
+    first = service.record_internal_transfer(**kwargs)
+    second = service.record_internal_transfer(**kwargs)
 
     assert first.created is True
     assert second.created is False
     assert _ledger_krw(store, "acct_from") == 750_000
+    assert _ledger_krw(store, "acct_to") == 250_000
 
 
 def test_leg_duplicate_keys_separate_the_sides_of_a_transfer():
@@ -624,14 +607,14 @@ def test_a_conversion_needs_two_currencies_and_an_id(tmp_path):
     assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
 
 
-def test_a_linked_flow_without_a_transfer_id_is_refused(tmp_path):
-    """A leg with no id can never be paired, so it can never be complete."""
+def test_a_linked_flow_cannot_be_recorded_one_leg_at_a_time(tmp_path):
+    """Linked movements must use the atomic transfer or conversion producer."""
     store = StateStore(str(tmp_path / "state.db"))
     _open_ledger(store, "acct_from", 1_000_000)
     service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
 
     for flow_class in ("internal_transfer", "fx_conversion"):
-        with pytest.raises(ValueError, match="transfer_id"):
+        with pytest.raises(ValueError, match="atomically"):
             service.record(
                 account_id="acct_from",
                 amount=250_000,
@@ -684,26 +667,68 @@ def test_an_internal_transfer_pair_is_recorded_as_internal(tmp_path):
     _open_ledger(store, "acct_to", 0)
     service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
 
-    for account_id, flow_type in (("acct_from", "withdrawal"), ("acct_to", "deposit")):
-        service.record(
-            account_id=account_id,
-            amount=250_000,
-            currency="KRW",
-            flow_type=flow_type,
-            effective_at="2026-08-02T12:00:00+00:00",
-            source="operator_cli",
-            transfer_id="move-1",
-            flow_class="internal_transfer",
-            duplicate_key=account_cash_flow_leg_duplicate_key(
-                "move-1", account_id, "KRW", flow_type
-            ),
-        )
+    service.record_internal_transfer(
+        from_account_id="acct_from",
+        from_currency="KRW",
+        from_amount=250_000,
+        to_account_id="acct_to",
+        to_currency="KRW",
+        to_amount=250_000,
+        effective_at="2026-08-02T12:00:00+00:00",
+        source="operator_cli",
+        transfer_id="move-1",
+    )
 
     events = store.list_system_events_by_type("account_cash_flow", limit=10)
     assert len(events) == 2
     assert {event["payload"]["flow_class"] for event in events} == {"internal_transfer"}
     assert _ledger_krw(store, "acct_from") == 750_000
     assert _ledger_krw(store, "acct_to") == 250_000
+
+
+def test_internal_transfer_is_all_or_nothing_when_destination_ledger_is_missing(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _open_ledger(store, "acct_from", 1_000_000)
+    service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
+
+    with pytest.raises(ValueError, match="ledger is not established"):
+        service.record_internal_transfer(
+            from_account_id="acct_from",
+            from_currency="KRW",
+            from_amount=250_000,
+            to_account_id="acct_missing",
+            to_currency="KRW",
+            to_amount=250_000,
+            effective_at="2026-08-02T12:00:00+00:00",
+            source="operator_cli",
+            transfer_id="move-missing",
+        )
+
+    assert _ledger_krw(store, "acct_from") == 1_000_000
+    assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
+
+
+def test_same_currency_internal_transfer_requires_matching_amounts(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _open_ledger(store, "acct_from", 1_000_000)
+    _open_ledger(store, "acct_to", 0)
+    service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
+
+    with pytest.raises(ValueError, match="amounts must match"):
+        service.record_internal_transfer(
+            from_account_id="acct_from",
+            from_currency="KRW",
+            from_amount=250_000,
+            to_account_id="acct_to",
+            to_currency="KRW",
+            to_amount=249_000,
+            effective_at="2026-08-02T12:00:00+00:00",
+            source="operator_cli",
+            transfer_id="move-mismatch",
+        )
+
+    assert _ledger_krw(store, "acct_from") == 1_000_000
+    assert _ledger_krw(store, "acct_to") == 0
 
 
 def _save_kis_snapshot(

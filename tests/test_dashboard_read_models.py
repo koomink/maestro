@@ -2536,9 +2536,17 @@ def test_paired_internal_transfer_nets_out_of_portfolio_performance(tmp_path):
     assert accounts[("acct_to", "run_2")]["cash_flow"] == 250.0
 
 
-def _fact(flow_class, *, signed_amount=100.0, currency="KRW", account_id="acct", transfer_id=None):
+def _fact(
+    flow_class,
+    *,
+    signed_amount=100.0,
+    currency="KRW",
+    account_id="acct",
+    transfer_id=None,
+    timestamp=None,
+):
     return {
-        "timestamp": utc_now(),
+        "timestamp": timestamp or utc_now(),
         "signed_amount": signed_amount,
         "currency": currency,
         "account_id": account_id,
@@ -2559,13 +2567,38 @@ def test_each_scope_neutralises_only_what_crosses_its_own_boundary():
     A conversion crosses no account and no portfolio edge -- the total never
     moves -- but it is exactly what moves one currency sleeve into another.
     """
+    linked_at = utc_now()
     paired_transfer = [
-        _fact("internal_transfer", signed_amount=-100.0, account_id="a", transfer_id="t1"),
-        _fact("internal_transfer", signed_amount=100.0, account_id="b", transfer_id="t1"),
+        _fact(
+            "internal_transfer",
+            signed_amount=-100.0,
+            account_id="a",
+            transfer_id="t1",
+            timestamp=linked_at,
+        ),
+        _fact(
+            "internal_transfer",
+            signed_amount=100.0,
+            account_id="b",
+            transfer_id="t1",
+            timestamp=linked_at,
+        ),
     ]
     paired_conversion = [
-        _fact("fx_conversion", signed_amount=-1400.0, currency="KRW", transfer_id="fx1"),
-        _fact("fx_conversion", signed_amount=1.0, currency="USD", transfer_id="fx1"),
+        _fact(
+            "fx_conversion",
+            signed_amount=-1400.0,
+            currency="KRW",
+            transfer_id="fx1",
+            timestamp=linked_at,
+        ),
+        _fact(
+            "fx_conversion",
+            signed_amount=1.0,
+            currency="USD",
+            transfer_id="fx1",
+            timestamp=linked_at,
+        ),
     ]
     facts = [
         _fact("external_transfer"),
@@ -2612,6 +2645,73 @@ def test_an_unpaired_linked_leg_is_reported_rather_than_counted():
         effects, reasons = cash_flow_effects_for_scope(facts, scope)
         assert effects == []
         assert [reason["code"] for reason in reasons] == ["unpaired_linked_cash_flow"]
+
+
+def test_malformed_or_cross_class_linked_sets_are_not_treated_as_complete():
+    linked_at = utc_now()
+    malformed = [
+        _fact(
+            "internal_transfer",
+            signed_amount=amount,
+            account_id=account_id,
+            transfer_id="three-legs",
+            timestamp=linked_at,
+        )
+        for amount, account_id in ((-100.0, "a"), (-25.0, "b"), (125.0, "c"))
+    ]
+    cross_class = [
+        _fact(
+            "internal_transfer",
+            signed_amount=-100.0,
+            account_id="a",
+            transfer_id="reused",
+            timestamp=linked_at,
+        ),
+        _fact(
+            "fx_conversion",
+            signed_amount=100.0,
+            currency="USD",
+            account_id="a",
+            transfer_id="reused",
+            timestamp=linked_at,
+        ),
+    ]
+
+    effects, reasons = cash_flow_effects_for_scope(
+        [*malformed, *cross_class], "currency_sleeve"
+    )
+
+    assert effects == []
+    assert {reason["code"] for reason in reasons} == {
+        "invalid_linked_cash_flow",
+        "conflicting_linked_cash_flow_classes",
+    }
+
+
+def test_linked_legs_with_different_effective_times_are_rejected():
+    first_at = utc_now()
+    facts = [
+        _fact(
+            "internal_transfer",
+            signed_amount=-100.0,
+            account_id="a",
+            transfer_id="late-leg",
+            timestamp=first_at,
+        ),
+        _fact(
+            "internal_transfer",
+            signed_amount=100.0,
+            account_id="b",
+            transfer_id="late-leg",
+            timestamp=first_at + timedelta(seconds=1),
+        ),
+    ]
+
+    effects, reasons = cash_flow_effects_for_scope(facts, "currency_sleeve")
+
+    assert effects == []
+    assert reasons[0]["code"] == "invalid_linked_cash_flow"
+    assert "effective_at" in reasons[0]["message"]
 
 
 def test_a_flow_recorded_before_classes_existed_is_an_external_transfer():
@@ -2916,6 +3016,118 @@ def test_sleeve_cash_flow_matches_with_and_without_a_baseline(tmp_path):
 
     assert baselined[0]["cash_flow"] == 500.0
     assert plain[0]["cash_flow"] == 500.0
+
+
+def test_disabled_account_cash_flow_does_not_enter_currency_sleeves(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    config = type(
+        "Config",
+        (),
+        {
+            "accounts": [
+                BrokerAccountConfig(
+                    id="disabled",
+                    broker="kis",
+                    enabled=False,
+                    broker_products=["kis_overseas_stock"],
+                ),
+                BrokerAccountConfig(
+                    id="enabled",
+                    broker="kis",
+                    enabled=True,
+                    broker_products=["kis_overseas_stock"],
+                ),
+            ]
+        },
+    )()
+    for run_id, created_at in (
+        ("run_1", "2026-01-01 00:00:00"),
+        ("run_2", "2026-01-02 00:00:00"),
+    ):
+        _save_multi_currency_snapshot(
+            store,
+            run_id,
+            "enabled",
+            {"KRW": 1_000.0},
+            created_at,
+        )
+    _record_cash_flow_event(
+        store,
+        "disabled_deposit",
+        {
+            "account_id": "disabled",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "flow_class": "external_transfer",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+
+    rows = build_currency_sleeve_performance_table(store, config)
+
+    assert rows[0]["cash_flow"] == 0.0
+    assert rows[0]["period_return"] == 0.0
+
+
+def test_unpaired_flow_only_degrades_its_own_account(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for account_id in ("good", "bad"):
+        _save_cash_only_snapshot(
+            store,
+            "run_1",
+            account_id,
+            1_000.0,
+            created_at="2026-01-01 00:00:00",
+        )
+        _save_cash_only_snapshot(
+            store,
+            "run_2",
+            account_id,
+            1_000.0,
+            created_at="2026-01-02 00:00:00",
+        )
+    _record_cash_flow_event(
+        store,
+        "bad_half",
+        {
+            "account_id": "bad",
+            "amount": 100.0,
+            "currency": "KRW",
+            "flow_type": "withdrawal",
+            "flow_class": "internal_transfer",
+            "transfer_id": "missing-side",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+
+    rows = {
+        (row["account_id"], row["run_id"]): row
+        for row in build_account_performance_table(store)
+    }
+
+    assert rows[("good", "run_2")]["cash_flow_quality"]["status"] == "ok"
+    assert rows[("bad", "run_2")]["cash_flow_quality"]["status"] == "degraded"
+
+
+def test_cash_flow_fact_reader_has_no_silent_history_limit(tmp_path, monkeypatch):
+    from maestro.dashboard.read_models import load_account_cash_flow_facts
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    original = store.list_system_events_by_type
+    observed_limits = []
+
+    def tracked(event_type, limit=10):
+        observed_limits.append(limit)
+        return original(event_type, limit=limit)
+
+    monkeypatch.setattr(store, "list_system_events_by_type", tracked)
+
+    load_account_cash_flow_facts(store)
+
+    assert observed_limits == [None]
 
 
 def test_cash_flow_center_surfaces_unresolved_ledger_broker_differences(tmp_path):

@@ -457,6 +457,10 @@ class StateStore:
             for leg in legs
         ]
         duplicate_keys = [leg["duplicate_key"] for leg in prepared if leg["duplicate_key"]]
+        if len(prepared) > 1 and len(duplicate_keys) != len(prepared):
+            raise ValueError("every linked cash-flow leg needs a duplicate key")
+        if len(set(duplicate_keys)) != len(duplicate_keys):
+            raise ValueError("linked cash-flow leg duplicate keys must be unique")
         with self.writer_lock("apply_account_cash_flows"):
             with self._connect() as conn:
                 states: dict[str, PortfolioState] = {}
@@ -1097,14 +1101,16 @@ class StateStore:
     def list_system_events_by_type(
         self,
         event_type: str,
-        limit: int = 10,
+        limit: int | None = 10,
     ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM system_events WHERE event_type = ? ORDER BY id DESC"
+        values: list[Any] = [event_type]
+        if limit is not None:
+            sql += " LIMIT ?"
+            values.append(limit)
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM system_events WHERE event_type = ? ORDER BY id DESC LIMIT ?",
-                (event_type, limit),
-            ).fetchall()
+            rows = conn.execute(sql, values).fetchall()
 
         output = []
         for row in rows:

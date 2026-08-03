@@ -8,6 +8,7 @@ from maestro.state.events import (
     COST,
     EXTERNAL_TRANSFER,
     FX_CONVERSION,
+    INTERNAL_TRANSFER,
     LINKED_FLOW_CLASSES,
     SystemEventType,
 )
@@ -49,7 +50,7 @@ def account_cash_flow_leg_duplicate_key(
 
 
 class AccountCashFlowService:
-    """Apply operator- or broker-verified external cash flows exactly once."""
+    """Apply verified account cash changes exactly once."""
 
     def __init__(self, store: StateStore, audit: AuditLogger) -> None:
         self.store = store
@@ -151,6 +152,90 @@ class AccountCashFlowService:
             legs.append(leg(normalized_to, fee, "withdrawal", COST))
         return self._apply(legs)
 
+    def record_internal_transfer(
+        self,
+        *,
+        from_account_id: str,
+        from_currency: str,
+        from_amount: float,
+        to_account_id: str,
+        to_currency: str,
+        to_amount: float,
+        transfer_id: str,
+        effective_at: str,
+        source: str,
+        reason: str | None = None,
+        decided_by: str | None = None,
+    ) -> AccountCashFlowRecord:
+        """Move cash between two tracked accounts as one atomic linked event."""
+        normalized_from_currency = from_currency.strip().upper()
+        normalized_to_currency = to_currency.strip().upper()
+        if from_account_id == to_account_id:
+            raise ValueError("an internal transfer needs two different accounts")
+        if from_amount <= 0 or to_amount <= 0:
+            raise ValueError("internal-transfer amounts must be positive")
+        if not transfer_id:
+            raise ValueError("an internal transfer needs a transfer_id so a retry is safe")
+        if normalized_from_currency == normalized_to_currency:
+            tolerance = _minor_unit(normalized_from_currency)
+            if abs(from_amount - to_amount) > tolerance:
+                raise ValueError(
+                    "same-currency internal-transfer amounts must match within one minor unit"
+                )
+
+        evidence = {
+            "kind": "operator_internal_transfer",
+            "from_account_id": from_account_id,
+            "from_currency": normalized_from_currency,
+            "from_amount": from_amount,
+            "to_account_id": to_account_id,
+            "to_currency": normalized_to_currency,
+            "to_amount": to_amount,
+        }
+
+        def leg(
+            account_id: str,
+            currency: str,
+            amount: float,
+            flow_type: str,
+        ) -> dict[str, Any]:
+            signed = abs(amount) if flow_type == "deposit" else -abs(amount)
+            payload = {
+                "account_id": account_id,
+                "amount": signed,
+                "currency": currency,
+                "flow_type": flow_type,
+                "flow_class": INTERNAL_TRANSFER,
+                "effective_at": effective_at,
+                "source": source,
+                "reason": reason,
+                "transfer_id": transfer_id,
+                "decided_by": decided_by,
+                "verification": "operator_verified",
+                "evidence": evidence,
+                "duplicate_key": account_cash_flow_leg_duplicate_key(
+                    transfer_id, account_id, currency, flow_type
+                ),
+            }
+            return {
+                "account_id": account_id,
+                "amount": signed,
+                "currency": currency,
+                "event_payload": payload,
+            }
+
+        return self._apply(
+            [
+                leg(
+                    from_account_id,
+                    normalized_from_currency,
+                    from_amount,
+                    "withdrawal",
+                ),
+                leg(to_account_id, normalized_to_currency, to_amount, "deposit"),
+            ]
+        )
+
     def _apply(self, legs: list[dict[str, Any]]) -> AccountCashFlowRecord:
         run_id = new_run_id()
         result = self.store.apply_account_cash_flows(run_id, legs)
@@ -192,10 +277,13 @@ class AccountCashFlowService:
         normalized_class = flow_class.strip().lower()
         if normalized_class not in ACCOUNT_CASH_FLOW_CLASSES:
             raise ValueError(f"flow_class must be one of {sorted(ACCOUNT_CASH_FLOW_CLASSES)}")
-        if normalized_class in LINKED_FLOW_CLASSES and not transfer_id:
-            # Without an id tying it to its other side, this leg can never be
-            # paired, so every reader would report the figure as incomplete.
-            raise ValueError(f"{normalized_class} needs a transfer_id to pair its legs")
+        if normalized_class in LINKED_FLOW_CLASSES:
+            command = (
+                "cash-flow convert"
+                if normalized_class == FX_CONVERSION
+                else "cash-flow transfer"
+            )
+            raise ValueError(f"use `{command}` to record {normalized_class} atomically")
         normalized_currency = currency.strip().upper()
         signed_amount = abs(float(amount))
         if normalized_type == "withdrawal":

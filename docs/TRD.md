@@ -1536,6 +1536,14 @@ ledger for downstream allocation. Account tracking start/end events define
 historical membership so disabling an account does not rewrite older NAV.
 Returns before the adopted baseline remain legacy/unverified.
 
+Linked `internal_transfer` and `fx_conversion` events use exactly two opposite
+legs with a shared identifier and effective time. Their ledger snapshots and
+events commit in one SQLite transaction; single-leg operator writes are refused.
+Performance readers validate class, cardinality, accounts, currencies, and
+effective time before neutralising a linked flow. They query the complete event
+history and restrict events and quality warnings to the accounts in the reported
+performance scope.
+
 Currency-sleeve performance uses the same persisted broker snapshots grouped by
 snapshot currency, so KRW and USD returns remain separate. Total portfolio
 performance groups broker snapshots by run/as-of time; when more than one

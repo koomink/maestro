@@ -1312,6 +1312,10 @@ remains the downstream strategy allocation. Portfolio drawdown is based on the
 chain-linked TWR index, and converted history uses the persisted FX snapshot
 available at each valuation time. The dashboard renders these persisted read
 models only and does not call broker or FX endpoints during page rendering.
+Moves between tracked accounts use one atomic `maestro cash-flow transfer`
+command; currency conversions use `maestro cash-flow convert`. The generic
+record command refuses either linked class so an interrupted operation cannot
+leave only one side in the ledger.
 
 For Toss, Maestro can also propose an external cash-flow candidate after a
 buying-power step remains stable for three snapshots with unchanged positions,

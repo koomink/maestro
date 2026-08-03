@@ -332,27 +332,21 @@ flow in the period.
 ### Linked flows
 
 `internal_transfer` and `fx_conversion` only mean anything as a pair. Both legs
-must share one `--transfer-id`, and each leg is keyed separately, so the two
-sides of a move between accounts take two `cash-flow record` calls:
+must share one `--transfer-id`. Record an account-to-account move with one
+`cash-flow transfer` command so both ledgers and both events commit atomically:
 
 ```bash
-maestro cash-flow record --config <approval-config> \
-  --account-id kis_brokerage --amount 250000 --currency KRW \
-  --flow-type withdrawal --flow-class internal_transfer \
+maestro cash-flow transfer --config <approval-config> \
+  --from-account-id kis_brokerage --from-currency KRW --from-amount 250000 \
+  --to-account-id toss_brokerage --to-currency KRW --to-amount 250000 \
   --transfer-id move-2026-08-02 \
-  --reason "move to Toss for US ETF purchase"
-maestro cash-flow record --config <approval-config> \
-  --account-id toss_brokerage --amount 250000 --currency KRW \
-  --flow-type deposit --flow-class internal_transfer \
-  --transfer-id move-2026-08-02 \
-  --reason "move from KIS for US ETF purchase"
+  --reason "move from KIS to Toss for US ETF purchase"
 ```
 
-A linked class without `--transfer-id` is refused: a leg with no id can never
-be paired, so it could only ever be reported as incomplete. A leg whose
-counterpart is missing is not counted either, and the read models report
-`unpaired_linked_cash_flow` in `cash_flow_quality` rather than publishing a
-figure built on half an event. Check that field after recording a transfer.
+`cash-flow record` refuses linked classes. This prevents a crash between two
+commands from leaving one ledger moved and the other untouched. A malformed
+legacy pair is not counted; the read models report an invalid or unpaired linked
+flow in `cash_flow_quality` instead of publishing a figure built on it.
 
 `cash-flow record` will not take `fx_conversion`; a conversion is two legs
 whose amounts have to agree, so use `cash-flow convert` below.
@@ -360,7 +354,7 @@ whose amounts have to agree, so use `cash-flow convert` below.
 ### Currency conversion
 
 Record a conversion with `cash-flow convert`. `--to-amount` is what actually
-arrived and `--fee` is the spread or commission that did not; they are booked
+arrived after the stated fee and `--fee` is the spread or commission; they are booked
 apart so the cost stays visible after the sleeve removes the conversion itself:
 
 ```bash
