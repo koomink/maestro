@@ -428,8 +428,17 @@ the same `signal_run_id`.
   idempotent. KIS `transaction_costs_today` remains KIS-only.
 - Every Toss snapshot refresh reads OPEN/CLOSED history before persisting the
   snapshot and reconciliation evidence. `ledger backfill-orders` remains the
-  operator repair entrypoint. Baseline/adoption cutoffs prevent historical
-  principal, positions, and costs from being applied twice.
+  operator repair entrypoint. Baseline/adoption cutoffs seed the full cumulative
+  broker-order watermark while suppressing only its first ledger application;
+  later partial-fill or cost increases apply only above that watermark. Legacy
+  snapshot-adoption events without `include_cash` retain their version-1 cash
+  baseline semantics.
+- Snapshot adoption persists the portfolio row and its structured provenance
+  event in one SQLite transaction. Toss `--include-cash` adoption additionally
+  requires successful order-history evidence tied to the selected snapshot.
+- A `ledger_bookkeeping_correction` is an idempotent, explicitly evidenced
+  non-flow repair. It updates account and legacy global ledgers atomically and
+  must not be represented as an external transfer, income, or broker cost.
 - Signal generation consumes broker positions plus ledger cash without writing
   a portfolio-ledger snapshot. Dashboard account, currency-sleeve, and total
   performance report `confirmed`, `provisional`, or `degraded`; buying-power-only

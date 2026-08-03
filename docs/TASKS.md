@@ -802,6 +802,9 @@
       cash-flow confirmation, and record operator-verified flows idempotently
 - [x] Validate linked cash-flow cardinality and scope, record internal transfers
       atomically, and remove the fixed event-history limit from performance reads
+- [x] Make Toss adoption/backfill migration-safe: recognize version-1 cash
+      baselines, seed full cumulative order watermarks, apply later fill deltas,
+      atomically persist adoption provenance, and add audited bookkeeping repair
 
 ## Completed / Historical Notes
 

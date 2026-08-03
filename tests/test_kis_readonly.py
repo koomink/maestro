@@ -436,6 +436,8 @@ def test_adopt_broker_snapshot_seeds_portfolio_for_reconciliation(tmp_path):
     assert state.positions == {"MOCK_ETF_A": 30_000.0, "MOCK_ETF_B": 40_000.0}
     events = store.list_system_events_by_type("broker_snapshot_adopted")
     assert events[0]["payload"]["reason"] == "operator baseline rehearsal"
+    assert events[0]["payload"]["schema_version"] == 2
+    assert events[0]["payload"]["include_cash"] is False
 
 
 def test_adopt_broker_snapshot_can_scope_multi_account_baseline(tmp_path):

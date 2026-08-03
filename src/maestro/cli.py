@@ -1978,6 +1978,58 @@ def ledger_backfill_orders(
     typer.echo(json.dumps(payload, default=str))
 
 
+@ledger_app.command("bookkeeping-correction")
+def ledger_bookkeeping_correction(
+    account_id: str = typer.Option(..., "--account-id"),
+    currency: str = typer.Option(..., "--currency"),
+    amount: float = typer.Option(..., "--amount"),
+    correction_id: str = typer.Option(..., "--correction-id"),
+    evidence: str = typer.Option(..., "--evidence"),
+    reason: str = typer.Option(..., "--reason"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Apply an idempotent non-flow correction with explicit evidence."""
+    maestro_config, identity = _load_operator_config(config)
+    if maestro_config.mode not in {RunMode.LIVE_READONLY, RunMode.LIVE_APPROVAL}:
+        raise typer.BadParameter(
+            "ledger bookkeeping-correction requires live_readonly or live_approval"
+        )
+    normalized_currency = currency.strip().upper()
+    normalized_correction_id = correction_id.strip()
+    if not normalized_currency or not normalized_correction_id:
+        raise typer.BadParameter("currency and correction-id must be non-empty")
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    run_id = new_run_id()
+    payload = {
+        "account_id": account_id,
+        "currency": normalized_currency,
+        "amount": float(amount),
+        "reason": reason,
+        "evidence": evidence,
+        "source": "operator_cli",
+        "decided_by": "operator_cli",
+        "effective_at": utc_now().isoformat(),
+        "duplicate_key": f"ledger-bookkeeping-correction:{normalized_correction_id}",
+    }
+    try:
+        created = store.apply_ledger_bookkeeping_correction(
+            run_id,
+            account_id=account_id,
+            currency=normalized_currency,
+            amount=amount,
+            event_payload=payload,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if created:
+        audit.log(run_id, str(SystemEventType.LEDGER_BOOKKEEPING_CORRECTION), payload)
+    typer.echo(
+        f"bookkeeping_correction run_id={run_id} created={str(created).lower()} "
+        f"account_id={account_id} amount={amount:.12f} currency={normalized_currency}"
+    )
+
+
 @cash_drift_app.command("report")
 def cash_drift_report(
     account_id: str = typer.Option(..., "--account-id"),
@@ -2176,12 +2228,17 @@ def adopt_broker_snapshot(
     adopted_account_id = str(
         latest["payload"].get("account_id") or latest.get("account_id") or ""
     )
+    if not adopted_account_id:
+        raise typer.BadParameter("broker snapshot is missing its Maestro account_id")
     existing_ledger = (
         store.load_latest_account_portfolio_state(adopted_account_id)
         if adopted_account_id
         else None
     )
     adopted_classification: str | None = None
+    order_history_backfill_run_id = str(
+        latest["payload"].get("order_history_backfill_run_id") or ""
+    )
     if include_cash and adopted_account_id:
         suspense = store.list_cash_suspense(account_id=adopted_account_id)
         classified_by_snapshot_id = {
@@ -2197,6 +2254,27 @@ def adopt_broker_snapshot(
                 "for the latest broker snapshot"
             )
         adopted_classification = classified_by_snapshot_id[int(latest["id"])]
+        if str(account.get("source") or "").startswith("toss_"):
+            verified_history = next(
+                (
+                    row
+                    for row in store.list_system_events_by_type(
+                        SystemEventType.BROKER_ORDER_HISTORY_BACKFILL,
+                        limit=2000,
+                    )
+                    if str(row.get("run_id") or "") == order_history_backfill_run_id
+                    and str((row.get("payload") or {}).get("account_id") or "")
+                    == adopted_account_id
+                    and int((row.get("payload") or {}).get("missing_ledger_count") or 0)
+                    == 0
+                ),
+                None,
+            )
+            if not order_history_backfill_run_id or verified_history is None:
+                raise typer.BadParameter(
+                    "Toss cash adoption requires verified order-history coverage "
+                    "for the selected broker snapshot"
+                )
     if (
         str(account.get("source") or "").startswith("toss_")
         and "ledger_cash_by_currency" in account
@@ -2221,12 +2299,8 @@ def adopt_broker_snapshot(
             cash_by_currency=dict(existing_ledger.cash_by_currency),
             positions=state.positions,
         )
-    run_id = new_run_id()
-    if adopted_account_id:
-        store.save_portfolio_snapshot(run_id, state, account_id=adopted_account_id)
-    if account_id is None:
-        store.save_portfolio_snapshot(run_id, state)
     payload = {
+        "schema_version": 2,
         "reason": reason,
         "include_cash": include_cash,
         # Adopting broker cash moves the ledger without writing an
@@ -2237,6 +2311,12 @@ def adopt_broker_snapshot(
         "ledger_effect": "cash_adopted_from_broker" if include_cash else "positions_only",
         "performance_effect": "retained_in_return" if include_cash else "none",
         "cash_drift_classification": adopted_classification,
+        "order_history_backfill_run_id": order_history_backfill_run_id or None,
+        "history_covered_through": (
+            str(account.get("fetched_at") or latest.get("created_at") or "")
+            if order_history_backfill_run_id
+            else None
+        ),
         "flow_class": (
             flow_class_for_cash_suspense(adopted_classification)
             if adopted_classification
@@ -2254,13 +2334,16 @@ def adopt_broker_snapshot(
         "cash_by_currency": state.cash_by_currency,
         "positions": state.positions,
     }
-    save_audited_system_event(
-        store,
-        audit,
+    run_id = new_run_id()
+    store.save_portfolio_snapshot_with_event(
         run_id,
-        SystemEventType.BROKER_SNAPSHOT_ADOPTED,
-        payload,
+        state,
+        account_id=adopted_account_id,
+        event_type=str(SystemEventType.BROKER_SNAPSHOT_ADOPTED),
+        event_payload=payload,
+        save_global=account_id is None,
     )
+    audit.log(run_id, str(SystemEventType.BROKER_SNAPSHOT_ADOPTED), payload)
     typer.echo(
         f"adopted run_id={run_id} broker_snapshot_id={latest['id']} "
         f"account_id={adopted_account_id or account.get('account_id') or 'none'} "

@@ -424,6 +424,7 @@ classifications and the flow class each implies:
 | Classification | Implies |
 | --- | --- |
 | `settlement_candidate` | nothing — a timing difference, not a flow |
+| `bookkeeping_correction` | nothing — an evidenced ledger repair, not a flow |
 | `unexplained` | nothing — blocks `--include-cash` adoption |
 | `transfer_candidate` | `external_transfer` |
 | `dividend`, `interest` | `investment_income` |
@@ -431,14 +432,15 @@ classifications and the flow class each implies:
 | `fx_conversion` | `fx_conversion` |
 
 Classify by cause, not by convenience. `settlement_candidate` is for a broker
-that has not caught up with a fill Maestro already booked — the open
-`toss_brokerage` USD suspense from the 2026-08-02 QQQ disposal is one — and it
-resolves itself once settlement lands.
+that has not caught up with a fill Maestro already booked and should resolve
+once settlement lands. `bookkeeping_correction` is for proved internal ledger
+duplication or omission and requires evidence naming the source event or order.
 
 Normal Toss refreshes backfill OPEN/CLOSED orders automatically and fail closed
 before reconciliation when history cannot be verified. Use this command only
-for an explicit historical repair; baseline/adoption cutoffs prevent replay of
-already represented principal, positions, and costs:
+for an explicit historical repair. Baseline/adoption cutoffs watermark the full
+cumulative principal, quantity, and costs without replay; later partial-fill or
+cost increases apply only above that watermark:
 
 ```bash
 maestro ledger backfill-orders --config <approval-config> \
@@ -451,12 +453,26 @@ account ledger and emits the audited flow the return is built from.
 
 `adopt-broker-snapshot` preserves ledger cash by default and adopts positions;
 use `--include-cash` only after a non-unexplained classification for the latest
-broker snapshot. Adopting cash moves the ledger without writing a cash flow, so
+broker snapshot. Toss cash adoption also requires verified order-history coverage,
+and the snapshot plus provenance event are committed atomically. Adopting cash
+moves the ledger without writing a cash flow, so
 the change is never removed from the return — right for a dividend the broker
 reports and Maestro has not booked, wrong for anything that is really an
 external transfer. The adoption event records `ledger_effect`,
 `performance_effect` and the classification it relied on, so a later reader can
 tell an earned amount from a bookkeeping correction.
+
+When evidence proves that Maestro itself duplicated or omitted a ledger delta,
+record the signed inverse with an idempotent correction ID. This updates both
+the account ledger and the legacy global view and emits
+`ledger_bookkeeping_correction`; it is not an account cash flow:
+
+```bash
+maestro ledger bookkeeping-correction --config <approval-config> \
+  --account-id toss_brokerage --currency USD --amount <signed-amount> \
+  --correction-id <stable-id> --evidence <event-or-order-reference> \
+  --reason <operator-reason>
+```
 Before a live run, confirm the latest reconciliation and that current Toss
 buying power covers each order; buying-power drift alone is observational and
 must not be described as investment return.

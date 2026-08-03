@@ -260,6 +260,21 @@ def _refresh_one_account(
                     ).reconcile_latest(run_id=run_id)
                     latest = latest_snapshot_for_account(store, account_id)
                     status = "refreshed" if reconciliation.passed else "quarantined"
+                    blocking_observations = [
+                        observation
+                        for observation in reconciliation.observations
+                        if observation.drift_level == "L3"
+                    ]
+                    failure_summary = (
+                        f"{len(reconciliation.issues)} reconciliation issue(s), "
+                        f"{len(blocking_observations)} blocking observation(s)"
+                    )
+                    if blocking_observations:
+                        first = blocking_observations[0]
+                        failure_summary += (
+                            f": {first.issue_type}:{first.symbol} "
+                            f"level={first.drift_level} difference={first.difference}"
+                        )
                     return _save_result(
                         store,
                         audit,
@@ -279,7 +294,7 @@ def _refresh_one_account(
                             error_message=(
                                 None
                                 if reconciliation.passed
-                                else f"{len(reconciliation.issues)} reconciliation issue(s)"
+                                else failure_summary
                             ),
                         ),
                     )

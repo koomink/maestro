@@ -166,6 +166,7 @@ class StateStore:
             )
             if order_id_column_is_new:
                 self._backfill_system_event_order_ids(conn)
+            self._migrate_legacy_baseline_fill_watermarks(conn)
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS approvals "
                 "("
@@ -421,6 +422,131 @@ class StateStore:
     ) -> None:
         self._insert("portfolio_snapshots", run_id, account_id, state.model_dump(mode="json"))
 
+    def save_portfolio_snapshot_with_event(
+        self,
+        run_id: str,
+        state: PortfolioState,
+        *,
+        account_id: str,
+        event_type: str,
+        event_payload: dict[str, Any],
+        save_global: bool = False,
+    ) -> None:
+        """Persist an adopted ledger snapshot and its provenance atomically."""
+        state_json = json.dumps(state.model_dump(mode="json"), default=str)
+        event_json = json.dumps(event_payload, default=str)
+        with self.writer_lock("save_portfolio_snapshot_with_event"):
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
+                    "VALUES (?, ?, ?)",
+                    (run_id, account_id, state_json),
+                )
+                if save_global:
+                    conn.execute(
+                        "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
+                        "VALUES (?, NULL, ?)",
+                        (run_id, state_json),
+                    )
+                conn.execute(
+                    "INSERT INTO system_events "
+                    "(run_id, event_type, payload, duplicate_key, broker_order_id, order_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        event_type,
+                        event_json,
+                        _system_event_duplicate_key(event_payload),
+                        _system_event_broker_order_id(event_payload),
+                        _system_event_order_id(event_payload),
+                    ),
+                )
+
+    def apply_ledger_bookkeeping_correction(
+        self,
+        run_id: str,
+        *,
+        account_id: str,
+        currency: str,
+        amount: float,
+        event_payload: dict[str, Any],
+    ) -> bool:
+        """Apply an audited non-flow correction to account and global ledgers."""
+        duplicate_key = _system_event_duplicate_key(event_payload)
+        if not duplicate_key:
+            raise ValueError("bookkeeping correction requires a duplicate key")
+        normalized_currency = str(currency).upper()
+        correction_amount = float(amount)
+        if abs(correction_amount) < 1e-12:
+            raise ValueError("bookkeeping correction amount must be non-zero")
+        with self.writer_lock("apply_ledger_bookkeeping_correction"):
+            with self._connect() as conn:
+                if conn.execute(
+                    "SELECT 1 FROM system_events WHERE duplicate_key = ?",
+                    (duplicate_key,),
+                ).fetchone():
+                    return False
+                account_row = conn.execute(
+                    "SELECT payload FROM portfolio_snapshots "
+                    "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                    (account_id,),
+                ).fetchone()
+                if account_row is None:
+                    raise ValueError(f"ledger is not established for account_id={account_id}")
+
+                def corrected(raw_state: str) -> PortfolioState:
+                    state = PortfolioState.model_validate(json.loads(raw_state))
+                    cash_by_currency = dict(state.cash_by_currency)
+                    if not cash_by_currency:
+                        cash_by_currency = {normalized_currency: float(state.cash)}
+                    cash_by_currency[normalized_currency] = (
+                        float(cash_by_currency.get(normalized_currency, 0.0))
+                        + correction_amount
+                    )
+                    cash = (
+                        float(cash_by_currency["KRW"])
+                        if "KRW" in cash_by_currency
+                        else float(sum(cash_by_currency.values()))
+                    )
+                    return state.model_copy(
+                        update={"cash": cash, "cash_by_currency": cash_by_currency},
+                        deep=True,
+                    )
+
+                for target_account_id, row in (
+                    (account_id, account_row),
+                    (
+                        None,
+                        conn.execute(
+                            "SELECT payload FROM portfolio_snapshots "
+                            "WHERE account_id IS NULL ORDER BY id DESC LIMIT 1"
+                        ).fetchone(),
+                    ),
+                ):
+                    if row is None:
+                        continue
+                    next_state = corrected(row[0])
+                    conn.execute(
+                        "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
+                        "VALUES (?, ?, ?)",
+                        (
+                            run_id,
+                            target_account_id,
+                            json.dumps(next_state.model_dump(mode="json"), default=str),
+                        ),
+                    )
+                conn.execute(
+                    "INSERT INTO system_events "
+                    "(run_id, event_type, payload, duplicate_key) VALUES (?, ?, ?, ?)",
+                    (
+                        run_id,
+                        "ledger_bookkeeping_correction",
+                        json.dumps(event_payload, default=str),
+                        duplicate_key,
+                    ),
+                )
+                return True
+
     def apply_account_cash_flows(
         self,
         run_id: str,
@@ -625,8 +751,17 @@ class StateStore:
         cumulative_notional: float,
         cumulative_commission: float | None = None,
         cumulative_tax: float | None = None,
+        quantity_in_baseline: bool = False,
+        principal_in_baseline: bool = False,
+        costs_in_baseline: bool = False,
     ) -> dict[str, float | bool]:
-        """Apply an idempotent broker-history fill/cost delta to the ledger."""
+        """Apply an idempotent broker-history fill/cost delta to the ledger.
+
+        Baseline flags suppress only the first observed cumulative values while
+        still seeding their watermarks. Later increases are therefore applied
+        normally instead of being hidden by an order timestamp before the
+        baseline.
+        """
         normalized_side = str(side).lower()
         signed = 1.0 if normalized_side == "buy" else -1.0
         with self.writer_lock("apply_broker_order_history"):
@@ -663,11 +798,16 @@ class StateStore:
                     if cumulative_tax is not None
                     else previous_tax
                 )
+                first_observation = watermark is None
                 quantity_delta = max(float(cumulative_quantity) - previous_quantity, 0.0)
                 notional_delta = max(float(cumulative_notional) - previous_notional, 0.0)
-                cost_delta = (next_commission - previous_commission) + (
-                    next_tax - previous_tax
-                )
+                cost_delta = (next_commission - previous_commission) + (next_tax - previous_tax)
+                if first_observation and quantity_in_baseline:
+                    quantity_delta = 0.0
+                if first_observation and principal_in_baseline:
+                    notional_delta = 0.0
+                if first_observation and costs_in_baseline:
+                    cost_delta = 0.0
                 changed = (
                     quantity_delta > 1e-12
                     or notional_delta > 1e-12
@@ -1424,6 +1564,60 @@ class StateStore:
                 for broker_order_id in broker_order_ids
             ],
         )
+
+    def _migrate_legacy_baseline_fill_watermarks(
+        self,
+        conn: sqlite3.Connection,
+    ) -> None:
+        """Upgrade zeroed pre-v2 baseline watermarks from audited history."""
+        rows = conn.execute(
+            "SELECT payload FROM system_events "
+            "WHERE event_type = 'broker_order_history_item' ORDER BY id ASC"
+        ).fetchall()
+        for row in rows:
+            payload = json.loads(row[0])
+            broker_order_id = str(payload.get("broker_order_id") or "")
+            if not broker_order_id:
+                continue
+            baseline_quantity = payload.get("quantity_in_adopted_positions") is True
+            baseline_principal = payload.get("principal_in_cash_baseline") is True
+            baseline_costs = payload.get("cost_in_cash_baseline") is True
+            if not (baseline_quantity or baseline_principal or baseline_costs):
+                continue
+            existing = conn.execute(
+                "SELECT cumulative_quantity, cumulative_notional, "
+                "cumulative_commission, cumulative_tax FROM fill_watermarks "
+                "WHERE broker_order_id = ?",
+                (broker_order_id,),
+            ).fetchone()
+            previous = tuple(float(value) for value in existing) if existing else (0.0,) * 4
+            values = (
+                max(previous[0], float(payload.get("filled_quantity") or 0.0))
+                if baseline_quantity
+                else previous[0],
+                max(previous[1], float(payload.get("cumulative_notional") or 0.0))
+                if baseline_principal
+                else previous[1],
+                max(previous[2], float(payload.get("cumulative_commission") or 0.0))
+                if baseline_costs
+                else previous[2],
+                max(previous[3], float(payload.get("cumulative_tax") or 0.0))
+                if baseline_costs
+                else previous[3],
+            )
+            conn.execute(
+                "INSERT INTO fill_watermarks "
+                "(broker_order_id, cumulative_quantity, cumulative_notional, "
+                "cumulative_commission, cumulative_tax, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(broker_order_id) DO UPDATE SET "
+                "cumulative_quantity = excluded.cumulative_quantity, "
+                "cumulative_notional = excluded.cumulative_notional, "
+                "cumulative_commission = excluded.cumulative_commission, "
+                "cumulative_tax = excluded.cumulative_tax, "
+                "updated_at = CURRENT_TIMESTAMP",
+                (broker_order_id, *values),
+            )
 
     def _list_rows(self, table: str, limit: int) -> list[dict[str, Any]]:
         allowed_tables = {

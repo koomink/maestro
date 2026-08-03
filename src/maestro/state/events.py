@@ -50,6 +50,7 @@ class SystemEventType(StrEnum):
     ACCOUNT_TRACKING_ENDED = "account_tracking_ended"
     PERFORMANCE_BASELINE_ADOPTED = "performance_baseline_adopted"
     LEDGER_OPENING_BASELINE = "ledger_opening_baseline"
+    LEDGER_BOOKKEEPING_CORRECTION = "ledger_bookkeeping_correction"
     CASH_DRIFT_OBSERVED = "cash_drift_observed"
     CASH_DRIFT_CLASSIFIED = "cash_drift_classified"
     BROKER_ORDER_HISTORY_BACKFILL = "broker_order_history_backfill"
@@ -151,6 +152,14 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
         "source",
         "effective_at",
     ),
+    SystemEventType.LEDGER_BOOKKEEPING_CORRECTION: (
+        "account_id",
+        "currency",
+        "amount",
+        "reason",
+        "evidence",
+        "effective_at",
+    ),
     SystemEventType.CASH_DRIFT_OBSERVED: (
         "account_id",
         "currency",
@@ -204,6 +213,7 @@ LINKED_FLOW_CLASSES = (INTERNAL_TRANSFER, FX_CONVERSION)
 # absence of knowledge rather than a cash flow, so they map to no flow class.
 CASH_SUSPENSE_CLASSIFICATIONS: dict[str, str | None] = {
     "settlement_candidate": None,
+    "bookkeeping_correction": None,
     "unexplained": None,
     "transfer_candidate": EXTERNAL_TRANSFER,
     "dividend": INVESTMENT_INCOME,

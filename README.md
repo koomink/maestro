@@ -1468,9 +1468,14 @@ maestro ledger backfill-orders --config <config> \
 
 Every Toss snapshot refresh backfills OPEN/CLOSED history before reconciliation;
 the CLI command is retained for explicit historical repair. Orders at or before
-the opening baseline are watermarked without reapplying principal, position, or
-cost. `adopt-broker-snapshot` changes positions only after a ledger exists. Use
-`--include-cash` only for a non-unexplained classification on the latest snapshot.
+the opening or adopted cash baseline are watermarked at their full broker
+cumulative quantity, principal, and costs without replaying them. A later partial
+fill applies only the increase above that watermark. Version-1 snapshot-adoption
+events that predate `include_cash` remain cash baselines because those commands
+always copied broker cash. `adopt-broker-snapshot` changes positions only after a
+ledger exists; its snapshot and provenance event commit atomically. Use
+`--include-cash` only for a non-unexplained classification on the latest snapshot
+with verified Toss order-history coverage.
 The dashboard reports `confirmed`, `provisional`, or `degraded` performance;
 confirmed TWR uses ledger cash and does not treat buying-power drift as return.
 Telegram operators can inspect and classify open suspense observations with

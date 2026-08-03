@@ -89,18 +89,19 @@ class TossOrderHistoryBackfillService:
                 # status from being suppressed by an early backfill.
                 cumulative_quantity=(
                     0.0
-                    if maestro_submitted or quantity_in_adopted_positions
+                    if maestro_submitted
                     else filled_quantity
                 ),
                 cumulative_notional=(
                     0.0
-                    if maestro_submitted or principal_in_cash_baseline
+                    if maestro_submitted
                     else cumulative_notional
                 ),
-                cumulative_commission=(
-                    0.0 if cost_in_cash_baseline else order.cumulative_commission
-                ),
-                cumulative_tax=0.0 if cost_in_cash_baseline else order.cumulative_tax,
+                cumulative_commission=order.cumulative_commission,
+                cumulative_tax=order.cumulative_tax,
+                quantity_in_baseline=quantity_in_adopted_positions,
+                principal_in_baseline=principal_in_cash_baseline,
+                costs_in_baseline=cost_in_cash_baseline,
             )
             if filled_quantity > 0:
                 fills += 1
@@ -190,9 +191,16 @@ class TossOrderHistoryBackfillService:
                 if timestamp is None:
                     continue
                 position_adopted_at = max(position_adopted_at or timestamp, timestamp)
-                if event_type == SystemEventType.LEDGER_OPENING_BASELINE or payload.get(
-                    "include_cash"
-                ) is True:
+                legacy_cash_adoption = (
+                    event_type == SystemEventType.BROKER_SNAPSHOT_ADOPTED
+                    and "include_cash" not in payload
+                    and ("cash" in payload or "cash_by_currency" in payload)
+                )
+                if (
+                    event_type == SystemEventType.LEDGER_OPENING_BASELINE
+                    or payload.get("include_cash") is True
+                    or legacy_cash_adoption
+                ):
                     cash_baseline_at = max(cash_baseline_at or timestamp, timestamp)
         return cash_baseline_at, position_adopted_at
 
