@@ -182,20 +182,22 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 # leaving; everything else is the portfolio earning or spending its own cash and
 # must stay inside the return.
 EXTERNAL_TRANSFER = "external_transfer"
+INTERNAL_TRANSFER = "internal_transfer"
+FX_CONVERSION = "fx_conversion"
+INVESTMENT_INCOME = "investment_income"
+COST = "cost"
 ACCOUNT_CASH_FLOW_CLASSES = (
     EXTERNAL_TRANSFER,
-    "investment_income",
-    "cost",
-    "fx_conversion",
-    "internal_transfer",
+    INVESTMENT_INCOME,
+    COST,
+    FX_CONVERSION,
+    INTERNAL_TRANSFER,
 )
 
-# Classes that a time-weighted return must neutralise.  An internal transfer is
-# still investor money entering or leaving *that account*, so it neutralises per
-# account and is netted away at portfolio level by ``transfer_id`` pairing.
-# Dividends, costs and currency conversions are the portfolio acting on its own
-# cash: neutralising them would move real gains and losses out of the return.
-TWR_NEUTRALIZING_FLOW_CLASSES = (EXTERNAL_TRANSFER, "internal_transfer")
+# Classes whose legs only mean anything as a linked set: money leaves one side
+# and arrives on the other, tied together by ``transfer_id``.  A lone leg of one
+# of these is a recording error, not a flow.
+LINKED_FLOW_CLASSES = (INTERNAL_TRANSFER, FX_CONVERSION)
 
 # Cash-suspense labels an operator can assign to an unexplained ledger/broker
 # difference.  ``settlement_candidate`` and ``unexplained`` describe timing or
@@ -204,11 +206,11 @@ CASH_SUSPENSE_CLASSIFICATIONS: dict[str, str | None] = {
     "settlement_candidate": None,
     "unexplained": None,
     "transfer_candidate": EXTERNAL_TRANSFER,
-    "dividend": "investment_income",
-    "interest": "investment_income",
-    "tax": "cost",
-    "fee": "cost",
-    "fx_conversion": "fx_conversion",
+    "dividend": INVESTMENT_INCOME,
+    "interest": INVESTMENT_INCOME,
+    "tax": COST,
+    "fee": COST,
+    "fx_conversion": FX_CONVERSION,
 }
 
 

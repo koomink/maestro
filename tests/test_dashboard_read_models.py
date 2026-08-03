@@ -44,6 +44,7 @@ from maestro.dashboard.read_models import (
     build_strategy_runs_table,
     build_system_events_table,
     build_total_portfolio_performance_table,
+    cash_flow_effects_for_scope,
 )
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state.models import PortfolioState
@@ -249,7 +250,6 @@ def test_dashboard_read_models_tolerate_sparse_payloads(tmp_path):
     assert build_maestro_state_exposure_table(store)[0]["symbol"] == "CASH"
     assert build_portfolio_snapshot_history_table(store) == []
     assert build_broker_snapshot_history_table(store)[0]["account_id"] == "acct"
-
 
 
 def test_broker_account_overview_reports_configured_account_states(tmp_path):
@@ -2534,3 +2534,154 @@ def test_paired_internal_transfer_nets_out_of_portfolio_performance(tmp_path):
     assert accounts[("acct_from", "run_2")]["cash_flow"] == -250.0
     assert accounts[("acct_from", "run_2")]["period_return"] == 0.0
     assert accounts[("acct_to", "run_2")]["cash_flow"] == 250.0
+
+
+def _fact(flow_class, *, signed_amount=100.0, currency="KRW", account_id="acct", transfer_id=None):
+    return {
+        "timestamp": utc_now(),
+        "signed_amount": signed_amount,
+        "currency": currency,
+        "account_id": account_id,
+        "transfer_id": transfer_id,
+        "flow_class": flow_class,
+        "payload": {"run_id": "run_1"},
+    }
+
+
+def _neutralised(facts, scope):
+    effects, _ = cash_flow_effects_for_scope(facts, scope)
+    return [effect["flow_class"] for effect in effects]
+
+
+def test_each_scope_neutralises_only_what_crosses_its_own_boundary():
+    """One rule table, so the three performance views cannot disagree.
+
+    A conversion crosses no account and no portfolio edge -- the total never
+    moves -- but it is exactly what moves one currency sleeve into another.
+    """
+    paired_transfer = [
+        _fact("internal_transfer", signed_amount=-100.0, account_id="a", transfer_id="t1"),
+        _fact("internal_transfer", signed_amount=100.0, account_id="b", transfer_id="t1"),
+    ]
+    paired_conversion = [
+        _fact("fx_conversion", signed_amount=-1400.0, currency="KRW", transfer_id="fx1"),
+        _fact("fx_conversion", signed_amount=1.0, currency="USD", transfer_id="fx1"),
+    ]
+    facts = [
+        _fact("external_transfer"),
+        *paired_transfer,
+        *paired_conversion,
+        _fact("investment_income"),
+        _fact("cost", signed_amount=-5.0),
+    ]
+
+    assert _neutralised(facts, "account") == [
+        "external_transfer",
+        "internal_transfer",
+        "internal_transfer",
+    ]
+    # The portfolio never lost the internally transferred money.
+    assert _neutralised(facts, "portfolio") == ["external_transfer"]
+    assert _neutralised(facts, "currency_sleeve") == [
+        "external_transfer",
+        "internal_transfer",
+        "internal_transfer",
+        "fx_conversion",
+        "fx_conversion",
+    ]
+
+
+def test_income_and_cost_are_never_neutralised_at_any_scope():
+    """These are the portfolio earning and spending its own cash."""
+    facts = [_fact("investment_income"), _fact("cost", signed_amount=-5.0)]
+
+    for scope in ("account", "portfolio", "currency_sleeve"):
+        assert _neutralised(facts, scope) == []
+
+
+def test_an_unpaired_linked_leg_is_reported_rather_than_counted():
+    """A lone leg of a two-sided event is a recording error, not a flow.
+
+    Counting it claims money entered or left somewhere it never did.
+    """
+    facts = [
+        _fact("internal_transfer", signed_amount=-100.0, account_id="a", transfer_id="t1"),
+    ]
+
+    for scope in ("account", "portfolio", "currency_sleeve"):
+        effects, reasons = cash_flow_effects_for_scope(facts, scope)
+        assert effects == []
+        assert [reason["code"] for reason in reasons] == ["unpaired_linked_cash_flow"]
+
+
+def test_a_flow_recorded_before_classes_existed_is_an_external_transfer():
+    facts = [_fact("external_transfer")]
+
+    for scope in ("account", "portfolio", "currency_sleeve"):
+        effects, reasons = cash_flow_effects_for_scope(facts, scope)
+        assert len(effects) == 1
+        assert reasons == []
+
+
+def test_unpaired_transfer_degrades_reported_cash_flow_quality(tmp_path):
+    """The read model must say the figure is incomplete, not just compute one."""
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_cash_only_snapshot(
+        store, "run_1", "acct_from", 1_000.0, created_at="2026-01-01 00:00:00"
+    )
+    _record_cash_flow_event(
+        store,
+        "half_transfer",
+        {
+            "account_id": "acct_from",
+            "amount": 250.0,
+            "currency": "KRW",
+            "flow_type": "withdrawal",
+            "flow_class": "internal_transfer",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "transfer_id": "move-1",
+            "source": "operator_cli",
+        },
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct_from", 750.0, created_at="2026-01-02 00:00:00"
+    )
+
+    rows = build_account_performance_table(store)
+
+    assert rows[0]["cash_flow_quality"]["status"] == "degraded"
+    assert rows[0]["cash_flow_quality"]["reasons"][0]["code"] == "unpaired_linked_cash_flow"
+    # The lone leg is not counted as money leaving the account.
+    assert rows[0]["cash_flow"] == 0.0
+
+
+def test_an_event_on_a_snapshot_boundary_belongs_to_one_period_only(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_cash_only_snapshot(
+        store, "run_1", "acct", 1_000.0, created_at="2026-01-01 00:00:00"
+    )
+    _record_cash_flow_event(
+        store,
+        "deposit",
+        {
+            "account_id": "acct",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "flow_class": "external_transfer",
+            # Exactly the second snapshot's timestamp.
+            "effective_at": "2026-01-02T00:00:00+00:00",
+            "source": "test",
+        },
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct", 1_500.0, created_at="2026-01-02 00:00:00"
+    )
+    _save_cash_only_snapshot(
+        store, "run_3", "acct", 1_500.0, created_at="2026-01-03 00:00:00"
+    )
+
+    rows = {row["run_id"]: row for row in build_account_performance_table(store)}
+
+    assert rows["run_2"]["cash_flow"] == 500.0
+    assert rows["run_3"]["cash_flow"] == 0.0

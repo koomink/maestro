@@ -14,7 +14,9 @@ from maestro.dashboard.actions import build_signal_freshness
 from maestro.monitoring.health import HealthService, latest_scheduled_run_event
 from maestro.state.events import (
     EXTERNAL_TRANSFER,
-    TWR_NEUTRALIZING_FLOW_CLASSES,
+    FX_CONVERSION,
+    INTERNAL_TRANSFER,
+    LINKED_FLOW_CLASSES,
     SystemEventType,
     missing_system_event_required_fields,
     required_system_event_fields,
@@ -904,6 +906,28 @@ def _performance_quality(rows: list[dict[str, Any]]) -> str:
     return "provisional"
 
 
+CASH_FLOW_SCOPE_ACCOUNT = "account"
+CASH_FLOW_SCOPE_PORTFOLIO = "portfolio"
+CASH_FLOW_SCOPE_CURRENCY_SLEEVE = "currency_sleeve"
+
+# What each scope counts as money crossing its own boundary.
+#
+# An internal transfer is investor money leaving *that account*, so an account
+# neutralises it, while the portfolio it never left does not.  A currency
+# conversion crosses no account and no portfolio edge -- the total is unchanged
+# -- but it is precisely what moves one currency sleeve into another, so only a
+# sleeve neutralises it.  Linked classes are additionally required to have both
+# of their legs recorded; see ``cash_flow_effects_for_scope``.
+_SCOPE_NEUTRALIZING_CLASSES = {
+    CASH_FLOW_SCOPE_ACCOUNT: (EXTERNAL_TRANSFER, INTERNAL_TRANSFER),
+    CASH_FLOW_SCOPE_PORTFOLIO: (EXTERNAL_TRANSFER,),
+    CASH_FLOW_SCOPE_CURRENCY_SLEEVE: (
+        EXTERNAL_TRANSFER,
+        INTERNAL_TRANSFER,
+        FX_CONVERSION,
+    ),
+}
+
 # Worst first: an aggregate is only as trustworthy as its weakest account.
 _CASH_VERIFICATION_RANK = (
     "unavailable",
@@ -1060,7 +1084,11 @@ def build_account_performance_table(
     # built from, so reading anything else here makes the same number disagree
     # with itself depending on which table the reader is looking at.  An
     # internal transfer is still money leaving *this* account, so it counts.
-    cash_flows = _account_cash_flow_events(store, exclude_internal_transfers=False)
+    cash_flows, cash_flow_reasons = cash_flow_effects_for_scope(
+        load_account_cash_flow_facts(store),
+        CASH_FLOW_SCOPE_ACCOUNT,
+    )
+    cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     # Performance state (first/previous/peak value) is tracked PER ACCOUNT —
     # a shared/global state across interleaved multi-account rows would
     # compare one account's snapshot against a different account's previous
@@ -1139,6 +1167,7 @@ def build_account_performance_table(
                 "reconciliation_created_at": (reconciliation or {}).get("created_at"),
                 "reconciliation_issues_count": (reconciliation or {}).get("issues_count"),
                 "source": account.get("source") or payload.get("source"),
+                "cash_flow_quality": cash_flow_quality,
                 "performance_status": (
                     "confirmed" if ledger_state is not None else "provisional"
                 ),
@@ -1177,11 +1206,11 @@ def _build_baselined_account_performance_table(
         for event in _account_lifecycle_events(store, after=baseline_timestamp)
         if event["event_type"] == SystemEventType.ACCOUNT_TRACKING_STARTED
     )
-    cash_flows = _account_cash_flow_events(
-        store,
-        after=baseline_timestamp,
-        exclude_internal_transfers=False,
+    cash_flows, cash_flow_reasons = cash_flow_effects_for_scope(
+        load_account_cash_flow_facts(store, after=baseline_timestamp),
+        CASH_FLOW_SCOPE_ACCOUNT,
     )
+    cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
     ledger_rows = _ledger_account_snapshot_rows(store)
     states: dict[str, dict[str, Any]] = {}
@@ -1324,6 +1353,7 @@ def _build_baselined_account_performance_table(
                 "baseline_id": baseline.get("baseline_id"),
                 "baseline_at": baseline.get("effective_at"),
                 "cash_flow_events": [event["payload"] for event in converted_events],
+                "cash_flow_quality": cash_flow_quality,
                 "performance_status": (
                     "confirmed" if ledger_state is not None else "provisional"
                 ),
@@ -1476,7 +1506,11 @@ def _build_baselined_currency_sleeve_performance_table(
     }
     active_accounts = set(str(key) for key in _mapping(baseline.get("accounts")))
     lifecycle_events = _account_lifecycle_events(store, after=baseline_timestamp)
-    cash_flows = _account_cash_flow_events(store, after=baseline_timestamp)
+    cash_flows, cash_flow_reasons = cash_flow_effects_for_scope(
+        load_account_cash_flow_facts(store, after=baseline_timestamp),
+        CASH_FLOW_SCOPE_PORTFOLIO,
+    )
+    cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
     states = {
         currency: {
@@ -1599,6 +1633,7 @@ def _build_baselined_currency_sleeve_performance_table(
                     "mwr": performance["mwr"],
                     "drawdown": performance["drawdown"],
                     "reconciliation_status": _combined_reconciliation_status(statuses),
+                    "cash_flow_quality": cash_flow_quality,
                     "performance_status": _performance_quality(
                         [latest_by_account[account_id] for account_id in active_accounts]
                     ),
@@ -1651,7 +1686,11 @@ def build_total_portfolio_performance_table(
     # Portfolio level nets out transfers between the operator's own accounts:
     # money moving from one account to another never entered or left the
     # portfolio, so counting it would neutralise a flow that never happened.
-    cash_flows = _account_cash_flow_events(store)
+    cash_flows, cash_flow_reasons = cash_flow_effects_for_scope(
+        load_account_cash_flow_facts(store),
+        CASH_FLOW_SCOPE_PORTFOLIO,
+    )
+    cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     performance_state = {
         "first_value": None,
         "previous_value": None,
@@ -1743,6 +1782,7 @@ def build_total_portfolio_performance_table(
                 "cumulative_return": performance["cumulative_return"],
                 "drawdown": performance["drawdown"],
                 "reconciliation_status": _combined_reconciliation_status(reconciliation_statuses),
+                "cash_flow_quality": cash_flow_quality,
                 "performance_status": _performance_quality(
                     list(latest_by_account.values())
                 ),
@@ -1791,7 +1831,11 @@ def _build_baselined_total_portfolio_performance_table(
     baseline_accounts = _mapping(baseline.get("accounts"))
     active_accounts = set(str(account_id) for account_id in baseline_accounts)
     lifecycle_events = _account_lifecycle_events(store, after=baseline_timestamp)
-    cash_flow_events = _account_cash_flow_events(store, after=baseline_timestamp)
+    cash_flow_events, cash_flow_reasons = cash_flow_effects_for_scope(
+        load_account_cash_flow_facts(store, after=baseline_timestamp),
+        CASH_FLOW_SCOPE_PORTFOLIO,
+    )
+    cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
     state = {
         "first_value": baseline_value,
@@ -1862,6 +1906,7 @@ def _build_baselined_total_portfolio_performance_table(
                     "missing_fx": False,
                     "stale_fx": False,
                     "reconciliation_status": "partial",
+                    "cash_flow_quality": cash_flow_quality,
                     "performance_status": "partial",
                     "baseline_id": baseline.get("baseline_id"),
                     "baseline_at": baseline.get("effective_at"),
@@ -2006,6 +2051,7 @@ def _build_baselined_total_portfolio_performance_table(
                 "reconciliation_status": _combined_reconciliation_status(
                     reconciliation_statuses
                 ),
+                "cash_flow_quality": cash_flow_quality,
                 "performance_status": _performance_quality(
                     [latest_by_account[account_id] for account_id in active_accounts]
                 ),
@@ -3642,13 +3688,19 @@ def _strategy_cash_flows_by_strategy(store: StateStore) -> dict[str, list[dict[s
     return flows
 
 
-def _account_cash_flow_events(
+def load_account_cash_flow_facts(
     store: StateStore,
     *,
     after: datetime | None = None,
-    exclude_internal_transfers: bool = True,
 ) -> list[dict[str, Any]]:
-    events: list[dict[str, Any]] = []
+    """Every recorded cash flow, normalised and unfiltered.
+
+    Nothing is dropped here.  What a flow means depends on which scope is
+    asking -- a currency conversion crosses no account and no portfolio
+    boundary, yet it is exactly what moves one currency sleeve into another --
+    so reading the events is kept apart from deciding what they do to a return.
+    """
+    facts: list[dict[str, Any]] = []
     for row in store.list_system_events_by_type(SystemEventType.ACCOUNT_CASH_FLOW, limit=10000):
         payload = _mapping(row.get("payload"))
         amount = _float_or_none(payload.get("amount"))
@@ -3658,23 +3710,18 @@ def _account_cash_flow_events(
             continue
         if after is not None and timestamp <= after:
             continue
-        # Only investor money moving in or out is neutralised out of the return.
-        # A dividend or a fee is the portfolio earning or spending its own cash;
-        # treating it as an external flow would move a real gain or loss out of
-        # the performance figure.  Events written before the class existed are
-        # external transfers, which is what they were recorded as.
-        flow_class = str(payload.get("flow_class") or EXTERNAL_TRANSFER).lower()
-        if flow_class not in TWR_NEUTRALIZING_FLOW_CLASSES:
-            continue
         flow_type = str(payload.get("flow_type") or "deposit").lower()
         signed_amount = -abs(amount) if flow_type == "withdrawal" else abs(amount)
-        events.append(
+        facts.append(
             {
                 "timestamp": timestamp,
                 "signed_amount": signed_amount,
                 "currency": currency,
                 "account_id": str(payload.get("account_id") or ""),
                 "transfer_id": payload.get("transfer_id"),
+                # Events written before the class existed are external
+                # transfers, which is what they were recorded as.
+                "flow_class": str(payload.get("flow_class") or EXTERNAL_TRANSFER).lower(),
                 "payload": {
                     **payload,
                     "signed_amount": signed_amount,
@@ -3682,25 +3729,57 @@ def _account_cash_flow_events(
                 },
             }
         )
-    transfer_signs: dict[str, set[int]] = {}
-    for event in events:
-        transfer_id = event.get("transfer_id")
-        if transfer_id:
-            transfer_signs.setdefault(str(transfer_id), set()).add(
-                1 if event["signed_amount"] > 0 else -1
+    facts.sort(key=lambda item: item["timestamp"])
+    return facts
+
+
+def cash_flow_effects_for_scope(
+    facts: list[dict[str, Any]],
+    scope: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Flows a scope must neutralise, and reasons the figure may be incomplete.
+
+    Every scope shares one rule table so the three performance views cannot
+    drift into disagreeing about the same deposit.  Dividends and costs are the
+    portfolio earning or spending its own cash and are never neutralised at any
+    scope; neutralising them would move a real gain or loss out of the return.
+    """
+    neutralizing = _SCOPE_NEUTRALIZING_CLASSES[scope]
+    linked_signs: dict[str, set[int]] = {}
+    for fact in facts:
+        if fact["flow_class"] in LINKED_FLOW_CLASSES and fact["transfer_id"]:
+            linked_signs.setdefault(str(fact["transfer_id"]), set()).add(
+                1 if fact["signed_amount"] > 0 else -1
             )
-    internal_transfers = {
-        transfer_id for transfer_id, signs in transfer_signs.items() if signs == {-1, 1}
-    }
-    output = [
-        event
-        for event in events
-        if not exclude_internal_transfers
-        or not event.get("transfer_id")
-        or str(event["transfer_id"]) not in internal_transfers
-    ]
-    output.sort(key=lambda item: item["timestamp"])
-    return output
+    paired = {transfer_id for transfer_id, signs in linked_signs.items() if signs == {-1, 1}}
+    effects: list[dict[str, Any]] = []
+    reasons: list[dict[str, Any]] = []
+    for fact in facts:
+        flow_class = fact["flow_class"]
+        transfer_id = str(fact["transfer_id"]) if fact["transfer_id"] else ""
+        if flow_class in LINKED_FLOW_CLASSES and transfer_id not in paired:
+            # One recorded side of a two-sided event.  Counting it would claim
+            # money entered or left somewhere it never did, so it is left out
+            # and the caller is told the figure cannot be trusted.
+            reasons.append(
+                {
+                    "code": "unpaired_linked_cash_flow",
+                    "message": (
+                        f"{flow_class} leg for account {fact['account_id']} "
+                        "has no counterpart leg"
+                    ),
+                    "run_id": fact["payload"].get("run_id"),
+                }
+            )
+            continue
+        if flow_class not in neutralizing:
+            continue
+        effects.append(fact)
+    return effects, reasons
+
+
+def _cash_flow_quality(reasons: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"status": "degraded" if reasons else "ok", "reasons": reasons}
 
 
 def _account_lifecycle_events(
