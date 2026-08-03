@@ -1756,6 +1756,70 @@ def record_account_cash_flow(
     )
 
 
+@cash_flow_app.command("convert")
+def record_currency_conversion(
+    account_id: str = typer.Option(..., "--account-id"),
+    from_currency: str = typer.Option(..., "--from-currency"),
+    from_amount: float = typer.Option(..., "--from-amount", min=0.000001),
+    to_currency: str = typer.Option(..., "--to-currency"),
+    to_amount: float = typer.Option(
+        ...,
+        "--to-amount",
+        min=0.000001,
+        help="Amount that actually arrived, excluding any spread or commission.",
+    ),
+    transfer_id: str = typer.Option(
+        ...,
+        "--transfer-id",
+        help="Names this conversion so re-running the command cannot apply it twice.",
+    ),
+    reason: str = typer.Option(..., "--reason"),
+    fee: float = typer.Option(
+        0.0,
+        "--fee",
+        min=0.0,
+        help="Spread or commission, in the target currency, booked as a cost.",
+    ),
+    rate: float | None = typer.Option(
+        None,
+        "--rate",
+        help="Target-currency units per source-currency unit; checked against the amounts.",
+    ),
+    effective_at: str | None = typer.Option(None, "--effective-at"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Record a currency conversion as linked legs plus its cost."""
+    maestro_config, identity = _load_operator_config(config)
+    known_accounts = set(broker_readonly_account_ids(maestro_config))
+    if account_id not in known_accounts:
+        raise typer.BadParameter(f"unknown account_id={account_id}")
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    try:
+        result = AccountCashFlowService(store, audit).record_currency_conversion(
+            account_id=account_id,
+            from_currency=from_currency,
+            from_amount=from_amount,
+            to_currency=to_currency,
+            to_amount=to_amount,
+            fee=fee,
+            rate=rate,
+            transfer_id=transfer_id,
+            effective_at=effective_at or utc_now().isoformat(),
+            source="operator_cli",
+            reason=reason,
+            decided_by="operator_cli",
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    typer.echo(
+        f"converted cash_flow_id={result.run_id} created={result.created} "
+        f"account_id={account_id} "
+        f"{from_amount:.6f} {from_currency.strip().upper()} -> "
+        f"{to_amount:.6f} {to_currency.strip().upper()} fee={fee:.6f}"
+    )
+
+
 @ledger_app.command("open-baseline")
 def open_ledger_baseline(
     account_id: str = typer.Option(..., "--account-id"),

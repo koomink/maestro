@@ -2685,3 +2685,50 @@ def test_an_event_on_a_snapshot_boundary_belongs_to_one_period_only(tmp_path):
 
     assert rows["run_2"]["cash_flow"] == 500.0
     assert rows["run_3"]["cash_flow"] == 0.0
+
+
+def test_a_recorded_conversion_is_neutralised_only_by_a_currency_sleeve(tmp_path):
+    """End to end from the producer: real events, not synthetic ones.
+
+    The conversion moved no money across the account or the portfolio, so their
+    returns keep the spread as the loss it was. Each currency sleeve did lose
+    or gain its whole leg, so a sleeve neutralises the conversion and is left
+    holding only the cost.
+    """
+    from maestro.dashboard.read_models import load_account_cash_flow_facts
+    from maestro.execution.account_cash_flows import AccountCashFlowService
+    from maestro.monitoring.audit_logger import AuditLogger
+
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=1_400_000.0, cash_by_currency={"KRW": 1_400_000.0, "USD": 0.0}),
+        account_id="toss_brokerage",
+    )
+    AccountCashFlowService(
+        store, AuditLogger(tmp_path / "audit.jsonl")
+    ).record_currency_conversion(
+        account_id="toss_brokerage",
+        from_currency="KRW",
+        from_amount=1_400_000.0,
+        to_currency="USD",
+        to_amount=995.0,
+        fee=5.0,
+        transfer_id="fx-1",
+        effective_at="2026-08-02T12:00:00+00:00",
+        source="operator_cli",
+    )
+
+    facts = load_account_cash_flow_facts(store)
+    assert len(facts) == 3
+
+    for scope in ("account", "portfolio"):
+        effects, reasons = cash_flow_effects_for_scope(facts, scope)
+        assert effects == []
+        assert reasons == []
+
+    effects, reasons = cash_flow_effects_for_scope(facts, "currency_sleeve")
+    assert reasons == []
+    assert sorted(
+        (effect["currency"], effect["signed_amount"]) for effect in effects
+    ) == [("KRW", -1_400_000.0), ("USD", 1_000.0)]

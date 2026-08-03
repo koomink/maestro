@@ -510,3 +510,115 @@ def test_a_leg_on_an_unopened_ledger_names_the_account(tmp_path):
     assert result["ledger_established"] is False
     assert result["missing_account_id"] == "acct_missing"
     assert _ledger_krw(store, "acct_from") == 1_000_000
+
+
+def _conversion_service(tmp_path, krw=1_400_000.0, usd=0.0):
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=krw, cash_by_currency={"KRW": krw, "USD": usd}),
+        account_id="toss_brokerage",
+    )
+    return store, AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
+
+
+def _convert(service, **overrides):
+    kwargs = {
+        "account_id": "toss_brokerage",
+        "from_currency": "KRW",
+        "from_amount": 1_400_000.0,
+        "to_currency": "USD",
+        "to_amount": 995.0,
+        "fee": 5.0,
+        "transfer_id": "fx-1",
+        "effective_at": "2026-08-02T12:00:00+00:00",
+        "source": "operator_cli",
+    }
+    kwargs.update(overrides)
+    return service.record_currency_conversion(**kwargs)
+
+
+def test_a_conversion_books_the_spread_apart_from_the_principal(tmp_path):
+    """The spread has to stay visible as a cost.
+
+    A currency sleeve neutralises the conversion itself, so folding the spread
+    into the converted amount would let both sleeves neutralise their whole leg
+    and a real loss would disappear from every return.
+    """
+    store, service = _conversion_service(tmp_path)
+
+    result = _convert(service)
+
+    assert result.created is True
+    state = store.load_latest_account_portfolio_state("toss_brokerage")
+    # The ledger reflects what actually happened: 995 arrived, not 1000.
+    assert state.cash_by_currency["KRW"] == 0.0
+    assert state.cash_by_currency["USD"] == 995.0
+    events = store.list_system_events_by_type("account_cash_flow", limit=10)
+    by_class = {}
+    for event in events:
+        by_class.setdefault(event["payload"]["flow_class"], []).append(event["payload"])
+    assert sorted(by_class) == ["cost", "fx_conversion"]
+    assert len(by_class["fx_conversion"]) == 2
+    assert by_class["cost"][0]["amount"] == -5.0
+    assert by_class["cost"][0]["currency"] == "USD"
+    # Every leg lands in the same performance period.
+    assert {event["payload"]["effective_at"] for event in events} == {
+        "2026-08-02T12:00:00+00:00"
+    }
+
+
+def test_a_conversion_without_a_fee_records_only_its_two_legs(tmp_path):
+    store, service = _conversion_service(tmp_path)
+
+    _convert(service, to_amount=1_000.0, fee=0.0)
+
+    events = store.list_system_events_by_type("account_cash_flow", limit=10)
+    assert len(events) == 2
+    assert {event["payload"]["flow_class"] for event in events} == {"fx_conversion"}
+    state = store.load_latest_account_portfolio_state("toss_brokerage")
+    assert state.cash_by_currency["USD"] == 1_000.0
+
+
+def test_a_conversion_whose_numbers_disagree_is_refused(tmp_path):
+    """A mistyped figure must not reach the ledger."""
+    store, service = _conversion_service(tmp_path)
+
+    with pytest.raises(ValueError, match="does not add up"):
+        # 1,400,000 KRW at 1/1400 is 1000 USD, not 995 + 20.
+        _convert(service, to_amount=995.0, fee=20.0, rate=1 / 1400)
+
+    assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
+
+
+def test_a_consistent_rate_is_accepted(tmp_path):
+    store, service = _conversion_service(tmp_path)
+
+    _convert(service, to_amount=995.0, fee=5.0, rate=1 / 1400)
+
+    assert len(store.list_system_events_by_type("account_cash_flow", limit=10)) == 3
+
+
+def test_replaying_a_conversion_applies_it_once(tmp_path):
+    store, service = _conversion_service(tmp_path)
+
+    first = _convert(service)
+    second = _convert(service)
+
+    assert first.created is True
+    assert second.created is False
+    state = store.load_latest_account_portfolio_state("toss_brokerage")
+    assert state.cash_by_currency["USD"] == 995.0
+    assert state.cash_by_currency["KRW"] == 0.0
+
+
+def test_a_conversion_needs_two_currencies_and_an_id(tmp_path):
+    store, service = _conversion_service(tmp_path)
+
+    with pytest.raises(ValueError, match="two different currencies"):
+        _convert(service, to_currency="KRW")
+    with pytest.raises(ValueError, match="transfer_id"):
+        _convert(service, transfer_id="")
+    with pytest.raises(ValueError, match="fee cannot be negative"):
+        _convert(service, fee=-1.0)
+    assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
