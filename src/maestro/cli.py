@@ -73,6 +73,8 @@ from maestro.safety.controls import SafetyControlService
 from maestro.scaffold import create_virtuoso_app_scaffold
 from maestro.state.events import (
     CASH_SUSPENSE_CLASSIFICATIONS,
+    EXTERNAL_TRANSFER,
+    FX_CONVERSION,
     SystemEventType,
     flow_class_for_cash_suspense,
     save_audited_system_event,
@@ -1709,6 +1711,14 @@ def record_account_cash_flow(
     currency: str = typer.Option(..., "--currency"),
     flow_type: str = typer.Option(..., "--flow-type"),
     reason: str = typer.Option(..., "--reason"),
+    flow_class: str = typer.Option(
+        EXTERNAL_TRANSFER,
+        "--flow-class",
+        help=(
+            "What the money was: external_transfer, internal_transfer, "
+            "investment_income or cost. Only transfers are removed from the return."
+        ),
+    ),
     effective_at: str | None = typer.Option(None, "--effective-at"),
     transfer_id: str | None = typer.Option(None, "--transfer-id"),
     config: Path | None = CONFIG_OPTION,
@@ -1720,6 +1730,11 @@ def record_account_cash_flow(
     normalized_type = flow_type.strip().lower()
     if normalized_type not in {"deposit", "withdrawal"}:
         raise typer.BadParameter("--flow-type must be deposit or withdrawal")
+    normalized_class = flow_class.strip().lower()
+    if normalized_class == FX_CONVERSION:
+        # A conversion is two legs whose amounts have to agree; recording one
+        # side here would leave a permanently unpaired flow.
+        raise typer.BadParameter("use `maestro cash-flow convert` to record a conversion")
     normalized_currency = currency.strip().upper()
     timestamp = effective_at or utc_now().isoformat()
     store = _state_store(maestro_config, identity)
@@ -1735,6 +1750,7 @@ def record_account_cash_flow(
             source="operator_cli",
             reason=reason,
             transfer_id=transfer_id,
+            flow_class=normalized_class,
             decided_by="operator_cli",
             verification="operator_verified",
             duplicate_key=(

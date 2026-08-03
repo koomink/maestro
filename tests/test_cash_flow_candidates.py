@@ -622,3 +622,85 @@ def test_a_conversion_needs_two_currencies_and_an_id(tmp_path):
     with pytest.raises(ValueError, match="fee cannot be negative"):
         _convert(service, fee=-1.0)
     assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
+
+
+def test_a_linked_flow_without_a_transfer_id_is_refused(tmp_path):
+    """A leg with no id can never be paired, so it can never be complete."""
+    store = StateStore(str(tmp_path / "state.db"))
+    _open_ledger(store, "acct_from", 1_000_000)
+    service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
+
+    for flow_class in ("internal_transfer", "fx_conversion"):
+        with pytest.raises(ValueError, match="transfer_id"):
+            service.record(
+                account_id="acct_from",
+                amount=250_000,
+                currency="KRW",
+                flow_type="withdrawal",
+                effective_at="2026-08-02T12:00:00+00:00",
+                source="operator_cli",
+                flow_class=flow_class,
+            )
+    assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
+
+
+def test_income_and_cost_can_be_recorded_without_a_transfer_id(tmp_path):
+    """These stand alone: nothing moved between accounts."""
+    store = StateStore(str(tmp_path / "state.db"))
+    _open_ledger(store, "acct", 1_000)
+    service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
+
+    service.record(
+        account_id="acct",
+        amount=50,
+        currency="KRW",
+        flow_type="deposit",
+        effective_at="2026-08-02T12:00:00+00:00",
+        source="operator_cli",
+        flow_class="investment_income",
+    )
+    service.record(
+        account_id="acct",
+        amount=10,
+        currency="KRW",
+        flow_type="withdrawal",
+        effective_at="2026-08-02T13:00:00+00:00",
+        source="operator_cli",
+        flow_class="cost",
+    )
+
+    classes = [
+        event["payload"]["flow_class"]
+        for event in store.list_system_events_by_type("account_cash_flow", limit=10)
+    ]
+    assert sorted(classes) == ["cost", "investment_income"]
+    assert _ledger_krw(store, "acct") == 1_040
+
+
+def test_an_internal_transfer_pair_is_recorded_as_internal(tmp_path):
+    """Both legs classified, so the pairing check can actually see them."""
+    store = StateStore(str(tmp_path / "state.db"))
+    _open_ledger(store, "acct_from", 1_000_000)
+    _open_ledger(store, "acct_to", 0)
+    service = AccountCashFlowService(store, AuditLogger(tmp_path / "audit.jsonl"))
+
+    for account_id, flow_type in (("acct_from", "withdrawal"), ("acct_to", "deposit")):
+        service.record(
+            account_id=account_id,
+            amount=250_000,
+            currency="KRW",
+            flow_type=flow_type,
+            effective_at="2026-08-02T12:00:00+00:00",
+            source="operator_cli",
+            transfer_id="move-1",
+            flow_class="internal_transfer",
+            duplicate_key=account_cash_flow_leg_duplicate_key(
+                "move-1", account_id, "KRW", flow_type
+            ),
+        )
+
+    events = store.list_system_events_by_type("account_cash_flow", limit=10)
+    assert len(events) == 2
+    assert {event["payload"]["flow_class"] for event in events} == {"internal_transfer"}
+    assert _ledger_krw(store, "acct_from") == 750_000
+    assert _ledger_krw(store, "acct_to") == 250_000

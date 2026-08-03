@@ -8,6 +8,7 @@ from maestro.state.events import (
     COST,
     EXTERNAL_TRANSFER,
     FX_CONVERSION,
+    LINKED_FLOW_CLASSES,
     SystemEventType,
 )
 from maestro.state.store import StateStore
@@ -191,6 +192,10 @@ class AccountCashFlowService:
         normalized_class = flow_class.strip().lower()
         if normalized_class not in ACCOUNT_CASH_FLOW_CLASSES:
             raise ValueError(f"flow_class must be one of {sorted(ACCOUNT_CASH_FLOW_CLASSES)}")
+        if normalized_class in LINKED_FLOW_CLASSES and not transfer_id:
+            # Without an id tying it to its other side, this leg can never be
+            # paired, so every reader would report the figure as incomplete.
+            raise ValueError(f"{normalized_class} needs a transfer_id to pair its legs")
         normalized_currency = currency.strip().upper()
         signed_amount = abs(float(amount))
         if normalized_type == "withdrawal":

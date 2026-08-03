@@ -300,6 +300,16 @@ sleeve return removes it.
 Flows recorded before `flow_class` existed are read as `external_transfer`,
 which is what they were recorded as.
 
+Set the class with `--flow-class` on `cash-flow record`; it defaults to
+`external_transfer`. A dividend the broker paid in cash:
+
+```bash
+maestro cash-flow record --config <approval-config> \
+  --account-id kis_brokerage --amount 12500 --currency KRW \
+  --flow-type deposit --flow-class investment_income \
+  --reason "005930 dividend"
+```
+
 ### Linked flows
 
 `internal_transfer` and `fx_conversion` only mean anything as a pair. Both legs
@@ -309,25 +319,24 @@ sides of a move between accounts take two `cash-flow record` calls:
 ```bash
 maestro cash-flow record --config <approval-config> \
   --account-id kis_brokerage --amount 250000 --currency KRW \
-  --flow-type withdrawal --transfer-id move-2026-08-02 \
+  --flow-type withdrawal --flow-class internal_transfer \
+  --transfer-id move-2026-08-02 \
   --reason "move to Toss for US ETF purchase"
 maestro cash-flow record --config <approval-config> \
   --account-id toss_brokerage --amount 250000 --currency KRW \
-  --flow-type deposit --transfer-id move-2026-08-02 \
+  --flow-type deposit --flow-class internal_transfer \
+  --transfer-id move-2026-08-02 \
   --reason "move from KIS for US ETF purchase"
 ```
 
-Known gap: `cash-flow record` has no way to say the move is internal, so both
-legs are recorded as `external_transfer`. For an equal-amount, same-currency
-move the portfolio total still comes out right, because the two legs cancel.
-It is not right for unequal amounts or two currencies, where the portfolio
-would remove the difference from its return as though that money had left.
-Record only same-currency, equal-amount moves this way until the class can be
-set, and use `cash-flow convert` for anything crossing currencies.
+A linked class without `--transfer-id` is refused: a leg with no id can never
+be paired, so it could only ever be reported as incomplete. A leg whose
+counterpart is missing is not counted either, and the read models report
+`unpaired_linked_cash_flow` in `cash_flow_quality` rather than publishing a
+figure built on half an event. Check that field after recording a transfer.
 
-Where legs are classified as linked, a leg without its counterpart is not
-counted and the read models report `unpaired_linked_cash_flow` in
-`cash_flow_quality` rather than publishing a figure built on half an event.
+`cash-flow record` will not take `fx_conversion`; a conversion is two legs
+whose amounts have to agree, so use `cash-flow convert` below.
 
 ### Currency conversion
 
@@ -402,12 +411,9 @@ maestro ledger backfill-orders --config <approval-config> \
   --account-id toss_brokerage --from-date YYYY-MM-DD
 ```
 
-Record an operator-verified deposit or withdrawal through `cash-flow record`.
-It advances the account ledger and emits the audited flow the return is built
-from. Everything it records is an `external_transfer`, or an
-`internal_transfer` when both legs share a `--transfer-id`; it has no option
-for the other classes. Income and costs reach the ledger through the
-cash-drift path below instead, and conversions through `cash-flow convert`.
+Record an operator-verified deposit or withdrawal through `cash-flow record`,
+setting `--flow-class` per "Cash flow accounting" above. It advances the
+account ledger and emits the audited flow the return is built from.
 
 `adopt-broker-snapshot` preserves ledger cash by default and adopts positions;
 use `--include-cash` only after a non-unexplained classification for the latest
