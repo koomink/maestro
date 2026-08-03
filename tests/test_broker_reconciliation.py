@@ -470,3 +470,51 @@ def _save_broker_snapshot(
             "unfilled_orders": [],
         },
     )
+
+
+def test_cash_suspense_classifications_carry_an_accounting_meaning():
+    """Each label an operator can pick must say what it does to the return.
+
+    Without the mapping, "dividend" and "transfer_candidate" are equally
+    plausible words that would be neutralised out of performance identically.
+    """
+    from maestro.state.events import (
+        CASH_SUSPENSE_CLASSIFICATIONS,
+        flow_class_for_cash_suspense,
+    )
+
+    assert flow_class_for_cash_suspense("transfer_candidate") == "external_transfer"
+    assert flow_class_for_cash_suspense("dividend") == "investment_income"
+    assert flow_class_for_cash_suspense("interest") == "investment_income"
+    assert flow_class_for_cash_suspense("tax") == "cost"
+    assert flow_class_for_cash_suspense("fee") == "cost"
+    assert flow_class_for_cash_suspense("fx_conversion") == "fx_conversion"
+    # Timing and ignorance are not cash flows and must not imply one.
+    assert flow_class_for_cash_suspense("settlement_candidate") is None
+    assert flow_class_for_cash_suspense("unexplained") is None
+    assert flow_class_for_cash_suspense("not_a_label") is None
+    assert set(CASH_SUSPENSE_CLASSIFICATIONS) >= {"dividend", "tax", "fx_conversion"}
+
+
+def test_cause_classifications_survive_a_suspense_round_trip(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    store.upsert_cash_suspense(
+        account_id="kis_brokerage",
+        currency="KRW",
+        amount=50_000.0,
+        snapshot_id=7,
+        observed_at="2026-01-01T00:00:00+00:00",
+    )
+
+    assert store.classify_cash_suspense(
+        account_id="kis_brokerage",
+        currency="KRW",
+        classification="dividend",
+    )
+
+    row = store.list_cash_suspense(account_id="kis_brokerage")[0]
+    assert row["candidate_label"] == "dividend"
+    # Adopting broker cash is gated on a non-unexplained label, so a cause
+    # classification has to clear that gate the way transfer_candidate does.
+    assert row["status"] == "classified"
+    assert row["candidate_label"] != "unexplained"

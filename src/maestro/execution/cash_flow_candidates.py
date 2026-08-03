@@ -65,12 +65,20 @@ class TossCashFlowCandidateDetector:
         ):
             return None
 
-        currencies = sorted(_buying_power_by_currency(latest_account))
-        for currency in currencies:
+        candidates = []
+        for currency in sorted(_buying_power_by_currency(latest_account)):
             candidate = self._detect_currency(rows, account_id, currency)
             if candidate is not None:
-                return candidate
-        return None
+                candidates.append(candidate)
+        if not candidates:
+            return None
+        # A currency conversion shows up as one currency falling while another
+        # rises over the same window.  Offering either leg on its own would ask
+        # the operator to confirm a deposit or withdrawal for an account whose
+        # money never actually entered or left.
+        if len({candidate.flow_type for candidate in candidates}) > 1:
+            return None
+        return candidates[0]
 
     def _detect_currency(
         self,

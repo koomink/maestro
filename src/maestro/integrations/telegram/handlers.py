@@ -72,11 +72,27 @@ from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
-from maestro.state.events import SystemEventType, save_audited_system_event
+from maestro.state.events import (
+    CASH_SUSPENSE_CLASSIFICATIONS,
+    SystemEventType,
+    flow_class_for_cash_suspense,
+    save_audited_system_event,
+)
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
 OPERATOR_CALLBACK_PREFIX = "operator:"
+# Callback data is length-limited, so classifications travel as single letters.
+_CASH_DRIFT_CLASSIFICATION_TOKENS = {
+    "s": "settlement_candidate",
+    "t": "transfer_candidate",
+    "u": "unexplained",
+    "d": "dividend",
+    "i": "interest",
+    "x": "tax",
+    "f": "fee",
+    "c": "fx_conversion",
+}
 # Maps strategy ids to systemd units that dispatch the daily signal and
 # non-blocking live approval pipeline for that strategy, e.g.
 # MAESTRO_REBALANCE_UNITS="tranquillo=maestro-symphony-signal-kr.service,\
@@ -1540,12 +1556,8 @@ class TelegramOperatorCommandRouter:
             self._answer(callback, "This cash-drift action is no longer active.")
             return True
         _, _, account_id, currency, classification, snapshot_id = parts
-        classification = {
-            "s": "settlement_candidate",
-            "t": "transfer_candidate",
-            "u": "unexplained",
-        }.get(classification, classification)
-        if classification not in {"settlement_candidate", "transfer_candidate", "unexplained"}:
+        classification = _CASH_DRIFT_CLASSIFICATION_TOKENS.get(classification, classification)
+        if classification not in CASH_SUSPENSE_CLASSIFICATIONS:
             self._answer(callback, "This cash-drift action is no longer active.")
             return True
         row = next(
@@ -1575,6 +1587,7 @@ class TelegramOperatorCommandRouter:
                 "account_id": account_id,
                 "currency": currency.upper(),
                 "classification": classification,
+                "flow_class": flow_class_for_cash_suspense(classification),
                 "snapshot_id": int(snapshot_id),
                 "decided_at": utc_now().isoformat(),
                 "decided_by": username or str(user_id),
@@ -4059,33 +4072,23 @@ def _cash_drift_markup(row: Mapping[str, Any]) -> dict[str, Any]:
     account_id = str(row.get("account_id") or "")
     currency = str(row.get("currency") or "").upper()
     snapshot_id = str(row.get("last_snapshot_id") or "")
+
+    def button(token: str, label: str) -> dict[str, Any]:
+        return {
+            "text": label,
+            "callback_data": (
+                f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
+                f"{account_id}:{currency}:{token}:{snapshot_id}"
+            ),
+        }
+
     return {
         "inline_keyboard": [
-            [
-                {
-                    "text": "정산 후보",
-                    "callback_data": (
-                        f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
-                        f"{account_id}:{currency}:s:{snapshot_id}"
-                    ),
-                },
-                {
-                    "text": "입출금 후보",
-                    "callback_data": (
-                        f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
-                        f"{account_id}:{currency}:t:{snapshot_id}"
-                    ),
-                },
-            ],
-            [
-                {
-                    "text": "미분류 유지",
-                    "callback_data": (
-                        f"{OPERATOR_CALLBACK_PREFIX}cash-drift:classify:"
-                        f"{account_id}:{currency}:u:{snapshot_id}"
-                    ),
-                }
-            ],
+            [button("s", "정산 후보"), button("t", "입출금 후보")],
+            [button("d", "배당"), button("i", "이자")],
+            [button("x", "세금"), button("f", "수수료")],
+            [button("c", "환전")],
+            [button("u", "미분류 유지")],
         ]
     }
 

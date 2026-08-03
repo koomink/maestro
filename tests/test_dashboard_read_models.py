@@ -2159,3 +2159,378 @@ def test_strategy_actual_performance_resolves_multi_account_scopes(tmp_path):
     assert [
         (row["strategy_id"], row["book_value"], row["positions"]) for row in rows
     ] == [("tranquillo", 50_000.0, {"KODEX": 5.0})]
+
+
+def _save_cash_only_snapshot(
+    store: StateStore,
+    run_id: str,
+    account_id: str,
+    cash: float,
+    *,
+    source: str = "kis_readonly",
+    created_at: str | None = None,
+) -> None:
+    store.save_broker_account_snapshot(
+        run_id,
+        account_id,
+        {
+            "account_id": account_id,
+            "account": {
+                "account_id": account_id,
+                "source": source,
+                "cash": cash,
+                "cash_by_currency": {"KRW": cash},
+                "buying_power_by_currency": {"KRW": cash},
+                "positions": [],
+            },
+        },
+    )
+    if created_at is not None:
+        with store._connect() as conn:
+            conn.execute(
+                "UPDATE broker_account_snapshots SET created_at = ? WHERE run_id = ?",
+                (created_at, run_id),
+            )
+
+
+def _record_cash_flow_event(
+    store: StateStore,
+    run_id: str,
+    payload: dict,
+) -> None:
+    store.save_system_event(run_id, "account_cash_flow", payload)
+
+
+def test_investment_income_stays_inside_the_return(tmp_path):
+    """A dividend is the portfolio earning money, not the investor adding it.
+
+    Neutralising it the way an external transfer is neutralised would move a
+    real gain out of the reported return.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_cash_only_snapshot(
+        store, "run_1", "acct", 1_000.0, created_at="2026-01-01 00:00:00"
+    )
+    _record_cash_flow_event(
+        store,
+        "dividend",
+        {
+            "account_id": "acct",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "flow_class": "investment_income",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct", 1_500.0, created_at="2026-01-02 00:00:00"
+    )
+
+    rows = build_account_performance_table(store)
+
+    latest = rows[0]
+    assert latest["cash_flow"] == 0.0
+    assert latest["period_return"] == 0.5
+
+
+def test_external_transfer_is_neutralised_out_of_the_return(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_cash_only_snapshot(
+        store, "run_1", "acct", 1_000.0, created_at="2026-01-01 00:00:00"
+    )
+    _record_cash_flow_event(
+        store,
+        "deposit",
+        {
+            "account_id": "acct",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "flow_class": "external_transfer",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct", 1_500.0, created_at="2026-01-02 00:00:00"
+    )
+
+    rows = build_account_performance_table(store)
+
+    latest = rows[0]
+    assert latest["cash_flow"] == 500.0
+    assert latest["period_return"] == 0.0
+
+
+def test_cash_flow_without_a_class_is_still_an_external_transfer(tmp_path):
+    """Events written before the class existed keep the meaning they were given."""
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_cash_only_snapshot(
+        store, "run_1", "acct", 1_000.0, created_at="2026-01-01 00:00:00"
+    )
+    _record_cash_flow_event(
+        store,
+        "legacy",
+        {
+            "account_id": "acct",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct", 1_500.0, created_at="2026-01-02 00:00:00"
+    )
+
+    rows = build_account_performance_table(store)
+
+    assert rows[0]["cash_flow"] == 500.0
+    assert rows[0]["period_return"] == 0.0
+
+
+def test_period_cash_flow_matches_with_and_without_a_baseline(tmp_path):
+    """The same deposit must total the same however performance is anchored.
+
+    The two paths used to read cash flow from different sources, so the same
+    screen could show two different answers for one deposit.
+    """
+
+    def build(with_baseline: bool) -> list[dict]:
+        suffix = "baseline" if with_baseline else "plain"
+        store = StateStore(str(tmp_path / f"state_{suffix}.db"), initial_cash=1000)
+        if with_baseline:
+            store.save_system_event(
+                "baseline",
+                "performance_baseline_adopted",
+                {
+                    "baseline_id": "baseline",
+                    "effective_at": "2026-01-01T00:00:00+00:00",
+                    "accounts": {
+                        "acct": {"snapshot_id": 1, "components": {"KRW": 1_000.0}}
+                    },
+                    "component_values": {"KRW": 1_000.0},
+                },
+            )
+        _save_cash_only_snapshot(
+            store, "run_1", "acct", 1_000.0, created_at="2026-01-01 00:00:01"
+        )
+        _record_cash_flow_event(
+            store,
+            "deposit",
+            {
+                "account_id": "acct",
+                "amount": 500.0,
+                "currency": "KRW",
+                "flow_type": "deposit",
+                "flow_class": "external_transfer",
+                "effective_at": "2026-01-01T12:00:00+00:00",
+                "source": "test",
+            },
+        )
+        _save_cash_only_snapshot(
+            store, "run_2", "acct", 1_500.0, created_at="2026-01-02 00:00:00"
+        )
+        return build_account_performance_table(store)
+
+    baselined = build(True)
+    plain = build(False)
+
+    assert baselined[0]["cash_flow"] == 500.0
+    assert plain[0]["cash_flow"] == 500.0
+    assert baselined[0]["cash_flow"] == plain[0]["cash_flow"]
+
+
+def _save_toss_ledger_snapshot(
+    store: StateStore,
+    run_id: str,
+    buying_power: float,
+    created_at: str,
+) -> None:
+    store.save_broker_account_snapshot(
+        run_id,
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "toss_brokerage",
+                "source": "toss_openapi_readonly",
+                "cash": buying_power,
+                "cash_by_currency": {"KRW": buying_power},
+                "buying_power_by_currency": {"KRW": buying_power},
+                "ledger_cash_by_currency": None,
+                "positions": [],
+            },
+        },
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = ? WHERE run_id = ?",
+            (created_at, run_id),
+        )
+
+
+def test_operator_checkpoint_stops_verifying_once_the_cash_moves(tmp_path):
+    """A confirmation is evidence about a moment, not about every later moment.
+
+    Treating one Toss confirmation as standing proof let an account keep
+    reporting verified cash long after the balance had moved on.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_portfolio_snapshot(
+        "ledger_open",
+        PortfolioState(cash=1_000.0, cash_by_currency={"KRW": 1_000.0}, positions={}),
+        account_id="toss_brokerage",
+    )
+    _save_toss_ledger_snapshot(store, "run_1", 1_000.0, "2026-01-01 00:00:01")
+    _save_toss_ledger_snapshot(store, "run_2", 1_000.0, "2026-01-02 00:00:01")
+    _save_toss_ledger_snapshot(store, "run_3", 1_500.0, "2026-01-03 00:00:01")
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE portfolio_snapshots SET created_at = '2026-01-01 00:00:00' "
+            "WHERE run_id = 'ledger_open'"
+        )
+    snapshot_ids = {
+        str(row["run_id"]): row["id"]
+        for row in store.list_broker_account_snapshots(limit=None)
+    }
+    store.save_system_event(
+        "checkpoint",
+        "account_cash_flow",
+        {
+            "account_id": "toss_brokerage",
+            "amount": 0.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "effective_at": "2026-01-02T00:00:01+00:00",
+            "source": "telegram_toss_cash_flow_confirmation",
+            "verification": "operator_verified",
+            "evidence": {
+                "latest_snapshot_id": snapshot_ids["run_2"],
+                "stable_snapshot_ids": [snapshot_ids["run_2"]],
+            },
+        },
+    )
+
+    rows = {row["run_id"]: row for row in build_account_performance_table(store)}
+
+    assert rows["run_1"]["broker_cash_verification"] == "unavailable"
+    assert rows["run_2"]["broker_cash_verification"] == "operator_verified"
+    assert rows["run_3"]["broker_cash_verification"] == "checkpoint_stale"
+
+
+def test_portfolio_cash_verification_collapses_to_the_weakest_account(tmp_path):
+    """One unverifiable account means the total is unverifiable too.
+
+    Reporting "mixed" described the disagreement without warning about it.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for account_id in ("toss_brokerage", "kis_brokerage"):
+        store.save_portfolio_snapshot(
+            f"ledger_{account_id}",
+            PortfolioState(
+                cash=1_000.0, cash_by_currency={"KRW": 1_000.0}, positions={}
+            ),
+            account_id=account_id,
+        )
+    store.save_broker_account_snapshot(
+        "run_1",
+        "toss_brokerage",
+        {
+            "account_id": "toss_brokerage",
+            "account": {
+                "account_id": "toss_brokerage",
+                "source": "toss_openapi_readonly",
+                "cash": 1_000.0,
+                "cash_by_currency": {"KRW": 1_000.0},
+                "buying_power_by_currency": {"KRW": 1_000.0},
+                "ledger_cash_by_currency": None,
+                "positions": [],
+            },
+        },
+    )
+    store.save_broker_account_snapshot(
+        "run_1",
+        "kis_brokerage",
+        {
+            "account_id": "kis_brokerage",
+            "account": {
+                "account_id": "kis_brokerage",
+                "source": "kis_domestic_readonly",
+                "broker_cash_verification": "broker_verified",
+                "cash": 1_000.0,
+                "cash_by_currency": {"KRW": 1_000.0},
+                "positions": [],
+            },
+        },
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE portfolio_snapshots SET created_at = '2026-01-01 00:00:00'"
+        )
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = '2026-01-01 00:00:01'"
+        )
+
+    rows = build_total_portfolio_performance_table(store)
+
+    assert rows[0]["broker_cash_verification"] == "unavailable"
+    assert rows[0]["broker_cash_verification_counts"] == {
+        "unavailable": 1,
+        "broker_verified": 1,
+    }
+
+
+def test_paired_internal_transfer_nets_out_of_portfolio_performance(tmp_path):
+    """Money moving between the operator's own accounts never left the portfolio.
+
+    Both legs have to exist for the pair to be recognised; with only one leg
+    recorded the portfolio return was neutralised by money that never went
+    anywhere.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_cash_only_snapshot(
+        store, "run_1", "acct_from", 1_000.0, created_at="2026-01-01 00:00:00"
+    )
+    _save_cash_only_snapshot(
+        store, "run_1", "acct_to", 0.0, created_at="2026-01-01 00:00:00"
+    )
+    for account_id, flow_type in (("acct_from", "withdrawal"), ("acct_to", "deposit")):
+        _record_cash_flow_event(
+            store,
+            f"transfer_{account_id}",
+            {
+                "account_id": account_id,
+                "amount": 250.0,
+                "currency": "KRW",
+                "flow_type": flow_type,
+                "flow_class": "internal_transfer",
+                "effective_at": "2026-01-01T12:00:00+00:00",
+                "transfer_id": "move-1",
+                "source": "operator_cli",
+            },
+        )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct_from", 750.0, created_at="2026-01-02 00:00:00"
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct_to", 250.0, created_at="2026-01-02 00:00:00"
+    )
+
+    portfolio = build_total_portfolio_performance_table(store)
+    accounts = {
+        (row["account_id"], row["run_id"]): row
+        for row in build_account_performance_table(store)
+    }
+
+    # The portfolio neither gained nor lost, and no external flow is claimed.
+    assert portfolio[0]["total_value"] == 1_000.0
+    assert portfolio[0]["cash_flow"] == 0.0
+    assert portfolio[0]["period_return"] == 0.0
+    # Each account still sees its own side, so neither shows a phantom return.
+    assert accounts[("acct_from", "run_2")]["cash_flow"] == -250.0
+    assert accounts[("acct_from", "run_2")]["period_return"] == 0.0
+    assert accounts[("acct_to", "run_2")]["cash_flow"] == 250.0

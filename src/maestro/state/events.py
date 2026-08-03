@@ -177,6 +177,45 @@ SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "fx_rate_snapshot_failed": ("provider", "pairs", "error_type", "checked_at"),
 }
 
+# What an account cash flow *is*, which is independent of how confident we are
+# that it happened.  Only an external transfer is investor money entering or
+# leaving; everything else is the portfolio earning or spending its own cash and
+# must stay inside the return.
+EXTERNAL_TRANSFER = "external_transfer"
+ACCOUNT_CASH_FLOW_CLASSES = (
+    EXTERNAL_TRANSFER,
+    "investment_income",
+    "cost",
+    "fx_conversion",
+    "internal_transfer",
+)
+
+# Classes that a time-weighted return must neutralise.  An internal transfer is
+# still investor money entering or leaving *that account*, so it neutralises per
+# account and is netted away at portfolio level by ``transfer_id`` pairing.
+# Dividends, costs and currency conversions are the portfolio acting on its own
+# cash: neutralising them would move real gains and losses out of the return.
+TWR_NEUTRALIZING_FLOW_CLASSES = (EXTERNAL_TRANSFER, "internal_transfer")
+
+# Cash-suspense labels an operator can assign to an unexplained ledger/broker
+# difference.  ``settlement_candidate`` and ``unexplained`` describe timing or
+# absence of knowledge rather than a cash flow, so they map to no flow class.
+CASH_SUSPENSE_CLASSIFICATIONS: dict[str, str | None] = {
+    "settlement_candidate": None,
+    "unexplained": None,
+    "transfer_candidate": EXTERNAL_TRANSFER,
+    "dividend": "investment_income",
+    "interest": "investment_income",
+    "tax": "cost",
+    "fee": "cost",
+    "fx_conversion": "fx_conversion",
+}
+
+
+def flow_class_for_cash_suspense(classification: str) -> str | None:
+    """Flow class implied by a cash-suspense classification, if any."""
+    return CASH_SUSPENSE_CLASSIFICATIONS.get(str(classification).strip().lower())
+
 
 def required_system_event_fields(event_type: SystemEventType | str) -> tuple[str, ...]:
     return SYSTEM_EVENT_REQUIRED_FIELDS.get(str(event_type), ())

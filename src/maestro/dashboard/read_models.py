@@ -13,6 +13,8 @@ from maestro.core.time_display import (
 from maestro.dashboard.actions import build_signal_freshness
 from maestro.monitoring.health import HealthService, latest_scheduled_run_event
 from maestro.state.events import (
+    EXTERNAL_TRANSFER,
+    TWR_NEUTRALIZING_FLOW_CLASSES,
     SystemEventType,
     missing_system_event_required_fields,
     required_system_event_fields,
@@ -857,6 +859,13 @@ def _broker_rows_with_ledger_cash(
     rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     ledger_rows = _ledger_account_snapshot_rows(store)
+    checkpoints = _operator_cash_checkpoints(store)
+    buying_power_by_snapshot_id = {
+        str(row.get("id")): _buying_power_by_currency(
+            _mapping(_mapping(row.get("payload")).get("account"))
+        )
+        for row in rows
+    }
     output: list[dict[str, Any]] = []
     for row in rows:
         ledger = _ledger_state_as_of(ledger_rows, _broker_snapshot_account_id(row), row)
@@ -870,10 +879,10 @@ def _broker_rows_with_ledger_cash(
             ledger,
         )
         payload["account"]["broker_cash_verification"] = _cash_verification_as_of(
-            store,
-            _broker_snapshot_account_id(row),
-            row.get("created_at"),
+            row,
             _mapping(payload.get("account")),
+            checkpoints.get(_broker_snapshot_account_id(row), []),
+            buying_power_by_snapshot_id,
         )
         updated["payload"] = payload
         output.append(updated)
@@ -895,44 +904,130 @@ def _performance_quality(rows: list[dict[str, Any]]) -> str:
     return "provisional"
 
 
-def _cash_verification_quality(rows: list[dict[str, Any]]) -> str:
-    values = {
-        str(
+# Worst first: an aggregate is only as trustworthy as its weakest account.
+_CASH_VERIFICATION_RANK = (
+    "unavailable",
+    "checkpoint_stale",
+    "operator_verified",
+    "broker_verified",
+)
+
+
+def _cash_verification_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = str(
             _mapping(_mapping(row.get("payload")).get("account")).get(
                 "broker_cash_verification"
             )
             or "unavailable"
         )
-        for row in rows
-    }
-    if len(values) == 1:
-        return next(iter(values))
-    return "mixed"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _cash_verification_quality(rows: list[dict[str, Any]]) -> str:
+    """Aggregate cash verification across accounts by collapsing to the worst.
+
+    A previous "mixed" reading said only that the accounts disagreed, which an
+    operator reads as a curiosity rather than as a warning.  One account whose
+    cash cannot be verified means the total cannot be verified either, so the
+    weakest value is the honest headline; ``_cash_verification_counts`` keeps
+    the per-account detail so the weak account stays identifiable.
+    """
+    counts = _cash_verification_counts(rows)
+    if not counts:
+        return "unavailable"
+    return min(
+        counts,
+        key=lambda value: (
+            _CASH_VERIFICATION_RANK.index(value)
+            if value in _CASH_VERIFICATION_RANK
+            else -1
+        ),
+    )
+
+
+def _operator_cash_checkpoints(store: StateStore) -> dict[str, list[dict[str, Any]]]:
+    """Points in time at which an operator confirmed an account's actual cash.
+
+    A confirmation is evidence about the moment it was made, not a standing
+    guarantee about every later snapshot.
+    """
+    checkpoints: dict[str, list[dict[str, Any]]] = {}
+    for row in store.list_system_events_by_type(SystemEventType.ACCOUNT_CASH_FLOW, limit=1000):
+        payload = _mapping(row.get("payload"))
+        if payload.get("verification") != "operator_verified":
+            continue
+        timestamp = _parse_timestamp(payload.get("effective_at") or row.get("created_at"))
+        if timestamp is None:
+            continue
+        evidence = _mapping(payload.get("evidence"))
+        verified_ids = {
+            str(value)
+            for value in [
+                *(evidence.get("stable_snapshot_ids") or []),
+                evidence.get("latest_snapshot_id"),
+            ]
+            if value is not None
+        }
+        checkpoints.setdefault(str(payload.get("account_id") or ""), []).append(
+            {
+                "timestamp": timestamp,
+                "verified_snapshot_ids": verified_ids,
+                "latest_snapshot_id": str(evidence.get("latest_snapshot_id") or ""),
+            }
+        )
+    for values in checkpoints.values():
+        values.sort(key=lambda item: item["timestamp"])
+    return checkpoints
 
 
 def _cash_verification_as_of(
-    store: StateStore,
-    account_id: str,
-    created_at: object,
+    row: dict[str, Any],
     account: dict[str, Any],
+    checkpoints: list[dict[str, Any]],
+    buying_power_by_snapshot_id: dict[str, dict[str, float]],
 ) -> str:
+    """Cash verification for one broker snapshot.
+
+    Staleness is decided by account activity, not by elapsed time: a
+    confirmation still describes the cash of a later snapshot as long as the
+    cash has not moved since, and stops describing it the moment it does.
+    """
     source = str(account.get("source") or "")
     default = str(account.get("broker_cash_verification") or "")
     if not default:
         default = "unavailable" if source.startswith("toss_") else "broker_verified"
-    snapshot_at = _parse_timestamp(created_at)
+    snapshot_at = _parse_timestamp(row.get("created_at"))
     if not source.startswith("toss_") or snapshot_at is None:
         return default
-    for row in store.list_system_events_by_type(SystemEventType.ACCOUNT_CASH_FLOW, limit=1000):
-        payload = _mapping(row.get("payload"))
-        if payload.get("account_id") != account_id:
-            continue
-        if payload.get("verification") != "operator_verified":
-            continue
-        effective_at = _parse_timestamp(payload.get("effective_at") or row.get("created_at"))
-        if effective_at is not None and effective_at <= snapshot_at:
-            return "operator_verified"
-    return default
+    checkpoint = next(
+        (
+            item
+            for item in reversed(checkpoints)
+            if item["timestamp"] <= snapshot_at
+        ),
+        None,
+    )
+    if checkpoint is None:
+        return default
+    snapshot_id = str(row.get("id"))
+    if snapshot_id in checkpoint["verified_snapshot_ids"]:
+        return "operator_verified"
+    checkpoint_cash = buying_power_by_snapshot_id.get(checkpoint["latest_snapshot_id"])
+    if checkpoint_cash is None:
+        # The confirmed snapshot is outside the window we can compare against,
+        # so we cannot show that the cash has held since.
+        return "checkpoint_stale"
+    if checkpoint_cash == _buying_power_by_currency(account):
+        return "operator_verified"
+    return "checkpoint_stale"
+
+
+def _buying_power_by_currency(account: dict[str, Any]) -> dict[str, float]:
+    values = _mapping(account.get("buying_power_by_currency"))
+    return {str(key).upper(): float(value) for key, value in values.items()}
 
 
 def build_account_performance_table(
@@ -959,6 +1054,13 @@ def build_account_performance_table(
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
     ledger_rows = _ledger_account_snapshot_rows(store)
     fx_snapshot = build_fx_rate_snapshot_card(store)
+    fx_events = _fx_rate_events(store)
+    # Cash flow comes from the recorded events, not from a field on the broker
+    # snapshot: the events are what the ledger and the return were actually
+    # built from, so reading anything else here makes the same number disagree
+    # with itself depending on which table the reader is looking at.  An
+    # internal transfer is still money leaving *this* account, so it counts.
+    cash_flows = _account_cash_flow_events(store, exclude_internal_transfers=False)
     # Performance state (first/previous/peak value) is tracked PER ACCOUNT —
     # a shared/global state across interleaved multi-account rows would
     # compare one account's snapshot against a different account's previous
@@ -982,7 +1084,7 @@ def build_account_performance_table(
         positions_market_value = (
             total_value - cash if total_value is not None and cash is not None else None
         )
-        cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
+        timestamp = _parse_timestamp(row.get("created_at"))
         state = state_by_account.setdefault(
             account_id,
             {
@@ -990,9 +1092,25 @@ def build_account_performance_table(
                 "previous_value": None,
                 "peak_value": None,
                 "cumulative_cash_flow": 0.0,
+                # Flows recorded before an account's first snapshot belong to no
+                # period here, so each account starts its own clock.
+                "previous_timestamp": timestamp,
             },
         )
-        performance = _advance_performance_state(state, total_value, cash_flow)
+        cash_flow, converted_events = _converted_period_cash_flow(
+            cash_flows,
+            fx_events,
+            previous_timestamp=state["previous_timestamp"],
+            timestamp=timestamp,
+            currency=currency,
+            account_id=account_id,
+        )
+        state["previous_timestamp"] = timestamp
+        performance = _advance_performance_state(
+            state,
+            total_value if cash_flow is not None else None,
+            cash_flow or 0.0,
+        )
 
         reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
         rows.append(
@@ -1011,7 +1129,8 @@ def build_account_performance_table(
                 ),
                 "unrealized_pnl": _account_unrealized_pnl(account, positions),
                 "fees": _first_float(account, payload, ("fees", "fee", "commission")),
-                "cash_flow": cash_flow,
+                "cash_flow": _round_money(cash_flow) if cash_flow is not None else None,
+                "cash_flow_events": [event["payload"] for event in converted_events],
                 "period_return": performance["period_return"],
                 "daily_return": performance["period_return"],
                 "cumulative_return": performance["cumulative_return"],
@@ -1320,6 +1439,9 @@ def build_currency_sleeve_performance_table(
                     "broker_cash_verification": _cash_verification_quality(
                         list(latest_by_account.values())
                     ),
+                    "broker_cash_verification_counts": _cash_verification_counts(
+                        list(latest_by_account.values())
+                    ),
                 }
             )
     return list(reversed(rows))
@@ -1483,6 +1605,9 @@ def _build_baselined_currency_sleeve_performance_table(
                     "broker_cash_verification": _cash_verification_quality(
                         [latest_by_account[account_id] for account_id in active_accounts]
                     ),
+                    "broker_cash_verification_counts": _cash_verification_counts(
+                        [latest_by_account[account_id] for account_id in active_accounts]
+                    ),
                     "baseline_id": baseline.get("baseline_id"),
                     "baseline_at": baseline.get("effective_at"),
                 }
@@ -1522,6 +1647,11 @@ def build_total_portfolio_performance_table(
 
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
     fx_snapshot = build_fx_rate_snapshot_card(store)
+    fx_events = _fx_rate_events(store)
+    # Portfolio level nets out transfers between the operator's own accounts:
+    # money moving from one account to another never entered or left the
+    # portfolio, so counting it would neutralise a flow that never happened.
+    cash_flows = _account_cash_flow_events(store)
     performance_state = {
         "first_value": None,
         "previous_value": None,
@@ -1530,6 +1660,7 @@ def build_total_portfolio_performance_table(
     }
     rows = []
     previous_component_values: dict[str, float] = {}
+    previous_timestamp: datetime | None = None
     latest_by_account: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for group_rows in grouped.values():
         for row in group_rows:
@@ -1540,7 +1671,6 @@ def build_total_portfolio_performance_table(
             continue
 
         component_values: dict[str, float] = {}
-        component_cash_flows: dict[str, float] = {}
         created_at = group_rows[-1].get("created_at")
         run_id = group_rows[-1].get("run_id")
         reconciliation_statuses = []
@@ -1554,21 +1684,22 @@ def build_total_portfolio_performance_table(
                 component_values[currency] = component_values.get(currency, 0.0) + value
             reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
             reconciliation_statuses.append(_reconciliation_status(reconciliation))
-        for row in group_rows:
-            payload = _mapping(row.get("payload"))
-            account = _mapping(payload.get("account"))
-            currency = _snapshot_currency(account, payload)
-            cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
-            component_cash_flows[currency] = component_cash_flows.get(currency, 0.0) + cash_flow
+
+        timestamp = _parse_timestamp(created_at)
+        if previous_timestamp is None:
+            previous_timestamp = timestamp
+        period_cash_flow, converted_events = _converted_period_cash_flow(
+            cash_flows,
+            fx_events,
+            previous_timestamp=previous_timestamp,
+            timestamp=timestamp,
+            currency=display_currency,
+        )
+        previous_timestamp = timestamp
 
         currencies = sorted(component_values)
         converted_value = _convert_components(
             component_values,
-            display_currency,
-            fx_snapshot,
-        )
-        converted_cash_flow = _convert_components(
-            component_cash_flows,
             display_currency,
             fx_snapshot,
         )
@@ -1577,12 +1708,12 @@ def build_total_portfolio_performance_table(
         missing_fx = fx_needed and fx_snapshot["status"] == "missing"
         stale_fx = fx_needed and fx_snapshot["status"] == "stale"
         total_value = converted_value if fx_ready else None
-        cash_flow = converted_cash_flow if fx_ready else None
+        cash_flow = period_cash_flow
         local_return = _local_component_return(component_values, previous_component_values)
         performance = _advance_performance_state(
             performance_state,
-            total_value,
-            cash_flow if cash_flow is not None else 0.0,
+            total_value if cash_flow is not None else None,
+            cash_flow or 0.0,
         )
         period_return = performance["period_return"]
         rows.append(
@@ -1601,7 +1732,8 @@ def build_total_portfolio_performance_table(
                 "fx_rate": fx_snapshot["rate"],
                 "fx_timestamp": fx_snapshot["as_of"],
                 "stale_fx": stale_fx,
-                "cash_flow": cash_flow,
+                "cash_flow": _round_money(cash_flow) if cash_flow is not None else None,
+                "cash_flow_events": [event["payload"] for event in converted_events],
                 "local_return": local_return if fx_needed else period_return,
                 "fx_effect": _round_ratio(period_return - local_return)
                 if period_return is not None and local_return is not None and fx_needed
@@ -1615,6 +1747,9 @@ def build_total_portfolio_performance_table(
                     list(latest_by_account.values())
                 ),
                 "broker_cash_verification": _cash_verification_quality(
+                    list(latest_by_account.values())
+                ),
+                "broker_cash_verification_counts": _cash_verification_counts(
                     list(latest_by_account.values())
                 ),
             }
@@ -1875,6 +2010,9 @@ def _build_baselined_total_portfolio_performance_table(
                     [latest_by_account[account_id] for account_id in active_accounts]
                 ),
                 "broker_cash_verification": _cash_verification_quality(
+                    [latest_by_account[account_id] for account_id in active_accounts]
+                ),
+                "broker_cash_verification_counts": _cash_verification_counts(
                     [latest_by_account[account_id] for account_id in active_accounts]
                 ),
                 "baseline_id": baseline.get("baseline_id"),
@@ -3520,6 +3658,14 @@ def _account_cash_flow_events(
             continue
         if after is not None and timestamp <= after:
             continue
+        # Only investor money moving in or out is neutralised out of the return.
+        # A dividend or a fee is the portfolio earning or spending its own cash;
+        # treating it as an external flow would move a real gain or loss out of
+        # the performance figure.  Events written before the class existed are
+        # external transfers, which is what they were recorded as.
+        flow_class = str(payload.get("flow_class") or EXTERNAL_TRANSFER).lower()
+        if flow_class not in TWR_NEUTRALIZING_FLOW_CLASSES:
+            continue
         flow_type = str(payload.get("flow_type") or "deposit").lower()
         signed_amount = -abs(amount) if flow_type == "withdrawal" else abs(amount)
         events.append(
@@ -3683,6 +3829,54 @@ def _period_cash_flow_events(
         if after_previous and timestamp <= current_timestamp:
             period_events.append(event)
     return period_events
+
+
+def _converted_period_cash_flow(
+    cash_flows: list[dict[str, Any]],
+    fx_events: list[dict[str, Any]],
+    *,
+    previous_timestamp: datetime | None,
+    timestamp: datetime | None,
+    currency: str,
+    account_id: str | None = None,
+) -> tuple[float | None, list[dict[str, Any]]]:
+    """Net external cash flow for one period, each event at its own FX rate.
+
+    Converting the whole period at the closing rate would produce a total that
+    no longer matches the amounts the return was neutralised by, so the two
+    figures would stop reconciling.  A missing rate returns ``None`` rather
+    than a partial sum that would silently understate the flow.
+    """
+    events = _period_cash_flow_events(cash_flows, previous_timestamp, timestamp)
+    if account_id is not None:
+        events = [event for event in events if event.get("account_id") == account_id]
+    total = 0.0
+    converted_events: list[dict[str, Any]] = []
+    for event in events:
+        event_fx = _fx_snapshot_as_of(fx_events, event["timestamp"])
+        converted = _convert_components(
+            {event["currency"]: event["signed_amount"]},
+            currency,
+            event_fx,
+        )
+        if converted is None:
+            return None, []
+        total += converted
+        converted_events.append(
+            {
+                "timestamp": event["timestamp"],
+                "signed_amount": converted,
+                "payload": {
+                    **event["payload"],
+                    "display_amount": converted,
+                    "display_currency": currency,
+                    "fx_rate": _fx_rate(event["currency"], currency, event_fx),
+                    "fx_as_of": event_fx.get("as_of"),
+                    "fx_event_id": event_fx.get("event_id"),
+                },
+            }
+        )
+    return total, converted_events
 
 
 def _advance_twr_performance_state(

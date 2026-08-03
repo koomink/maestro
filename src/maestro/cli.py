@@ -21,7 +21,10 @@ from maestro.core.enums import ProfileStage, RunMode
 from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
-from maestro.execution.account_cash_flows import AccountCashFlowService
+from maestro.execution.account_cash_flows import (
+    AccountCashFlowService,
+    account_cash_flow_leg_duplicate_key,
+)
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.brokers.readonly_factory import (
@@ -68,7 +71,12 @@ from maestro.orchestration.orchestrator import (
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.scaffold import create_virtuoso_app_scaffold
-from maestro.state.events import SystemEventType, save_audited_system_event
+from maestro.state.events import (
+    CASH_SUSPENSE_CLASSIFICATIONS,
+    SystemEventType,
+    flow_class_for_cash_suspense,
+    save_audited_system_event,
+)
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -1729,7 +1737,16 @@ def record_account_cash_flow(
             transfer_id=transfer_id,
             decided_by="operator_cli",
             verification="operator_verified",
-            duplicate_key=(f"account-cash-flow:transfer:{transfer_id}" if transfer_id else None),
+            duplicate_key=(
+                account_cash_flow_leg_duplicate_key(
+                    transfer_id,
+                    account_id,
+                    normalized_currency,
+                    normalized_type,
+                )
+                if transfer_id
+                else None
+            ),
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -1949,10 +1966,11 @@ def cash_drift_classify(
     config: Path | None = CONFIG_OPTION,
 ) -> None:
     """Classify a suspense observation without silently changing the ledger."""
-    allowed = {"settlement_candidate", "transfer_candidate", "unexplained"}
     normalized = classification.strip().lower()
-    if normalized not in allowed:
-        raise typer.BadParameter(f"--classification must be one of {sorted(allowed)}")
+    if normalized not in CASH_SUSPENSE_CLASSIFICATIONS:
+        raise typer.BadParameter(
+            f"--classification must be one of {sorted(CASH_SUSPENSE_CLASSIFICATIONS)}"
+        )
     maestro_config, identity = _load_operator_config(config)
     store = _state_store(maestro_config, identity)
     if not store.classify_cash_suspense(
@@ -1980,6 +1998,7 @@ def cash_drift_classify(
             "account_id": account_id,
             "currency": currency.strip().upper(),
             "classification": normalized,
+            "flow_class": flow_class_for_cash_suspense(normalized),
             "snapshot_id": suspense.get("last_snapshot_id") if suspense else None,
             "decided_at": utc_now().isoformat(),
             "decided_by": "operator_cli",
@@ -2029,20 +2048,22 @@ def adopt_broker_snapshot(
         if adopted_account_id
         else None
     )
+    adopted_classification: str | None = None
     if include_cash and adopted_account_id:
         suspense = store.list_cash_suspense(account_id=adopted_account_id)
-        classified_snapshot_ids = {
-            int(row["last_snapshot_id"])
+        classified_by_snapshot_id = {
+            int(row["last_snapshot_id"]): str(row.get("candidate_label") or "")
             for row in suspense
             if row.get("last_snapshot_id") is not None
             and row.get("status") == "classified"
             and row.get("candidate_label") != "unexplained"
         }
-        if int(latest["id"]) not in classified_snapshot_ids:
+        if int(latest["id"]) not in classified_by_snapshot_id:
             raise typer.BadParameter(
                 "--include-cash requires a non-unexplained cash-drift classification "
                 "for the latest broker snapshot"
             )
+        adopted_classification = classified_by_snapshot_id[int(latest["id"])]
     if (
         str(account.get("source") or "").startswith("toss_")
         and "ledger_cash_by_currency" in account
@@ -2075,6 +2096,19 @@ def adopt_broker_snapshot(
     payload = {
         "reason": reason,
         "include_cash": include_cash,
+        # Adopting broker cash moves the ledger without writing an
+        # account_cash_flow, so the change is never neutralised out of the
+        # return.  Recording that intent here is what lets a later reader tell
+        # an earned dividend apart from a bookkeeping correction instead of
+        # having to parse the free-text reason.
+        "ledger_effect": "cash_adopted_from_broker" if include_cash else "positions_only",
+        "performance_effect": "retained_in_return" if include_cash else "none",
+        "cash_drift_classification": adopted_classification,
+        "flow_class": (
+            flow_class_for_cash_suspense(adopted_classification)
+            if adopted_classification
+            else None
+        ),
         "broker_snapshot_id": latest["id"],
         "account_id": adopted_account_id or None,
         "broker_account_id": account.get("account_id"),

@@ -427,15 +427,24 @@ class StateStore:
         account_id: str,
         amount: float,
         currency: str,
-    ) -> bool:
+        *,
+        event_payload: dict[str, Any],
+    ) -> dict[str, Any]:
         """Apply a verified external cash flow to the account ledger.
 
         Broker snapshots are never used as a cash source here.  The method
         advances the latest account-scoped ledger state and leaves the global
         portfolio snapshot untouched; fills continue to update both views via
         ``apply_fill_reconciliation``.
+
+        The ledger row and the ``account_cash_flow`` event are written in one
+        transaction.  Splitting them leaves a crash window where the ledger has
+        already moved but the event that records it does not exist, so the
+        duplicate-key retry finds nothing and applies the same flow twice.
         """
         normalized_currency = str(currency).upper()
+        duplicate_key = _system_event_duplicate_key(event_payload)
+        payload_json = json.dumps(event_payload, default=str)
         with self.writer_lock("apply_account_cash_flow"):
             with self._connect() as conn:
                 row = conn.execute(
@@ -444,7 +453,18 @@ class StateStore:
                     (account_id,),
                 ).fetchone()
                 if row is None:
-                    return False
+                    return {"ledger_established": False, "created": False, "run_id": ""}
+                if duplicate_key is not None:
+                    existing = conn.execute(
+                        "SELECT run_id FROM system_events WHERE duplicate_key = ? LIMIT 1",
+                        (duplicate_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        return {
+                            "ledger_established": True,
+                            "created": False,
+                            "run_id": str(existing[0] or ""),
+                        }
                 state = PortfolioState.model_validate(json.loads(row[0]))
                 cash_by_currency = dict(state.cash_by_currency)
                 if not cash_by_currency:
@@ -469,7 +489,12 @@ class StateStore:
                         json.dumps(next_state.model_dump(mode="json"), default=str),
                     ),
                 )
-                return True
+                conn.execute(
+                    "INSERT INTO system_events "
+                    "(run_id, event_type, payload, duplicate_key) VALUES (?, ?, ?, ?)",
+                    (run_id, "account_cash_flow", payload_json, duplicate_key),
+                )
+                return {"ledger_established": True, "created": True, "run_id": run_id}
 
     def upsert_cash_suspense(
         self,
