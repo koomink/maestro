@@ -274,6 +274,85 @@ Only the affected symbol becomes a recovery-review candidate; it does not halt
 the remaining batch. Do not infer the same for `409`, server failures, or a
 missing/unreadable response, because broker acceptance cannot be ruled out.
 
+## Cash flow accounting
+
+Every `account_cash_flow` carries a `flow_class` saying what the money was.
+This decides whether performance treats it as investor money crossing a
+boundary or as the portfolio acting on its own cash:
+
+| `flow_class` | Removed from account/portfolio return | Removed from a currency sleeve return |
+| --- | --- | --- |
+| `external_transfer` | yes | yes |
+| `internal_transfer` | account only | yes |
+| `fx_conversion` | no | yes |
+| `investment_income` | no | no |
+| `cost` | no | no |
+
+Classify a dividend, interest payment, tax or fee as such, never as a deposit
+or withdrawal. A dividend recorded as a deposit is removed from the return, so
+the account silently reports having earned less than it did; a fee recorded as
+a withdrawal reports more.
+
+A conversion crosses no account and no portfolio boundary — the total does not
+move — but it is exactly what moves one currency sleeve into another, so only a
+sleeve return removes it.
+
+Flows recorded before `flow_class` existed are read as `external_transfer`,
+which is what they were recorded as.
+
+### Linked flows
+
+`internal_transfer` and `fx_conversion` only mean anything as a pair. Both legs
+must share one `--transfer-id`, and each leg is keyed separately, so the two
+sides of a move between accounts take two `cash-flow record` calls:
+
+```bash
+maestro cash-flow record --config <approval-config> \
+  --account-id kis_brokerage --amount 250000 --currency KRW \
+  --flow-type withdrawal --transfer-id move-2026-08-02 \
+  --reason "move to Toss for US ETF purchase"
+maestro cash-flow record --config <approval-config> \
+  --account-id toss_brokerage --amount 250000 --currency KRW \
+  --flow-type deposit --transfer-id move-2026-08-02 \
+  --reason "move from KIS for US ETF purchase"
+```
+
+Known gap: `cash-flow record` has no way to say the move is internal, so both
+legs are recorded as `external_transfer`. For an equal-amount, same-currency
+move the portfolio total still comes out right, because the two legs cancel.
+It is not right for unequal amounts or two currencies, where the portfolio
+would remove the difference from its return as though that money had left.
+Record only same-currency, equal-amount moves this way until the class can be
+set, and use `cash-flow convert` for anything crossing currencies.
+
+Where legs are classified as linked, a leg without its counterpart is not
+counted and the read models report `unpaired_linked_cash_flow` in
+`cash_flow_quality` rather than publishing a figure built on half an event.
+
+### Currency conversion
+
+Record a conversion with `cash-flow convert`. `--to-amount` is what actually
+arrived and `--fee` is the spread or commission that did not; they are booked
+apart so the cost stays visible after the sleeve removes the conversion itself:
+
+```bash
+maestro cash-flow convert --config <approval-config> \
+  --account-id toss_brokerage \
+  --from-currency KRW --from-amount 1400000 \
+  --to-currency USD --to-amount 995 --fee 5 \
+  --transfer-id fx-2026-08-02 \
+  --reason "convert KRW for US ETF purchase"
+```
+
+`--transfer-id` is required: it is what makes a repeated run a no-op instead of
+converting twice. Pass `--rate` (target-currency units per source-currency
+unit) to have the amounts cross-checked before anything reaches the ledger.
+
+The Toss candidate detector deliberately offers nothing when two currencies
+move in opposite directions over the same window. That is a conversion, and
+confirming either side alone would record a deposit or withdrawal for an
+account whose money never left. Record it with `cash-flow convert` instead.
+
 ## Toss cash ledger operations
 
 Toss `cashBuyingPower` is used only for current order capacity. It is not
@@ -295,8 +374,23 @@ maestro cash-drift report --config <approval-config> \
 ```
 
 The Telegram operator's `/cash_drift` command shows the same suspense rows.
-Its settlement/transfer/unexplained buttons only classify the observation;
-they do not write an account cash flow or alter the ledger.
+Classifying an observation never writes a cash flow or alters the ledger; it
+records what the operator believes caused the difference. The available
+classifications and the flow class each implies:
+
+| Classification | Implies |
+| --- | --- |
+| `settlement_candidate` | nothing — a timing difference, not a flow |
+| `unexplained` | nothing — blocks `--include-cash` adoption |
+| `transfer_candidate` | `external_transfer` |
+| `dividend`, `interest` | `investment_income` |
+| `tax`, `fee` | `cost` |
+| `fx_conversion` | `fx_conversion` |
+
+Classify by cause, not by convenience. `settlement_candidate` is for a broker
+that has not caught up with a fill Maestro already booked — the open
+`toss_brokerage` USD suspense from the 2026-08-02 QQQ disposal is one — and it
+resolves itself once settlement lands.
 
 Normal Toss refreshes backfill OPEN/CLOSED orders automatically and fail closed
 before reconciliation when history cannot be verified. Use this command only
@@ -309,10 +403,20 @@ maestro ledger backfill-orders --config <approval-config> \
 ```
 
 Record an operator-verified deposit or withdrawal through `cash-flow record`.
-It advances the account ledger and emits the audited flow used by baselined TWR.
+It advances the account ledger and emits the audited flow the return is built
+from. Everything it records is an `external_transfer`, or an
+`internal_transfer` when both legs share a `--transfer-id`; it has no option
+for the other classes. Income and costs reach the ledger through the
+cash-drift path below instead, and conversions through `cash-flow convert`.
+
 `adopt-broker-snapshot` preserves ledger cash by default and adopts positions;
 use `--include-cash` only after a non-unexplained classification for the latest
-broker snapshot.
+broker snapshot. Adopting cash moves the ledger without writing a cash flow, so
+the change is never removed from the return — right for a dividend the broker
+reports and Maestro has not booked, wrong for anything that is really an
+external transfer. The adoption event records `ledger_effect`,
+`performance_effect` and the classification it relied on, so a later reader can
+tell an earned amount from a bookkeeping correction.
 Before a live run, confirm the latest reconciliation and that current Toss
 buying power covers each order; buying-power drift alone is observational and
 must not be described as investment return.
@@ -323,6 +427,16 @@ Confirm the one-click amount only after checking the Toss app. Use
 `/cash_flow <proposal_id> <actual_amount>` when it differs, or reject the
 candidate to leave the ledger unchanged. Confirmed candidates are recorded as
 `operator_verified`; Toss still has no broker-verified cash endpoint.
+
+That confirmation is evidence about the moment it was made, not a standing
+guarantee. A later snapshot reads `operator_verified` only while the buying
+power has not moved since; once it moves the snapshot reads `checkpoint_stale`
+until the next confirmation. Staleness follows account activity, not elapsed
+time, so a quiet account does not go stale on its own.
+
+Portfolio-level `broker_cash_verification` reports the weakest account rather
+than "mixed": one account whose cash cannot be verified means the total cannot
+be either. `broker_cash_verification_counts` carries the per-account breakdown.
 
 ## KIS Read-only Reconciliation
 
