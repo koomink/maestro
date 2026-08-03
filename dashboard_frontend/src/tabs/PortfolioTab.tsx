@@ -72,9 +72,6 @@ export function PortfolioTab({
         </div>
         <MetricRows metrics={snapshot.system_verdict.capital_summary.slice(0, 5)} />
       </Panel>
-      <Panel title="Cash Flow" aside={<StatusPill tone="primary">Read-only</StatusPill>}>
-        <CashFlowPanel center={investment.cash_flow_center} period={period} />
-      </Panel>
       <div className="portfolio-matrix-row">
         <Panel title="Account Matrix">
           <AccountMatrixPanel displayCurrency={displayCurrency} investment={investment} />
@@ -84,6 +81,9 @@ export function PortfolioTab({
         </Panel>
         <Panel title="Holdings / Positions">
           <HoldingsTable investment={investment} />
+        </Panel>
+        <Panel title="Cash Flow" aside={<StatusPill tone="primary">Read-only</StatusPill>}>
+          <CashFlowPanel center={investment.cash_flow_center} period={period} />
         </Panel>
       </div>
     </section>
@@ -122,8 +122,10 @@ function CashFlowPanel({ center, period }: { center: CashFlowCenter; period: Per
             account: accountDisplayLabel(row.account_id),
             ccy: row.currency,
             amount: formatValue(row.amount),
-            classification: row.classification,
-            since: String(row.first_observed_at || "").slice(0, 16),
+            // "_candidate" is noise in a narrow column: everything in this
+            // table is a hypothesis awaiting confirmation.
+            classification: String(row.classification || "").replace("_candidate", ""),
+            since: String(row.first_observed_at || "").slice(0, 10),
           }))}
         />
       )}
@@ -141,7 +143,7 @@ function CashFlowPanel({ center, period }: { center: CashFlowCenter; period: Per
               ccy: row.currency,
               amount: formatValue(row.amount),
               type: row.flow_type,
-              seen: String(row.created_at || "").slice(0, 16),
+              seen: String(row.created_at || "").slice(0, 10),
             }))}
           />
           <p className="muted-copy">Confirm in Telegram; this view does not change the ledger.</p>

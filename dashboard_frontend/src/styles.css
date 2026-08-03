@@ -382,9 +382,26 @@ button:disabled { cursor: not-allowed; opacity: 0.45; }
 .portfolio-matrix-row {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 0.9fr) minmax(0, 1.2fr);
+  grid-template-columns:
+    minmax(0, 0.85fr) minmax(0, 0.8fr) minmax(0, 1.1fr) minmax(0, 1fr);
   gap: 8px;
   min-height: 0;
+}
+
+/* Section labels inside a detail panel, matching the operator-brief heading
+   rather than the browser default, which renders as a page-level title. */
+.cash-flow-panel h3 {
+  margin: 10px 0 4px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.cash-flow-panel h3:first-child {
+  margin-top: 0;
 }
 
 .maestro-grid,
