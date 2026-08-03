@@ -1403,8 +1403,18 @@ def build_currency_sleeve_performance_table(
         grouped.setdefault(group_key, []).append(row)
 
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    # A sleeve is denominated in its own currency, so a flow belongs to the
+    # sleeve it is denominated in and needs no conversion.  Reading it off the
+    # broker snapshot and labelling it with the account's single currency put
+    # a USD deposit into the KRW sleeve of any account holding both.
+    cash_flows, cash_flow_reasons = cash_flow_effects_for_scope(
+        load_account_cash_flow_facts(store),
+        CASH_FLOW_SCOPE_CURRENCY_SLEEVE,
+    )
+    cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     state_by_currency: dict[str, dict[str, Any]] = {}
     rows: list[dict[str, Any]] = []
+    previous_timestamp: datetime | None = None
     latest_by_account: OrderedDict[str, dict[str, Any]] = OrderedDict()
     for group_rows in grouped.values():
         for row in group_rows:
@@ -1430,15 +1440,21 @@ def build_currency_sleeve_performance_table(
                 component_cash[currency] = component_cash.get(currency, 0.0) + value
             reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
             reconciliation_statuses.append(_reconciliation_status(reconciliation))
-        for row in group_rows:
-            payload = _mapping(row.get("payload"))
-            account = _mapping(payload.get("account"))
-            currency = _snapshot_currency(account, payload)
-            cash_flow = _first_float(account, payload, ("cash_flow", "net_cash_flow")) or 0.0
-            component_cash_flows[currency] = component_cash_flows.get(currency, 0.0) + cash_flow
+        timestamp = _parse_timestamp(created_at)
+        if previous_timestamp is None:
+            previous_timestamp = timestamp
+        for event in _period_cash_flow_events(cash_flows, previous_timestamp, timestamp):
+            component_cash_flows[event["currency"]] = (
+                component_cash_flows.get(event["currency"], 0.0) + event["signed_amount"]
+            )
+        previous_timestamp = timestamp
 
         combined_reconciliation = _combined_reconciliation_status(reconciliation_statuses)
-        for currency, total_value in component_values.items():
+        # A sleeve can be created by a flow before the broker reports a holding
+        # in it -- a conversion into a currency the account did not hold -- so
+        # the flow decides the row exists just as much as the value does.
+        for currency in sorted(set(component_values) | set(component_cash_flows)):
+            total_value = component_values.get(currency, 0.0)
             state = state_by_currency.setdefault(
                 currency,
                 {
@@ -1458,6 +1474,7 @@ def build_currency_sleeve_performance_table(
                     "total_value": total_value,
                     "cash": component_cash.get(currency),
                     "cash_flow": cash_flow,
+                    "cash_flow_quality": cash_flow_quality,
                     "period_return": performance["period_return"],
                     "daily_return": performance["period_return"],
                     "cumulative_return": performance["cumulative_return"],
@@ -1508,7 +1525,7 @@ def _build_baselined_currency_sleeve_performance_table(
     lifecycle_events = _account_lifecycle_events(store, after=baseline_timestamp)
     cash_flows, cash_flow_reasons = cash_flow_effects_for_scope(
         load_account_cash_flow_facts(store, after=baseline_timestamp),
-        CASH_FLOW_SCOPE_PORTFOLIO,
+        CASH_FLOW_SCOPE_CURRENCY_SLEEVE,
     )
     cash_flow_quality = _cash_flow_quality(cash_flow_reasons)
     reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)

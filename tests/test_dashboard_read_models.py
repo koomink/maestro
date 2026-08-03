@@ -2732,3 +2732,187 @@ def test_a_recorded_conversion_is_neutralised_only_by_a_currency_sleeve(tmp_path
     assert sorted(
         (effect["currency"], effect["signed_amount"]) for effect in effects
     ) == [("KRW", -1_400_000.0), ("USD", 1_000.0)]
+
+
+def _save_multi_currency_snapshot(store, run_id, account_id, cash_by_currency, created_at):
+    store.save_broker_account_snapshot(
+        run_id,
+        account_id,
+        {
+            "account_id": account_id,
+            "account": {
+                "account_id": account_id,
+                "source": "toss_openapi_readonly",
+                "cash": float(cash_by_currency.get("KRW", 0.0)),
+                "cash_by_currency": dict(cash_by_currency),
+                "positions": [],
+            },
+        },
+    )
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE broker_account_snapshots SET created_at = ? WHERE run_id = ?",
+            (created_at, run_id),
+        )
+
+
+def _sleeve_rows(store):
+    return {
+        (row["run_id"], row["currency"]): row
+        for row in build_currency_sleeve_performance_table(store)
+    }
+
+
+def test_a_deposit_lands_only_in_the_sleeve_it_was_denominated_in(tmp_path):
+    """A mixed-currency account has no single currency to label a flow with.
+
+    Reading the flow off the broker snapshot and tagging it with the account's
+    one currency put a USD deposit into the KRW sleeve.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_multi_currency_snapshot(
+        store, "run_1", "toss", {"KRW": 1_000_000.0, "USD": 1_000.0}, "2026-01-01 00:00:00"
+    )
+    _record_cash_flow_event(
+        store,
+        "deposit",
+        {
+            "account_id": "toss",
+            "amount": 500.0,
+            "currency": "USD",
+            "flow_type": "deposit",
+            "flow_class": "external_transfer",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "operator_cli",
+        },
+    )
+    _save_multi_currency_snapshot(
+        store, "run_2", "toss", {"KRW": 1_000_000.0, "USD": 1_500.0}, "2026-01-02 00:00:00"
+    )
+
+    rows = _sleeve_rows(store)
+
+    assert rows[("run_2", "USD")]["cash_flow"] == 500.0
+    assert rows[("run_2", "USD")]["period_return"] == 0.0
+    assert rows[("run_2", "KRW")]["cash_flow"] == 0.0
+    assert rows[("run_2", "KRW")]["period_return"] == 0.0
+
+
+def test_a_conversion_leaves_no_phantom_gain_or_loss_in_either_sleeve(tmp_path):
+    """Only the spread should show, and only where it was paid.
+
+    Each sleeve genuinely lost or gained its whole leg, so a sleeve neutralises
+    the conversion. What is left in the target sleeve is the cost.
+    """
+    from maestro.execution.account_cash_flows import AccountCashFlowService
+    from maestro.monitoring.audit_logger import AuditLogger
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_portfolio_snapshot(
+        "ledger",
+        PortfolioState(cash=1_400_000.0, cash_by_currency={"KRW": 1_400_000.0, "USD": 1_000.0}),
+        account_id="toss",
+    )
+    _save_multi_currency_snapshot(
+        store, "run_1", "toss", {"KRW": 1_400_000.0, "USD": 1_000.0}, "2026-01-01 00:00:00"
+    )
+    AccountCashFlowService(
+        store, AuditLogger(tmp_path / "audit.jsonl")
+    ).record_currency_conversion(
+        account_id="toss",
+        from_currency="KRW",
+        from_amount=1_400_000.0,
+        to_currency="USD",
+        to_amount=995.0,
+        fee=5.0,
+        transfer_id="fx-1",
+        effective_at="2026-01-01T12:00:00+00:00",
+        source="operator_cli",
+    )
+    _save_multi_currency_snapshot(
+        store, "run_2", "toss", {"KRW": 0.0, "USD": 1_995.0}, "2026-01-02 00:00:00"
+    )
+
+    rows = _sleeve_rows(store)
+
+    # The KRW sleeve lost exactly what it converted away, so it lost nothing.
+    assert rows[("run_2", "KRW")]["cash_flow"] == -1_400_000.0
+    assert rows[("run_2", "KRW")]["period_return"] == 0.0
+    # The USD sleeve received the fair amount and paid a 5 USD spread on 1,000.
+    assert rows[("run_2", "USD")]["cash_flow"] == 1_000.0
+    assert rows[("run_2", "USD")]["period_return"] == -0.005
+
+
+def test_income_and_cost_stay_inside_a_sleeve_return(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_multi_currency_snapshot(
+        store, "run_1", "toss", {"USD": 1_000.0}, "2026-01-01 00:00:00"
+    )
+    for run_id, flow_class, flow_type, amount in (
+        ("dividend", "investment_income", "deposit", 50.0),
+        ("withholding", "cost", "withdrawal", 10.0),
+    ):
+        _record_cash_flow_event(
+            store,
+            run_id,
+            {
+                "account_id": "toss",
+                "amount": amount,
+                "currency": "USD",
+                "flow_type": flow_type,
+                "flow_class": flow_class,
+                "effective_at": "2026-01-01T12:00:00+00:00",
+                "source": "test",
+            },
+        )
+    _save_multi_currency_snapshot(
+        store, "run_2", "toss", {"USD": 1_040.0}, "2026-01-02 00:00:00"
+    )
+
+    rows = _sleeve_rows(store)
+
+    assert rows[("run_2", "USD")]["cash_flow"] == 0.0
+    assert rows[("run_2", "USD")]["period_return"] == 0.04
+
+
+def test_sleeve_cash_flow_matches_with_and_without_a_baseline(tmp_path):
+    def build(with_baseline: bool):
+        suffix = "baseline" if with_baseline else "plain"
+        store = StateStore(str(tmp_path / f"sleeve_{suffix}.db"), initial_cash=1000)
+        if with_baseline:
+            store.save_system_event(
+                "baseline",
+                "performance_baseline_adopted",
+                {
+                    "baseline_id": "baseline",
+                    "effective_at": "2026-01-01T00:00:00+00:00",
+                    "accounts": {"toss": {"snapshot_id": 1, "components": {"USD": 1_000.0}}},
+                    "component_values": {"USD": 1_000.0},
+                },
+            )
+        _save_multi_currency_snapshot(
+            store, "run_1", "toss", {"USD": 1_000.0}, "2026-01-01 00:00:01"
+        )
+        _record_cash_flow_event(
+            store,
+            "deposit",
+            {
+                "account_id": "toss",
+                "amount": 500.0,
+                "currency": "USD",
+                "flow_type": "deposit",
+                "flow_class": "external_transfer",
+                "effective_at": "2026-01-01T12:00:00+00:00",
+                "source": "test",
+            },
+        )
+        _save_multi_currency_snapshot(
+            store, "run_2", "toss", {"USD": 1_500.0}, "2026-01-02 00:00:00"
+        )
+        return build_currency_sleeve_performance_table(store)
+
+    baselined = build(True)
+    plain = build(False)
+
+    assert baselined[0]["cash_flow"] == 500.0
+    assert plain[0]["cash_flow"] == 500.0
