@@ -536,6 +536,19 @@ def test_dashboard_snapshot_includes_feature_parity_read_models(tmp_path):
     assert isinstance(payload["investment_console"]["total_portfolio_performance"], list)
     assert isinstance(payload["investment_console"]["total_portfolio_performance_krw"], list)
     assert isinstance(payload["investment_console"]["total_portfolio_performance_usd"], list)
+    cash_flow_center = payload["investment_console"]["cash_flow_center"]
+    assert cash_flow_center["schema_version"] == 1
+    assert cash_flow_center["display_currency"] == "USD"
+    # The unresolved ledger-versus-broker differences had no screen at all
+    # before this key existed, so the snapshot has to carry them.
+    assert set(cash_flow_center) >= {
+        "events",
+        "pending_candidates",
+        "recent_decisions",
+        "unresolved_deltas",
+        "account_statuses",
+        "quality",
+    }
     performance_snapshot = payload["investment_console"]["performance_snapshot"]
     assert performance_snapshot["schema_version"] == 1
     assert performance_snapshot["display_currency"] == "USD"

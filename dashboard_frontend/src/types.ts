@@ -90,6 +90,17 @@ export type RunDetail = {
   strategy_book_snapshots: Row[];
 };
 
+export type CashFlowCenter = {
+  schema_version: number;
+  display_currency: "KRW" | "USD";
+  events: Row[];
+  pending_candidates: Row[];
+  recent_decisions: Row[];
+  unresolved_deltas: Row[];
+  account_statuses: Row[];
+  quality: { status: "ok" | "degraded" | string; reasons: Row[] };
+};
+
 export type AppPerformanceSnapshot = {
   schema_version: number;
   latest: Row;
@@ -186,6 +197,7 @@ export type DashboardSnapshot = {
     account_performance: Row[];
     account_performance_currency?: string;
     currency_sleeve_performance: Row[];
+    cash_flow_center: CashFlowCenter;
     total_portfolio_performance: Row[];
     total_portfolio_performance_krw: Row[];
     total_portfolio_performance_usd: Row[];

@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useState } from "react";
-import type { DashboardSnapshot, Row, Tone } from "../types";
+import type { CashFlowCenter, DashboardSnapshot, Row, Tone } from "../types";
 import { filterByPeriod } from "../utils/data";
 import { formatCompact, formatPercent, formatValue } from "../utils/format";
 import { toneFromValue } from "../utils/tone";
@@ -44,7 +44,11 @@ export function PortfolioTab({
   const yKey = rows.some((row) => Number.isFinite(Number(row.total_value))) ? "total_value" : "current_value";
   return (
     <section className="tab-grid portfolio-grid">
-      <PortfolioKpiStrip performanceRows={investment.total_portfolio_performance} />
+      <PortfolioKpiStrip
+        performanceRows={rows}
+        cashFlowCenter={investment.cash_flow_center}
+        period={period}
+      />
       <Panel title="Portfolio Pulse">
         <PortfolioPulse displayCurrency={displayCurrency} snapshot={snapshot} />
       </Panel>
@@ -53,7 +57,12 @@ export function PortfolioTab({
         title={`Portfolio Value / Return / Cash Flow · ${coverage}`}
         aside={<Segmented values={periods} value={period} onChange={setPeriod} />}
       >
-        <TerminalChart title="Portfolio Value" rows={rows} yKey={yKey} />
+        <TerminalChart
+          title="Portfolio Value"
+          rows={rows}
+          yKey={yKey}
+          markers={filterByPeriod(investment.cash_flow_center.events, period)}
+        />
       </Panel>
       <Panel title="AI Summary" aside={<StatusPill tone="primary">Read-only</StatusPill>}>
         <div className="ai-copy">
@@ -62,6 +71,9 @@ export function PortfolioTab({
           {nextCheck && <p className="ai-next-check">Next: {nextCheck}</p>}
         </div>
         <MetricRows metrics={snapshot.system_verdict.capital_summary.slice(0, 5)} />
+      </Panel>
+      <Panel title="Cash Flow" aside={<StatusPill tone="primary">Read-only</StatusPill>}>
+        <CashFlowPanel center={investment.cash_flow_center} period={period} />
       </Panel>
       <div className="portfolio-matrix-row">
         <Panel title="Account Matrix">
@@ -79,15 +91,114 @@ export function PortfolioTab({
 }
 
 /**
+ * Confirmed flows, candidates still waiting on the operator, and differences
+ * between the ledger and the broker that nobody has explained.
+ *
+ * The unresolved differences lead because they are the ones that disappear
+ * quietly: nothing re-raises a cash change once the balance settles into its
+ * new level, so an operator who missed the Telegram message had no screen that
+ * would tell them anything was outstanding.
+ */
+function CashFlowPanel({ center, period }: { center: CashFlowCenter; period: Period }) {
+  const events = filterByPeriod(center.events, period);
+  const pending = center.pending_candidates.filter((row) => row.status === "pending");
+  const unresolved = center.unresolved_deltas.filter((row) => row.status !== "resolved");
+  return (
+    <div className="cash-flow-panel">
+      {center.quality.status !== "ok" && (
+        <p className="muted-copy">
+          Incomplete: {center.quality.reasons.map((reason) => reason.message).join("; ")}
+        </p>
+      )}
+      <h3>Unresolved differences</h3>
+      {unresolved.length === 0 ? (
+        <p className="muted-copy">None. Ledger and broker cash agree.</p>
+      ) : (
+        <CompactTable
+          columns={["account", "ccy", "amount", "classification", "since"]}
+          dense
+          limit={6}
+          rows={unresolved.map((row) => ({
+            account: accountDisplayLabel(row.account_id),
+            ccy: row.currency,
+            amount: formatValue(row.amount),
+            classification: row.classification,
+            since: String(row.first_observed_at || "").slice(0, 16),
+          }))}
+        />
+      )}
+      <h3>Awaiting confirmation</h3>
+      {pending.length === 0 ? (
+        <p className="muted-copy">None.</p>
+      ) : (
+        <>
+          <CompactTable
+            columns={["account", "ccy", "amount", "type", "seen"]}
+            dense
+            limit={6}
+            rows={pending.map((row) => ({
+              account: accountDisplayLabel(row.account_id),
+              ccy: row.currency,
+              amount: formatValue(row.amount),
+              type: row.flow_type,
+              seen: String(row.created_at || "").slice(0, 16),
+            }))}
+          />
+          <p className="muted-copy">Confirm in Telegram; this view does not change the ledger.</p>
+        </>
+      )}
+      <h3>Recorded flows · {period}</h3>
+      {events.length === 0 ? (
+        <p className="muted-copy">No cash moved in this period.</p>
+      ) : (
+        <CompactTable
+          columns={["when", "account", "amount", "class", "in return", "verified"]}
+          dense
+          limit={10}
+          rows={events.map((row) => ({
+            when: String(row.effective_at || "").slice(0, 16),
+            account: accountDisplayLabel(row.account_id),
+            amount: `${formatValue(row.amount)} ${row.currency}`,
+            class: row.flow_class,
+            // The one thing a reader cannot infer: whether performance treats
+            // this as the investor's money or the portfolio's own.
+            "in return": row.neutralised_in_return ? "removed" : "kept",
+            verified: row.verification ?? "n/a",
+          }))}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
  * Top-line performance KPIs from the total-portfolio performance read model:
  * NAV, latest period return, cumulative return, drawdown, reconciliation.
  */
-function PortfolioKpiStrip({ performanceRows }: { performanceRows: Row[] }) {
+function PortfolioKpiStrip({
+  performanceRows,
+  cashFlowCenter,
+  period,
+}: {
+  performanceRows: Row[];
+  cashFlowCenter: CashFlowCenter;
+  period: Period;
+}) {
   const latest = performanceRows[0] || {};
   const periodReturn = numeric(latest.daily_return ?? latest.period_return);
   const cumulativeReturn = numeric(latest.cumulative_return);
   const drawdown = numeric(latest.drawdown);
-  const cashFlow = numeric(latest.cash_flow);
+  // Summed over the selected period rather than read off the newest snapshot:
+  // sitting beside a 1M/3M selector, a single interval's figure reads as the
+  // period total and is wrong by however much moved earlier in it.
+  const periodEvents = filterByPeriod(cashFlowCenter.events, period).filter(
+    (event) => event.neutralised_in_return,
+  );
+  const flows = periodEvents.map((event) => numeric(event.display_amount) ?? 0);
+  const unconverted = periodEvents.some((event) => numeric(event.display_amount) == null);
+  const netFlow = unconverted ? null : flows.reduce((total, value) => total + value, 0);
+  const deposits = flows.filter((value) => value > 0).reduce((a, b) => a + b, 0);
+  const withdrawals = flows.filter((value) => value < 0).reduce((a, b) => a + b, 0);
   const totalValue = numeric(latest.total_value);
   const currency = String(latest.currency || latest.display_currency || "");
   const reconciliation = String(latest.reconciliation_status || "n/a");
@@ -107,7 +218,7 @@ function PortfolioKpiStrip({ performanceRows }: { performanceRows: Row[] }) {
       <KpiCard
         label="Cumulative Return"
         value={cumulativeReturn == null ? "n/a" : formatPercent(cumulativeReturn)}
-        caption="net of cash flows"
+        caption="external flows removed"
         tone={returnTone(cumulativeReturn)}
       />
       <KpiCard
@@ -117,9 +228,17 @@ function PortfolioKpiStrip({ performanceRows }: { performanceRows: Row[] }) {
         tone={drawdown != null && drawdown < 0 ? "danger" : "neutral"}
       />
       <KpiCard
-        label="Period Cash Flow"
-        value={cashFlow == null ? "n/a" : `${formatCompact(cashFlow)} ${currency}`.trim()}
-        caption="deposits / withdrawals"
+        label={`Net Cash Flow · ${period}`}
+        value={
+          netFlow == null
+            ? "fx missing"
+            : `${formatCompact(netFlow)} ${cashFlowCenter.display_currency}`.trim()
+        }
+        caption={
+          netFlow == null
+            ? "no rate for every flow"
+            : `+${formatCompact(deposits)} / ${formatCompact(withdrawals)}`
+        }
       />
       <KpiCard
         label="Reconciliation"

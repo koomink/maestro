@@ -310,6 +310,25 @@ maestro cash-flow record --config <approval-config> \
   --reason "005930 dividend"
 ```
 
+### Reading it on the dashboard
+
+The Portfolio tab's Cash Flow panel is the one place all of this is visible.
+It is read-only; confirming still happens in Telegram.
+
+- **Unresolved differences** come first because they are the ones that vanish
+  quietly. Nothing re-raises a cash change once the balance settles into its new
+  level, so an operator who missed the Telegram message would otherwise never
+  learn anything was outstanding. Clear them with `/cash_drift`.
+- **Awaiting confirmation** lists candidates no one has answered.
+- **Recorded flows** shows each confirmed flow with its class and, in the
+  `in return` column, whether performance removed it. That column is the one
+  thing that cannot be inferred from the amount.
+
+`Net Cash Flow` in the KPI strip is the total for the selected period, not the
+newest interval, and counts only flows that performance removed. It reads
+`fx missing` rather than a smaller number when a rate is unavailable for any
+flow in the period.
+
 ### Linked flows
 
 `internal_transfer` and `fx_conversion` only mean anything as a pair. Both legs

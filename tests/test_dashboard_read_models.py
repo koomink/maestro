@@ -2916,3 +2916,134 @@ def test_sleeve_cash_flow_matches_with_and_without_a_baseline(tmp_path):
 
     assert baselined[0]["cash_flow"] == 500.0
     assert plain[0]["cash_flow"] == 500.0
+
+
+def test_cash_flow_center_surfaces_unresolved_ledger_broker_differences(tmp_path):
+    """The open difference had no screen at all before this.
+
+    Nothing re-raises a cash change once the balance settles into its new level,
+    so an operator who missed the Telegram message had no way to find out.
+    """
+    from maestro.dashboard.read_models import build_cash_flow_center
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.upsert_cash_suspense(
+        account_id="toss_brokerage",
+        currency="USD",
+        amount=-261.18,
+        snapshot_id=1417,
+        observed_at="2026-08-02T11:00:14+00:00",
+    )
+
+    center = build_cash_flow_center(store)
+
+    assert len(center["unresolved_deltas"]) == 1
+    delta = center["unresolved_deltas"][0]
+    assert delta["account_id"] == "toss_brokerage"
+    assert delta["amount"] == -261.18
+    assert delta["classification"] == "unexplained"
+    assert delta["status"] == "open"
+
+
+def test_cash_flow_center_says_which_flows_performance_removed(tmp_path):
+    """A reader cannot infer this, and getting it backwards is the whole risk."""
+    from maestro.dashboard.read_models import build_cash_flow_center
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for run_id, flow_class in (("deposit", "external_transfer"), ("dividend", "investment_income")):
+        _record_cash_flow_event(
+            store,
+            run_id,
+            {
+                "account_id": "acct",
+                "amount": 500.0,
+                "currency": "KRW",
+                "flow_type": "deposit",
+                "flow_class": flow_class,
+                "effective_at": "2026-01-01T12:00:00+00:00",
+                "source": "test",
+            },
+        )
+
+    center = build_cash_flow_center(store)
+
+    by_class = {event["flow_class"]: event for event in center["events"]}
+    assert by_class["external_transfer"]["neutralised_in_return"] is True
+    assert by_class["investment_income"]["neutralised_in_return"] is False
+
+
+def test_cash_flow_center_separates_pending_candidates_from_decided_ones(tmp_path):
+    from maestro.dashboard.read_models import build_cash_flow_center
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for proposal_id, account_id in (("p1", "acct_a"), ("p2", "acct_b")):
+        store.save_system_event(
+            proposal_id,
+            "account_cash_flow_proposal",
+            {
+                "proposal_id": proposal_id,
+                "account_id": account_id,
+                "amount": 1_000.0,
+                "currency": "KRW",
+                "flow_type": "deposit",
+                "effective_at": "2026-01-01T00:00:00+00:00",
+            },
+        )
+    store.save_system_event(
+        "ack",
+        "account_cash_flow_proposal_ack",
+        {"proposal_id": "p1", "status": "rejected", "decided_by": "operator"},
+    )
+
+    center = build_cash_flow_center(store)
+
+    assert [row["proposal_id"] for row in center["pending_candidates"]] == ["p2"]
+    assert center["pending_candidates"][0]["confirm_in"] == "telegram"
+    assert [row["status"] for row in center["recent_decisions"]] == ["rejected"]
+
+
+def test_cash_flow_center_marks_a_replaced_candidate_superseded(tmp_path):
+    from maestro.dashboard.read_models import build_cash_flow_center
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    for proposal_id in ("older", "newer"):
+        store.save_system_event(
+            proposal_id,
+            "account_cash_flow_proposal",
+            {
+                "proposal_id": proposal_id,
+                "account_id": "acct",
+                "amount": 1_000.0,
+                "currency": "KRW",
+                "flow_type": "deposit",
+                "effective_at": "2026-01-01T00:00:00+00:00",
+            },
+        )
+
+    center = build_cash_flow_center(store)
+
+    statuses = {row["proposal_id"]: row["status"] for row in center["pending_candidates"]}
+    assert statuses == {"newer": "pending", "older": "superseded"}
+
+
+def test_cash_flow_center_reports_each_account_cash_basis(tmp_path):
+    from maestro.dashboard.read_models import build_cash_flow_center
+
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_portfolio_snapshot(
+        "ledger",
+        PortfolioState(cash=1_000.0, cash_by_currency={"KRW": 1_000.0}, positions={}),
+        account_id="toss_brokerage",
+    )
+    _save_multi_currency_snapshot(
+        store, "run_1", "toss_brokerage", {"KRW": 1_000.0}, "2026-01-02 00:00:00"
+    )
+    with store._connect() as conn:
+        conn.execute("UPDATE portfolio_snapshots SET created_at = '2026-01-01 00:00:00'")
+
+    center = build_cash_flow_center(store)
+
+    status = center["account_statuses"][0]
+    assert status["account_id"] == "toss_brokerage"
+    assert status["cash_basis"] == "proxy"
+    assert status["ledger_status"] == "confirmed"

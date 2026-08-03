@@ -2090,6 +2090,196 @@ def _build_baselined_total_portfolio_performance_table(
     return list(reversed(rows))
 
 
+def build_cash_flow_center(
+    store: StateStore,
+    config: MaestroConfig | None = None,
+    display_currency: str = "KRW",
+) -> dict[str, Any]:
+    """Everything known about money entering and leaving, in one place.
+
+    The pieces already existed and were scattered: confirmed flows lived inside
+    performance rows, candidates awaiting confirmation lived only in Telegram,
+    and the unresolved ledger-versus-broker differences in ``cash_suspense``
+    were not surfaced anywhere at all. An operator who missed a Telegram message
+    had no screen that would tell them so.
+
+    Events are pre-converted here rather than in the browser, each at the rate
+    of its own moment, so the figures agree with the ones the returns were
+    built from.
+    """
+    fx_events = _fx_rate_events(store)
+    facts = load_account_cash_flow_facts(store)
+    neutralised, reasons = cash_flow_effects_for_scope(facts, CASH_FLOW_SCOPE_PORTFOLIO)
+    neutralised_run_ids = {
+        str(_mapping(fact["payload"]).get("run_id")) for fact in neutralised
+    }
+
+    events = []
+    for fact in facts:
+        payload = _mapping(fact["payload"])
+        event_fx = _fx_snapshot_as_of(fx_events, fact["timestamp"])
+        converted = _convert_components(
+            {fact["currency"]: fact["signed_amount"]},
+            display_currency,
+            event_fx,
+        )
+        events.append(
+            {
+                "run_id": payload.get("run_id"),
+                "account_id": fact["account_id"],
+                "effective_at": payload.get("effective_at"),
+                "amount": fact["signed_amount"],
+                "currency": fact["currency"],
+                "display_amount": _round_money(converted) if converted is not None else None,
+                "display_currency": display_currency,
+                "fx_rate": _fx_rate(fact["currency"], display_currency, event_fx),
+                "flow_type": payload.get("flow_type"),
+                "flow_class": fact["flow_class"],
+                "verification": payload.get("verification"),
+                "source": payload.get("source"),
+                "decided_by": payload.get("decided_by"),
+                "transfer_id": payload.get("transfer_id"),
+                # Whether the portfolio return treats this as money crossing its
+                # edge. Without it a reader cannot tell why a dividend shows up
+                # in the return and a deposit does not.
+                "neutralised_in_return": str(payload.get("run_id")) in neutralised_run_ids,
+            }
+        )
+    events.reverse()
+
+    pending, decisions = _cash_flow_proposal_states(store)
+    return {
+        "schema_version": 1,
+        "display_currency": display_currency,
+        "events": events,
+        "pending_candidates": pending,
+        "recent_decisions": decisions[:20],
+        "unresolved_deltas": _unresolved_cash_deltas(store),
+        "account_statuses": _cash_flow_account_statuses(store, config),
+        "quality": _cash_flow_quality(reasons),
+    }
+
+
+def _cash_flow_proposal_states(
+    store: StateStore,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Candidates still awaiting an operator, and what was decided recently.
+
+    A candidate the operator never answered is the one that matters: nothing
+    else in the system will raise it again once the balance settles into its
+    new level.
+    """
+    acks: dict[str, dict[str, Any]] = {}
+    decisions = []
+    for row in store.list_system_events_by_type(
+        SystemEventType.ACCOUNT_CASH_FLOW_PROPOSAL_ACK, limit=1000
+    ):
+        payload = _mapping(row.get("payload"))
+        proposal_id = str(payload.get("proposal_id") or "")
+        if not proposal_id or proposal_id in acks:
+            continue
+        acks[proposal_id] = payload
+        decisions.append(
+            {
+                "proposal_id": proposal_id,
+                "status": payload.get("status"),
+                "decided_by": payload.get("decided_by"),
+                "decided_at": row.get("created_at"),
+            }
+        )
+
+    seen: set[str] = set()
+    pending = []
+    for row in store.list_system_events_by_type(
+        SystemEventType.ACCOUNT_CASH_FLOW_PROPOSAL, limit=1000
+    ):
+        payload = _mapping(row.get("payload"))
+        proposal_id = str(payload.get("proposal_id") or "")
+        if not proposal_id or proposal_id in acks:
+            continue
+        key = f"{payload.get('account_id')}:{payload.get('currency')}"
+        # Rows arrive newest first, so a later proposal for the same account and
+        # currency has already replaced anything older.
+        status = "pending" if key not in seen else "superseded"
+        seen.add(key)
+        pending.append(
+            {
+                "proposal_id": proposal_id,
+                "status": status,
+                "account_id": payload.get("account_id"),
+                "amount": payload.get("amount"),
+                "currency": payload.get("currency"),
+                "flow_type": payload.get("flow_type"),
+                "source": payload.get("source"),
+                "effective_at": payload.get("effective_at"),
+                "created_at": row.get("created_at"),
+                "evidence": payload.get("evidence") or {},
+                "confirm_in": "telegram",
+            }
+        )
+    return pending, decisions
+
+
+def _unresolved_cash_deltas(store: StateStore) -> list[dict[str, Any]]:
+    """Ledger-versus-broker differences nobody has explained yet."""
+    return [
+        {
+            "account_id": row.get("account_id"),
+            "currency": row.get("currency"),
+            "amount": _float_or_none(row.get("amount")),
+            "classification": row.get("candidate_label"),
+            "status": row.get("status"),
+            "first_observed_at": row.get("first_observed_at"),
+            "last_observed_at": row.get("last_observed_at"),
+            "last_snapshot_id": row.get("last_snapshot_id"),
+        }
+        for row in store.list_cash_suspense()
+    ]
+
+
+def _cash_flow_account_statuses(
+    store: StateStore,
+    config: MaestroConfig | None,
+) -> list[dict[str, Any]]:
+    disabled_ids = _disabled_native_account_ids(config)
+    rows = [
+        row
+        for row in store.list_broker_account_snapshots(limit=200)
+        if _broker_snapshot_account_id(row) not in disabled_ids
+    ]
+    rows = _broker_rows_with_ledger_cash(store, rows)
+    reconciliation_by_snapshot_id = _reconciliation_by_snapshot_id(store)
+    deltas_by_account: dict[str, list[dict[str, Any]]] = {}
+    for delta in _unresolved_cash_deltas(store):
+        deltas_by_account.setdefault(str(delta["account_id"]), []).append(delta)
+
+    statuses: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        account_id = _broker_snapshot_account_id(row)
+        if account_id in statuses:
+            continue
+        account = _mapping(_mapping(row.get("payload")).get("account"))
+        source = str(account.get("source") or "")
+        reconciliation = reconciliation_by_snapshot_id.get(str(row.get("id")))
+        statuses[account_id] = {
+            "account_id": account_id,
+            "source": source,
+            # Toss publishes buying power and no settled-cash endpoint, so its
+            # cash is a proxy however recently it was confirmed.
+            "cash_basis": "proxy" if source.startswith("toss_") else "broker_reported",
+            "cash_verification": account.get("broker_cash_verification", "unavailable"),
+            "ledger_status": (
+                "confirmed"
+                if account.get("ledger_cash_by_currency") is not None
+                else "provisional"
+            ),
+            "reconciliation_status": _reconciliation_status(reconciliation),
+            "last_snapshot_at": row.get("created_at"),
+            "unresolved_deltas": deltas_by_account.get(account_id, []),
+        }
+    return list(statuses.values())
+
+
 def build_fx_rate_snapshot_card(store: StateStore) -> dict[str, Any]:
     latest = store.load_latest_system_event("fx_rate_snapshot")
     if latest is None:
