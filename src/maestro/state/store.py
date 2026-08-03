@@ -421,80 +421,125 @@ class StateStore:
     ) -> None:
         self._insert("portfolio_snapshots", run_id, account_id, state.model_dump(mode="json"))
 
-    def apply_account_cash_flow(
+    def apply_account_cash_flows(
         self,
         run_id: str,
-        account_id: str,
-        amount: float,
-        currency: str,
-        *,
-        event_payload: dict[str, Any],
+        legs: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Apply a verified external cash flow to the account ledger.
+        """Apply linked cash-flow legs to their account ledgers in one transaction.
 
         Broker snapshots are never used as a cash source here.  The method
         advances the latest account-scoped ledger state and leaves the global
         portfolio snapshot untouched; fills continue to update both views via
         ``apply_fill_reconciliation``.
 
-        The ledger row and the ``account_cash_flow`` event are written in one
-        transaction.  Splitting them leaves a crash window where the ledger has
-        already moved but the event that records it does not exist, so the
-        duplicate-key retry finds nothing and applies the same flow twice.
+        A conversion or an account-to-account transfer only means anything as a
+        set: money leaves one side and arrives on the other.  Writing the legs
+        separately permits a state where one side moved and the other did not,
+        which reads as money appearing or vanishing.  Ledger rows and the events
+        that explain them are therefore all written together, so a crash leaves
+        the ledger exactly where it started and the retry is safe.
+
+        Each leg is ``{account_id, amount, currency, event_payload}`` with a
+        signed amount.  Legs are grouped per account so an account advances
+        through one ledger state carrying every currency delta applied to it.
         """
-        normalized_currency = str(currency).upper()
-        duplicate_key = _system_event_duplicate_key(event_payload)
-        payload_json = json.dumps(event_payload, default=str)
-        with self.writer_lock("apply_account_cash_flow"):
+        if not legs:
+            raise ValueError("at least one cash-flow leg is required")
+        prepared = [
+            {
+                "account_id": str(leg["account_id"]),
+                "amount": float(leg["amount"]),
+                "currency": str(leg["currency"]).upper(),
+                "payload": leg["event_payload"],
+                "duplicate_key": _system_event_duplicate_key(leg["event_payload"]),
+            }
+            for leg in legs
+        ]
+        duplicate_keys = [leg["duplicate_key"] for leg in prepared if leg["duplicate_key"]]
+        with self.writer_lock("apply_account_cash_flows"):
             with self._connect() as conn:
-                row = conn.execute(
-                    "SELECT payload FROM portfolio_snapshots "
-                    "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
-                    (account_id,),
-                ).fetchone()
-                if row is None:
-                    return {"ledger_established": False, "created": False, "run_id": ""}
-                if duplicate_key is not None:
-                    existing = conn.execute(
-                        "SELECT run_id FROM system_events WHERE duplicate_key = ? LIMIT 1",
-                        (duplicate_key,),
+                states: dict[str, PortfolioState] = {}
+                for account_id in dict.fromkeys(leg["account_id"] for leg in prepared):
+                    row = conn.execute(
+                        "SELECT payload FROM portfolio_snapshots "
+                        "WHERE account_id = ? ORDER BY id DESC LIMIT 1",
+                        (account_id,),
                     ).fetchone()
-                    if existing is not None:
+                    if row is None:
+                        return {
+                            "ledger_established": False,
+                            "missing_account_id": account_id,
+                            "created": False,
+                            "run_id": "",
+                        }
+                    states[account_id] = PortfolioState.model_validate(json.loads(row[0]))
+                if duplicate_keys:
+                    existing = conn.execute(
+                        "SELECT duplicate_key, run_id FROM system_events "
+                        f"WHERE duplicate_key IN ({','.join('?' * len(duplicate_keys))})",
+                        duplicate_keys,
+                    ).fetchall()
+                    if len(existing) == len(duplicate_keys):
                         return {
                             "ledger_established": True,
+                            "missing_account_id": None,
                             "created": False,
-                            "run_id": str(existing[0] or ""),
+                            "run_id": str(existing[0][1] or ""),
                         }
-                state = PortfolioState.model_validate(json.loads(row[0]))
-                cash_by_currency = dict(state.cash_by_currency)
-                if not cash_by_currency:
-                    cash_by_currency = {normalized_currency: float(state.cash)}
-                cash_by_currency[normalized_currency] = (
-                    float(cash_by_currency.get(normalized_currency, 0.0)) + float(amount)
-                )
-                if "KRW" in cash_by_currency:
-                    cash = float(cash_by_currency["KRW"])
-                else:
-                    cash = float(sum(cash_by_currency.values()))
-                next_state = state.model_copy(
-                    update={"cash": cash, "cash_by_currency": cash_by_currency},
-                    deep=True,
-                )
-                conn.execute(
-                    "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
-                    "VALUES (?, ?, ?)",
-                    (
-                        run_id,
-                        account_id,
-                        json.dumps(next_state.model_dump(mode="json"), default=str),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO system_events "
-                    "(run_id, event_type, payload, duplicate_key) VALUES (?, ?, ?, ?)",
-                    (run_id, "account_cash_flow", payload_json, duplicate_key),
-                )
-                return {"ledger_established": True, "created": True, "run_id": run_id}
+                    if existing:
+                        # Half of this set is already on the ledger.  Applying the
+                        # rest would complete a transfer the operator never asked
+                        # for twice over, so refuse rather than guess.
+                        raise ValueError(
+                            "cash-flow legs conflict with an existing partial record: "
+                            f"{sorted(str(row[0]) for row in existing)}"
+                        )
+                for account_id, state in states.items():
+                    cash_by_currency = dict(state.cash_by_currency)
+                    for leg in prepared:
+                        if leg["account_id"] != account_id:
+                            continue
+                        currency = leg["currency"]
+                        if not cash_by_currency:
+                            cash_by_currency = {currency: float(state.cash)}
+                        cash_by_currency[currency] = (
+                            float(cash_by_currency.get(currency, 0.0)) + leg["amount"]
+                        )
+                    if "KRW" in cash_by_currency:
+                        cash = float(cash_by_currency["KRW"])
+                    else:
+                        cash = float(sum(cash_by_currency.values()))
+                    next_state = state.model_copy(
+                        update={"cash": cash, "cash_by_currency": cash_by_currency},
+                        deep=True,
+                    )
+                    conn.execute(
+                        "INSERT INTO portfolio_snapshots (run_id, account_id, payload) "
+                        "VALUES (?, ?, ?)",
+                        (
+                            run_id,
+                            account_id,
+                            json.dumps(next_state.model_dump(mode="json"), default=str),
+                        ),
+                    )
+                for leg in prepared:
+                    conn.execute(
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key) VALUES (?, ?, ?, ?)",
+                        (
+                            run_id,
+                            "account_cash_flow",
+                            json.dumps(leg["payload"], default=str),
+                            leg["duplicate_key"],
+                        ),
+                    )
+                return {
+                    "ledger_established": True,
+                    "missing_account_id": None,
+                    "created": True,
+                    "run_id": run_id,
+                }
 
     def upsert_cash_suspense(
         self,

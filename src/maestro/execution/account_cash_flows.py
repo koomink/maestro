@@ -94,12 +94,16 @@ class AccountCashFlowService:
         }
         # The ledger row and the event are written together; the store reports
         # back whether this call was the one that created them.
-        result = self.store.apply_account_cash_flow(
+        result = self.store.apply_account_cash_flows(
             run_id,
-            account_id,
-            signed_amount,
-            normalized_currency,
-            event_payload=payload,
+            [
+                {
+                    "account_id": account_id,
+                    "amount": signed_amount,
+                    "currency": normalized_currency,
+                    "event_payload": payload,
+                }
+            ],
         )
         if not result["ledger_established"]:
             raise ValueError(

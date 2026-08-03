@@ -339,3 +339,174 @@ def test_leg_duplicate_keys_separate_the_sides_of_a_transfer():
     # Case differences must not create a second key for the same leg.
     normalized = account_cash_flow_leg_duplicate_key("t1", "acct_from", "KRW", "withdrawal")
     assert outbound == normalized
+
+
+class _NthEventInsertFailingConnection:
+    """Connection proxy that fails on the Nth cash-flow event insert."""
+
+    def __init__(self, conn: sqlite3.Connection, counter: list[int], fail_on: int) -> None:
+        self._conn = conn
+        self._counter = counter
+        self._fail_on = fail_on
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._conn.__exit__(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def execute(self, sql, *args):
+        if "INSERT INTO system_events" in sql:
+            self._counter[0] += 1
+            if self._counter[0] == self._fail_on:
+                raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+
+def _conversion_legs(account_id: str) -> list[dict]:
+    """One account converting KRW into USD, as two linked legs."""
+    return [
+        {
+            "account_id": account_id,
+            "amount": -1_400_000.0,
+            "currency": "KRW",
+            "event_payload": {
+                "account_id": account_id,
+                "amount": -1_400_000.0,
+                "currency": "KRW",
+                "flow_type": "withdrawal",
+                "flow_class": "fx_conversion",
+                "effective_at": "2026-08-02T12:00:00+00:00",
+                "source": "operator_cli",
+                "transfer_id": "fx-1",
+                "duplicate_key": account_cash_flow_leg_duplicate_key(
+                    "fx-1", account_id, "KRW", "withdrawal"
+                ),
+            },
+        },
+        {
+            "account_id": account_id,
+            "amount": 1_000.0,
+            "currency": "USD",
+            "event_payload": {
+                "account_id": account_id,
+                "amount": 1_000.0,
+                "currency": "USD",
+                "flow_type": "deposit",
+                "flow_class": "fx_conversion",
+                "effective_at": "2026-08-02T12:00:00+00:00",
+                "source": "operator_cli",
+                "transfer_id": "fx-1",
+                "duplicate_key": account_cash_flow_leg_duplicate_key(
+                    "fx-1", account_id, "USD", "deposit"
+                ),
+            },
+        },
+    ]
+
+
+def test_linked_legs_land_on_one_ledger_state(tmp_path):
+    """Both currency deltas of a conversion advance the account together."""
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=1_400_000, cash_by_currency={"KRW": 1_400_000, "USD": 0.0}),
+        account_id="toss_brokerage",
+    )
+
+    result = store.apply_account_cash_flows("run_1", _conversion_legs("toss_brokerage"))
+
+    assert result["created"] is True
+    state = store.load_latest_account_portfolio_state("toss_brokerage")
+    assert state.cash_by_currency["KRW"] == 0.0
+    assert state.cash_by_currency["USD"] == 1_000.0
+    assert len(store.list_system_events_by_type("account_cash_flow", limit=10)) == 2
+
+
+def test_a_failed_leg_rolls_back_every_other_leg(tmp_path, monkeypatch):
+    """Half a conversion is money vanishing, so no leg may survive alone."""
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=1_400_000, cash_by_currency={"KRW": 1_400_000, "USD": 0.0}),
+        account_id="toss_brokerage",
+    )
+    real_connect = StateStore._connect
+    counter = [0]
+
+    def failing_connect(self):
+        return _NthEventInsertFailingConnection(real_connect(self), counter, fail_on=2)
+
+    monkeypatch.setattr(StateStore, "_connect", failing_connect)
+    with pytest.raises(sqlite3.OperationalError):
+        store.apply_account_cash_flows("run_1", _conversion_legs("toss_brokerage"))
+    monkeypatch.undo()
+
+    state = store.load_latest_account_portfolio_state("toss_brokerage")
+    assert state.cash_by_currency["KRW"] == 1_400_000
+    assert state.cash_by_currency["USD"] == 0.0
+    assert store.list_system_events_by_type("account_cash_flow", limit=10) == []
+
+
+def test_replaying_a_whole_linked_set_applies_nothing_new(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=1_400_000, cash_by_currency={"KRW": 1_400_000, "USD": 0.0}),
+        account_id="toss_brokerage",
+    )
+    legs = _conversion_legs("toss_brokerage")
+
+    first = store.apply_account_cash_flows("run_1", legs)
+    second = store.apply_account_cash_flows("run_2", legs)
+
+    assert first["created"] is True
+    assert second["created"] is False
+    assert second["run_id"] == "run_1"
+    state = store.load_latest_account_portfolio_state("toss_brokerage")
+    assert state.cash_by_currency["KRW"] == 0.0
+    assert state.cash_by_currency["USD"] == 1_000.0
+
+
+def test_a_partially_recorded_linked_set_is_refused(tmp_path):
+    """Completing a half-recorded set would apply the missing side unasked."""
+    store = StateStore(str(tmp_path / "state.db"))
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=1_400_000, cash_by_currency={"KRW": 1_400_000, "USD": 0.0}),
+        account_id="toss_brokerage",
+    )
+    legs = _conversion_legs("toss_brokerage")
+    store.apply_account_cash_flows("run_1", legs[:1])
+
+    with pytest.raises(ValueError, match="partial record"):
+        store.apply_account_cash_flows("run_2", legs)
+
+
+def test_a_leg_on_an_unopened_ledger_names_the_account(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _open_ledger(store, "acct_from", 1_000_000)
+    legs = [
+        {
+            "account_id": "acct_from",
+            "amount": -250_000.0,
+            "currency": "KRW",
+            "event_payload": {"account_id": "acct_from", "duplicate_key": "leg:a"},
+        },
+        {
+            "account_id": "acct_missing",
+            "amount": 250_000.0,
+            "currency": "KRW",
+            "event_payload": {"account_id": "acct_missing", "duplicate_key": "leg:b"},
+        },
+    ]
+
+    result = store.apply_account_cash_flows("run_1", legs)
+
+    assert result["ledger_established"] is False
+    assert result["missing_account_id"] == "acct_missing"
+    assert _ledger_krw(store, "acct_from") == 1_000_000
