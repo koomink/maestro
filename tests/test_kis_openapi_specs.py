@@ -211,6 +211,51 @@ class TokenTransport:
         return {"access_token": "issued-token", "access_token_token_expired": "2099-01-01 00:00:00"}
 
 
+def test_no_stock_account_endpoint_reports_why_cash_moved():
+    """Pins the survey in docs/kis_cash_transaction_api_survey.md.
+
+    Classifying a KIS cash change automatically would need the broker to say
+    what caused it. No stock-account endpoint does, so operator confirmation is
+    not a stopgap but the only route the broker offers. If a newer workbook adds
+    one, this fails and the survey is revisited.
+    """
+    catalog = _api_catalog_rows()
+
+    # Named a transaction history, but the request filters by buy/sell and every
+    # field is trade-shaped, so it reports only what fills already explain.
+    assert catalog["해외주식 일별거래내역"] == {
+        "method": "GET",
+        "url": "/uapi/overseas-stock/v1/trading/inquire-period-trans",
+        "real_tr_id": "CTOS4001R",
+        "demo_tr_id": "모의투자 미지원",
+    }
+    # The shape we wanted -- ACNT_TR_TYPE_CD 2 is 입출금 -- exists only for
+    # overseas futures and options, which Maestro does not trade.
+    assert catalog["해외선물옵션 기간계좌거래내역"] == {
+        "method": "GET",
+        "url": "/uapi/overseas-futureoption/v1/trading/inquire-period-trans",
+        "real_tr_id": "OTFM3114R",
+        "demo_tr_id": "모의투자 미지원",
+    }
+    # Account-scoped domestic corporate actions: can corroborate a dividend,
+    # cannot confirm the cash line on its own.
+    assert catalog["기간별계좌권리현황조회"] == {
+        "method": "GET",
+        "url": "/uapi/domestic-stock/v1/trading/period-rights",
+        "real_tr_id": "CTRGA011R",
+        "demo_tr_id": "모의투자 미지원",
+    }
+    # None of these can be exercised against the mock environment, so a response
+    # fixture needs a live account.
+    for name in (
+        "해외주식 일별거래내역",
+        "해외선물옵션 기간계좌거래내역",
+        "기간별계좌권리현황조회",
+        "기간별매매손익현황조회",
+    ):
+        assert catalog[name]["demo_tr_id"] == "모의투자 미지원", name
+
+
 def _api_catalog_rows() -> dict[str, dict[str, str]]:
     workbook = _openapi_workbook_path()
     with ZipFile(workbook) as archive:
