@@ -1,12 +1,14 @@
 import sqlite3
+from datetime import timedelta
 
 import pytest
 
+from maestro.core.clock import utc_now
 from maestro.execution.account_cash_flows import (
     AccountCashFlowService,
     account_cash_flow_leg_duplicate_key,
 )
-from maestro.execution.cash_flow_candidates import TossCashFlowCandidateDetector
+from maestro.execution.cash_flow_candidates import CashFlowCandidateDetector
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -47,7 +49,7 @@ def test_detects_stable_toss_buying_power_step(tmp_path):
     _save_toss_snapshot(store, "changed-2", 2_000_000)
     _save_toss_snapshot(store, "changed-3", 2_000_000)
 
-    candidate = TossCashFlowCandidateDetector(store).detect("toss_brokerage")
+    candidate = CashFlowCandidateDetector(store).detect("toss_brokerage")
 
     assert candidate is not None
     assert candidate.flow_type == "deposit"
@@ -67,7 +69,7 @@ def test_rejects_candidate_when_orders_change(tmp_path):
     )
     _save_toss_snapshot(store, "changed-3", 2_000_000)
 
-    assert TossCashFlowCandidateDetector(store).detect("toss_brokerage") is None
+    assert CashFlowCandidateDetector(store).detect("toss_brokerage") is None
 
 
 def test_account_cash_flow_service_is_idempotent(tmp_path):
@@ -143,7 +145,7 @@ def test_opposite_sign_currency_moves_are_not_offered_as_a_cash_flow(tmp_path):
     for run_id in ("changed-1", "changed-2", "changed-3"):
         _save_toss_snapshot_multi(store, run_id, {"KRW": 100_000.0, "USD": 1_100.0})
 
-    assert TossCashFlowCandidateDetector(store).detect("toss_brokerage") is None
+    assert CashFlowCandidateDetector(store).detect("toss_brokerage") is None
 
 
 def test_same_sign_currency_moves_still_produce_a_candidate(tmp_path):
@@ -153,7 +155,7 @@ def test_same_sign_currency_moves_still_produce_a_candidate(tmp_path):
     for run_id in ("changed-1", "changed-2", "changed-3"):
         _save_toss_snapshot_multi(store, run_id, {"KRW": 200_000.0, "USD": 200.0})
 
-    candidate = TossCashFlowCandidateDetector(store).detect("toss_brokerage")
+    candidate = CashFlowCandidateDetector(store).detect("toss_brokerage")
 
     assert candidate is not None
     assert candidate.flow_type == "deposit"
@@ -563,9 +565,7 @@ def test_a_conversion_books_the_spread_apart_from_the_principal(tmp_path):
     assert by_class["cost"][0]["amount"] == -5.0
     assert by_class["cost"][0]["currency"] == "USD"
     # Every leg lands in the same performance period.
-    assert {event["payload"]["effective_at"] for event in events} == {
-        "2026-08-02T12:00:00+00:00"
-    }
+    assert {event["payload"]["effective_at"] for event in events} == {"2026-08-02T12:00:00+00:00"}
 
 
 def test_a_conversion_without_a_fee_records_only_its_two_legs(tmp_path):
@@ -704,3 +704,121 @@ def test_an_internal_transfer_pair_is_recorded_as_internal(tmp_path):
     assert {event["payload"]["flow_class"] for event in events} == {"internal_transfer"}
     assert _ledger_krw(store, "acct_from") == 750_000
     assert _ledger_krw(store, "acct_to") == 250_000
+
+
+def _save_kis_snapshot(
+    store: StateStore,
+    run_id: str,
+    cash_by_currency: dict[str, float],
+    *,
+    positions: list[dict] | None = None,
+    order_fills: list[dict] | None = None,
+    account_id: str = "kis_brokerage",
+) -> None:
+    store.save_broker_account_snapshot(
+        run_id,
+        account_id,
+        {
+            "account_id": account_id,
+            "account": {
+                "account_id": account_id,
+                "source": "kis_domestic_readonly",
+                "cash": float(cash_by_currency.get("KRW", 0.0)),
+                "cash_by_currency": dict(cash_by_currency),
+                "positions": positions or [],
+            },
+            "unfilled_orders": [],
+            "order_fills": order_fills or [],
+        },
+    )
+
+
+def test_broker_reported_cash_needs_the_same_stability_as_a_proxy(tmp_path):
+    """One snapshot's difference is not evidence of an external flow.
+
+    KIS reports real deposits, but a real balance still moves for settlement
+    and fees, so a single step is not something to ask an operator to confirm.
+    """
+    store = StateStore(str(tmp_path / "state.db"))
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_000_000.0})
+    _save_kis_snapshot(store, "changed-1", {"KRW": 2_000_000.0})
+    _save_kis_snapshot(store, "changed-2", {"KRW": 1_500_000.0})
+    _save_kis_snapshot(store, "changed-3", {"KRW": 2_000_000.0})
+
+    assert CashFlowCandidateDetector(store).detect("kis_brokerage") is None
+
+
+def test_a_stable_broker_reported_change_is_offered(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_000_000.0})
+    for run_id in ("changed-1", "changed-2", "changed-3"):
+        _save_kis_snapshot(store, run_id, {"KRW": 2_000_000.0})
+
+    candidate = CashFlowCandidateDetector(store).detect("kis_brokerage")
+
+    assert candidate is not None
+    assert candidate.cash_basis == "broker_reported"
+    assert candidate.flow_type == "deposit"
+    assert candidate.amount == 1_000_000.0
+    assert candidate.evidence()["kind"] == "stable_broker_reported_cash_change"
+
+
+def test_a_recently_settling_fill_blocks_a_candidate(tmp_path):
+    """A fill from before the window can still be moving cash now.
+
+    Settlement is the account's own trading catching up, not investor money
+    arriving, so it must never be offered as a deposit.
+    """
+    store = StateStore(str(tmp_path / "state.db"))
+    recent_fill = [{"symbol": "005930", "submitted_at": utc_now().isoformat()}]
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_000_000.0}, order_fills=recent_fill)
+    for run_id in ("changed-1", "changed-2", "changed-3"):
+        _save_kis_snapshot(store, run_id, {"KRW": 2_000_000.0}, order_fills=recent_fill)
+
+    assert CashFlowCandidateDetector(store).detect("kis_brokerage") is None
+
+
+def test_a_long_settled_fill_does_not_block_a_candidate(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    old_fill = [{"symbol": "005930", "submitted_at": (utc_now() - timedelta(days=30)).isoformat()}]
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_000_000.0}, order_fills=old_fill)
+    for run_id in ("changed-1", "changed-2", "changed-3"):
+        _save_kis_snapshot(store, run_id, {"KRW": 2_000_000.0}, order_fills=old_fill)
+
+    assert CashFlowCandidateDetector(store).detect("kis_brokerage") is not None
+
+
+def test_broker_reported_position_changes_block_a_candidate(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_000_000.0})
+    _save_kis_snapshot(
+        store,
+        "changed-1",
+        {"KRW": 2_000_000.0},
+        positions=[{"symbol": "005930", "quantity": 1.0}],
+    )
+    for run_id in ("changed-2", "changed-3"):
+        _save_kis_snapshot(store, run_id, {"KRW": 2_000_000.0})
+
+    assert CashFlowCandidateDetector(store).detect("kis_brokerage") is None
+
+
+def test_broker_reported_conversion_is_not_offered_as_a_flow(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_400_000.0, "USD": 100.0})
+    for run_id in ("changed-1", "changed-2", "changed-3"):
+        _save_kis_snapshot(store, run_id, {"KRW": 100_000.0, "USD": 1_100.0})
+
+    assert CashFlowCandidateDetector(store).detect("kis_brokerage") is None
+
+
+def test_detection_reaches_past_other_accounts_snapshots(tmp_path):
+    """Filtering after the query made detection fail as accounts were added."""
+    store = StateStore(str(tmp_path / "state.db"))
+    _save_kis_snapshot(store, "baseline", {"KRW": 1_000_000.0})
+    for index in range(120):
+        _save_kis_snapshot(store, f"noise-{index}", {"KRW": 5.0}, account_id="other_account")
+    for run_id in ("changed-1", "changed-2", "changed-3"):
+        _save_kis_snapshot(store, run_id, {"KRW": 2_000_000.0})
+
+    assert CashFlowCandidateDetector(store).detect("kis_brokerage") is not None

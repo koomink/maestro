@@ -1236,6 +1236,7 @@ class StateStore:
         *,
         since: str | None = None,
         before: str | None = None,
+        account_id: str | None = None,
     ) -> list[dict[str, Any]]:
         clauses = []
         values: list[Any] = []
@@ -1245,6 +1246,11 @@ class StateStore:
         if before is not None:
             clauses.append("created_at < ?")
             values.append(before)
+        if account_id is not None:
+            # Filtering after the limit means a caller wanting one account's
+            # history silently gets less of it as more accounts are tracked.
+            clauses.append("account_id = ?")
+            values.append(account_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         sql = (
             "SELECT * FROM broker_account_snapshots"

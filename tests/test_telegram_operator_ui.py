@@ -455,37 +455,43 @@ def test_telegram_operator_funding_complete_fails_when_readonly_refresh_fails(
     assert ack_events == []
 
 
+def _save_broker_reported_cash_window(store, account_id, baseline, changed):
+    """Baseline plus three snapshots holding the new level.
+
+    Candidate detection now requires the same evidence from every broker: the
+    new level has to persist rather than appear once, so a fixture that flips
+    the balance in a single step no longer describes an offerable candidate.
+    """
+    for run_id, cash in [
+        ("run_old_cash", baseline),
+        ("run_new_cash_1", changed),
+        ("run_new_cash_2", changed),
+        ("run_new_cash_3", changed),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            account_id,
+            {
+                "account_id": account_id,
+                "account": {
+                    "account_id": account_id,
+                    "currency": "KRW",
+                    "cash": cash,
+                    "cash_by_currency": {"KRW": cash},
+                    "total_value": cash,
+                    "positions": [],
+                    "source": "fixture",
+                },
+                "unfilled_orders": [],
+                "order_fills": [],
+            },
+        )
+
+
 def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target_split(tmp_path):
     config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    store.save_broker_account_snapshot(
-        "run_old_cash",
-        "paper_cash",
-        {
-            "account": {
-                "account_id": "paper_cash",
-                "currency": "KRW",
-                "cash": 1_000_000.0,
-                "total_value": 1_000_000.0,
-                "positions": [],
-                "source": "fixture",
-            }
-        },
-    )
-    store.save_broker_account_snapshot(
-        "run_new_cash",
-        "paper_cash",
-        {
-            "account": {
-                "account_id": "paper_cash",
-                "currency": "KRW",
-                "cash": 2_000_000.0,
-                "total_value": 2_000_000.0,
-                "positions": [],
-                "source": "fixture",
-            }
-        },
-    )
+    _save_broker_reported_cash_window(store, "paper_cash", 1_000_000.0, 2_000_000.0)
     client = FakeTelegramClient()
     router = TelegramOperatorCommandRouter(
         config=config,
@@ -588,34 +594,7 @@ def test_telegram_operator_confirms_stable_toss_cash_flow_candidate_once(tmp_pat
 def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp_path):
     config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    store.save_broker_account_snapshot(
-        "run_old_cash",
-        "paper_cash",
-        {
-            "account": {
-                "account_id": "paper_cash",
-                "currency": "KRW",
-                "cash": 1_000_000.0,
-                "total_value": 1_000_000.0,
-                "positions": [],
-                "source": "fixture",
-            }
-        },
-    )
-    store.save_broker_account_snapshot(
-        "run_new_cash",
-        "paper_cash",
-        {
-            "account": {
-                "account_id": "paper_cash",
-                "currency": "KRW",
-                "cash": 2_000_000.0,
-                "total_value": 2_000_000.0,
-                "positions": [],
-                "source": "fixture",
-            }
-        },
-    )
+    _save_broker_reported_cash_window(store, "paper_cash", 1_000_000.0, 2_000_000.0)
     client = FakeTelegramClient()
     router = TelegramOperatorCommandRouter(
         config=config,
@@ -654,21 +633,7 @@ def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp
 def test_telegram_operator_confirms_unexplained_withdrawal_as_account_flow(tmp_path):
     config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    for run_id, cash in [("run_old", 2_000_000.0), ("run_new", 1_000_000.0)]:
-        store.save_broker_account_snapshot(
-            run_id,
-            "paper_cash",
-            {
-                "account": {
-                    "account_id": "paper_cash",
-                    "currency": "KRW",
-                    "cash": cash,
-                    "total_value": cash,
-                    "positions": [],
-                    "source": "fixture",
-                }
-            },
-        )
+    _save_broker_reported_cash_window(store, "paper_cash", 2_000_000.0, 1_000_000.0)
     client = FakeTelegramClient()
     router = TelegramOperatorCommandRouter(
         config=config,

@@ -357,10 +357,31 @@ maestro cash-flow convert --config <approval-config> \
 converting twice. Pass `--rate` (target-currency units per source-currency
 unit) to have the amounts cross-checked before anything reaches the ledger.
 
-The Toss candidate detector deliberately offers nothing when two currencies
-move in opposite directions over the same window. That is a conversion, and
-confirming either side alone would record a deposit or withdrawal for an
-account whose money never left. Record it with `cash-flow convert` instead.
+The candidate detector deliberately offers nothing when two currencies move in
+opposite directions over the same window. That is a conversion, and confirming
+either side alone would record a deposit or withdrawal for an account whose
+money never left. Record it with `cash-flow convert` instead.
+
+### Candidate detection
+
+Every broker's cash changes go through one detector, so the evidence required
+is the same whether the figure is Toss buying power or a broker-reported
+deposit balance. A change is offered for confirmation only when:
+
+- the new level holds across three consecutive snapshots
+- positions, open orders and fills are unchanged across the window
+- no order lifecycle event falls inside the window
+- no observed fill is within three days of the latest snapshot, since Korean
+  equities settle T+2 and US equities T+1, and settlement is the account's own
+  trading catching up rather than money arriving
+- the change is at least KRW 1,000 or USD 1
+- no second currency moved the opposite way
+
+What still differs by broker is what the confirmation means, not what evidence
+is required. Toss cash is a proxy the operator checks in the app; a
+broker-reported figure is the broker's own number. KIS cannot do better than
+this: it publishes no endpoint that says why a stock account's cash moved. See
+`docs/kis_cash_transaction_api_survey.md`.
 
 ## Toss cash ledger operations
 
@@ -427,9 +448,9 @@ Before a live run, confirm the latest reconciliation and that current Toss
 buying power covers each order; buying-power drift alone is observational and
 must not be described as investment return.
 
-The Telegram operator only offers a Toss cash-flow candidate when a buying-power
-step is stable across three snapshots and positions/orders/fills are unchanged.
-Confirm the one-click amount only after checking the Toss app. Use
+The Telegram operator offers a Toss cash-flow candidate only when the evidence
+in "Candidate detection" above holds. Confirm the one-click amount only after
+checking the Toss app. Use
 `/cash_flow <proposal_id> <actual_amount>` when it differs, or reject the
 candidate to leave the ledger unchanged. Confirmed candidates are recorded as
 `operator_verified`; Toss still has no broker-verified cash endpoint.

@@ -49,7 +49,11 @@ from maestro.execution.budget_requests import (
     selected_budget_from_request,
     validate_selected_budget,
 )
-from maestro.execution.cash_flow_candidates import TossCashFlowCandidateDetector
+from maestro.execution.cash_flow_candidates import (
+    BROKER_REPORTED_CASH,
+    PROXY_CASH,
+    CashFlowCandidateDetector,
+)
 from maestro.execution.funding_requests import (
     format_contribution_funding_request,
     funding_request_reply_markup,
@@ -1650,7 +1654,7 @@ class TelegramOperatorCommandRouter:
             self._record("/cash-flow_reject", chat_id, user_id, username, "rejected")
             return True
         if is_toss_candidate:
-            current = TossCashFlowCandidateDetector(self.store).detect(
+            current = CashFlowCandidateDetector(self.store).detect(
                 str(proposal.get("account_id") or "")
             )
             if current is None or current.fingerprint != proposal.get("fingerprint"):
@@ -1816,7 +1820,7 @@ class TelegramOperatorCommandRouter:
             self._send(chat_id, "Cash-flow proposal is stale or the amount is invalid.")
             self._record("/cash_flow", chat_id, user_id, username, "invalid")
             return
-        current = TossCashFlowCandidateDetector(self.store).detect(
+        current = CashFlowCandidateDetector(self.store).detect(
             str(proposal.get("account_id") or "")
         )
         if current is None or current.fingerprint != proposal.get("fingerprint"):
@@ -2388,90 +2392,48 @@ class TelegramOperatorCommandRouter:
         if not isinstance(latest_account, Mapping):
             return None
         account_id = _broker_snapshot_account_id(latest)
+        candidate = CashFlowCandidateDetector(self.store).detect(account_id)
+        if candidate is None:
+            return None
+        existing = self._cash_flow_candidate_proposal(candidate.fingerprint)
+        if existing is not None:
+            return existing
+        allocations = self._target_cash_flow_allocations(
+            candidate.account_id,
+            candidate.amount,
+        )
         if (
-            str(latest_account.get("source") or "").startswith("toss_")
-            and "ledger_cash_by_currency" in latest_account
-            and latest_account.get("ledger_cash_by_currency") is None
+            candidate.cash_basis == BROKER_REPORTED_CASH
+            and candidate.flow_type == "deposit"
+            and not allocations
         ):
-            candidate = TossCashFlowCandidateDetector(self.store).detect(account_id)
-            if candidate is None:
-                return None
-            existing = self._cash_flow_candidate_proposal(candidate.fingerprint)
-            if existing is not None:
-                return existing
-            return {
-                "proposal_id": new_run_id(),
-                "status": "pending",
-                "fingerprint": candidate.fingerprint,
-                "account_id": candidate.account_id,
-                "broker_snapshot_id": candidate.latest_snapshot_id,
-                "previous_broker_snapshot_id": candidate.baseline_snapshot_id,
-                "amount": candidate.amount,
-                "currency": candidate.currency,
-                "flow_type": candidate.flow_type,
-                "source": "toss_buying_power_cash_flow_candidate",
-                "verification": "operator_required",
-                "effective_at": candidate.effective_at,
-                "created_at": utc_now().isoformat(),
-                "allocations": self._target_cash_flow_allocations(
-                    candidate.account_id,
-                    candidate.amount,
-                ),
-                "evidence": candidate.evidence(),
-            }
-        previous = next(
-            (row for row in snapshots[1:] if _broker_snapshot_account_id(row) == account_id),
-            None,
-        )
-        if previous is None:
+            # A broker-reported deposit is offered for allocation to a strategy;
+            # with no enabled strategy on the account there is nothing to offer.
             return None
-        previous_payload = previous.get("payload") or {}
-        previous_account = (
-            previous_payload.get("account") if isinstance(previous_payload, Mapping) else {}
-        )
-        if not isinstance(previous_account, Mapping):
-            return None
-        latest_cash = _cash_by_currency(latest_account)
-        previous_cash = _cash_by_currency(previous_account)
-        latest_positions = {
-            str(row.get("symbol")): _float_or_none(row.get("quantity")) or 0.0
-            for row in latest_account.get("positions") or []
-            if isinstance(row, Mapping)
+        return {
+            "proposal_id": new_run_id(),
+            "status": "pending",
+            "fingerprint": candidate.fingerprint,
+            "account_id": candidate.account_id,
+            "broker_snapshot_id": candidate.latest_snapshot_id,
+            "previous_broker_snapshot_id": candidate.baseline_snapshot_id,
+            "amount": candidate.amount,
+            "currency": candidate.currency,
+            "flow_type": candidate.flow_type,
+            # The source drives how the confirmed flow is verified downstream:
+            # Toss cash is a proxy the operator checks in the app, while a
+            # broker-reported figure is the broker's own number.
+            "source": (
+                "toss_buying_power_cash_flow_candidate"
+                if candidate.cash_basis == PROXY_CASH
+                else "broker_snapshot_unexplained_cash_change"
+            ),
+            "verification": "operator_required",
+            "effective_at": candidate.effective_at,
+            "created_at": utc_now().isoformat(),
+            "allocations": allocations,
+            "evidence": candidate.evidence(),
         }
-        previous_positions = {
-            str(row.get("symbol")): _float_or_none(row.get("quantity")) or 0.0
-            for row in previous_account.get("positions") or []
-            if isinstance(row, Mapping)
-        }
-        if latest_positions != previous_positions:
-            return None
-        for currency in sorted(set(latest_cash) | set(previous_cash)):
-            delta = latest_cash.get(currency, 0.0) - previous_cash.get(currency, 0.0)
-            minimum_change = 1_000.0 if currency == "KRW" else 1.0
-            if abs(delta) < minimum_change:
-                continue
-            amount = abs(delta)
-            if self._cash_flow_proposal_exists(latest.get("id"), account_id, currency, amount):
-                return None
-            allocations = self._target_cash_flow_allocations(account_id, amount)
-            if delta > 0 and not allocations:
-                return None
-            flow_type = "deposit" if delta > 0 else "withdrawal"
-            return {
-                "proposal_id": new_run_id(),
-                "status": "pending",
-                "account_id": account_id,
-                "broker_snapshot_id": latest.get("id"),
-                "previous_broker_snapshot_id": previous.get("id"),
-                "amount": amount,
-                "currency": currency,
-                "flow_type": flow_type,
-                "source": "broker_snapshot_unexplained_cash_change",
-                "effective_at": str(latest.get("created_at") or utc_now().isoformat()),
-                "created_at": utc_now().isoformat(),
-                "allocations": allocations,
-            }
-        return None
 
     def _target_cash_flow_allocations(self, account_id: str, amount: float) -> list[dict[str, Any]]:
         candidates = []
@@ -2502,20 +2464,6 @@ class TelegramOperatorCommandRouter:
             }
             for strategy, weight in candidates
         ]
-
-    def _cash_flow_proposal_exists(
-        self, broker_snapshot_id: object, account_id: str, currency: str, amount: float
-    ) -> bool:
-        for row in self.store.list_system_events_by_type("strategy_cash_flow_proposal", limit=1000):
-            payload = row.get("payload") or {}
-            if (
-                payload.get("broker_snapshot_id") == broker_snapshot_id
-                and payload.get("account_id") == account_id
-                and payload.get("currency") == currency
-                and _float_or_none(payload.get("amount")) == amount
-            ):
-                return True
-        return False
 
     def _cash_flow_candidate_proposal(self, fingerprint: str) -> dict[str, Any] | None:
         acked = {

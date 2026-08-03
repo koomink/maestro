@@ -2,7 +2,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from maestro.state.store import StateStore
@@ -16,15 +16,26 @@ _BLOCKING_EVENT_TYPES = {
     "live_order_recovery_required",
     "live_order_recovery_completed",
 }
+# Korean equities settle T+2 and US equities T+1, so a fill up to this many days
+# old can still be moving cash today.  Activity inside the observation window is
+# already excluded; this covers a fill that happened before it.
+_SETTLEMENT_HORIZON_DAYS = 3.0
+
+# Where an account's cash figure comes from.  Toss reports only buying power, a
+# proxy that is not settled cash; other brokers report actual deposits.  The
+# safety checks are identical either way -- what differs is which number to read.
+PROXY_CASH = "proxy"
+BROKER_REPORTED_CASH = "broker_reported"
 
 
 @dataclass(frozen=True)
-class TossCashFlowCandidate:
+class CashFlowCandidate:
     fingerprint: str
     account_id: str
     currency: str
     amount: float
     flow_type: str
+    cash_basis: str
     baseline_snapshot_id: int
     first_changed_snapshot_id: int
     latest_snapshot_id: int
@@ -33,7 +44,12 @@ class TossCashFlowCandidate:
 
     def evidence(self) -> dict[str, Any]:
         return {
-            "kind": "stable_toss_buying_power_change",
+            "kind": (
+                "stable_toss_buying_power_change"
+                if self.cash_basis == PROXY_CASH
+                else "stable_broker_reported_cash_change"
+            ),
+            "cash_basis": self.cash_basis,
             "baseline_snapshot_id": self.baseline_snapshot_id,
             "first_changed_snapshot_id": self.first_changed_snapshot_id,
             "latest_snapshot_id": self.latest_snapshot_id,
@@ -42,32 +58,40 @@ class TossCashFlowCandidate:
             "orders_unchanged": True,
             "fills_unchanged": True,
             "blocking_lifecycle_events": False,
+            "settled_beyond_horizon_days": _SETTLEMENT_HORIZON_DAYS,
         }
 
 
-class TossCashFlowCandidateDetector:
+class CashFlowCandidateDetector:
+    """Offers an unexplained cash change for operator confirmation.
+
+    The same evidence is required whichever broker reported the change: the new
+    level has to hold across consecutive snapshots, positions, orders and fills
+    must be unchanged across the window, no order lifecycle event may fall
+    inside it, and no fill may be close enough to still be settling.  A change
+    that survives all of that is one the account's own activity cannot explain.
+    """
+
     def __init__(self, store: StateStore) -> None:
         self.store = store
 
-    def detect(self, account_id: str) -> TossCashFlowCandidate | None:
-        rows = [
-            row
-            for row in self.store.list_broker_account_snapshots(limit=100)
-            if _snapshot_account_id(row) == account_id
-        ]
+    def detect(self, account_id: str) -> CashFlowCandidate | None:
+        rows = self.store.list_broker_account_snapshots(limit=100, account_id=account_id)
         if len(rows) < 4:
             return None
         latest_account = _account(rows[0])
-        if not (
-            str(latest_account.get("source") or "").startswith("toss_")
-            and "ledger_cash_by_currency" in latest_account
-            and latest_account.get("ledger_cash_by_currency") is None
-        ):
+        basis = _cash_basis(latest_account)
+        if basis is None:
+            return None
+        latest_timestamp = _timestamp(rows[0].get("created_at"))
+        if latest_timestamp is not None and _settling_fill_nearby(rows, latest_timestamp):
+            # A fill from before the window can still be moving cash now, and
+            # settlement is not an external flow.
             return None
 
         candidates = []
-        for currency in sorted(_buying_power_by_currency(latest_account)):
-            candidate = self._detect_currency(rows, account_id, currency)
+        for currency in sorted(_cash_by_basis(latest_account, basis)):
+            candidate = self._detect_currency(rows, account_id, currency, basis)
             if candidate is not None:
                 candidates.append(candidate)
         if not candidates:
@@ -85,15 +109,16 @@ class TossCashFlowCandidateDetector:
         rows: list[dict[str, Any]],
         account_id: str,
         currency: str,
-    ) -> TossCashFlowCandidate | None:
+        basis: str,
+    ) -> CashFlowCandidate | None:
         tolerance = _STABILITY_TOLERANCE.get(currency, 0.01)
-        latest_value = _buying_power_by_currency(_account(rows[0])).get(currency)
+        latest_value = _cash_by_basis(_account(rows[0]), basis).get(currency)
         if latest_value is None:
             return None
         stable: list[dict[str, Any]] = []
         baseline: dict[str, Any] | None = None
         for row in rows:
-            value = _buying_power_by_currency(_account(row)).get(currency)
+            value = _cash_by_basis(_account(row), basis).get(currency)
             if value is None:
                 return None
             if abs(value - latest_value) <= tolerance:
@@ -103,7 +128,7 @@ class TossCashFlowCandidateDetector:
             break
         if len(stable) < 3 or baseline is None:
             return None
-        baseline_value = _buying_power_by_currency(_account(baseline)).get(currency)
+        baseline_value = _cash_by_basis(_account(baseline), basis).get(currency)
         if baseline_value is None:
             return None
         delta = latest_value - baseline_value
@@ -129,7 +154,7 @@ class TossCashFlowCandidateDetector:
             json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")
         ).hexdigest()[:24]
         del window
-        return TossCashFlowCandidate(
+        return CashFlowCandidate(
             fingerprint=fingerprint,
             account_id=account_id,
             currency=currency,
@@ -140,6 +165,7 @@ class TossCashFlowCandidateDetector:
             latest_snapshot_id=int(stable[0]["id"]),
             stable_snapshot_ids=tuple(int(row["id"]) for row in reversed(stable)),
             effective_at=str(first_changed.get("created_at") or ""),
+            cash_basis=basis,
         )
 
     def _has_blocking_events(
@@ -187,6 +213,63 @@ def _account(row: Mapping[str, Any]) -> Mapping[str, Any]:
     return account if isinstance(account, Mapping) else {}
 
 
+def _cash_basis(account: Mapping[str, Any]) -> str | None:
+    """Which cash figure this account's changes should be read from.
+
+    Toss publishes buying power and no settled-cash endpoint, so its ledger
+    cash is deliberately absent; anything else reports actual deposits.
+    """
+    source = str(account.get("source") or "")
+    if (
+        source.startswith("toss_")
+        and "ledger_cash_by_currency" in account
+        and account.get("ledger_cash_by_currency") is None
+    ):
+        return PROXY_CASH
+    if source:
+        return BROKER_REPORTED_CASH
+    return None
+
+
+def _cash_by_basis(account: Mapping[str, Any], basis: str) -> dict[str, float]:
+    if basis == PROXY_CASH:
+        return _buying_power_by_currency(account)
+    values = account.get("cash_by_currency")
+    if isinstance(values, Mapping) and values:
+        return {str(key).upper(): float(value) for key, value in values.items()}
+    cash = account.get("cash")
+    if cash is None:
+        return {}
+    cash_balance = account.get("cash_balance")
+    currency = str(account.get("currency") or "UNKNOWN")
+    if isinstance(cash_balance, Mapping):
+        currency = str(cash_balance.get("currency") or currency)
+    return {currency.upper(): float(cash)}
+
+
+def _settling_fill_nearby(
+    rows: list[dict[str, Any]],
+    latest_timestamp: datetime,
+) -> bool:
+    """Whether any observed fill is recent enough to still be settling."""
+    for row in rows:
+        payload = row.get("payload") or {}
+        fills = payload.get("order_fills") if isinstance(payload, Mapping) else None
+        for fill in fills or []:
+            if not isinstance(fill, Mapping):
+                continue
+            submitted = _timestamp(fill.get("submitted_at"))
+            if submitted is None:
+                continue
+            elapsed_days = (latest_timestamp - submitted).total_seconds() / 86400.0
+            # Anything not yet past the horizon blocks, including a fill dated
+            # after the snapshot: snapshot timestamps are second-granular, so a
+            # fill recorded moments earlier can still read as being ahead of it.
+            if elapsed_days <= _SETTLEMENT_HORIZON_DAYS:
+                return True
+    return False
+
+
 def _buying_power_by_currency(account: Mapping[str, Any]) -> dict[str, float]:
     values = account.get("buying_power_by_currency") or {}
     if isinstance(values, Mapping) and values:
@@ -218,6 +301,9 @@ def _timestamp(value: object) -> datetime | None:
         return None
     text = str(value).replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    # Snapshot rows carry naive UTC from SQLite while event payloads carry an
+    # offset; comparing the two raises unless they are normalised first.
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
