@@ -1313,6 +1313,12 @@ chain-linked TWR index, and converted history uses the persisted FX snapshot
 available at each valuation time. The dashboard renders these persisted read
 models only and does not call broker or FX endpoints during page rendering.
 
+For Toss, Maestro can also propose an external cash-flow candidate after a
+buying-power step remains stable for three snapshots with unchanged positions,
+orders, and fills. Telegram confirmation is an operator attestation, not broker
+cash proof; the ledger is unchanged until confirmation. If the displayed amount
+differs from the Toss app, use `/cash_flow <proposal_id> <actual_amount>`.
+
 Virtuoso app performance uses strategy book snapshots as the app value series
 and explicit Telegram-attributed `strategy_cash_flow` events as the app-level
 deposit/withdrawal ledger. The Dashboard presents TWR first, with net PnL,

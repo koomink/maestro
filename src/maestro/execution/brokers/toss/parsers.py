@@ -80,6 +80,7 @@ def toss_snapshot_from_payloads(
             daily_pnl_by_currency=_pnl_by_currency(holdings.get("dailyProfitLoss")),
             ledger_cash_by_currency=None,
             buying_power_by_currency=available_by_currency,
+            broker_cash_verification="unavailable",
             fetched_at=fetched_at or utc_now(),
             source="toss_openapi_readonly",
         ),

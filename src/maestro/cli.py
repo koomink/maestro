@@ -21,6 +21,7 @@ from maestro.core.enums import ProfileStage, RunMode
 from maestro.core.ids import new_run_id
 from maestro.core.time_display import format_operator_time, operator_timezone
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
+from maestro.execution.account_cash_flows import AccountCashFlowService
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.brokers.readonly_factory import (
@@ -1715,37 +1716,25 @@ def record_account_cash_flow(
     timestamp = effective_at or utc_now().isoformat()
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    run_id = new_run_id()
     signed_amount = abs(amount) if normalized_type == "deposit" else -abs(amount)
-    payload = {
-        "account_id": account_id,
-        "amount": signed_amount,
-        "currency": normalized_currency,
-        "flow_type": normalized_type,
-        "effective_at": timestamp,
-        "source": "operator_cli",
-        "reason": reason,
-        "transfer_id": transfer_id,
-        "decided_by": "operator_cli",
-    }
-    if not store.apply_account_cash_flow(
-        run_id,
-        account_id,
-        signed_amount,
-        normalized_currency,
-    ):
-        raise typer.BadParameter(
-            "account ledger is not established; run `maestro ledger open-baseline` first"
+    try:
+        result = AccountCashFlowService(store, audit).record(
+            account_id=account_id,
+            amount=amount,
+            currency=normalized_currency,
+            flow_type=normalized_type,
+            effective_at=timestamp,
+            source="operator_cli",
+            reason=reason,
+            transfer_id=transfer_id,
+            decided_by="operator_cli",
+            verification="operator_verified",
+            duplicate_key=(f"account-cash-flow:transfer:{transfer_id}" if transfer_id else None),
         )
-    save_audited_system_event(
-        store,
-        audit,
-        run_id,
-        SystemEventType.ACCOUNT_CASH_FLOW,
-        payload,
-    )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(
-        f"recorded cash_flow_id={run_id} account_id={account_id} "
+        f"recorded cash_flow_id={result.run_id} account_id={account_id} "
         f"amount={signed_amount:.6f} currency={normalized_currency}"
     )
 

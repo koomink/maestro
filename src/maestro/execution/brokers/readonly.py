@@ -59,6 +59,7 @@ class BrokerAccountSnapshot(BaseModel):
     # value explicitly means that the broker exposes no authoritative ledger.
     ledger_cash_by_currency: dict[str, float] | None = None
     buying_power_by_currency: dict[str, float] = Field(default_factory=dict)
+    broker_cash_verification: str = "unavailable"
     # Account-level daily PnL as reported by the broker. The live daily-loss
     # gate (`maestro.orchestration.live_gates`) reads these keys from the
     # stored snapshot payload; without them an all-cash account has no

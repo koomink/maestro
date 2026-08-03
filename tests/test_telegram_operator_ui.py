@@ -522,6 +522,69 @@ def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target
     assert ack_events[0]["payload"]["status"] == "approved"
 
 
+def test_telegram_operator_confirms_stable_toss_cash_flow_candidate_once(tmp_path):
+    config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_portfolio_snapshot(
+        "ledger_baseline",
+        PortfolioState(cash=1_000_000, cash_by_currency={"KRW": 1_000_000}),
+        account_id="paper_cash",
+    )
+    for run_id, buying_power in [
+        ("baseline", 1_000_000.0),
+        ("changed-1", 2_000_000.0),
+        ("changed-2", 2_000_000.0),
+        ("changed-3", 2_000_000.0),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "paper_cash",
+            {
+                "account_id": "paper_cash",
+                "account": {
+                    "account_id": "paper_cash",
+                    "source": "toss_openapi_readonly",
+                    "cash": buying_power,
+                    "cash_by_currency": {"KRW": buying_power},
+                    "buying_power_by_currency": {"KRW": buying_power},
+                    "ledger_cash_by_currency": None,
+                    "positions": [],
+                },
+                "unfilled_orders": [],
+                "order_fills": [],
+            },
+        )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    assert router.process_update(message_update("/account"))
+    assert client.sent_messages[-1]["text"].startswith("Maestro cash-flow candidate")
+    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[0][
+        "payload"
+    ]
+
+    assert router.process_update(
+        callback_update(f"operator:cash-flow:confirm:{proposal['proposal_id']}")
+    )
+    flow = store.list_system_events_by_type("account_cash_flow", limit=1)[0]["payload"]
+    assert flow["amount"] == 1_000_000.0
+    assert flow["verification"] == "operator_verified"
+    assert flow["evidence"]["kind"] == "stable_toss_buying_power_change"
+    state = store.load_latest_account_portfolio_state("paper_cash")
+    assert state is not None
+    assert state.cash_by_currency["KRW"] == 2_000_000.0
+
+    assert router.process_update(
+        callback_update(f"operator:cash-flow:confirm:{proposal['proposal_id']}")
+    )
+    assert len(store.list_system_events_by_type("account_cash_flow", limit=10)) == 1
+
+
 def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp_path):
     config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)

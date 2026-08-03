@@ -798,6 +798,8 @@
 - [x] Make signal refresh ledger-read-only, couple Toss snapshots to successful
       OPEN/CLOSED history backfill, protect pre-baseline replay, and use ledger
       cash for account, currency-sleeve, and total confirmed performance
+- [x] Detect stable unexplained Toss buying-power steps, request guarded Telegram
+      cash-flow confirmation, and record operator-verified flows idempotently
 
 ## Completed / Historical Notes
 

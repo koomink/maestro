@@ -869,6 +869,12 @@ def _broker_rows_with_ledger_cash(
             _mapping(payload.get("account")),
             ledger,
         )
+        payload["account"]["broker_cash_verification"] = _cash_verification_as_of(
+            store,
+            _broker_snapshot_account_id(row),
+            row.get("created_at"),
+            _mapping(payload.get("account")),
+        )
         updated["payload"] = payload
         output.append(updated)
     return output
@@ -887,6 +893,46 @@ def _performance_quality(rows: list[dict[str, Any]]) -> str:
     if any(flags):
         return "degraded"
     return "provisional"
+
+
+def _cash_verification_quality(rows: list[dict[str, Any]]) -> str:
+    values = {
+        str(
+            _mapping(_mapping(row.get("payload")).get("account")).get(
+                "broker_cash_verification"
+            )
+            or "unavailable"
+        )
+        for row in rows
+    }
+    if len(values) == 1:
+        return next(iter(values))
+    return "mixed"
+
+
+def _cash_verification_as_of(
+    store: StateStore,
+    account_id: str,
+    created_at: object,
+    account: dict[str, Any],
+) -> str:
+    source = str(account.get("source") or "")
+    default = str(account.get("broker_cash_verification") or "")
+    if not default:
+        default = "unavailable" if source.startswith("toss_") else "broker_verified"
+    snapshot_at = _parse_timestamp(created_at)
+    if not source.startswith("toss_") or snapshot_at is None:
+        return default
+    for row in store.list_system_events_by_type(SystemEventType.ACCOUNT_CASH_FLOW, limit=1000):
+        payload = _mapping(row.get("payload"))
+        if payload.get("account_id") != account_id:
+            continue
+        if payload.get("verification") != "operator_verified":
+            continue
+        effective_at = _parse_timestamp(payload.get("effective_at") or row.get("created_at"))
+        if effective_at is not None and effective_at <= snapshot_at:
+            return "operator_verified"
+    return default
 
 
 def build_account_performance_table(
@@ -976,6 +1022,9 @@ def build_account_performance_table(
                 "source": account.get("source") or payload.get("source"),
                 "performance_status": (
                     "confirmed" if ledger_state is not None else "provisional"
+                ),
+                "broker_cash_verification": account.get(
+                    "broker_cash_verification", "unavailable"
                 ),
             }
         )
@@ -1159,6 +1208,9 @@ def _build_baselined_account_performance_table(
                 "performance_status": (
                     "confirmed" if ledger_state is not None else "provisional"
                 ),
+                "broker_cash_verification": account.get(
+                    "broker_cash_verification", "unavailable"
+                ),
             }
         )
     for account_id in states:
@@ -1263,6 +1315,9 @@ def build_currency_sleeve_performance_table(
                     "drawdown": performance["drawdown"],
                     "reconciliation_status": combined_reconciliation,
                     "performance_status": _performance_quality(
+                        list(latest_by_account.values())
+                    ),
+                    "broker_cash_verification": _cash_verification_quality(
                         list(latest_by_account.values())
                     ),
                 }
@@ -1425,6 +1480,9 @@ def _build_baselined_currency_sleeve_performance_table(
                     "performance_status": _performance_quality(
                         [latest_by_account[account_id] for account_id in active_accounts]
                     ),
+                    "broker_cash_verification": _cash_verification_quality(
+                        [latest_by_account[account_id] for account_id in active_accounts]
+                    ),
                     "baseline_id": baseline.get("baseline_id"),
                     "baseline_at": baseline.get("effective_at"),
                 }
@@ -1554,6 +1612,9 @@ def build_total_portfolio_performance_table(
                 "drawdown": performance["drawdown"],
                 "reconciliation_status": _combined_reconciliation_status(reconciliation_statuses),
                 "performance_status": _performance_quality(
+                    list(latest_by_account.values())
+                ),
+                "broker_cash_verification": _cash_verification_quality(
                     list(latest_by_account.values())
                 ),
             }
@@ -1811,6 +1872,9 @@ def _build_baselined_total_portfolio_performance_table(
                     reconciliation_statuses
                 ),
                 "performance_status": _performance_quality(
+                    [latest_by_account[account_id] for account_id in active_accounts]
+                ),
+                "broker_cash_verification": _cash_verification_quality(
                     [latest_by_account[account_id] for account_id in active_accounts]
                 ),
                 "baseline_id": baseline.get("baseline_id"),

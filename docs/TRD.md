@@ -437,6 +437,15 @@ the same `signal_run_id`.
 - Telegram `/cash_drift` exposes the same suspense rows with stale-snapshot
   callback protection. Classification is audited but never silently writes an
   account cash flow.
+- Toss cash-flow candidate detection compares snapshot-to-snapshot buying power,
+  never the accumulated ledger drift. A candidate requires three stable
+  observations with unchanged positions/orders/fills and no blocking live-order
+  lifecycle. Only an authorized Telegram confirmation writes the idempotent
+  `account_cash_flow`; its evidence is `operator_verified`, while ordinary Toss
+  snapshots remain `broker_cash_verification=unavailable`.
+- Performance quality and cash verification are separate dimensions. A ledger
+  can support confirmed TWR while broker cash remains unavailable or has only an
+  operator-verified checkpoint.
 
 ### 3.6 Current Live Approval Order Foundation
 

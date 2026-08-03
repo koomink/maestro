@@ -42,6 +42,7 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
             buying_power_detail=buying_power,
             ledger_cash_by_currency={"KRW": cash_balance.cash},
             buying_power_by_currency={"KRW": buying_power.cash_buying_power},
+            broker_cash_verification="broker_verified",
             daily_pnl=daily_pnl,
             daily_pnl_by_currency={"KRW": daily_pnl} if daily_pnl is not None else None,
             fetched_at=utc_now(),

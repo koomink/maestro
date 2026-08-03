@@ -317,6 +317,13 @@ Before a live run, confirm the latest reconciliation and that current Toss
 buying power covers each order; buying-power drift alone is observational and
 must not be described as investment return.
 
+The Telegram operator only offers a Toss cash-flow candidate when a buying-power
+step is stable across three snapshots and positions/orders/fills are unchanged.
+Confirm the one-click amount only after checking the Toss app. Use
+`/cash_flow <proposal_id> <actual_amount>` when it differs, or reject the
+candidate to leave the ledger unchanged. Confirmed candidates are recorded as
+`operator_verified`; Toss still has no broker-verified cash endpoint.
+
 ## KIS Read-only Reconciliation
 
 1. Use a KIS read-only or live-approval config for the intended broker product,
