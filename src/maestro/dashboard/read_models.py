@@ -1572,6 +1572,7 @@ def _build_baselined_currency_sleeve_performance_table(
         if timestamp is None or timestamp <= baseline_timestamp:
             continue
         started: set[str] = set()
+        started_at: dict[str, datetime] = {}
         ended: set[str] = set()
         while (
             lifecycle_index < len(lifecycle_events)
@@ -1583,6 +1584,7 @@ def _build_baselined_currency_sleeve_performance_table(
                 if account_id not in active_accounts:
                     active_accounts.add(account_id)
                     started.add(account_id)
+                    started_at[account_id] = event["timestamp"]
             elif account_id in active_accounts:
                 active_accounts.discard(account_id)
                 ended.add(account_id)
@@ -1616,11 +1618,10 @@ def _build_baselined_currency_sleeve_performance_table(
             timestamp,
         )
         period_scope_accounts = active_accounts | ended
-        period_events = [
-            event
-            for event in period_events
-            if event.get("account_id") in period_scope_accounts
-        ]
+        period_events = _flows_after_tracking_started(
+            [event for event in period_events if event.get("account_id") in period_scope_accounts],
+            started_at,
+        )
         for event in period_events:
             flow_by_currency[event["currency"]] = (
                 flow_by_currency.get(event["currency"], 0.0) + event["signed_amount"]
@@ -1913,6 +1914,7 @@ def _build_baselined_total_portfolio_performance_table(
         if current_timestamp is None or current_timestamp <= baseline_timestamp:
             continue
         started: set[str] = set()
+        started_at: dict[str, datetime] = {}
         ended: set[str] = set()
         while (
             lifecycle_index < len(lifecycle_events)
@@ -1923,6 +1925,7 @@ def _build_baselined_total_portfolio_performance_table(
                 if event["account_id"] not in active_accounts:
                     active_accounts.add(event["account_id"])
                     started.add(event["account_id"])
+                    started_at[event["account_id"]] = event["timestamp"]
             else:
                 if event["account_id"] in active_accounts:
                     active_accounts.discard(event["account_id"])
@@ -1997,11 +2000,10 @@ def _build_baselined_total_portfolio_performance_table(
             current_timestamp,
         )
         period_scope_accounts = active_accounts | ended
-        period_events = [
-            event
-            for event in period_events
-            if event.get("account_id") in period_scope_accounts
-        ]
+        period_events = _flows_after_tracking_started(
+            [event for event in period_events if event.get("account_id") in period_scope_accounts],
+            started_at,
+        )
         membership_components: dict[str, float] = {}
         converted_event_payloads: list[dict[str, Any]] = []
         converted_events: list[dict[str, Any]] = []
@@ -4306,6 +4308,25 @@ def _converted_period_cash_flow(
             }
         )
     return total, converted_events
+
+
+def _flows_after_tracking_started(
+    events: list[dict[str, Any]],
+    started_at: dict[str, datetime],
+) -> list[dict[str, Any]]:
+    """Drop flows that happened before their account joined the portfolio.
+
+    An account joins carrying whatever it already held, and that whole value is
+    counted once as a membership flow.  A deposit made while the account was
+    still untracked is already inside that value, so counting it again
+    neutralises twice what actually arrived and fabricates a loss.
+    """
+    return [
+        event
+        for event in events
+        if (joined := started_at.get(str(event.get("account_id") or ""))) is None
+        or event["timestamp"] > joined
+    ]
 
 
 def _advance_twr_performance_state(

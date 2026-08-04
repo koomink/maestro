@@ -3259,3 +3259,177 @@ def test_cash_flow_center_reports_each_account_cash_basis(tmp_path):
     assert status["account_id"] == "toss_brokerage"
     assert status["cash_basis"] == "proxy"
     assert status["ledger_status"] == "confirmed"
+
+
+def test_a_cross_currency_internal_transfer_neutralises_per_sleeve_only(tmp_path):
+    """The one cell where a sleeve and the portfolio must disagree.
+
+    Moving KRW out of one account and USD into another leaves the portfolio
+    holding what it held, so its return keeps the money. Each currency sleeve
+    really did shrink or grow, so each neutralises its own leg.
+    """
+    linked_at = utc_now()
+    legs = [
+        _fact(
+            "internal_transfer",
+            signed_amount=-1_400_000.0,
+            currency="KRW",
+            account_id="acct_a",
+            transfer_id="t1",
+            timestamp=linked_at,
+        ),
+        _fact(
+            "internal_transfer",
+            signed_amount=1_000.0,
+            currency="USD",
+            account_id="acct_b",
+            transfer_id="t1",
+            timestamp=linked_at,
+        ),
+    ]
+
+    effects, reasons = cash_flow_effects_for_scope(legs, "currency_sleeve")
+    assert reasons == []
+    assert sorted((row["currency"], row["signed_amount"]) for row in effects) == [
+        ("KRW", -1_400_000.0),
+        ("USD", 1_000.0),
+    ]
+    # Each account lost or gained its own side.
+    assert len(_neutralised(legs, "account")) == 2
+    # The portfolio never lost it.
+    assert _neutralised(legs, "portfolio") == []
+
+
+def test_a_cross_currency_internal_transfer_leaves_no_phantom_sleeve_return(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_multi_currency_snapshot(
+        store, "run_1", "acct_a", {"KRW": 1_400_000.0}, "2026-01-01 00:00:00"
+    )
+    _save_multi_currency_snapshot(
+        store, "run_1", "acct_b", {"USD": 1_000.0}, "2026-01-01 00:00:00"
+    )
+    for account_id, currency, amount, flow_type in (
+        ("acct_a", "KRW", 1_400_000.0, "withdrawal"),
+        ("acct_b", "USD", 1_000.0, "deposit"),
+    ):
+        _record_cash_flow_event(
+            store,
+            f"move_{account_id}",
+            {
+                "account_id": account_id,
+                "amount": amount,
+                "currency": currency,
+                "flow_type": flow_type,
+                "flow_class": "internal_transfer",
+                "effective_at": "2026-01-01T12:00:00+00:00",
+                "transfer_id": "move-1",
+                "source": "operator_cli",
+            },
+        )
+    _save_multi_currency_snapshot(
+        store, "run_2", "acct_a", {"KRW": 0.0}, "2026-01-02 00:00:00"
+    )
+    _save_multi_currency_snapshot(
+        store, "run_2", "acct_b", {"USD": 2_000.0}, "2026-01-02 00:00:00"
+    )
+
+    rows = _sleeve_rows(store)
+
+    assert rows[("run_2", "KRW")]["cash_flow"] == -1_400_000.0
+    assert rows[("run_2", "KRW")]["period_return"] == 0.0
+    assert rows[("run_2", "USD")]["cash_flow"] == 1_000.0
+    assert rows[("run_2", "USD")]["period_return"] == 0.0
+
+
+def test_a_missing_rate_reports_no_cash_flow_rather_than_zero(tmp_path):
+    """Zero would read as "nothing moved", which is a different claim."""
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    _save_multi_currency_snapshot(store, "run_1", "acct", {"USD": 1_000.0}, "2026-01-01 00:00:00")
+    _record_cash_flow_event(
+        store,
+        "deposit",
+        {
+            "account_id": "acct",
+            "amount": 500.0,
+            "currency": "USD",
+            "flow_type": "deposit",
+            "flow_class": "external_transfer",
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+    _save_multi_currency_snapshot(store, "run_2", "acct", {"USD": 1_500.0}, "2026-01-02 00:00:00")
+
+    # No fx_rate_snapshot has ever been recorded, so USD cannot be shown in KRW.
+    rows = build_total_portfolio_performance_table(store, display_currency="KRW")
+
+    assert rows[0]["cash_flow"] is None
+
+
+def _tracked_join_store(tmp_path, name="join.db"):
+    """A portfolio that gains an account carrying a deposit made before it joined."""
+    store = StateStore(str(tmp_path / name), initial_cash=1000)
+    store.save_system_event(
+        "baseline",
+        "performance_baseline_adopted",
+        {
+            "baseline_id": "baseline",
+            "effective_at": "2026-01-01T00:00:00+00:00",
+            "accounts": {"acct_a": {"snapshot_id": 1, "components": {"KRW": 1_000.0}}},
+            "component_values": {"KRW": 1_000.0},
+        },
+    )
+    store.save_system_event(
+        "join",
+        "account_tracking_started",
+        {"account_id": "acct_b", "effective_at": "2026-01-02T00:00:00+00:00"},
+    )
+    _record_cash_flow_event(
+        store,
+        "deposit",
+        {
+            "account_id": "acct_b",
+            "amount": 500.0,
+            "currency": "KRW",
+            "flow_type": "deposit",
+            "flow_class": "external_transfer",
+            # While acct_b was still untracked, so it is inside the value the
+            # account brings with it when it joins.
+            "effective_at": "2026-01-01T12:00:00+00:00",
+            "source": "test",
+        },
+    )
+    _save_cash_only_snapshot(
+        store, "run_1", "acct_a", 1_000.0, created_at="2026-01-01 00:00:01"
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct_a", 1_000.0, created_at="2026-01-02 00:00:01"
+    )
+    _save_cash_only_snapshot(
+        store, "run_2", "acct_b", 500.0, created_at="2026-01-02 00:00:01"
+    )
+    return store
+
+
+def test_an_account_joining_does_not_count_its_deposit_twice(tmp_path):
+    """The joining value already contains what arrived before the join.
+
+    Counting the membership flow and the earlier deposit both neutralised twice
+    what actually arrived, turning a flat period into a fabricated 50% loss.
+    """
+    rows = build_total_portfolio_performance_table(_tracked_join_store(tmp_path))
+
+    latest = rows[0]
+    assert latest["total_value"] == 1_500.0
+    assert latest["cash_flow"] == 500.0
+    assert latest["period_return"] == 0.0
+
+
+def test_a_currency_sleeve_also_counts_a_joining_account_once(tmp_path):
+    rows = build_currency_sleeve_performance_table(_tracked_join_store(tmp_path, "join_sleeve.db"))
+
+    latest = rows[0]
+    assert latest["currency"] == "KRW"
+    assert latest["total_value"] == 1_500.0
+    assert latest["cash_flow"] == 500.0
+    assert latest["period_return"] == 0.0
