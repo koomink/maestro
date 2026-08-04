@@ -190,9 +190,91 @@ def test_toss_buying_power_drift_is_observational(tmp_path):
     suspense = store.list_cash_suspense(account_id="toss_brokerage")
     assert suspense[0]["amount"] == 2.0
     assert suspense[0]["status"] == "open"
-    assert result.account_results[0]["observations"][0]["issue_type"] == (
-        "buying_power_drift"
+    assert result.account_results[0]["observations"][0]["issue_type"] == ("buying_power_drift")
+
+    store.save_broker_account_snapshot(
+        new_run_id(),
+        "toss_brokerage",
+        {
+            "account": {
+                "account_id": "toss-1",
+                "cash": 1000.0,
+                "cash_by_currency": {"USD": 1000.0},
+                "ledger_cash_by_currency": None,
+                "buying_power_by_currency": {"USD": 1000.0},
+                "buying_power": 1000.0,
+                "positions": [],
+                "fetched_at": "2026-05-07T00:15:00+00:00",
+                "source": "toss_openapi_readonly",
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [],
+        },
     )
+
+    resolved = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        account_ids=["toss_brokerage"],
+    ).reconcile_latest()
+
+    assert resolved.observations == []
+    suspense = store.list_cash_suspense(account_id="toss_brokerage")[0]
+    assert suspense["status"] == "resolved"
+    assert suspense["resolved_at"] is not None
+    events = store.list_system_events_by_type("cash_drift_resolved", limit=10)
+    assert len(events) == 1
+    assert events[0]["payload"]["incident_id"] == suspense["incident_id"]
+
+
+def test_toss_open_buy_reservation_is_not_cash_drift(tmp_path):
+    config, store, audit = _reconciliation_context(tmp_path)
+    store.save_portfolio_snapshot(
+        new_run_id(),
+        PortfolioState(cash=1538.48, cash_by_currency={"USD": 1538.48}, positions={}),
+        account_id="toss_brokerage",
+    )
+    store.save_broker_account_snapshot(
+        new_run_id(),
+        "toss_brokerage",
+        {
+            "account": {
+                "account_id": "toss-1",
+                "cash": 247.92,
+                "cash_by_currency": {"USD": 247.92},
+                "ledger_cash_by_currency": None,
+                "buying_power_by_currency": {"USD": 247.92},
+                "buying_power": 247.92,
+                "positions": [],
+                "fetched_at": "2026-08-04T00:00:00+00:00",
+                "source": "toss_openapi_readonly",
+            },
+            "current_prices": {},
+            "order_fills": [],
+            "unfilled_orders": [
+                {
+                    "order_id": "open-buy",
+                    "symbol": "PDBC",
+                    "side": "buy",
+                    "currency": "USD",
+                    "reserved_cash": 1290.56,
+                }
+            ],
+        },
+    )
+
+    result = BrokerReconciliationService(
+        config.reconciliation,
+        store,
+        audit,
+        account_ids=["toss_brokerage"],
+    ).reconcile_latest()
+
+    assert result.passed is True
+    assert result.issues == []
+    assert result.observations == []
 
 
 def test_known_1343_krw_drift_replays_as_l1_without_blocking(tmp_path):
@@ -518,3 +600,51 @@ def test_cause_classifications_survive_a_suspense_round_trip(tmp_path):
     # classification has to clear that gate the way transfer_candidate does.
     assert row["status"] == "classified"
     assert row["candidate_label"] != "unexplained"
+
+
+def test_cash_suspense_starts_a_new_incident_after_resolution(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    first = store.upsert_cash_suspense(
+        account_id="toss_brokerage",
+        currency="USD",
+        amount=-261.18,
+        snapshot_id=10,
+        observed_at="2026-08-03T12:00:00+00:00",
+    )
+    store.classify_cash_suspense(
+        account_id="toss_brokerage",
+        currency="USD",
+        classification="settlement_candidate",
+    )
+
+    same = store.upsert_cash_suspense(
+        account_id="toss_brokerage",
+        currency="USD",
+        amount=-261.19,
+        snapshot_id=11,
+        observed_at="2026-08-03T12:15:00+00:00",
+    )
+
+    assert same["incident_id"] == first["incident_id"]
+    assert same["status"] == "classified"
+    assert same["candidate_label"] == "settlement_candidate"
+    store.resolve_cash_suspense(
+        account_id="toss_brokerage",
+        currency="USD",
+        snapshot_id=12,
+        resolved_at="2026-08-03T12:30:00+00:00",
+    )
+
+    next_incident = store.upsert_cash_suspense(
+        account_id="toss_brokerage",
+        currency="USD",
+        amount=24_349.96,
+        snapshot_id=13,
+        observed_at="2026-08-03T16:15:00+00:00",
+    )
+
+    assert next_incident["incident_id"] != first["incident_id"]
+    assert next_incident["first_snapshot_id"] == 13
+    assert next_incident["first_observed_at"] == "2026-08-03T16:15:00+00:00"
+    assert next_incident["status"] == "open"
+    assert next_incident["candidate_label"] == "unexplained"

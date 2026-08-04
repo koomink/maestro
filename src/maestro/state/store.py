@@ -62,8 +62,21 @@ class StateStore:
                 "first_snapshot_id INTEGER, last_snapshot_id INTEGER, "
                 "first_observed_at TEXT NOT NULL, last_observed_at TEXT NOT NULL, "
                 "candidate_label TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', "
+                "incident_id TEXT, resolved_at TEXT, "
                 "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
                 "PRIMARY KEY (account_id, currency))"
+            )
+            cash_suspense_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(cash_suspense)").fetchall()
+            }
+            if "incident_id" not in cash_suspense_columns:
+                conn.execute("ALTER TABLE cash_suspense ADD COLUMN incident_id TEXT")
+            if "resolved_at" not in cash_suspense_columns:
+                conn.execute("ALTER TABLE cash_suspense ADD COLUMN resolved_at TEXT")
+            conn.execute(
+                "UPDATE cash_suspense SET incident_id = "
+                "account_id || ':' || currency || ':' || COALESCE(first_snapshot_id, 0) "
+                "WHERE incident_id IS NULL"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS fill_watermarks "
@@ -86,8 +99,7 @@ class StateStore:
                 )
             if "cumulative_tax" not in fill_watermark_columns:
                 conn.execute(
-                    "ALTER TABLE fill_watermarks ADD COLUMN "
-                    "cumulative_tax REAL NOT NULL DEFAULT 0"
+                    "ALTER TABLE fill_watermarks ADD COLUMN cumulative_tax REAL NOT NULL DEFAULT 0"
                 )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS strategy_runs "
@@ -109,9 +121,7 @@ class StateStore:
                 "created_at TEXT DEFAULT CURRENT_TIMESTAMP"
                 ")"
             )
-            order_columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()
-            }
+            order_columns = {row[1] for row in conn.execute("PRAGMA table_info(orders)").fetchall()}
             orders_contribution_columns_are_new = "contribution_month" not in order_columns
             if "contribution_month" not in order_columns:
                 conn.execute("ALTER TABLE orders ADD COLUMN contribution_month TEXT")
@@ -500,8 +510,7 @@ class StateStore:
                     if not cash_by_currency:
                         cash_by_currency = {normalized_currency: float(state.cash)}
                     cash_by_currency[normalized_currency] = (
-                        float(cash_by_currency.get(normalized_currency, 0.0))
-                        + correction_amount
+                        float(cash_by_currency.get(normalized_currency, 0.0)) + correction_amount
                     )
                     cash = (
                         float(cash_by_currency["KRW"])
@@ -664,6 +673,17 @@ class StateStore:
                             leg["duplicate_key"],
                         ),
                     )
+                for account_id, currency in {
+                    (leg["account_id"], leg["currency"])
+                    for leg in prepared
+                    if str(leg["payload"].get("flow_class") or "") == "fx_conversion"
+                }:
+                    conn.execute(
+                        "UPDATE cash_suspense SET candidate_label = 'fx_conversion', "
+                        "status = 'classified', updated_at = CURRENT_TIMESTAMP "
+                        "WHERE account_id = ? AND currency = ?",
+                        (account_id, currency),
+                    )
                 return {
                     "ledger_established": True,
                     "missing_account_id": None,
@@ -680,30 +700,107 @@ class StateStore:
         snapshot_id: int | None,
         observed_at: str,
         candidate_label: str = "unexplained",
-    ) -> None:
+    ) -> dict[str, Any]:
+        normalized_currency = str(currency).upper()
+        incident_id = f"{account_id}:{normalized_currency}:{snapshot_id or 0}:{observed_at}"
         with self.writer_lock("upsert_cash_suspense"):
             with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                existing = conn.execute(
+                    "SELECT * FROM cash_suspense WHERE account_id = ? AND currency = ?",
+                    (account_id, normalized_currency),
+                ).fetchone()
+                starts_new_incident = existing is None or existing["status"] == "resolved"
+                if existing is not None and existing["status"] == "classified":
+                    previous = float(existing["amount"])
+                    material_change = abs(float(amount) - previous) > max(
+                        0.01 if normalized_currency != "KRW" else 1.0,
+                        abs(previous) * 0.1,
+                    )
+                    starts_new_incident = material_change
+                if starts_new_incident:
+                    conn.execute(
+                        "INSERT INTO cash_suspense "
+                        "(account_id, currency, amount, first_snapshot_id, last_snapshot_id, "
+                        "first_observed_at, last_observed_at, candidate_label, status, "
+                        "incident_id, resolved_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, NULL, CURRENT_TIMESTAMP) "
+                        "ON CONFLICT(account_id, currency) DO UPDATE SET "
+                        "amount = excluded.amount, "
+                        "first_snapshot_id = excluded.first_snapshot_id, "
+                        "last_snapshot_id = excluded.last_snapshot_id, "
+                        "first_observed_at = excluded.first_observed_at, "
+                        "last_observed_at = excluded.last_observed_at, "
+                        "candidate_label = excluded.candidate_label, "
+                        "status = 'open', incident_id = excluded.incident_id, "
+                        "resolved_at = NULL, updated_at = CURRENT_TIMESTAMP",
+                        (
+                            account_id,
+                            normalized_currency,
+                            float(amount),
+                            snapshot_id,
+                            snapshot_id,
+                            observed_at,
+                            observed_at,
+                            candidate_label,
+                            incident_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE cash_suspense SET amount = ?, last_snapshot_id = ?, "
+                        "last_observed_at = ?, updated_at = CURRENT_TIMESTAMP "
+                        "WHERE account_id = ? AND currency = ?",
+                        (
+                            float(amount),
+                            snapshot_id,
+                            observed_at,
+                            account_id,
+                            normalized_currency,
+                        ),
+                    )
+                row = conn.execute(
+                    "SELECT * FROM cash_suspense WHERE account_id = ? AND currency = ?",
+                    (account_id, normalized_currency),
+                ).fetchone()
+                return dict(row)
+
+    def resolve_cash_suspense(
+        self,
+        *,
+        account_id: str,
+        currency: str,
+        snapshot_id: int | None,
+        resolved_at: str,
+    ) -> dict[str, Any] | None:
+        normalized_currency = str(currency).upper()
+        with self.writer_lock("resolve_cash_suspense"):
+            with self._connect() as conn:
+                conn.row_factory = sqlite3.Row
+                existing = conn.execute(
+                    "SELECT * FROM cash_suspense WHERE account_id = ? AND currency = ?",
+                    (account_id, normalized_currency),
+                ).fetchone()
+                if existing is None or existing["status"] == "resolved":
+                    return None
                 conn.execute(
-                    "INSERT INTO cash_suspense "
-                    "(account_id, currency, amount, first_snapshot_id, last_snapshot_id, "
-                    "first_observed_at, last_observed_at, candidate_label, status, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', CURRENT_TIMESTAMP) "
-                    "ON CONFLICT(account_id, currency) DO UPDATE SET "
-                    "amount = excluded.amount, "
-                    "last_snapshot_id = excluded.last_snapshot_id, "
-                    "last_observed_at = excluded.last_observed_at, "
-                    "candidate_label = excluded.candidate_label, "
-                    "status = 'open', updated_at = CURRENT_TIMESTAMP",
+                    "UPDATE cash_suspense SET status = 'resolved', resolved_at = ?, "
+                    "last_snapshot_id = COALESCE(?, last_snapshot_id), "
+                    "last_observed_at = ?, updated_at = CURRENT_TIMESTAMP "
+                    "WHERE account_id = ? AND currency = ?",
                     (
+                        resolved_at,
+                        snapshot_id,
+                        resolved_at,
                         account_id,
-                        str(currency).upper(),
-                        float(amount),
-                        snapshot_id,
-                        snapshot_id,
-                        observed_at,
-                        observed_at,
-                        candidate_label,
+                        normalized_currency,
                     ),
+                )
+                return dict(
+                    conn.execute(
+                        "SELECT * FROM cash_suspense WHERE account_id = ? AND currency = ?",
+                        (account_id, normalized_currency),
+                    ).fetchone()
                 )
 
     def classify_cash_suspense(
@@ -808,11 +905,7 @@ class StateStore:
                     notional_delta = 0.0
                 if first_observation and costs_in_baseline:
                     cost_delta = 0.0
-                changed = (
-                    quantity_delta > 1e-12
-                    or notional_delta > 1e-12
-                    or cost_delta > 1e-12
-                )
+                changed = quantity_delta > 1e-12 or notional_delta > 1e-12 or cost_delta > 1e-12
                 if changed:
                     normalized_currency = str(currency).upper()
 
@@ -926,8 +1019,7 @@ class StateStore:
     def load_fill_cost_watermarks(self) -> dict[str, tuple[float, float]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT broker_order_id, cumulative_commission, cumulative_tax "
-                "FROM fill_watermarks"
+                "SELECT broker_order_id, cumulative_commission, cumulative_tax FROM fill_watermarks"
             ).fetchall()
         return {str(row[0]): (float(row[1]), float(row[2])) for row in rows}
 
@@ -1399,9 +1491,7 @@ class StateStore:
             values.append(account_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         sql = (
-            "SELECT * FROM broker_account_snapshots"
-            + where
-            + " ORDER BY created_at DESC, id DESC"
+            "SELECT * FROM broker_account_snapshots" + where + " ORDER BY created_at DESC, id DESC"
         )
         if limit is not None:
             sql += " LIMIT ?"

@@ -445,13 +445,28 @@ the same `signal_run_id`.
   changes do not change confirmed NAV or TWR.
 - Telegram `/cash_drift` exposes the same suspense rows with stale-snapshot
   callback protection. Classification is audited but never silently writes an
-  account cash flow.
+  account cash flow. Suspense is incident-scoped: an in-budget reconciliation
+  resolves the current account/currency incident, while a later drift resets its
+  first-observed evidence and incident identifier.
+- The resume-order tracker reconciles terminal status evidence even when an old
+  resolved marker exists, and records resolution only after fill application
+  succeeds. Broker-history or status evidence that remains above the ledger fill
+  watermark for 15 minutes produces one deduplicated Telegram warning per
+  broker-order cumulative fill.
 - Toss cash-flow candidate detection compares snapshot-to-snapshot buying power,
   never the accumulated ledger drift. A candidate requires three stable
   observations with unchanged positions/orders/fills and no blocking live-order
   lifecycle. Only an authorized Telegram confirmation writes the idempotent
   `account_cash_flow`; its evidence is `operator_verified`, while ordinary Toss
   snapshots remain `broker_cash_verification=unavailable`.
+- Opposite-direction Toss currency changes over the same stable snapshot window
+  form one `FxConversionCandidate`. Telegram persists one proposal and an
+  authorized callback invokes `record_currency_conversion`, which writes both
+  `fx_conversion` legs atomically with a fingerprint-derived idempotency key.
+  Existing fills do not suppress this paired candidate when position/order/fill
+  signatures are unchanged across its window. Callback processing revalidates
+  both the candidate fingerprint and the latest ledger-to-buying-power result;
+  stale balances are rejected without changing either currency.
 - Performance quality and cash verification are separate dimensions. A ledger
   can support confirmed TWR while broker cash remains unavailable or has only an
   operator-verified checkpoint.

@@ -145,17 +145,24 @@ def toss_order_summaries(
         if country == "US" and total_order_notional <= 10.0:
             estimated_commission = 0.0
         reserved_cash = reserved_principal + estimated_commission
+        raw_status = str(item.get("status") or "")
+        status = {
+            "PENDING": "OPEN",
+            "PENDING_CANCEL": "OPEN",
+            "PENDING_REPLACE": "OPEN",
+            "PARTIAL_FILLED": "PARTIALLY_FILLED",
+        }.get(raw_status.upper(), raw_status)
         output.append(
             BrokerOrderSummary(
                 order_id=str(item.get("orderId") or ""),
                 symbol=str(item.get("symbol") or ""),
                 side=side,
                 quantity=quantity,
-                status=str(item.get("status") or ""),
+                status=status,
                 submitted_at=_datetime(item.get("orderedAt")),
                 filled_quantity=filled_quantity,
                 average_fill_price=_optional_decimal(execution.get("averageFilledPrice")),
-                raw_status=str(item.get("status") or "") or None,
+                raw_status=raw_status or None,
                 currency=currency,
                 remaining_quantity=remaining_quantity,
                 limit_price=price,

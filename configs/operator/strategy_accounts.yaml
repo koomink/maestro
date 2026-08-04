@@ -55,6 +55,7 @@ account_strategy_targets:
       target_weight: 0.7
       allowed_symbols:
         - QQQ
+        - QQQM
         - SCHD
         - BIL
         - TLT

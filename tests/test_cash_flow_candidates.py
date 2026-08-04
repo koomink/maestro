@@ -8,7 +8,10 @@ from maestro.execution.account_cash_flows import (
     AccountCashFlowService,
     account_cash_flow_leg_duplicate_key,
 )
-from maestro.execution.cash_flow_candidates import CashFlowCandidateDetector
+from maestro.execution.cash_flow_candidates import (
+    CashFlowCandidateDetector,
+    FxConversionCandidate,
+)
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -72,6 +75,43 @@ def test_rejects_candidate_when_orders_change(tmp_path):
     assert CashFlowCandidateDetector(store).detect("toss_brokerage") is None
 
 
+def test_market_price_changes_do_not_hide_an_unchanged_position(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    _save_toss_snapshot(
+        store,
+        "baseline",
+        1_000_000,
+        positions=[
+            {
+                "symbol": "QQQ",
+                "quantity": 2.0,
+                "average_price": 100.0,
+                "current_price": 101.0,
+                "unrealized_pnl": 2.0,
+                "currency": "USD",
+            }
+        ],
+    )
+    for index, current_price in enumerate((102.0, 103.0, 104.0), start=1):
+        _save_toss_snapshot(
+            store,
+            f"changed-{index}",
+            2_000_000,
+            positions=[
+                {
+                    "symbol": "QQQ",
+                    "quantity": 2.0,
+                    "average_price": 100.0,
+                    "current_price": current_price,
+                    "unrealized_pnl": (current_price - 100.0) * 2.0,
+                    "currency": "USD",
+                }
+            ],
+        )
+
+    assert CashFlowCandidateDetector(store).detect("toss_brokerage") is not None
+
+
 def test_account_cash_flow_service_is_idempotent(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
     store.save_portfolio_snapshot(
@@ -113,6 +153,8 @@ def _save_toss_snapshot_multi(
     store: StateStore,
     run_id: str,
     buying_power_by_currency: dict[str, float],
+    *,
+    order_fills: list[dict] | None = None,
 ) -> None:
     store.save_broker_account_snapshot(
         run_id,
@@ -129,12 +171,12 @@ def _save_toss_snapshot_multi(
                 "positions": [],
             },
             "unfilled_orders": [],
-            "order_fills": [],
+            "order_fills": order_fills or [],
         },
     )
 
 
-def test_opposite_sign_currency_moves_are_not_offered_as_a_cash_flow(tmp_path):
+def test_opposite_sign_toss_currency_moves_are_offered_as_one_conversion(tmp_path):
     """A conversion is one currency falling while another rises.
 
     Confirming either leg on its own would record investor money entering or
@@ -145,7 +187,37 @@ def test_opposite_sign_currency_moves_are_not_offered_as_a_cash_flow(tmp_path):
     for run_id in ("changed-1", "changed-2", "changed-3"):
         _save_toss_snapshot_multi(store, run_id, {"KRW": 100_000.0, "USD": 1_100.0})
 
-    assert CashFlowCandidateDetector(store).detect("toss_brokerage") is None
+    candidate = CashFlowCandidateDetector(store).detect("toss_brokerage")
+
+    assert isinstance(candidate, FxConversionCandidate)
+    assert candidate.from_currency == "KRW"
+    assert candidate.from_amount == 1_300_000.0
+    assert candidate.to_currency == "USD"
+    assert candidate.to_amount == 1_000.0
+    assert candidate.evidence()["paired_opposite_currency_moves"] is True
+
+
+def test_recent_fills_do_not_hide_a_stable_toss_conversion_candidate(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    recent_fill = [{"symbol": "QQQ", "submitted_at": utc_now().isoformat()}]
+    _save_toss_snapshot_multi(
+        store,
+        "baseline",
+        {"KRW": 1_400_000.0, "USD": 100.0},
+        order_fills=recent_fill,
+    )
+    for run_id in ("changed-1", "changed-2", "changed-3"):
+        _save_toss_snapshot_multi(
+            store,
+            run_id,
+            {"KRW": 100_000.0, "USD": 1_100.0},
+            order_fills=recent_fill,
+        )
+
+    assert isinstance(
+        CashFlowCandidateDetector(store).detect("toss_brokerage"),
+        FxConversionCandidate,
+    )
 
 
 def test_same_sign_currency_moves_still_produce_a_candidate(tmp_path):
@@ -553,6 +625,14 @@ def test_a_conversion_books_the_spread_apart_from_the_principal(tmp_path):
 
 def test_a_conversion_without_a_fee_records_only_its_two_legs(tmp_path):
     store, service = _conversion_service(tmp_path)
+    for currency, amount in (("KRW", -1_400_000.0), ("USD", 1_000.0)):
+        store.upsert_cash_suspense(
+            account_id="toss_brokerage",
+            currency=currency,
+            amount=amount,
+            snapshot_id=1,
+            observed_at="2026-08-02T12:00:00+00:00",
+        )
 
     _convert(service, to_amount=1_000.0, fee=0.0)
 
@@ -561,6 +641,9 @@ def test_a_conversion_without_a_fee_records_only_its_two_legs(tmp_path):
     assert {event["payload"]["flow_class"] for event in events} == {"fx_conversion"}
     state = store.load_latest_account_portfolio_state("toss_brokerage")
     assert state.cash_by_currency["USD"] == 1_000.0
+    suspense = store.list_cash_suspense(account_id="toss_brokerage")
+    assert {row["candidate_label"] for row in suspense} == {"fx_conversion"}
+    assert {row["status"] for row in suspense} == {"classified"}
 
 
 def test_a_conversion_whose_numbers_disagree_is_refused(tmp_path):

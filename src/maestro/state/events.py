@@ -53,9 +53,11 @@ class SystemEventType(StrEnum):
     LEDGER_BOOKKEEPING_CORRECTION = "ledger_bookkeeping_correction"
     CASH_DRIFT_OBSERVED = "cash_drift_observed"
     CASH_DRIFT_CLASSIFIED = "cash_drift_classified"
+    CASH_DRIFT_RESOLVED = "cash_drift_resolved"
     BROKER_ORDER_HISTORY_BACKFILL = "broker_order_history_backfill"
     TELEGRAM_COMMAND = "telegram_command"
     TELEGRAM_RECOVERY_NOTICE = "telegram_recovery_notice"
+    TELEGRAM_UNRECONCILED_FILL_NOTICE = "telegram_unreconciled_fill_notice"
 
 
 SYSTEM_EVENT_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {

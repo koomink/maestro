@@ -287,6 +287,134 @@ def test_adopted_attribution_reconciles_external_changes_manual_first(tmp_path):
     assert {position.version for position in positions} == {3}
 
 
+def test_operator_reclassifies_adopted_position_between_buckets(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    service = AccountAttributionReconciliationService(store, audit)
+    service.reconcile_broker_snapshot(
+        run_id="run_sync_1",
+        account_id="toss_brokerage",
+        broker_snapshot_id=11,
+        broker_positions={"QQQM": 22.0},
+        strategy_symbols_by_bucket={},
+    )
+    service.adopt_latest(
+        run_id="run_adopt",
+        account_id="toss_brokerage",
+        reason="operator verified",
+        adopted_by="cli",
+    )
+
+    positions = service.reclassify_position(
+        run_id="run_reclassify",
+        account_id="toss_brokerage",
+        symbol="QQQM",
+        from_bucket_id="manual",
+        to_bucket_id="crescendo_us",
+        quantity=22.0,
+        reason="QQQM is a QQQ substitute",
+        reclassified_by="cli",
+    )
+
+    assert _quantity(positions, "manual", "QQQM") == 0.0
+    assert _quantity(positions, "crescendo_us", "QQQM") == 22.0
+    assert {position.broker_snapshot_id for position in positions} == {11}
+    assert {position.approved for position in positions} == {True}
+    event = store.load_latest_system_event("account_attribution_reconciliation")
+    assert event["payload"]["status"] == "operator_reclassified"
+    assert event["payload"]["reason"] == "QQQM is a QQQ substitute"
+
+
+def test_operator_reclassification_rejects_excess_quantity(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    service = AccountAttributionReconciliationService(store, audit)
+    service.reconcile_broker_snapshot(
+        run_id="run_sync_1",
+        account_id="toss_brokerage",
+        broker_snapshot_id=11,
+        broker_positions={"QQQM": 22.0},
+        strategy_symbols_by_bucket={},
+    )
+    service.adopt_latest(
+        run_id="run_adopt",
+        account_id="toss_brokerage",
+        reason="operator verified",
+        adopted_by="cli",
+    )
+
+    with pytest.raises(AttributionValidationError, match="exceeds source quantity"):
+        service.reclassify_position(
+            run_id="run_reclassify",
+            account_id="toss_brokerage",
+            symbol="QQQM",
+            from_bucket_id="manual",
+            to_bucket_id="crescendo_us",
+            quantity=23.0,
+            reason="QQQM is a QQQ substitute",
+            reclassified_by="cli",
+        )
+
+
+def test_operator_restores_warning_backed_reduction_before_delayed_sell_fill(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    audit = AuditLogger(str(tmp_path / "audit.jsonl"))
+    service = AccountAttributionReconciliationService(store, audit)
+    service.reconcile_broker_snapshot(
+        run_id="run_sync_1",
+        account_id="toss_brokerage",
+        broker_snapshot_id=11,
+        broker_positions={"QQQM": 22.0},
+        strategy_symbols_by_bucket={"crescendo_us": {"QQQM"}},
+    )
+    service.adopt_latest(
+        run_id="run_adopt",
+        account_id="toss_brokerage",
+        reason="operator verified",
+        adopted_by="cli",
+    )
+    reduced = service.reconcile_broker_snapshot(
+        run_id="run_sync_after_sell",
+        account_id="toss_brokerage",
+        broker_snapshot_id=12,
+        broker_positions={},
+        strategy_symbols_by_bucket={"crescendo_us": {"QQQM"}},
+    )
+    assert _quantity(reduced, "crescendo_us", "QQQM") == 0.0
+
+    restored = service.restore_pending_maestro_sell(
+        run_id="run_restore",
+        account_id="toss_brokerage",
+        symbol="QQQM",
+        bucket_id="crescendo_us",
+        quantity=22.0,
+        reason="broker snapshot preceded fill reconciliation",
+        restored_by="cli",
+    )
+    final = service.apply_maestro_fill(
+        run_id="run_fill",
+        account_id="toss_brokerage",
+        bucket_id="crescendo_us",
+        symbol="QQQM",
+        side="sell",
+        quantity=22.0,
+        fill_key="TOSS-SELL:22",
+    )
+
+    assert _quantity(restored, "crescendo_us", "QQQM") == 22.0
+    assert _quantity(final, "crescendo_us", "QQQM") == 0.0
+    with pytest.raises(AttributionValidationError, match="warning-backed"):
+        service.restore_pending_maestro_sell(
+            run_id="run_restore_again",
+            account_id="toss_brokerage",
+            symbol="QQQM",
+            bucket_id="crescendo_us",
+            quantity=22.0,
+            reason="duplicate",
+            restored_by="cli",
+        )
+
+
 def test_attribution_gate_requires_adoption_matching_snapshot_and_quantities(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))

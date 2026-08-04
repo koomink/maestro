@@ -521,9 +521,9 @@ def test_telegram_operator_account_detects_voluntary_deposit_and_approves_target
     account_flows = store.list_system_events_by_type("account_cash_flow", limit=10)
     assert account_flows[0]["payload"]["account_id"] == "paper_cash"
     assert account_flows[0]["payload"]["amount"] == 1_000_000.0
-    assert {
-        event["payload"]["account_cash_flow_id"] for event in cash_flow_events
-    } == {account_flows[0]["run_id"]}
+    assert {event["payload"]["account_cash_flow_id"] for event in cash_flow_events} == {
+        account_flows[0]["run_id"]
+    }
     ack_events = store.list_system_events_by_type("strategy_cash_flow_proposal_ack", limit=10)
     assert ack_events[0]["payload"]["status"] == "approved"
 
@@ -570,9 +570,7 @@ def test_telegram_operator_confirms_stable_toss_cash_flow_candidate_once(tmp_pat
 
     assert router.process_update(message_update("/account"))
     assert client.sent_messages[-1]["text"].startswith("Maestro cash-flow candidate")
-    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[0][
-        "payload"
-    ]
+    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[0]["payload"]
 
     assert router.process_update(
         callback_update(f"operator:cash-flow:confirm:{proposal['proposal_id']}")
@@ -589,6 +587,119 @@ def test_telegram_operator_confirms_stable_toss_cash_flow_candidate_once(tmp_pat
         callback_update(f"operator:cash-flow:confirm:{proposal['proposal_id']}")
     )
     assert len(store.list_system_events_by_type("account_cash_flow", limit=10)) == 1
+
+
+def test_telegram_operator_proactively_confirms_toss_fx_conversion_once(tmp_path):
+    config = load_config(_telegram_voluntary_deposit_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.save_portfolio_snapshot(
+        "ledger_baseline",
+        PortfolioState(
+            cash=1_350_090.0,
+            cash_by_currency={"KRW": 1_350_000.0, "USD": 90.0},
+        ),
+        account_id="paper_cash",
+    )
+    for run_id, balances in [
+        ("baseline", {"KRW": 1_400_000.0, "USD": 100.0}),
+        ("changed-1", {"KRW": 100_000.0, "USD": 1_100.0}),
+        ("changed-2", {"KRW": 100_000.0, "USD": 1_100.0}),
+        ("changed-3", {"KRW": 100_000.0, "USD": 1_100.0}),
+    ]:
+        store.save_broker_account_snapshot(
+            run_id,
+            "paper_cash",
+            {
+                "account_id": "paper_cash",
+                "account": {
+                    "account_id": "paper_cash",
+                    "source": "toss_openapi_readonly",
+                    "cash": balances["KRW"],
+                    "cash_by_currency": balances,
+                    "buying_power_by_currency": balances,
+                    "ledger_cash_by_currency": None,
+                    "positions": [],
+                },
+                "unfilled_orders": [],
+                "order_fills": [],
+            },
+        )
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
+    )
+
+    router.notify_pending_cash_flows()
+
+    assert client.sent_messages[-1]["text"].startswith("Maestro currency-conversion candidate")
+    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[0]["payload"]
+    assert proposal["source"] == "toss_buying_power_fx_conversion_candidate"
+    assert proposal["observed_from_amount"] == 1_300_000.0
+    assert proposal["observed_to_amount"] == 1_000.0
+    assert proposal["from_amount"] == 1_250_000.0
+    assert proposal["to_amount"] == 1_010.0
+    assert "Maestro ledger adjustment" in client.sent_messages[-1]["text"]
+
+    assert router.process_update(
+        callback_update(f"operator:cash-flow:confirm:{proposal['proposal_id']}")
+    )
+
+    flows = store.list_system_events_by_type("account_cash_flow", limit=10)
+    assert len(flows) == 2
+    assert {row["payload"]["flow_class"] for row in flows} == {"fx_conversion"}
+    state = store.load_latest_account_portfolio_state("paper_cash")
+    assert state is not None
+    assert state.cash_by_currency == {"KRW": 100_000.0, "USD": 1_100.0}
+    assert client.answered_callbacks[-1]["text"] == "Currency conversion recorded."
+
+    assert router.process_update(
+        callback_update(f"operator:cash-flow:confirm:{proposal['proposal_id']}")
+    )
+    assert len(store.list_system_events_by_type("account_cash_flow", limit=10)) == 2
+
+
+def test_telegram_operator_warns_once_for_an_unreconciled_live_fill(
+    tmp_path,
+    monkeypatch,
+):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    candidate = {
+        "broker_order_id": "toss-order-1234567890",
+        "account_id": "toss_brokerage",
+        "symbol": "QQQM",
+        "side": "sell",
+        "filled_quantity": 22.0,
+        "applied_quantity": 0.0,
+        "missing_quantity": 22.0,
+        "missing_notional": 6316.20,
+        "first_observed_at": "2026-08-04T00:00:00+00:00",
+        "age_seconds": 901.0,
+    }
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.list_unreconciled_live_order_fills",
+        lambda store: [candidate],
+    )
+
+    router._notify_unreconciled_live_order_fills()
+    router._notify_unreconciled_live_order_fills()
+
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["text"].startswith("Maestro unreconciled fill warning")
+    assert "QQQM" in client.sent_messages[0]["text"]
+    notices = store.list_system_events_by_type("telegram_unreconciled_fill_notice", limit=10)
+    assert len(notices) == 1
 
 
 def test_telegram_operator_account_assigns_voluntary_deposit_to_one_strategy(tmp_path):
@@ -643,18 +754,14 @@ def test_telegram_operator_confirms_unexplained_withdrawal_as_account_flow(tmp_p
     )
 
     assert router.process_update(message_update("/account"))
-    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[
-        0
-    ]["payload"]
+    proposal = store.list_system_events_by_type("account_cash_flow_proposal", limit=1)[0]["payload"]
     assert proposal["flow_type"] == "withdrawal"
 
     assert router.process_update(
         callback_update(f"operator:cash-flow:approve:{proposal['proposal_id']}")
     )
 
-    account_flow = store.list_system_events_by_type("account_cash_flow", limit=1)[0][
-        "payload"
-    ]
+    account_flow = store.list_system_events_by_type("account_cash_flow", limit=1)[0]["payload"]
     assert account_flow["amount"] == -1_000_000.0
     assert account_flow["flow_type"] == "withdrawal"
 
@@ -1898,9 +2005,7 @@ def test_telegram_recovery_callback_requests_broker_attestation(monkeypatch, tmp
         ),
     )
 
-    assert router.process_update(
-        callback_update("operator:wfrec:auto:0123456789abcdef")
-    )
+    assert router.process_update(callback_update("operator:wfrec:auto:0123456789abcdef"))
 
     edited = client.edited_messages[-1]
     assert "Automatic order matching was inconclusive" in edited["text"]
@@ -1926,9 +2031,7 @@ def test_telegram_recovery_notification_is_idempotent(tmp_path):
     router.poll_once()
 
     notices = [
-        message
-        for message in client.sent_messages
-        if "Maestro Recovery Center" in message["text"]
+        message for message in client.sent_messages if "Maestro Recovery Center" in message["text"]
     ]
     assert len(notices) == 1
     assert len(store.list_system_events_by_type("telegram_recovery_notice")) == 1
@@ -2407,15 +2510,11 @@ def test_retry_quote_is_normalized_to_instrument_tick(monkeypatch, tmp_path):
     order = _store_recoverable_order(store).model_copy(update={"symbol": "PDBC"})
     retry_config = SimpleNamespace(
         universe=SimpleNamespace(
-            get=lambda symbol: SimpleNamespace(price_tick=0.01)
-            if symbol == "PDBC"
-            else None
+            get=lambda symbol: SimpleNamespace(price_tick=0.01) if symbol == "PDBC" else None
         )
     )
     readonly_service = SimpleNamespace(
-        client=SimpleNamespace(
-            get_current_prices=lambda symbols: {"PDBC": 17.465}
-        )
+        client=SimpleNamespace(get_current_prices=lambda symbols: {"PDBC": 17.465})
     )
     monkeypatch.setattr(
         "maestro.integrations.telegram.handlers.build_broker_readonly_service",

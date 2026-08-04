@@ -196,6 +196,14 @@ def test_toss_snapshot_keeps_open_buy_reservations_out_of_cash_fields():
         "USD": 185.43525,
     }
     assert [order.order_id for order in snapshot.unfilled_orders] == ["KR-OPEN", "US-OPEN"]
+    assert [order.status for order in snapshot.unfilled_orders] == [
+        "OPEN",
+        "PARTIALLY_FILLED",
+    ]
+    assert [order.raw_status for order in snapshot.unfilled_orders] == [
+        "PENDING",
+        "PARTIAL_FILLED",
+    ]
 
 
 def test_toss_readonly_client_fetches_account_snapshot_with_account_header():

@@ -129,8 +129,7 @@ class BrokerReconciliationService:
                     issue_type="no_portfolio_snapshot",
                     tolerance=0.0,
                     message=(
-                        "No Maestro portfolio snapshot is available for "
-                        f"account_id={account_id}."
+                        f"No Maestro portfolio snapshot is available for account_id={account_id}."
                     ),
                 )
                 issues.append(issue)
@@ -170,8 +169,7 @@ class BrokerReconciliationService:
                 _issue_for_account(issue, account_id) for issue in account_result.issues
             ]
             account_observations = [
-                _issue_for_account(issue, account_id)
-                for issue in account_result.observations
+                _issue_for_account(issue, account_id) for issue in account_result.observations
             ]
             issues.extend(account_issues)
             observations.extend(account_observations)
@@ -196,9 +194,8 @@ class BrokerReconciliationService:
 
         return ReconciliationResult(
             run_id=run_id,
-            passed=not issues and not any(
-                observation.drift_level == "L3" for observation in observations
-            ),
+            passed=not issues
+            and not any(observation.drift_level == "L3" for observation in observations),
             checked_at=utc_now().isoformat(),
             cash_difference=cash_difference,
             position_differences=position_differences,
@@ -236,9 +233,10 @@ class BrokerReconciliationService:
                 ),
                 None,
             )
-            if history is None or int(
-                (history.get("payload") or {}).get("missing_ledger_count") or 0
-            ) > 0:
+            if (
+                history is None
+                or int((history.get("payload") or {}).get("missing_ledger_count") or 0) > 0
+            ):
                 issues.append(
                     ReconciliationIssue(
                         issue_type="order_history_unverified",
@@ -327,16 +325,18 @@ class BrokerReconciliationService:
                     )
                 )
 
-        if any(issue.issue_type in {
-            "position_quantity_mismatch",
-            "unknown_broker_position",
-            "missing_broker_position",
-        } for issue in issues):
+        if any(
+            issue.issue_type
+            in {
+                "position_quantity_mismatch",
+                "unknown_broker_position",
+                "missing_broker_position",
+            }
+            for issue in issues
+        ):
             for observation in observations:
                 observation.drift_level = "L3"
-                observation.message = (
-                    observation.message + " Position/fill mismatch makes this L3."
-                )
+                observation.message = observation.message + " Position/fill mismatch makes this L3."
 
         account_id = str(broker_account.get("account_id") or "") or None
         for observation in observations:
@@ -345,9 +345,8 @@ class BrokerReconciliationService:
 
         return ReconciliationResult(
             run_id=run_id,
-            passed=not issues and not any(
-                observation.drift_level == "L3" for observation in observations
-            ),
+            passed=not issues
+            and not any(observation.drift_level == "L3" for observation in observations),
             checked_at=utc_now().isoformat(),
             cash_difference=cash_difference,
             position_differences=position_differences,
@@ -416,13 +415,16 @@ class BrokerReconciliationService:
         # reconciliation failure. Persist each observation separately so the
         # ledger/audit timeline can classify it later without turning it into
         # an accounting cash flow or a return.
+        observed_pairs: set[tuple[str, str]] = set()
         for observation in result.observations:
             if observation.issue_type != "buying_power_drift":
                 continue
             currency = str(observation.symbol or "").removeprefix("CASH_") or "KRW"
             snapshot_id = observation.broker_snapshot_id or result.broker_snapshot_id
+            account_id = str(observation.account_id or result.broker_account_id)
+            observed_pairs.add((account_id, currency.upper()))
             observation_payload = {
-                "account_id": observation.account_id or result.broker_account_id,
+                "account_id": account_id,
                 "currency": currency,
                 "difference": observation.difference,
                 "snapshot_id": snapshot_id,
@@ -433,13 +435,14 @@ class BrokerReconciliationService:
                     f"{snapshot_id}:{currency}"
                 ),
             }
-            self.state_store.upsert_cash_suspense(
-                account_id=str(observation_payload["account_id"]),
+            suspense = self.state_store.upsert_cash_suspense(
+                account_id=account_id,
                 currency=currency,
                 amount=float(observation.difference or 0.0),
                 snapshot_id=snapshot_id,
                 observed_at=result.checked_at,
             )
+            observation_payload["incident_id"] = suspense.get("incident_id")
             if self.state_store.duplicate_key_exists(observation_payload["duplicate_key"]):
                 continue
             save_audited_system_event(
@@ -449,6 +452,42 @@ class BrokerReconciliationService:
                 SystemEventType.CASH_DRIFT_OBSERVED,
                 observation_payload,
             )
+        for account_result in result.account_results:
+            account_id = str(account_result.get("account_id") or "")
+            snapshot_id = account_result.get("broker_snapshot_id")
+            if not account_id or snapshot_id is None:
+                continue
+            for row in self.state_store.list_cash_suspense(account_id=account_id):
+                pair = (account_id, str(row["currency"]).upper())
+                if pair in observed_pairs or row.get("status") == "resolved":
+                    continue
+                resolved = self.state_store.resolve_cash_suspense(
+                    account_id=account_id,
+                    currency=str(row["currency"]),
+                    snapshot_id=int(snapshot_id),
+                    resolved_at=result.checked_at,
+                )
+                if resolved is None:
+                    continue
+                incident_id = str(resolved.get("incident_id") or "")
+                resolution_payload = {
+                    "account_id": account_id,
+                    "currency": str(row["currency"]),
+                    "incident_id": incident_id,
+                    "previous_amount": float(row["amount"]),
+                    "snapshot_id": int(snapshot_id),
+                    "resolved_at": result.checked_at,
+                    "reason": "buying_power_drift_returned_within_budget",
+                    "duplicate_key": f"cash-drift-resolved:{incident_id}",
+                }
+                if not self.state_store.duplicate_key_exists(resolution_payload["duplicate_key"]):
+                    save_audited_system_event(
+                        self.state_store,
+                        self.audit_logger,
+                        result.run_id,
+                        SystemEventType.CASH_DRIFT_RESOLVED,
+                        resolution_payload,
+                    )
 
     def _tolerances(self) -> dict[str, float]:
         return {
@@ -536,12 +575,13 @@ class BrokerReconciliationService:
         buying_power = broker_account.get("buying_power_by_currency") or {}
         for currency in sorted(set(ledger) | set(buying_power)):
             ledger_value = float(ledger.get(currency, 0.0))
-            broker_value = float(buying_power.get(currency, 0.0))
+            broker_value = float(buying_power.get(currency, 0.0)) + _reserved_buy_cash(
+                broker_account, currency
+            )
             difference = broker_value - ledger_value
             drift_config = self.config.buying_power_drift
             budget_by_currency = (
-                self.config.buying_power_drift_budget_by_currency
-                or drift_config.budget_by_currency
+                self.config.buying_power_drift_budget_by_currency or drift_config.budget_by_currency
             )
             budget = budget_by_currency.get(currency, 0.0)
             if abs(difference) <= budget:
@@ -600,11 +640,25 @@ class BrokerReconciliationService:
                     drift_stable=drift_stable,
                     message=(
                         "Broker buying power differs from the Maestro cash ledger; "
+                        "open buy-order reservations are added back before comparison; "
                         f"this is observational drift {drift_level} and does not "
                         "change accounting cash."
                     ),
                 )
             )
+
+
+def _reserved_buy_cash(broker_account: dict[str, Any], currency: str) -> float:
+    total = 0.0
+    for order in broker_account.get("_unfilled_orders") or []:
+        if not isinstance(order, dict):
+            continue
+        if str(order.get("side") or "").lower() != "buy":
+            continue
+        if str(order.get("currency") or "").upper() != currency.upper():
+            continue
+        total += max(float(order.get("reserved_cash") or 0.0), 0.0)
+    return total
 
 
 def _buying_power_drift_level(
@@ -645,10 +699,7 @@ def _recent_fill_notional(broker_account: dict[str, Any]) -> float:
             continue
         quantity = float(fill.get("filled_quantity") or fill.get("quantity") or 0.0)
         price = float(
-            fill.get("average_fill_price")
-            or fill.get("limit_price")
-            or fill.get("price")
-            or 0.0
+            fill.get("average_fill_price") or fill.get("limit_price") or fill.get("price") or 0.0
         )
         total += abs(quantity * price)
     return total
@@ -720,9 +771,7 @@ def _account_with_observation_context(snapshot: dict[str, Any]) -> dict[str, Any
     account["_order_fills"] = payload.get("order_fills") or []
     account["_unfilled_orders"] = payload.get("unfilled_orders") or []
     account["_snapshot_created_at"] = snapshot.get("created_at")
-    account["_order_history_backfill_run_id"] = payload.get(
-        "order_history_backfill_run_id"
-    )
+    account["_order_history_backfill_run_id"] = payload.get("order_history_backfill_run_id")
     return account
 
 

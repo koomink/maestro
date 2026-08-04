@@ -236,8 +236,16 @@ class AccountAttributionReconciliationService:
             )
         else:
             raise ValueError(f"Unsupported Maestro fill side: {side}")
-        version = max(position.version for position in previous) + 1
-        broker_snapshot_id = previous[0].broker_snapshot_id if previous else None
+        latest_payload = self._latest_attribution_payload(account_id) or {}
+        version = max(
+            (position.version for position in previous),
+            default=int(latest_payload.get("version") or 0),
+        ) + 1
+        broker_snapshot_id = (
+            previous[0].broker_snapshot_id
+            if previous
+            else latest_payload.get("broker_snapshot_id")
+        )
         approved = all(position.approved for position in previous)
         next_positions = [
             position.model_copy(
@@ -266,6 +274,172 @@ class AccountAttributionReconciliationService:
         )
         return next_positions
 
+    def reclassify_position(
+        self,
+        *,
+        run_id: str,
+        account_id: str,
+        symbol: str,
+        from_bucket_id: str,
+        to_bucket_id: str,
+        quantity: float,
+        reason: str,
+        reclassified_by: str,
+    ) -> list[AttributionPosition]:
+        previous = self._latest_positions(account_id)
+        if previous is None:
+            raise AttributionValidationError(
+                f"account attribution is missing for account_id={account_id}"
+            )
+        if not all(position.approved for position in previous):
+            raise AttributionValidationError(
+                f"account attribution is not adopted for account_id={account_id}"
+            )
+        if from_bucket_id == to_bucket_id:
+            raise AttributionValidationError("attribution buckets must be different")
+        if quantity <= 0:
+            raise AttributionValidationError("reclassification quantity must be positive")
+
+        positions = _positions_by_key(previous)
+        from_key = (account_id, symbol, from_bucket_id)
+        to_key = (account_id, symbol, to_bucket_id)
+        available = positions.get(from_key, 0.0)
+        if quantity > available + 1e-9:
+            raise AttributionValidationError(
+                "attribution reclassification exceeds source quantity: "
+                f"account_id={account_id} symbol={symbol} "
+                f"bucket_id={from_bucket_id} available={available:g}"
+            )
+        positions[from_key] -= quantity
+        positions[to_key] += quantity
+
+        version = max(position.version for position in previous) + 1
+        broker_snapshot_id = previous[0].broker_snapshot_id if previous else None
+        next_positions = [
+            position.model_copy(
+                update={
+                    "source": "operator_reclassified",
+                    "confidence": "high",
+                    "broker_snapshot_id": broker_snapshot_id,
+                    "version": version,
+                    "approved": True,
+                }
+            )
+            for position in _sorted_positions(positions)
+        ]
+        change = _event(
+            "operator_reclassified",
+            account_id=account_id,
+            symbol=symbol,
+            bucket_id=to_bucket_id,
+            quantity=quantity,
+        )
+        change["from_bucket_id"] = from_bucket_id
+        change["to_bucket_id"] = to_bucket_id
+        self.state_store.save_account_attribution_snapshot(run_id, next_positions)
+        self._save_state_event(
+            run_id=run_id,
+            event_type=ATTRIBUTION_RECONCILIATION_EVENT,
+            account_id=account_id,
+            broker_snapshot_id=broker_snapshot_id,
+            version=version,
+            approved=True,
+            status="operator_reclassified",
+            positions=next_positions,
+            changes=[change],
+            reason=reason,
+            reclassified_by=reclassified_by,
+        )
+        return next_positions
+
+    def restore_pending_maestro_sell(
+        self,
+        *,
+        run_id: str,
+        account_id: str,
+        symbol: str,
+        bucket_id: str,
+        quantity: float,
+        reason: str,
+        restored_by: str,
+    ) -> list[AttributionPosition]:
+        """Reverse a broker-delta reduction before replaying its Maestro sell fill.
+
+        A broker snapshot can observe a sell before fill reconciliation does. The
+        attribution delta then records an explicit strategy-reduction warning and
+        removes the quantity. This audited repair restores only warning-backed
+        quantity so the normal fill path can consume it exactly once.
+        """
+        previous = self._latest_positions(account_id)
+        if previous is None:
+            raise AttributionValidationError(
+                f"account attribution is missing for account_id={account_id}"
+            )
+        if not all(position.approved for position in previous):
+            raise AttributionValidationError(
+                f"account attribution is not adopted for account_id={account_id}"
+            )
+        if quantity <= 0:
+            raise AttributionValidationError("restoration quantity must be positive")
+        available = self._unrestored_strategy_reduction(
+            account_id=account_id,
+            symbol=symbol,
+            bucket_id=bucket_id,
+        )
+        if quantity > available + 1e-9:
+            raise AttributionValidationError(
+                "restoration exceeds warning-backed strategy reduction: "
+                f"account_id={account_id} symbol={symbol} bucket_id={bucket_id} "
+                f"available={available:g}"
+            )
+
+        positions = _positions_by_key(previous)
+        positions[(account_id, symbol, bucket_id)] += quantity
+        latest_payload = self._latest_attribution_payload(account_id) or {}
+        version = max(
+            (position.version for position in previous),
+            default=int(latest_payload.get("version") or 0),
+        ) + 1
+        broker_snapshot_id = (
+            previous[0].broker_snapshot_id
+            if previous
+            else latest_payload.get("broker_snapshot_id")
+        )
+        next_positions = [
+            position.model_copy(
+                update={
+                    "source": "operator_recovery",
+                    "confidence": "high",
+                    "broker_snapshot_id": broker_snapshot_id,
+                    "version": version,
+                    "approved": True,
+                }
+            )
+            for position in _sorted_positions(positions)
+        ]
+        change = _event(
+            "pending_maestro_sell_restored",
+            account_id=account_id,
+            symbol=symbol,
+            bucket_id=bucket_id,
+            quantity=quantity,
+        )
+        self.state_store.save_account_attribution_snapshot(run_id, next_positions)
+        self._save_state_event(
+            run_id=run_id,
+            event_type=ATTRIBUTION_RECONCILIATION_EVENT,
+            account_id=account_id,
+            broker_snapshot_id=broker_snapshot_id,
+            version=version,
+            approved=True,
+            status="pending_maestro_sell_restored",
+            positions=next_positions,
+            changes=[change],
+            reason=reason,
+            restored_by=restored_by,
+        )
+        return next_positions
+
     def has_attribution(self, account_id: str) -> bool:
         return self._latest_positions(account_id) is not None
 
@@ -282,7 +456,48 @@ class AccountAttributionReconciliationService:
                 return True
         return False
 
+    def _unrestored_strategy_reduction(
+        self,
+        *,
+        account_id: str,
+        symbol: str,
+        bucket_id: str,
+    ) -> float:
+        warned = 0.0
+        restored = 0.0
+        for row in self.state_store.list_system_events_by_type(
+            ATTRIBUTION_RECONCILIATION_EVENT,
+            limit=5000,
+        ):
+            payload = row.get("payload") or {}
+            if payload.get("account_id") != account_id:
+                continue
+            for change in payload.get("changes") or []:
+                if not isinstance(change, dict):
+                    continue
+                if (
+                    change.get("symbol") != symbol
+                    or change.get("bucket_id") != bucket_id
+                ):
+                    continue
+                event_type = change.get("event_type")
+                quantity = max(float(change.get("quantity") or 0.0), 0.0)
+                if event_type == "external_strategy_reduction_warning":
+                    warned += quantity
+                elif event_type == "pending_maestro_sell_restored":
+                    restored += quantity
+        return max(warned - restored, 0.0)
+
     def _latest_positions(self, account_id: str) -> list[AttributionPosition] | None:
+        payload = self._latest_attribution_payload(account_id)
+        if payload is None:
+            return None
+        return [
+            AttributionPosition.model_validate(position)
+            for position in payload.get("positions", [])
+        ]
+
+    def _latest_attribution_payload(self, account_id: str) -> dict[str, Any] | None:
         event_types = {ATTRIBUTION_ADOPTED_EVENT, ATTRIBUTION_RECONCILIATION_EVENT}
         for row in self.state_store.list_system_events(limit=2000):
             if row.get("event_type") not in event_types:
@@ -290,10 +505,7 @@ class AccountAttributionReconciliationService:
             payload = row["payload"]
             if payload.get("account_id") != account_id:
                 continue
-            return [
-                AttributionPosition.model_validate(position)
-                for position in payload.get("positions", [])
-            ]
+            return payload
         return None
 
     def _save_state_event(

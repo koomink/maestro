@@ -305,6 +305,31 @@ def test_lifecycle_max_polls_reached_while_open_records_outstanding_order(tmp_pa
     )
 
 
+def test_lifecycle_reconciliation_failure_keeps_nonterminal_order_tracked(tmp_path):
+    lifecycle, store, _, _, request, approval, broker_reconciliation = _context(
+        tmp_path,
+        statuses=[
+            _poll(
+                OrderStatus.PARTIALLY_FILLED,
+                filled=1.0,
+                remaining=1.0,
+                average_fill_price=70_000.0,
+            )
+        ],
+    )
+    broker_reconciliation.passed = False
+
+    result = lifecycle.run(request, approval)
+
+    assert result.final_status == OrderStatus.FAILED
+    events = store.list_system_events_by_type("live_order_tracking_incomplete", limit=10)
+    assert len(events) == 1
+    assert events[0]["payload"]["reason"] == (
+        "reconciliation_failed_before_terminal_status"
+    )
+    assert events[0]["payload"]["last_status"] == OrderStatus.PARTIALLY_FILLED.value
+
+
 def test_lifecycle_terminal_status_records_no_outstanding_order(tmp_path):
     lifecycle, store, _, _, request, approval, _ = _context(
         tmp_path,
@@ -571,12 +596,13 @@ class FailingNotificationClient(LiveOrderNotificationClient):
 class FakeBrokerReconciliation(BrokerReconciliationRunner):
     def __init__(self) -> None:
         self.call_count = 0
+        self.passed = True
 
     def reconcile_latest(self) -> ReconciliationResult:
         self.call_count += 1
         return ReconciliationResult(
             run_id=f"run_broker_reconcile_{self.call_count}",
-            passed=True,
+            passed=self.passed,
             checked_at=utc_now().isoformat(),
             issues=[],
             tolerances={

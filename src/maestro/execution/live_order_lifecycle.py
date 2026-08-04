@@ -158,6 +158,15 @@ class LiveOrderLifecycleService:
                     broker_result = self.broker_reconciliation_service.reconcile_latest()
                     broker_reconciliations.append(broker_result.model_dump(mode="json"))
                     if broker_result.passed is not True:
+                        if snapshot.status not in _TERMINAL_LIFECYCLE_STATUSES:
+                            self._persist_tracking_incomplete(
+                                request,
+                                broker_order,
+                                snapshot.status,
+                                poll_count,
+                                elapsed_seconds=elapsed_seconds,
+                                reason="reconciliation_failed_before_terminal_status",
+                            )
                         self._notify(
                             notifications,
                             request.run_id,
@@ -325,6 +334,7 @@ class LiveOrderLifecycleService:
         poll_count: int,
         *,
         elapsed_seconds: float,
+        reason: str = "poll_window_closed_before_terminal_status",
     ) -> None:
         save_audited_system_event(
             self.state_store,
@@ -332,7 +342,7 @@ class LiveOrderLifecycleService:
             request.run_id,
             SystemEventType.LIVE_ORDER_TRACKING_INCOMPLETE,
             {
-                "reason": "poll_window_closed_before_terminal_status",
+                "reason": reason,
                 "order_id": request.order_id,
                 "broker_order": broker_order.model_dump(mode="json"),
                 "broker_order_id": broker_order.broker_order_id,

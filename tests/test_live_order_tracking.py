@@ -1,6 +1,13 @@
+from datetime import timedelta
+
+import pytest
+
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus
-from maestro.execution.live_order_tracking import LiveOrderTrackingResumeService
+from maestro.execution.live_order_tracking import (
+    LiveOrderTrackingResumeService,
+    list_unreconciled_live_order_fills,
+)
 from maestro.execution.live_orders import (
     BrokerOrderId,
     LiveOrderLifecycleNotification,
@@ -33,6 +40,115 @@ def test_resume_applies_a_fill_that_arrived_after_the_poll_window_closed(tmp_pat
     assert store.load_latest_portfolio_state().positions == {"KODEX": 37.0}
     resolved = store.list_system_events_by_type("live_order_tracking_resolved", limit=10)
     assert resolved[0]["payload"]["final_status"] == OrderStatus.FILLED.value
+
+
+def test_unreconciled_maestro_fill_is_reported_after_fifteen_minutes(tmp_path):
+    store, _ = _stores(tmp_path)
+    store.save_system_event(
+        "run_history",
+        "broker_order_history_item",
+        {
+            "account_id": "toss_brokerage",
+            "broker_order_id": "toss-sell-1",
+            "symbol": "QQQM",
+            "side": "sell",
+            "filled_quantity": 22.0,
+            "cumulative_notional": 6316.20,
+            "history_mode": "maestro_cost_only",
+        },
+    )
+
+    candidates = list_unreconciled_live_order_fills(
+        store,
+        now=utc_now() + timedelta(minutes=16),
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["broker_order_id"] == "toss-sell-1"
+    assert candidates[0]["missing_quantity"] == 22.0
+    assert candidates[0]["missing_notional"] == pytest.approx(6316.20)
+
+
+def test_resume_discovers_an_accepted_order_missing_tracking_event(tmp_path):
+    store, audit = _stores(tmp_path)
+    broker_order = _broker_order("0004931100", "ord_kodex_1", "kis_ps")
+    store.save_system_event(
+        "run_signal_1",
+        "live_order_result",
+        {
+            "request": {"order_id": "ord_kodex_1", "account_id": "kis_ps"},
+            "result": {
+                "order_id": "ord_kodex_1",
+                "status": OrderStatus.ACCEPTED_BY_BROKER.value,
+                "broker_order": broker_order.model_dump(mode="json"),
+            },
+        },
+    )
+    filled = _snapshot(
+        OrderStatus.FILLED,
+        filled=37.0,
+        remaining=0.0,
+        average_fill_price=13_395.0,
+    )
+    service = _service(store, audit, {"0004931100": filled})
+
+    summary = service.resume("run_resume_1")
+
+    assert summary["outstanding_orders"] == 1
+    assert summary["resolved_order_ids"] == ["ord_kodex_1"]
+    assert store.load_latest_portfolio_state().positions == {"KODEX": 37.0}
+
+
+def test_resume_reconciles_a_terminal_status_even_after_tracking_was_resolved(tmp_path):
+    store, audit = _stores(tmp_path)
+    _record_outstanding(store, broker_order_id="0004931100")
+    filled = _snapshot(
+        OrderStatus.FILLED,
+        filled=37.0,
+        remaining=0.0,
+        average_fill_price=13_395.0,
+    )
+    store.save_system_event("run_poll", "live_order_status", filled.model_dump(mode="json"))
+    store.save_system_event(
+        "run_poll",
+        "live_order_tracking_resolved",
+        {
+            "order_id": "ord_kodex_1",
+            "broker_order_id": "0004931100",
+            "final_status": OrderStatus.FILLED.value,
+        },
+    )
+    service = _service(store, audit, {})
+
+    summary = service.resume("run_resume_1")
+
+    assert summary["outstanding_orders"] == 0
+    assert [fill["quantity"] for fill in summary["applied_fills"]] == [37.0]
+    assert store.load_latest_portfolio_state().positions == {"KODEX": 37.0}
+
+
+def test_resume_does_not_mark_terminal_order_resolved_when_fill_reconciliation_fails(
+    tmp_path,
+):
+    store, audit = _stores(tmp_path)
+    _record_outstanding(store, broker_order_id="0004931100")
+    filled = _snapshot(
+        OrderStatus.FILLED,
+        filled=37.0,
+        remaining=0.0,
+        average_fill_price=13_395.0,
+    )
+    service = LiveOrderTrackingResumeService(
+        store,
+        audit,
+        lambda account_id: FakeStatusClient({"0004931100": filled}, failing_broker_order_ids=set()),
+        fill_reconciliation_service=FailingFillReconciliationService(),
+    )
+
+    with pytest.raises(RuntimeError, match="ledger unavailable"):
+        service.resume("run_resume_1")
+
+    assert store.list_system_events_by_type("live_order_tracking_resolved", limit=10) == []
 
 
 def test_resume_notifies_when_a_recovered_order_reaches_a_terminal_status(tmp_path):
@@ -205,6 +321,12 @@ class FakeNotificationClient(LiveOrderNotificationClient):
 class FailingNotificationClient(LiveOrderNotificationClient):
     def notify(self, event: LiveOrderLifecycleNotification) -> None:
         raise RuntimeError("telegram unreachable")
+
+
+class FailingFillReconciliationService:
+    def reconcile_latest(self, run_id):
+        del run_id
+        raise RuntimeError("ledger unavailable")
 
 
 def _broker_order(broker_order_id: str, order_id: str, account_id: str) -> BrokerOrderId:

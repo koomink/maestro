@@ -2377,6 +2377,46 @@ def adopt_account_attribution(
     )
 
 
+@app.command("reclassify-account-attribution")
+def reclassify_account_attribution(
+    account_id: str = typer.Option(..., "--account-id"),
+    symbol: str = typer.Option(..., "--symbol"),
+    from_bucket_id: str = typer.Option(..., "--from-bucket"),
+    to_bucket_id: str = typer.Option(..., "--to-bucket"),
+    quantity: float = typer.Option(..., "--quantity", min=0.000000001),
+    reason: str = typer.Option(..., "--reason"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    maestro_config, identity = _load_operator_config(config)
+    targets = maestro_config.account_strategy_targets.get(account_id, {})
+    if to_bucket_id not in targets:
+        raise typer.BadParameter(
+            f"unknown attribution target bucket for account_id={account_id}: {to_bucket_id}"
+        )
+    allowed_symbols = targets[to_bucket_id].allowed_symbols
+    if to_bucket_id != "manual" and symbol not in allowed_symbols:
+        raise typer.BadParameter(
+            f"symbol is not allowed for attribution bucket {to_bucket_id}: {symbol}"
+        )
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    positions = AccountAttributionReconciliationService(store, audit).reclassify_position(
+        run_id=new_run_id(),
+        account_id=account_id,
+        symbol=symbol,
+        from_bucket_id=from_bucket_id,
+        to_bucket_id=to_bucket_id,
+        quantity=quantity,
+        reason=reason,
+        reclassified_by="cli",
+    )
+    version = positions[0].version if positions else 1
+    typer.echo(
+        f"reclassified account_id={account_id} symbol={symbol} quantity={quantity:g} "
+        f"from_bucket={from_bucket_id} to_bucket={to_bucket_id} version={version}"
+    )
+
+
 @app.command("reconcile-fills")
 def reconcile_fills(config: Path | None = CONFIG_OPTION) -> None:
     maestro_config, identity = _load_operator_config(config)
@@ -2390,6 +2430,46 @@ def reconcile_fills(config: Path | None = CONFIG_OPTION) -> None:
         f"skipped_fills={len(result.skipped_fills)} "
         f"portfolio_updated={str(result.portfolio_updated).lower()} "
         f"cash={result.cash:.2f} positions={len(result.positions)}"
+    )
+
+
+@app.command("restore-pending-maestro-sell-attribution")
+def restore_pending_maestro_sell_attribution(
+    account_id: str = typer.Option(..., "--account-id"),
+    symbol: str = typer.Option(..., "--symbol"),
+    bucket_id: str = typer.Option(..., "--bucket"),
+    quantity: float = typer.Option(..., "--quantity", min=0.000000001),
+    reason: str = typer.Option(..., "--reason"),
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Restore warning-backed attribution before replaying a delayed sell fill."""
+    maestro_config, identity = _load_operator_config(config)
+    targets = maestro_config.account_strategy_targets.get(account_id, {})
+    if bucket_id not in targets:
+        raise typer.BadParameter(
+            f"unknown attribution target bucket for account_id={account_id}: {bucket_id}"
+        )
+    if symbol not in targets[bucket_id].allowed_symbols:
+        raise typer.BadParameter(
+            f"symbol is not allowed for attribution bucket {bucket_id}: {symbol}"
+        )
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    positions = AccountAttributionReconciliationService(
+        store, audit
+    ).restore_pending_maestro_sell(
+        run_id=new_run_id(),
+        account_id=account_id,
+        symbol=symbol,
+        bucket_id=bucket_id,
+        quantity=quantity,
+        reason=reason,
+        restored_by="cli",
+    )
+    version = positions[0].version if positions else 1
+    typer.echo(
+        f"restored account_id={account_id} symbol={symbol} quantity={quantity:g} "
+        f"bucket={bucket_id} version={version}"
     )
 
 

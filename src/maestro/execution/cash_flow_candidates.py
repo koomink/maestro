@@ -62,20 +62,53 @@ class CashFlowCandidate:
         }
 
 
+@dataclass(frozen=True)
+class FxConversionCandidate:
+    fingerprint: str
+    account_id: str
+    from_currency: str
+    from_amount: float
+    to_currency: str
+    to_amount: float
+    cash_basis: str
+    baseline_snapshot_id: int
+    first_changed_snapshot_id: int
+    latest_snapshot_id: int
+    stable_snapshot_ids: tuple[int, ...]
+    effective_at: str
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "kind": "stable_toss_fx_conversion_change",
+            "cash_basis": self.cash_basis,
+            "baseline_snapshot_id": self.baseline_snapshot_id,
+            "first_changed_snapshot_id": self.first_changed_snapshot_id,
+            "latest_snapshot_id": self.latest_snapshot_id,
+            "stable_snapshot_ids": list(self.stable_snapshot_ids),
+            "positions_unchanged": True,
+            "orders_unchanged": True,
+            "fills_unchanged": True,
+            "paired_opposite_currency_moves": True,
+            "operator_confirmation_required": True,
+        }
+
+
 class CashFlowCandidateDetector:
     """Offers an unexplained cash change for operator confirmation.
 
-    The same evidence is required whichever broker reported the change: the new
-    level has to hold across consecutive snapshots, positions, orders and fills
-    must be unchanged across the window, no order lifecycle event may fall
-    inside it, and no fill may be close enough to still be settling.  A change
-    that survives all of that is one the account's own activity cannot explain.
+    The new level has to hold across consecutive snapshots and positions, orders,
+    and fills must be unchanged across the window. Single-currency flows also
+    reject nearby lifecycle/settlement activity. Paired opposite Toss movements
+    are offered as one conversion candidate for explicit operator confirmation;
+    neither currency is ever offered as an independent deposit or withdrawal.
     """
 
     def __init__(self, store: StateStore) -> None:
         self.store = store
 
-    def detect(self, account_id: str) -> CashFlowCandidate | None:
+    def detect(
+        self, account_id: str
+    ) -> CashFlowCandidate | FxConversionCandidate | None:
         rows = self.store.list_broker_account_snapshots(limit=100, account_id=account_id)
         if len(rows) < 4:
             return None
@@ -83,26 +116,46 @@ class CashFlowCandidateDetector:
         basis = _cash_basis(latest_account)
         if basis is None:
             return None
-        latest_timestamp = _timestamp(rows[0].get("created_at"))
-        if latest_timestamp is not None and _settling_fill_nearby(rows, latest_timestamp):
-            # A fill from before the window can still be moving cash now, and
-            # settlement is not an external flow.
-            return None
-
-        candidates = []
+        candidates: list[CashFlowCandidate] = []
         for currency in sorted(_cash_by_basis(latest_account, basis)):
-            candidate = self._detect_currency(rows, account_id, currency, basis)
+            candidate = self._detect_currency(
+                rows,
+                account_id,
+                currency,
+                basis,
+                check_blocking_events=False,
+            )
             if candidate is not None:
                 candidates.append(candidate)
         if not candidates:
             return None
-        # A currency conversion shows up as one currency falling while another
-        # rises over the same window.  Offering either leg on its own would ask
-        # the operator to confirm a deposit or withdrawal for an account whose
-        # money never actually entered or left.
-        if len({candidate.flow_type for candidate in candidates}) > 1:
+        conversion = _fx_conversion_candidate(candidates, basis)
+        if conversion is not None:
+            return conversion
+
+        latest_timestamp = _timestamp(rows[0].get("created_at"))
+        if latest_timestamp is not None and _settling_fill_nearby(rows, latest_timestamp):
+            # A fill from before the window can still be moving one currency's
+            # cash. Paired opposite-currency moves above are offered only for
+            # explicit operator confirmation as a conversion.
             return None
-        return candidates[0]
+
+        strict_candidates = []
+        for currency in sorted(_cash_by_basis(latest_account, basis)):
+            candidate = self._detect_currency(
+                rows,
+                account_id,
+                currency,
+                basis,
+                check_blocking_events=True,
+            )
+            if candidate is not None:
+                strict_candidates.append(candidate)
+        if not strict_candidates:
+            return None
+        if len({candidate.flow_type for candidate in strict_candidates}) > 1:
+            return None
+        return strict_candidates[0]
 
     def _detect_currency(
         self,
@@ -110,6 +163,8 @@ class CashFlowCandidateDetector:
         account_id: str,
         currency: str,
         basis: str,
+        *,
+        check_blocking_events: bool,
     ) -> CashFlowCandidate | None:
         tolerance = _STABILITY_TOLERANCE.get(currency, 0.01)
         latest_value = _cash_by_basis(_account(rows[0]), basis).get(currency)
@@ -139,7 +194,9 @@ class CashFlowCandidateDetector:
         signature = _activity_signature(baseline)
         if any(_activity_signature(row) != signature for row in stable):
             return None
-        if self._has_blocking_events(account_id, baseline, stable[0]):
+        if check_blocking_events and self._has_blocking_events(
+            account_id, baseline, stable[0]
+        ):
             return None
 
         first_changed = stable[-1]
@@ -195,6 +252,53 @@ class CashFlowCandidateDetector:
                 return True
         return False
 
+
+def _fx_conversion_candidate(
+    candidates: list[CashFlowCandidate],
+    basis: str,
+) -> FxConversionCandidate | None:
+    if basis != PROXY_CASH or len(candidates) != 2:
+        return None
+    withdrawals = [candidate for candidate in candidates if candidate.flow_type == "withdrawal"]
+    deposits = [candidate for candidate in candidates if candidate.flow_type == "deposit"]
+    if len(withdrawals) != 1 or len(deposits) != 1:
+        return None
+    outbound = withdrawals[0]
+    inbound = deposits[0]
+    if (
+        outbound.account_id != inbound.account_id
+        or outbound.baseline_snapshot_id != inbound.baseline_snapshot_id
+        or outbound.first_changed_snapshot_id != inbound.first_changed_snapshot_id
+        or outbound.latest_snapshot_id != inbound.latest_snapshot_id
+        or outbound.stable_snapshot_ids != inbound.stable_snapshot_ids
+    ):
+        return None
+    fingerprint_payload = {
+        "account_id": outbound.account_id,
+        "baseline_snapshot_id": outbound.baseline_snapshot_id,
+        "first_changed_snapshot_id": outbound.first_changed_snapshot_id,
+        "from_currency": outbound.currency,
+        "from_amount": round(outbound.amount, 8),
+        "to_currency": inbound.currency,
+        "to_amount": round(inbound.amount, 8),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:24]
+    return FxConversionCandidate(
+        fingerprint=fingerprint,
+        account_id=outbound.account_id,
+        from_currency=outbound.currency,
+        from_amount=outbound.amount,
+        to_currency=inbound.currency,
+        to_amount=inbound.amount,
+        cash_basis=basis,
+        baseline_snapshot_id=outbound.baseline_snapshot_id,
+        first_changed_snapshot_id=outbound.first_changed_snapshot_id,
+        latest_snapshot_id=outbound.latest_snapshot_id,
+        stable_snapshot_ids=outbound.stable_snapshot_ids,
+        effective_at=outbound.effective_at,
+    )
 
 def _snapshot_account_id(row: Mapping[str, Any]) -> str:
     payload = row.get("payload") or {}
@@ -289,11 +393,59 @@ def _activity_signature(row: Mapping[str, Any]) -> str:
     payload = row.get("payload") or {}
     account = _account(row)
     comparable = {
-        "positions": account.get("positions") or [],
-        "unfilled_orders": payload.get("unfilled_orders") if isinstance(payload, Mapping) else [],
-        "order_fills": payload.get("order_fills") if isinstance(payload, Mapping) else [],
+        "positions": _normalized_positions(account.get("positions") or []),
+        "unfilled_orders": _normalized_orders(
+            payload.get("unfilled_orders") if isinstance(payload, Mapping) else []
+        ),
+        "order_fills": _normalized_orders(
+            payload.get("order_fills") if isinstance(payload, Mapping) else []
+        ),
     }
     return json.dumps(comparable, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _normalized_positions(rows: object) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    output = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        output.append(
+            {
+                "symbol": str(row.get("symbol") or ""),
+                "quantity": float(row.get("quantity") or 0.0),
+                "average_price": float(row.get("average_price") or 0.0),
+                "currency": str(row.get("currency") or "").upper(),
+            }
+        )
+    return sorted(output, key=lambda row: (row["symbol"], row["currency"]))
+
+
+def _normalized_orders(rows: object) -> list[dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    output = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        output.append(
+            {
+                "order_id": str(row.get("order_id") or ""),
+                "symbol": str(row.get("symbol") or ""),
+                "side": str(row.get("side") or "").lower(),
+                "status": str(row.get("status") or "").upper(),
+                "quantity": float(row.get("quantity") or 0.0),
+                "filled_quantity": float(row.get("filled_quantity") or 0.0),
+                "remaining_quantity": float(row.get("remaining_quantity") or 0.0),
+                "average_fill_price": float(row.get("average_fill_price") or 0.0),
+                "cumulative_commission": float(
+                    row.get("cumulative_commission") or 0.0
+                ),
+                "cumulative_tax": float(row.get("cumulative_tax") or 0.0),
+            }
+        )
+    return sorted(output, key=lambda row: row["order_id"])
 
 
 def _timestamp(value: object) -> datetime | None:

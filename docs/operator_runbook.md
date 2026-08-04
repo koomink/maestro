@@ -239,6 +239,24 @@ reserved in `account_strategy_targets`. `fugue -> dev_sandbox` is
 `enabled: false`, `readonly: true`, and `signal: false`, so it can appear in
 operator views without being imported or executed by `symphony_signal`.
 
+`QQQM` is an allowed `crescendo_us` attribution symbol because it is held as a
+lower-fee QQQ substitute. Correct an already adopted holding without changing
+broker quantities by using the audited reclassification command:
+
+```bash
+maestro reclassify-account-attribution \
+  --config <approval-config> \
+  --account-id toss_brokerage \
+  --symbol QQQM \
+  --from-bucket manual \
+  --to-bucket crescendo_us \
+  --quantity <quantity> \
+  --reason "QQQM is a QQQ substitute owned by Crescendo"
+```
+
+Reclassification makes the position part of Crescendo's rebalance scope; it
+does not change Crescendo's configured QQQ execution override.
+
 Before the first Toss order, refresh the broker snapshot and inspect the
 automatic attribution baseline:
 
@@ -370,10 +388,12 @@ maestro cash-flow convert --config <approval-config> \
 converting twice. Pass `--rate` (target-currency units per source-currency
 unit) to have the amounts cross-checked before anything reaches the ledger.
 
-The candidate detector deliberately offers nothing when two currencies move in
-opposite directions over the same window. That is a conversion, and confirming
-either side alone would record a deposit or withdrawal for an account whose
-money never left. Record it with `cash-flow convert` instead.
+When two Toss currencies move in opposite directions over the same stable
+window, the detector offers one paired conversion candidate rather than two
+independent deposit/withdrawal candidates. Telegram shows both observed legs;
+one authorized confirmation records them atomically through the same linked-leg
+producer as `cash-flow convert`. The manual command remains available for
+historical conversions or corrected amounts.
 
 ### Candidate detection
 
@@ -383,12 +403,20 @@ deposit balance. A change is offered for confirmation only when:
 
 - the new level holds across three consecutive snapshots
 - positions, open orders and fills are unchanged across the window
-- no order lifecycle event falls inside the window
-- no observed fill is within three days of the latest snapshot, since Korean
-  equities settle T+2 and US equities T+1, and settlement is the account's own
-  trading catching up rather than money arriving
+- for a single-currency flow, no order lifecycle event falls inside the window
+- for a single-currency flow, no observed fill is within three days of the
+  latest snapshot, since Korean equities settle T+2 and US equities T+1, and
+  settlement is the account's own trading catching up rather than money arriving
 - the change is at least KRW 1,000 or USD 1
-- no second currency moved the opposite way
+
+A paired Toss conversion still requires the same three stable snapshots and
+unchanged position/order/fill signatures. A recent fill does not hide the
+candidate merely because it exists before the conversion window; the operator
+must still confirm that the paired movements were a conversion. If Maestro's
+starting cash ledger already differed from Toss, the message shows both the
+observed broker movement and the smaller/larger ledger adjustment needed to
+reach the latest confirmed balances. Approval is rejected as stale if either
+balance changes before the callback.
 
 What still differs by broker is what the confirmation means, not what evidence
 is required. Toss cash is a proxy the operator checks in the app; a
@@ -421,6 +449,18 @@ Classifying an observation never writes a cash flow or alters the ledger; it
 records what the operator believes caused the difference. The available
 classifications and the flow class each implies:
 
+Each account/currency row represents the current incident. When reconciliation
+returns within the configured drift budget, Maestro marks that incident
+`resolved`; a later drift starts a new incident with a new first-observed
+snapshot and timestamp. Repeated observations of the same classified incident
+preserve the operator's classification.
+
+Each account/currency row represents the current incident. When reconciliation
+returns within the configured drift budget, Maestro marks that incident
+`resolved`; a later drift starts a new incident with a new first-observed
+snapshot and timestamp. Repeated observations of the same classified incident
+preserve the operator's classification.
+
 | Classification | Implies |
 | --- | --- |
 | `settlement_candidate` | nothing — a timing difference, not a flow |
@@ -441,6 +481,20 @@ before reconciliation when history cannot be verified. Use this command only
 for an explicit historical repair. Baseline/adoption cutoffs watermark the full
 cumulative principal, quantity, and costs without replay; later partial-fill or
 cost increases apply only above that watermark:
+
+For Maestro-submitted orders, history remains cost-only because the live-order
+status path owns quantity and principal. If broker history shows a fill that is
+still above the ledger watermark for 15 minutes, the Telegram operator sends a
+deduplicated `Maestro unreconciled fill warning`. Do not adopt broker cash or
+positions to clear that warning; keep new live execution blocked and let
+`resume-order-tracking` complete fill reconciliation.
+
+For Maestro-submitted orders, history remains cost-only because the live-order
+status path owns quantity and principal. If broker history shows a fill that is
+still above the ledger watermark for 15 minutes, the Telegram operator sends a
+deduplicated `Maestro unreconciled fill warning`. Do not adopt broker cash or
+positions to clear that warning; keep new live execution blocked and let
+`resume-order-tracking` complete fill reconciliation.
 
 ```bash
 maestro ledger backfill-orders --config <approval-config> \
@@ -483,6 +537,12 @@ checking the Toss app. Use
 `/cash_flow <proposal_id> <actual_amount>` when it differs, or reject the
 candidate to leave the ledger unchanged. Confirmed candidates are recorded as
 `operator_verified`; Toss still has no broker-verified cash endpoint.
+
+For a paired conversion, Telegram displays `observed from` and `observed to`
+amounts and provides `환전 맞음` / `환전 아님`. Approval writes both
+`fx_conversion` legs in one transaction with a fingerprint-derived transfer id;
+retries cannot apply the conversion twice. When a pre-existing ledger drift
+exists, the message also displays the exact ledger adjustment that will be used.
 
 That confirmation is evidence about the moment it was made, not a standing
 guarantee. A later snapshot reads `operator_verified` only while the buying

@@ -53,6 +53,7 @@ from maestro.execution.cash_flow_candidates import (
     BROKER_REPORTED_CASH,
     PROXY_CASH,
     CashFlowCandidateDetector,
+    FxConversionCandidate,
 )
 from maestro.execution.funding_requests import (
     format_contribution_funding_request,
@@ -65,6 +66,7 @@ from maestro.execution.live_order_models import (
     LiveOrderRequest,
     LiveOrderStatusSnapshot,
 )
+from maestro.execution.live_order_tracking import list_unreconciled_live_order_fills
 from maestro.execution.order_builder import round_price_to_tick
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
@@ -276,17 +278,57 @@ class TelegramOperatorCommandRouter:
         return next_offset
 
     def notify_pending_cash_flows(self) -> None:
-        account_ids = [
+        account_ids = {
             str(account_id)
             for account_id, _ in broker_readonly_accounts(self.config)
             if account_id is not None
-        ]
+        }
+        account_ids.update(
+            str(account.id)
+            for account in getattr(self.config, "accounts", [])
+            if getattr(account, "enabled", False) and getattr(account, "id", None)
+        )
         for chat_id in self.config.approval.telegram_allowed_chat_ids:
-            for account_id in account_ids:
+            for account_id in sorted(account_ids):
                 self._send_voluntary_deposit_allocation_proposal(
                     int(chat_id),
                     account_id=account_id,
                 )
+        self._notify_unreconciled_live_order_fills()
+
+    def _notify_unreconciled_live_order_fills(self) -> None:
+        candidates = list_unreconciled_live_order_fills(self.store)
+        for candidate in candidates:
+            notice_key = (
+                "telegram-unreconciled-fill-notice:"
+                f"{candidate['broker_order_id']}:{candidate['filled_quantity']}"
+            )
+            if self.store.duplicate_key_exists(notice_key):
+                continue
+            age_minutes = int(float(candidate["age_seconds"]) // 60)
+            message = (
+                "Maestro unreconciled fill warning\n"
+                f"account_id: {_mask_identifier(str(candidate['account_id']))}\n"
+                f"symbol: {candidate['symbol']}\n"
+                f"side: {candidate['side']}\n"
+                f"missing quantity: {float(candidate['missing_quantity']):g}\n"
+                f"estimated principal: {_money(float(candidate['missing_notional']))}\n"
+                f"unreconciled for: {age_minutes} minutes\n"
+                f"broker_order_id: {_mask_identifier(str(candidate['broker_order_id']))}\n\n"
+                "New live execution should remain blocked until fill reconciliation succeeds."
+            )
+            for chat_id in self.config.approval.telegram_allowed_chat_ids:
+                self._send(int(chat_id), message)
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                new_run_id(),
+                SystemEventType.TELEGRAM_UNRECONCILED_FILL_NOTICE,
+                {
+                    **candidate,
+                    "duplicate_key": notice_key,
+                },
+            )
 
     def _process_callback(
         self,
@@ -1637,6 +1679,7 @@ class TelegramOperatorCommandRouter:
             self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
             return True
         is_toss_candidate = proposal.get("source") == "toss_buying_power_cash_flow_candidate"
+        is_fx_candidate = proposal.get("source") == "toss_buying_power_fx_conversion_candidate"
         if is_toss_candidate and transition == "different":
             self._answer(callback, "Enter the verified amount with /cash_flow.")
             self._edit_callback_message(
@@ -1647,13 +1690,13 @@ class TelegramOperatorCommandRouter:
             )
             self._record("/cash-flow_different", chat_id, user_id, username, "amount_required")
             return True
-        if is_toss_candidate and transition in {"reject", "ignore"}:
+        if (is_toss_candidate or is_fx_candidate) and transition in {"reject", "ignore"}:
             self._save_cash_flow_proposal_ack(proposal_id, "rejected", user_id, username)
             self._answer(callback, "Cash-flow candidate rejected.")
             self._edit_callback_message(callback, "Cash-flow candidate rejected; ledger unchanged.")
             self._record("/cash-flow_reject", chat_id, user_id, username, "rejected")
             return True
-        if is_toss_candidate:
+        if is_toss_candidate or is_fx_candidate:
             current = CashFlowCandidateDetector(self.store).detect(
                 str(proposal.get("account_id") or "")
             )
@@ -1693,6 +1736,47 @@ class TelegramOperatorCommandRouter:
             account_amount = -account_amount
         account_id = str(proposal.get("account_id") or "")
         self._ensure_account_ledger_for_proposal(proposal)
+        if is_fx_candidate:
+            if self.store.load_latest_account_portfolio_state(account_id) is None:
+                self._answer(callback, "Account cash ledger is not established.")
+                self._record("/cash-flow", chat_id, user_id, username, "missing_ledger")
+                return True
+            if not self._fx_proposal_matches_latest_ledger(proposal):
+                self._answer(callback, "This currency-conversion candidate is stale.")
+                self._record("/cash-flow", chat_id, user_id, username, "stale_callback")
+                return True
+            cash_flow = AccountCashFlowService(self.store, self.audit).record_currency_conversion(
+                account_id=account_id,
+                from_currency=str(proposal.get("from_currency") or ""),
+                from_amount=abs(_float_or_none(proposal.get("from_amount")) or 0.0),
+                to_currency=str(proposal.get("to_currency") or ""),
+                to_amount=abs(_float_or_none(proposal.get("to_amount")) or 0.0),
+                transfer_id=f"telegram-fx:{proposal['fingerprint']}",
+                effective_at=effective_at,
+                source="telegram_toss_fx_conversion_confirmation",
+                reason="operator confirmed detected Toss currency conversion",
+                decided_by=username or str(user_id),
+            )
+            if not cash_flow.created:
+                self._answer(callback, "This currency conversion was already applied.")
+                self._record("/cash-flow", chat_id, user_id, username, "duplicate")
+                return True
+            self._save_cash_flow_proposal_ack(
+                proposal_id,
+                "approved",
+                user_id,
+                username,
+                account_cash_flow_id=cash_flow.run_id,
+            )
+            self._answer(callback, "Currency conversion recorded.")
+            self._edit_callback_message(
+                callback,
+                "Currency conversion recorded\n"
+                f"{_money(proposal.get('from_amount'))} {proposal.get('from_currency')} → "
+                f"{_money(proposal.get('to_amount'))} {proposal.get('to_currency')}",
+            )
+            self._record("/cash-flow_approve", chat_id, user_id, username, "approved_fx")
+            return True
         if self.store.load_latest_account_portfolio_state(account_id) is not None:
             cash_flow = AccountCashFlowService(self.store, self.audit).record(
                 account_id=account_id,
@@ -1721,9 +1805,7 @@ class TelegramOperatorCommandRouter:
             account_cash_flow_id = new_run_id()
         for allocation in allocations:
             strategy_id = allocation.get("strategy_id")
-            strategy_duplicate_key = (
-                f"strategy-cash-flow:proposal:{proposal_id}:{strategy_id}"
-            )
+            strategy_duplicate_key = f"strategy-cash-flow:proposal:{proposal_id}:{strategy_id}"
             if self.store.duplicate_key_exists(strategy_duplicate_key):
                 continue
             payload = {
@@ -1795,6 +1877,35 @@ class TelegramOperatorCommandRouter:
                 unknown_symbol_policy=self.config.portfolio.unknown_broker_position_policy,
             ),
             account_id=account_id,
+        )
+
+    def _fx_proposal_matches_latest_ledger(
+        self,
+        proposal: Mapping[str, Any],
+    ) -> bool:
+        account_id = str(proposal.get("account_id") or "")
+        ledger = self.store.load_latest_account_portfolio_state(account_id)
+        snapshots = self.store.list_broker_account_snapshots(
+            limit=1,
+            account_id=account_id,
+        )
+        if ledger is None or not snapshots:
+            return False
+        account = _mapping(_mapping(snapshots[0]).get("payload")).get("account")
+        buying_power = _mapping(_mapping(account).get("buying_power_by_currency"))
+        from_currency = str(proposal.get("from_currency") or "").upper()
+        to_currency = str(proposal.get("to_currency") or "").upper()
+        if from_currency not in buying_power or to_currency not in buying_power:
+            return False
+        from_amount = abs(_float_or_none(proposal.get("from_amount")) or 0.0)
+        to_amount = abs(_float_or_none(proposal.get("to_amount")) or 0.0)
+        from_after = float(ledger.cash_by_currency.get(from_currency, 0.0)) - from_amount
+        to_after = float(ledger.cash_by_currency.get(to_currency, 0.0)) + to_amount
+        from_tolerance = 1.0 if from_currency in {"KRW", "JPY"} else 0.01
+        to_tolerance = 1.0 if to_currency in {"KRW", "JPY"} else 0.01
+        return (
+            abs(from_after - float(buying_power[from_currency])) <= from_tolerance
+            and abs(to_after - float(buying_power[to_currency])) <= to_tolerance
         )
 
     def _process_cash_flow_command(
@@ -2239,9 +2350,7 @@ class TelegramOperatorCommandRouter:
         effective_at = utc_now().isoformat()
         per_strategy_amount = amount / len(strategy_ids)
         for strategy_id in strategy_ids:
-            duplicate_key = (
-                f"strategy-cash-flow:funding:{request.get('request_id')}:{strategy_id}"
-            )
+            duplicate_key = f"strategy-cash-flow:funding:{request.get('request_id')}:{strategy_id}"
             if self.store.duplicate_key_exists(duplicate_key):
                 continue
             payload = {
@@ -2274,6 +2383,9 @@ class TelegramOperatorCommandRouter:
     ) -> None:
         proposal = self._build_voluntary_deposit_proposal(account_id=account_id)
         if proposal is None:
+            return
+        if proposal.get("source") == "toss_buying_power_fx_conversion_candidate":
+            self._send_toss_fx_conversion_candidate(chat_id, proposal)
             return
         if proposal.get("source") == "toss_buying_power_cash_flow_candidate":
             self._send_toss_cash_flow_candidate(chat_id, proposal)
@@ -2372,6 +2484,70 @@ class TelegramOperatorCommandRouter:
                 "duplicate_key": notice_key,
             },
         )
+
+    def _send_toss_fx_conversion_candidate(
+        self,
+        chat_id: int,
+        proposal: dict[str, Any],
+    ) -> None:
+        fingerprint = str(proposal["fingerprint"])
+        notice_key = f"telegram-toss-fx-conversion-notice:{fingerprint}"
+        if self.store.duplicate_key_exists(notice_key):
+            return
+        if not self._cash_flow_candidate_proposal(fingerprint):
+            for event_type, scope in (
+                (SystemEventType.ACCOUNT_CASH_FLOW_PROPOSAL, "account"),
+                (SystemEventType.STRATEGY_CASH_FLOW_PROPOSAL, "strategy"),
+            ):
+                save_audited_system_event(
+                    self.store,
+                    self.audit,
+                    new_run_id(),
+                    event_type,
+                    dict(
+                        proposal,
+                        duplicate_key=f"toss-fx-proposal:{scope}:{fingerprint}",
+                    ),
+                )
+        evidence = dict(proposal.get("evidence") or {})
+        observed_from = float(proposal.get("observed_from_amount") or proposal["from_amount"])
+        observed_to = float(proposal.get("observed_to_amount") or proposal["to_amount"])
+        ledger_from = float(proposal["from_amount"])
+        ledger_to = float(proposal["to_amount"])
+        ledger_note = ""
+        if abs(observed_from - ledger_from) > 1e-9 or abs(observed_to - ledger_to) > 1e-9:
+            ledger_note = (
+                "\nMaestro ledger adjustment:\n"
+                f"- {_money(ledger_from)} {proposal['from_currency']} → "
+                f"{_money(ledger_to)} {proposal['to_currency']}\n"
+            )
+        self._send(
+            chat_id,
+            "Maestro currency-conversion candidate\n"
+            f"account_id: {_mask_identifier(proposal['account_id'])}\n"
+            f"observed from: {_money(observed_from)} {proposal['from_currency']}\n"
+            f"observed to: {_money(observed_to)} {proposal['to_currency']}\n"
+            f"{ledger_note}"
+            f"first_observed: {proposal['effective_at']}\n"
+            f"stable_snapshots: {len(evidence.get('stable_snapshot_ids') or [])}\n"
+            "evidence: paired cash moves; positions/orders/fills unchanged\n\n"
+            "환전이 맞는 경우에만 승인하세요.",
+            reply_markup=_toss_fx_conversion_candidate_markup(proposal),
+        )
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            new_run_id(),
+            "telegram_cash_flow_candidate_notice",
+            {
+                "proposal_id": proposal["proposal_id"],
+                "fingerprint": fingerprint,
+                "account_id": proposal["account_id"],
+                "candidate_type": "fx_conversion",
+                "duplicate_key": notice_key,
+            },
+        )
+
     def _build_voluntary_deposit_proposal(
         self,
         *,
@@ -2379,9 +2555,7 @@ class TelegramOperatorCommandRouter:
     ) -> dict[str, Any] | None:
         snapshots = self.store.list_broker_account_snapshots(limit=1000)
         if account_id is not None:
-            snapshots = [
-                row for row in snapshots if _broker_snapshot_account_id(row) == account_id
-            ]
+            snapshots = [row for row in snapshots if _broker_snapshot_account_id(row) == account_id]
         if len(snapshots) < 2:
             return None
         latest = snapshots[0]
@@ -2398,6 +2572,50 @@ class TelegramOperatorCommandRouter:
         existing = self._cash_flow_candidate_proposal(candidate.fingerprint)
         if existing is not None:
             return existing
+        if isinstance(candidate, FxConversionCandidate):
+            observed_from_amount = candidate.from_amount
+            observed_to_amount = candidate.to_amount
+            from_amount = observed_from_amount
+            to_amount = observed_to_amount
+            ledger_state = self.store.load_latest_account_portfolio_state(candidate.account_id)
+            latest_buying_power = _mapping(latest_account.get("buying_power_by_currency"))
+            if ledger_state is not None and latest_buying_power:
+                ledger_from = float(ledger_state.cash_by_currency.get(candidate.from_currency, 0.0))
+                ledger_to = float(ledger_state.cash_by_currency.get(candidate.to_currency, 0.0))
+                broker_from = float(latest_buying_power.get(candidate.from_currency, ledger_from))
+                broker_to = float(latest_buying_power.get(candidate.to_currency, ledger_to))
+                required_from = ledger_from - broker_from
+                required_to = broker_to - ledger_to
+                if required_from > 0 and required_to > 0:
+                    from_amount = required_from
+                    to_amount = required_to
+            evidence = {
+                **candidate.evidence(),
+                "observed_from_amount": observed_from_amount,
+                "observed_to_amount": observed_to_amount,
+                "ledger_from_amount": from_amount,
+                "ledger_to_amount": to_amount,
+            }
+            return {
+                "proposal_id": new_run_id(),
+                "status": "pending",
+                "fingerprint": candidate.fingerprint,
+                "account_id": candidate.account_id,
+                "broker_snapshot_id": candidate.latest_snapshot_id,
+                "previous_broker_snapshot_id": candidate.baseline_snapshot_id,
+                "from_currency": candidate.from_currency,
+                "from_amount": from_amount,
+                "to_currency": candidate.to_currency,
+                "to_amount": to_amount,
+                "observed_from_amount": observed_from_amount,
+                "observed_to_amount": observed_to_amount,
+                "source": "toss_buying_power_fx_conversion_candidate",
+                "verification": "operator_required",
+                "effective_at": candidate.effective_at,
+                "created_at": utc_now().isoformat(),
+                "allocations": [],
+                "evidence": evidence,
+            }
         allocations = self._target_cash_flow_allocations(
             candidate.account_id,
             candidate.amount,
@@ -3794,11 +4012,7 @@ def _workflow_recovery_markup(
     attestation: bool,
 ) -> dict[str, Any]:
     action = "attest" if attestation else "auto"
-    text = (
-        "브로커에서 미접수·미체결 확인 후 해제"
-        if attestation
-        else "주문 상태 확인 및 복구"
-    )
+    text = "브로커에서 미접수·미체결 확인 후 해제" if attestation else "주문 상태 확인 및 복구"
     return {
         "inline_keyboard": [
             [
@@ -3993,9 +4207,7 @@ def _toss_cash_flow_candidate_markup(proposal: Mapping[str, Any]) -> dict[str, A
             [
                 {
                     "text": f"{label} {amount} 맞음",
-                    "callback_data": (
-                        f"{OPERATOR_CALLBACK_PREFIX}cash-flow:confirm:{proposal_id}"
-                    ),
+                    "callback_data": (f"{OPERATOR_CALLBACK_PREFIX}cash-flow:confirm:{proposal_id}"),
                 }
             ],
             [
@@ -4007,10 +4219,30 @@ def _toss_cash_flow_candidate_markup(proposal: Mapping[str, Any]) -> dict[str, A
                 },
                 {
                     "text": "입출금 아님",
-                    "callback_data": (
-                        f"{OPERATOR_CALLBACK_PREFIX}cash-flow:reject:{proposal_id}"
-                    ),
+                    "callback_data": (f"{OPERATOR_CALLBACK_PREFIX}cash-flow:reject:{proposal_id}"),
                 },
+            ],
+        ]
+    }
+
+
+def _toss_fx_conversion_candidate_markup(
+    proposal: Mapping[str, Any],
+) -> dict[str, Any]:
+    proposal_id = str(proposal.get("proposal_id") or "")
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "환전 맞음",
+                    "callback_data": (f"{OPERATOR_CALLBACK_PREFIX}cash-flow:confirm:{proposal_id}"),
+                }
+            ],
+            [
+                {
+                    "text": "환전 아님",
+                    "callback_data": (f"{OPERATOR_CALLBACK_PREFIX}cash-flow:reject:{proposal_id}"),
+                }
             ],
         ]
     }

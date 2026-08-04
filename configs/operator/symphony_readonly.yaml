@@ -16,6 +16,7 @@ portfolio:
       cash_symbol: CASH_USD
       symbols:
         - QQQ
+        - QQQM
         - SCHD
         - BIL
         - TLT
@@ -41,6 +42,18 @@ universe:
       broker: kis
       broker_product: kis_overseas_stock
       broker_symbol: QQQ
+      exchange_code: NASD
+      quantity_step: 1
+      price_tick: 0.01
+      min_order_quantity: 1
+      min_order_notional: 1
+    - symbol: QQQM
+      asset_type: etf
+      region: US
+      currency: USD
+      broker: toss
+      broker_product: kis_overseas_stock
+      broker_symbol: QQQM
       exchange_code: NASD
       quantity_step: 1
       price_tick: 0.01

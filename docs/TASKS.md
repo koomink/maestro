@@ -805,6 +805,9 @@
 - [x] Make Toss adoption/backfill migration-safe: recognize version-1 cash
       baselines, seed full cumulative order watermarks, apply later fill deltas,
       atomically persist adoption provenance, and add audited bookkeeping repair
+- [x] Preserve live-order recovery until fill reconciliation succeeds, resolve
+      cash-suspense incidents explicitly, and alert on fills that remain above
+      the ledger watermark for 15 minutes
 
 ## Completed / Historical Notes
 

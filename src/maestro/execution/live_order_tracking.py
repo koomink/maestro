@@ -12,6 +12,7 @@ cash, and settlement costs land with the same provenance as a fill observed inli
 """
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 from maestro.core.clock import utc_now
@@ -21,6 +22,7 @@ from maestro.execution.live_order_models import (
     BrokerOrderId,
     FillReconciliationResult,
     LiveOrderLifecycleNotification,
+    LiveOrderStatusSnapshot,
 )
 from maestro.execution.live_order_ports import (
     LiveOrderNotificationClient,
@@ -38,6 +40,121 @@ TERMINAL_ORDER_STATUSES = {
     OrderStatus.HALTED,
     OrderStatus.FAILED,
 }
+
+
+def list_unreconciled_live_order_fills(
+    state_store: StateStore,
+    *,
+    min_age_seconds: float = 900.0,
+    limit: int = 2000,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Return broker-observed live fills that are still absent from the ledger."""
+    watermarks = state_store.load_fill_watermarks()
+    candidates: dict[str, dict[str, Any]] = {}
+
+    def remember(
+        *,
+        broker_order_id: str,
+        account_id: str,
+        symbol: str,
+        side: str,
+        filled_quantity: float,
+        cumulative_notional: float,
+        created_at: str,
+    ) -> None:
+        applied_quantity = float(watermarks.get(broker_order_id, (0.0, 0.0))[0])
+        if filled_quantity <= applied_quantity + 1e-9:
+            return
+        observed_at = _event_timestamp(created_at)
+        existing = candidates.get(broker_order_id)
+        first_observed_at = min(
+            observed_at,
+            existing["first_observed_at"] if existing is not None else observed_at,
+        )
+        missing_quantity = filled_quantity - applied_quantity
+        missing_notional = (
+            cumulative_notional * missing_quantity / filled_quantity if filled_quantity > 0 else 0.0
+        )
+        candidates[broker_order_id] = {
+            "broker_order_id": broker_order_id,
+            "account_id": account_id,
+            "symbol": symbol,
+            "side": side,
+            "filled_quantity": filled_quantity,
+            "applied_quantity": applied_quantity,
+            "missing_quantity": missing_quantity,
+            "missing_notional": missing_notional,
+            "first_observed_at": first_observed_at,
+        }
+
+    history_rows = state_store.list_system_events_by_type("broker_order_history_item", limit=limit)
+    for row in reversed(history_rows):
+        payload = row.get("payload") or {}
+        if payload.get("history_mode") != "maestro_cost_only":
+            continue
+        broker_order_id = str(payload.get("broker_order_id") or "")
+        if not broker_order_id:
+            continue
+        remember(
+            broker_order_id=broker_order_id,
+            account_id=str(payload.get("account_id") or ""),
+            symbol=str(payload.get("symbol") or ""),
+            side=str(payload.get("side") or ""),
+            filled_quantity=float(payload.get("filled_quantity") or 0.0),
+            cumulative_notional=float(payload.get("cumulative_notional") or 0.0),
+            created_at=str(row.get("created_at") or ""),
+        )
+
+    status_rows = state_store.list_system_events_by_type(
+        SystemEventType.LIVE_ORDER_STATUS, limit=limit
+    )
+    for row in reversed(status_rows):
+        payload = row.get("payload") or {}
+        nested = payload.get("broker_order") or {}
+        partial_fill = payload.get("partial_fill") or {}
+        broker_order_id = str(nested.get("broker_order_id") or "")
+        if not broker_order_id or broker_order_id in candidates:
+            continue
+        filled_quantity = float(partial_fill.get("filled_quantity") or 0.0)
+        average_price = float(partial_fill.get("average_fill_price") or 0.0)
+        remember(
+            broker_order_id=broker_order_id,
+            account_id=str(nested.get("account_id") or ""),
+            symbol=str(payload.get("symbol") or nested.get("symbol") or ""),
+            side=str(payload.get("side") or nested.get("side") or ""),
+            filled_quantity=filled_quantity,
+            cumulative_notional=filled_quantity * average_price,
+            created_at=str(row.get("created_at") or ""),
+        )
+
+    checked_at = now or datetime.now(UTC)
+    output = []
+    for candidate in candidates.values():
+        age_seconds = max(
+            (checked_at - candidate["first_observed_at"]).total_seconds(),
+            0.0,
+        )
+        if age_seconds < min_age_seconds:
+            continue
+        output.append(
+            {
+                **candidate,
+                "first_observed_at": candidate["first_observed_at"].isoformat(),
+                "age_seconds": age_seconds,
+            }
+        )
+    return sorted(output, key=lambda item: (-item["age_seconds"], item["broker_order_id"]))
+
+
+def _event_timestamp(value: str) -> datetime:
+    normalized = value.strip().replace("Z", "+00:00")
+    if not normalized:
+        return datetime.now(UTC)
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 class OutstandingOrder:
@@ -93,7 +210,12 @@ class LiveOrderTrackingResumeService:
         return service
 
     def list_outstanding_orders(self, *, limit: int = 100) -> list[OutstandingOrder]:
-        """Orders marked outstanding that have not since reached a terminal state."""
+        """Accepted orders without a later terminal status snapshot.
+
+        Tracking-incomplete events are the normal source. Accepted submission
+        results are also scanned so orders created before that event existed, or
+        abandoned by an exceptional lifecycle exit, remain recoverable.
+        """
         rows = self.state_store.list_system_events_by_type(
             SystemEventType.LIVE_ORDER_TRACKING_INCOMPLETE, limit=limit
         )
@@ -122,6 +244,33 @@ class LiveOrderTrackingResumeService:
                     last_status=str(payload.get("last_status") or OrderStatus.OPEN.value),
                 )
             )
+        for row in self.state_store.list_system_events_by_type(
+            SystemEventType.LIVE_ORDER_RESULT, limit=max(limit, 1000)
+        ):
+            payload = row.get("payload") or {}
+            result_payload = payload.get("result") or {}
+            broker_order_payload = result_payload.get("broker_order")
+            if not isinstance(broker_order_payload, dict):
+                continue
+            broker_order = BrokerOrderId.model_validate(broker_order_payload)
+            broker_order_id = broker_order.broker_order_id
+            if broker_order_id in seen or broker_order_id in resolved:
+                continue
+            status = str(result_payload.get("status") or "")
+            if status in {value.value for value in TERMINAL_ORDER_STATUSES}:
+                continue
+            seen.add(broker_order_id)
+            outstanding.append(
+                OutstandingOrder(
+                    event_id=int(row["id"]),
+                    run_id=str(row["run_id"]),
+                    order_id=str(result_payload.get("order_id") or broker_order.order_id),
+                    broker_order=broker_order,
+                    last_status=status or OrderStatus.ACCEPTED_BY_BROKER.value,
+                )
+            )
+            if len(outstanding) >= limit:
+                break
         return outstanding
 
     def resume(self, run_id: str, *, limit: int = 100) -> dict[str, Any]:
@@ -131,6 +280,7 @@ class LiveOrderTrackingResumeService:
         failures: list[dict[str, Any]] = []
         resolved: list[str] = []
         still_open: list[str] = []
+        terminal: list[tuple[OutstandingOrder, LiveOrderStatusSnapshot]] = []
         for order in outstanding:
             try:
                 status_service = self._status_service_for(order.broker_order.account_id)
@@ -157,24 +307,27 @@ class LiveOrderTrackingResumeService:
                 }
             )
             if snapshot.status in TERMINAL_ORDER_STATUSES:
-                self._persist_resolved(run_id, order, snapshot.status)
-                resolved.append(order.order_id)
-                # Without this the recovery is as silent as the loss was: the
-                # operator approved an order and never heard how it ended.
-                self._notify(
-                    run_id,
-                    order,
-                    snapshot.status,
-                    f"Live order reached {snapshot.status.value} after tracking resumed; "
-                    f"filled {snapshot.partial_fill.filled_quantity:g}"
-                    f"/{snapshot.partial_fill.ordered_quantity:g}.",
-                )
+                terminal.append((order, snapshot))
             else:
                 still_open.append(order.order_id)
 
         fill_result: FillReconciliationResult | None = None
-        if polled:
+        if polled or self._has_unreconciled_statuses(limit=max(limit, 1000)):
             fill_result = self.fill_reconciliation_service.reconcile_latest(run_id)
+        # A terminal broker status is not operationally resolved until its fill is
+        # safely in the ledger. Persisting this marker first can make a failed
+        # reconciliation invisible to every later resume run.
+        for order, snapshot in terminal:
+            self._persist_resolved(run_id, order, snapshot.status)
+            resolved.append(order.order_id)
+            self._notify(
+                run_id,
+                order,
+                snapshot.status,
+                f"Live order reached {snapshot.status.value} after tracking resumed; "
+                f"filled {snapshot.partial_fill.filled_quantity:g}"
+                f"/{snapshot.partial_fill.ordered_quantity:g}.",
+            )
 
         summary = {
             "checked_at": utc_now().isoformat(),
@@ -190,6 +343,29 @@ class LiveOrderTrackingResumeService:
             ),
         }
         return summary
+
+    def _has_unreconciled_statuses(self, *, limit: int) -> bool:
+        watermarks = self.state_store.load_fill_watermarks()
+        cost_watermarks = self.state_store.load_fill_cost_watermarks()
+        for row in self.state_store.list_system_events_by_type(
+            SystemEventType.LIVE_ORDER_STATUS, limit=limit
+        ):
+            payload = row.get("payload") or {}
+            nested = payload.get("broker_order") or {}
+            broker_order_id = str(nested.get("broker_order_id") or "")
+            if not broker_order_id:
+                continue
+            partial_fill = payload.get("partial_fill") or {}
+            filled_quantity = float(partial_fill.get("filled_quantity") or 0.0)
+            applied_quantity = float(watermarks.get(broker_order_id, (0.0, 0.0))[0])
+            if filled_quantity > applied_quantity + 1e-9:
+                return True
+            commission = float(payload.get("cumulative_commission") or 0.0)
+            tax = float(payload.get("cumulative_tax") or 0.0)
+            applied_commission, applied_tax = cost_watermarks.get(broker_order_id, (0.0, 0.0))
+            if commission > applied_commission + 1e-9 or tax > applied_tax + 1e-9:
+                return True
+        return False
 
     def _notify(
         self,
@@ -278,4 +454,5 @@ __all__ = [
     "LiveOrderTrackingResumeService",
     "OutstandingOrder",
     "TERMINAL_ORDER_STATUSES",
+    "list_unreconciled_live_order_fills",
 ]

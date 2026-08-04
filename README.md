@@ -1322,6 +1322,10 @@ buying-power step remains stable for three snapshots with unchanged positions,
 orders, and fills. Telegram confirmation is an operator attestation, not broker
 cash proof; the ledger is unchanged until confirmation. If the displayed amount
 differs from the Toss app, use `/cash_flow <proposal_id> <actual_amount>`.
+Opposite KRW/USD movements over the same stable window are proposed as one
+currency conversion. The Telegram confirmation records both linked legs in one
+transaction and rejects the callback if the latest Toss or ledger balances have
+changed since the proposal.
 
 Virtuoso app performance uses strategy book snapshots as the app value series
 and explicit Telegram-attributed `strategy_cash_flow` events as the app-level
@@ -1480,7 +1484,11 @@ The dashboard reports `confirmed`, `provisional`, or `degraded` performance;
 confirmed TWR uses ledger cash and does not treat buying-power drift as return.
 Telegram operators can inspect and classify open suspense observations with
 `/cash_drift`; classification is audited and leaves the ledger unchanged until
-the broker evidence supports an explicit cash-flow record.
+the broker evidence supports an explicit cash-flow record. A drift incident is
+automatically marked resolved when reconciliation returns within budget; a
+later difference starts with fresh first-observed evidence. Maestro-submitted
+fills that remain above the ledger watermark for 15 minutes generate a
+deduplicated Telegram warning and must be reconciled rather than adopted.
 
 ## Development Rule
 

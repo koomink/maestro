@@ -441,9 +441,38 @@ broker snapshot by hand, losing the real fill quantity, price, and settlement
 costs.
 
 The lifecycle now records `live_order_tracking_incomplete` and notifies when the
-window closes on a working order, and `maestro resume-order-tracking` re-polls
-those orders so the fill lands on the normal reconciliation path and the operator
-gets a Telegram message with the outcome.
+window closes on a working order, including when a post-fill reconciliation exits
+before the broker order is terminal. `maestro resume-order-tracking` re-polls those
+orders so the fill lands on the normal reconciliation path and the operator gets a
+Telegram message with the outcome. As a recovery fallback it also discovers
+accepted `live_order_result` records that have no later terminal status snapshot;
+this repairs orders created before tracking-incomplete events were available.
+
+For Toss, raw working statuses such as `PENDING` are normalized to `OPEN` in the
+read-only snapshot. Cash reconciliation also adds the `reserved_cash` of unfilled
+buy orders back to buying power before comparing it with the Maestro cash ledger,
+so a normal broker reservation is not escalated as an L3 cash drift.
+
+If a scheduled broker snapshot observes a strategy sell before its delayed fill
+is reconciled, attribution records an `external_strategy_reduction_warning` and
+may remove the position first. Restore only that warning-backed quantity, then
+replay fills through the normal idempotent path:
+
+```bash
+maestro restore-pending-maestro-sell-attribution \
+  --config <readonly-config> \
+  --account-id toss_brokerage \
+  --symbol <symbol> \
+  --bucket crescendo_us \
+  --quantity <filled-quantity> \
+  --reason "broker snapshot preceded delayed Maestro fill reconciliation"
+maestro reconcile-fills --config <readonly-config>
+```
+
+The restore command rejects quantities not backed by an unclaimed strategy
+reduction warning and writes an audited attribution version. Do not use snapshot
+adoption to repair this case because it loses the fill's quantity, price, and cash
+provenance.
 
 `maestro-resume-order-tracking.timer` runs it every 2 minutes during KRX and US
 market hours. That bounds notification latency after the inline 10-minute window
