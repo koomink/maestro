@@ -28,6 +28,18 @@ def round_price_to_tick(raw_price: float, instrument: TradableInstrument | None)
     return float(Decimal(ticks) * Decimal(str(instrument.price_tick)))
 
 
+def floor_quantity_to_step(raw_quantity: float, instrument: TradableInstrument | None) -> float:
+    """Round a quantity down to the instrument's tradable step.
+
+    Rounding down rather than to nearest keeps an order inside whatever budget
+    sized it: a rounded-up share is one the account may not be able to pay for.
+    """
+    if instrument is None:
+        return raw_quantity
+    steps = int(Decimal(str(raw_quantity)) / Decimal(str(instrument.quantity_step)))
+    return float(Decimal(steps) * Decimal(str(instrument.quantity_step)))
+
+
 class OrderBuilder:
     def __init__(
         self,
@@ -300,11 +312,7 @@ class OrderBuilder:
         return order.model_copy(update={"quantity": quantity, "notional": notional})
 
     def _order_quantity(self, symbol: str, raw_quantity: float) -> float:
-        instrument = self.instruments.get(symbol)
-        if instrument is None:
-            return raw_quantity
-        steps = int(Decimal(str(raw_quantity)) / Decimal(str(instrument.quantity_step)))
-        return float(Decimal(steps) * Decimal(str(instrument.quantity_step)))
+        return floor_quantity_to_step(raw_quantity, self.instruments.get(symbol))
 
     def _build_buy_only_contribution_orders(
         self,

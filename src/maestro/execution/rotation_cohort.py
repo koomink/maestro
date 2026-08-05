@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 
 from maestro.core.enums import OrderSide, OrderStatus
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.base import OrderIntent
 from maestro.execution.live_order_models import LiveOrderLifecycleResult
+from maestro.execution.order_builder import floor_quantity_to_step
 
 
 @dataclass(frozen=True)
@@ -68,3 +70,30 @@ def evaluate_sell_phase(results: list[LiveOrderLifecycleResult]) -> SellPhaseOut
         reason="sell_phase_incomplete:" + ",".join(statuses),
         unfilled=unfilled,
     )
+
+
+def rescale_buys_to_cash(
+    buys: list[OrderIntent],
+    available_cash: float,
+    instruments: dict[str, TradableInstrument],
+) -> list[OrderIntent]:
+    """Fit approved buys inside the cash the sells actually raised.
+
+    Quantities only ever shrink. The operator approved these sizes as a ceiling,
+    so surplus cash must not buy more than what they were shown.
+    """
+    total_notional = sum(order.notional for order in buys)
+    if total_notional <= 0:
+        return []
+    scale = min(1.0, max(0.0, available_cash) / total_notional)
+    rescaled: list[OrderIntent] = []
+    for order in buys:
+        instrument = instruments.get(order.symbol)
+        quantity = floor_quantity_to_step(order.quantity * scale, instrument)
+        notional = quantity * order.price
+        min_quantity = instrument.min_order_quantity if instrument else 0.0
+        min_notional = instrument.min_order_notional if instrument else 0.0
+        if quantity <= 0 or quantity < min_quantity or notional < min_notional:
+            continue
+        rescaled.append(order.model_copy(update={"quantity": quantity, "notional": notional}))
+    return rescaled
