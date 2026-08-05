@@ -168,6 +168,7 @@ def _order(
     *,
     side: OrderSide = OrderSide.BUY,
     currency: Currency | None = None,
+    strategy: str | None = None,
 ) -> OrderIntent:
     return OrderIntent(
         order_id=order_id,
@@ -178,6 +179,7 @@ def _order(
         notional=quantity * price,
         account_id=account_id,
         currency=currency,
+        metadata={"source_strategy_ids": [strategy]} if strategy else {},
     )
 
 
@@ -245,3 +247,61 @@ def test_sell_proceeds_do_not_cross_currencies():
 
     assert [order.order_id for order in accepted] == ["sell_krw"]
     assert [item.order.order_id for item in blocked] == ["buy_usd"]
+
+
+def test_sell_in_another_approval_group_does_not_fund_a_buy():
+    """Deferral must follow the unit that actually executes together.
+
+    Orders are split into approval groups by source_strategy_ids and each group
+    runs its own sell-then-buy phases. A buy whose funding sell lands in a
+    different group is executed as a buy-only cohort — no resize, no post-sell
+    capacity ruling — so deferring it here would submit it unchecked.
+    """
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order(
+                "sell_a", "QQQ", 100, 100, "toss",
+                side=OrderSide.SELL, currency=Currency.USD, strategy="alpha",
+            ),
+            _order("buy_b", "TLT", 100, 100, "toss", currency=Currency.USD, strategy="beta"),
+        ]
+    )
+
+    assert [order.order_id for order in accepted] == ["sell_a"]
+    assert [item.order.order_id for item in blocked] == ["buy_b"]
+
+
+def test_sell_in_the_same_approval_group_still_funds_a_buy():
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order(
+                "sell_a", "QQQ", 100, 100, "toss",
+                side=OrderSide.SELL, currency=Currency.USD, strategy="alpha",
+            ),
+            _order("buy_b", "TLT", 100, 100, "toss", currency=Currency.USD, strategy="alpha"),
+        ]
+    )
+
+    assert blocked == []
+    buy = next(order for order in accepted if order.order_id == "buy_b")
+    assert buy.metadata["sell_fill_pending"] is True

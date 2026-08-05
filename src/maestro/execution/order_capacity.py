@@ -20,10 +20,20 @@ class OrderCapacityBlock(BaseModel):
     checked_at: str
 
 
-def _capacity_scope(order: OrderIntent) -> tuple[str, str | None]:
-    """Account and currency: the boundary broker cash is actually fungible across."""
+def _capacity_scope(order: OrderIntent) -> tuple[str, str | None, tuple[str, ...]]:
+    """The unit that will actually execute together.
+
+    Cash is fungible per account and currency, but orders are then split into
+    approval groups by `source_strategy_ids` and each group runs its own
+    sell-then-buy phases. A buy whose funding sell lands in a different group is
+    executed as a buy-only cohort — no resize, no post-sell capacity ruling — so
+    the deferral decision has to be made at the same granularity or it hands that
+    buy through unchecked.
+    """
     currency = order.currency.value if order.currency is not None else order.sleeve
-    return (order.account_id or "default", currency)
+    source_strategy_ids = order.metadata.get("source_strategy_ids") or []
+    group = tuple(str(strategy_id) for strategy_id in source_strategy_ids if strategy_id)
+    return (order.account_id or "default", currency, group)
 
 
 class OrderCapacityService:
@@ -41,7 +51,7 @@ class OrderCapacityService:
     ) -> tuple[list[OrderIntent], list[OrderCapacityBlock]]:
         accepted: list[OrderIntent] = []
         blocked: list[OrderCapacityBlock] = []
-        reserved_by_scope: dict[tuple[str, str | None], float] = {}
+        reserved_by_scope: dict[tuple[str, str | None, tuple[str, ...]], float] = {}
         # A rotation's buy is funded by the sell filed alongside it, so a fully
         # invested account reports zero buying power — and zero max buy quantity —
         # right up until that sell settles. Every dimension measured here is a
@@ -51,7 +61,7 @@ class OrderCapacityService:
         #
         # Cash is fungible per account AND currency: a KRW sell cannot fund a USD
         # buy, and their notionals are not even comparable numbers.
-        proceeds_by_scope: dict[tuple[str, str | None], float] = {}
+        proceeds_by_scope: dict[tuple[str, str | None, tuple[str, ...]], float] = {}
         for order in orders:
             if order.side == OrderSide.SELL:
                 sell_scope = _capacity_scope(order)
