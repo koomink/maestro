@@ -69,6 +69,13 @@ from maestro.execution.live_orders import (
 from maestro.execution.order_builder import round_price_to_tick
 from maestro.execution.order_capacity import OrderCapacityBlock, OrderCapacityService
 from maestro.execution.reconciliation import BrokerReconciliationService
+from maestro.execution.rotation_cohort import (
+    RotationCohort,
+    SellPhaseOutcome,
+    evaluate_sell_phase,
+    rescale_buys_to_cash,
+    split_rotation_cohorts,
+)
 from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.integrations.telegram.bot import TelegramBotAPIClient
 from maestro.integrations.telegram.formatter import format_approval_request
@@ -2561,8 +2568,108 @@ class MaestroOrchestrator:
             )
 
         dependencies_by_account: dict[str | None, LiveApprovalDependencies] = {}
+        lifecycle_results: list[LiveOrderLifecycleResult] = []
+        for cohort in split_rotation_cohorts(armed_orders):
+            lifecycle_results.extend(
+                self._run_cohort_phases(
+                    cohort,
+                    run_id=run_id,
+                    approval_id=approval_id,
+                    approval_decision=approval_decision,
+                    signal_run_id=signal_run_id,
+                    dependencies_by_account=dependencies_by_account,
+                )
+            )
+        return lifecycle_results, self.state_store.load_latest_portfolio_state()
+
+    def _run_cohort_phases(
+        self,
+        cohort: RotationCohort,
+        *,
+        run_id: str,
+        approval_id: str,
+        approval_decision: ApprovalDecision,
+        signal_run_id: str | None,
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+    ) -> list[LiveOrderLifecycleResult]:
+        """Sell, wait for the fills, then buy against the cash they raised.
+
+        The broker re-checks buying power against its own live balance when the
+        order is submitted, so a buy can only be sized once its funding sell has
+        actually settled into cash. Sizing it any earlier is what left the book
+        sitting in cash for a whole rebalance cycle.
+        """
+        results: list[LiveOrderLifecycleResult] = []
+        sell_results = self._run_batch_phase(
+            list(cohort.sells),
+            run_id=run_id,
+            approval_id=approval_id,
+            approval_decision=approval_decision,
+            signal_run_id=signal_run_id,
+            dependencies_by_account=dependencies_by_account,
+        )
+        results.extend(sell_results)
+        outcome = evaluate_sell_phase(sell_results)
+        self._record_event(
+            run_id,
+            "rotation_cohort_phase",
+            {
+                "account_id": cohort.account_id,
+                "currency": cohort.currency,
+                "phase": "sell",
+                "complete": outcome.complete,
+                "reason": outcome.reason,
+                "sell_order_ids": [order.order_id for order in cohort.sells],
+                "buy_order_ids": [order.order_id for order in cohort.buys],
+            },
+        )
+        if not outcome.complete:
+            self._abort_cohort(
+                cohort,
+                outcome,
+                run_id=run_id,
+                approval_decision=approval_decision,
+                dependencies_by_account=dependencies_by_account,
+            )
+            return results
+        if not cohort.buys:
+            return results
+        # Only a cohort whose buys were funded by its own sells needs resizing.
+        # A buy-only run — a monthly contribution, say — was already sized and
+        # gated against real cash at approval time, and nothing has moved since.
+        buys = list(cohort.buys)
+        if cohort.sells:
+            buys = rescale_buys_to_cash(
+                buys,
+                self._cohort_available_cash(cohort),
+                {instrument.symbol: instrument for instrument in self.config.universe.instruments},
+            )
+        results.extend(
+            self._run_batch_phase(
+                buys,
+                run_id=run_id,
+                approval_id=approval_id,
+                approval_decision=approval_decision,
+                signal_run_id=signal_run_id,
+                dependencies_by_account=dependencies_by_account,
+            )
+        )
+        return results
+
+    def _run_batch_phase(
+        self,
+        orders: list[OrderIntent],
+        *,
+        run_id: str,
+        approval_id: str,
+        approval_decision: ApprovalDecision,
+        signal_run_id: str | None,
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+    ) -> list[LiveOrderLifecycleResult]:
+        if not orders:
+            return []
         batch_items = self._build_batch_items(
-            armed_orders,
+            orders,
             run_id=run_id,
             approval_id=approval_id,
             signal_run_id=signal_run_id,
@@ -2574,9 +2681,31 @@ class MaestroOrchestrator:
             self.audit,
             self._batch_notification_client(dependencies_by_account),
         ).run(batch_items, approval_decision)
-        orders_by_id = {order.order_id: order for order in armed_orders}
-        for item in batch.items:
-            lifecycle = item.lifecycle
+        lifecycles = [item.lifecycle for item in batch.items]
+        self._record_lifecycle_recovery_candidates(
+            run_id,
+            lifecycles,
+            {order.order_id: order for order in orders},
+            signal_run_id=signal_run_id,
+        )
+        return lifecycles
+
+    def _cohort_available_cash(self, cohort: RotationCohort) -> float:
+        """Broker buying power once the sells settled, net of the fee buffer."""
+        lookup = self.order_capacity_lookup or self._lookup_order_capacity
+        capacity = lookup(cohort.buys[0])
+        buffer = 1.0 - self.config.execution.live_order_limits.fee_buffer_pct
+        return max(0.0, capacity.cash_buying_power) * max(0.0, buffer)
+
+    def _record_lifecycle_recovery_candidates(
+        self,
+        run_id: str,
+        lifecycles: list[LiveOrderLifecycleResult],
+        orders_by_id: dict[str, OrderIntent],
+        *,
+        signal_run_id: str | None,
+    ) -> None:
+        for lifecycle in lifecycles:
             if (
                 lifecycle.final_status.value not in {"failed", "rejected", "halted"}
                 or lifecycle.broker_order_id is not None
@@ -2606,9 +2735,26 @@ class MaestroOrchestrator:
                 order,
                 lifecycle.failed_reason or lifecycle.halt_reason or lifecycle.final_status.value,
             )
-        return (
-            [item.lifecycle for item in batch.items],
-            self.state_store.load_latest_portfolio_state(),
+
+    def _abort_cohort(
+        self,
+        cohort: RotationCohort,
+        outcome: SellPhaseOutcome,
+        *,
+        run_id: str,
+        approval_decision: ApprovalDecision,
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+    ) -> None:
+        self._record_event(
+            run_id,
+            "rotation_cohort_aborted",
+            {
+                "account_id": cohort.account_id,
+                "currency": cohort.currency,
+                "reason": outcome.reason,
+                "unfilled_order_ids": [result.order_id for result in outcome.unfilled],
+                "skipped_buy_order_ids": [order.order_id for order in cohort.buys],
+            },
         )
 
     def _record_live_order_dry_run(

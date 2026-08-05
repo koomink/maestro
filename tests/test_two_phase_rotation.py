@@ -1,0 +1,267 @@
+"""A rotation must sell, wait for the fills, and only then buy.
+
+The broker re-checks buying power against its own live balance at submission
+time, so a buy filed alongside its funding sell is rejected and the book sits in
+cash for a whole cycle. These tests pin the ordering and the barrier.
+"""
+
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from maestro.approval.models import ApprovalDecision
+from maestro.config.loader import load_config
+from maestro.core.clock import utc_now
+from maestro.core.enums import Currency, OrderSide, OrderStatus
+from maestro.execution.base import OrderIntent
+from maestro.execution.brokers.readonly import BrokerBuyingPower
+from maestro.execution.live_order_factory import LiveApprovalDependencies
+from maestro.execution.live_order_models import (
+    BrokerOrderId,
+    FillReconciliationResult,
+    LiveOrderResult,
+    LiveOrderStatusSnapshot,
+    PartialFillSummary,
+)
+from maestro.orchestration import orchestrator as orchestrator_module
+from maestro.orchestration.orchestrator import MaestroOrchestrator
+
+
+def test_buys_are_submitted_only_after_every_sell_filled(tmp_path, monkeypatch):
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    _install_fakes(monkeypatch, calls, {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.FILLED})
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    # The sell is submitted and confirmed filled before the buy is even sent.
+    assert calls == ["submit:sell_a", "poll:sell_a", "submit:buy_b", "poll:buy_b"]
+
+
+def test_partially_filled_sell_blocks_every_buy(tmp_path, monkeypatch):
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.PARTIALLY_FILLED, "buy_b": OrderStatus.FILLED},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:buy_b" not in calls
+
+
+def test_buys_shrink_to_the_cash_the_sells_actually_raised(tmp_path, monkeypatch):
+    submitted: list[tuple[str, float]] = []
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=5_000.0)
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.FILLED},
+        submitted=submitted,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    # The buy was approved for 100 @ 100 = $10,000 but only $5,000 came back.
+    assert dict(submitted)["buy_b"] == 50.0
+
+
+def test_buy_only_run_is_not_resized_against_buying_power(tmp_path, monkeypatch):
+    """A contribution has no sells to wait on, so nothing has moved since approval.
+
+    Re-querying and rescaling it would silently shrink a run that was already
+    sized and gated against real cash.
+    """
+    submitted: list[tuple[str, float]] = []
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=1.0)
+
+    def _explode(order):
+        raise AssertionError(f"buying power must not be consulted for {order.order_id}")
+
+    orchestrator.order_capacity_lookup = _explode
+    _install_fakes(monkeypatch, calls, {"buy_b": OrderStatus.FILLED}, submitted=submitted)
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert dict(submitted)["buy_b"] == 100.0
+
+
+def _install_fakes(
+    monkeypatch,
+    calls: list[str],
+    status_by_order: dict[str, OrderStatus],
+    submitted: list[tuple[str, float]] | None = None,
+) -> None:
+    def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
+        del config, kwargs
+        return LiveApprovalDependencies(
+            state_store=state_store,
+            audit_logger=audit_logger,
+            safety_service=_SafetyService(calls, submitted),
+            status_service=_StatusService(calls, status_by_order),
+            fill_reconciliation_service=_FillService(),
+            workflow_service=None,
+            lifecycle_service=None,
+        )
+
+    monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
+
+
+class _SafetyService:
+    def __init__(self, calls: list[str], submitted: list[tuple[str, float]] | None) -> None:
+        self.calls = calls
+        self.submitted = submitted
+
+    def submit_approved_order(self, request, approval):
+        del approval
+        self.calls.append(f"submit:{request.order_id}")
+        if self.submitted is not None:
+            self.submitted.append((request.order_id, request.quantity))
+        return LiveOrderResult(
+            order_id=request.order_id,
+            status=OrderStatus.ACCEPTED_BY_BROKER,
+            broker_order=BrokerOrderId(
+                broker="toss",
+                broker_order_id=request.order_id,
+                order_id=request.order_id,
+                submitted_at=utc_now().isoformat(),
+                account_id=request.account_id,
+            ),
+        )
+
+
+class _StatusService:
+    def __init__(self, calls: list[str], status_by_order: dict[str, OrderStatus]) -> None:
+        self.calls = calls
+        self.status_by_order = status_by_order
+
+    def poll_order_status(self, run_id, broker_order):
+        del run_id
+        self.calls.append(f"poll:{broker_order.broker_order_id}")
+        status = self.status_by_order[broker_order.order_id]
+        filled = 100.0 if status == OrderStatus.FILLED else 50.0
+        return LiveOrderStatusSnapshot(
+            broker_order=broker_order,
+            status=status,
+            checked_at=utc_now().isoformat(),
+            symbol="MOCK_ETF_A",
+            side=OrderSide.SELL,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=100.0,
+                filled_quantity=filled,
+                remaining_quantity=100.0 - filled,
+            ),
+        )
+
+
+class _FillService:
+    def reconcile_latest(self, run_id):
+        return FillReconciliationResult(
+            run_id=run_id,
+            checked_at=utc_now().isoformat(),
+            cash=1_000_000,
+            positions={},
+        )
+
+
+def _sell(order_id: str) -> OrderIntent:
+    return _intent(order_id, "MOCK_ETF_A", OrderSide.SELL)
+
+
+def _buy(order_id: str) -> OrderIntent:
+    return _intent(order_id, "MOCK_ETF_B", OrderSide.BUY)
+
+
+def _intent(order_id: str, symbol: str, side: OrderSide) -> OrderIntent:
+    return OrderIntent(
+        order_id=order_id,
+        symbol=symbol,
+        side=side,
+        quantity=100,
+        price=100.0,
+        notional=10_000.0,
+        currency=Currency.KRW,
+        account_id="acct-a",
+    )
+
+
+def _approval_decision(run_id: str) -> ApprovalDecision:
+    return ApprovalDecision(
+        approval_id="appr-1",
+        run_id=run_id,
+        status="approved",
+        decided_at=utc_now(),
+        decided_by="telegram:fake",
+    )
+
+
+def _orchestrator(tmp_path, *, buying_power: float) -> MaestroOrchestrator:
+    raw: dict[str, Any] = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw["mode"] = "live_approval"
+    raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    del raw["portfolio"]["initial_cash"]
+    raw["portfolio"]["allowed_symbols"] = ["CASH", "MOCK_ETF_A", "MOCK_ETF_B"]
+    raw["execution"] = {"engine": "paper"}
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "timeout_seconds": 1,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+        "telegram_poll_interval_seconds": 0.0,
+    }
+    raw["kis"] = {
+        "enabled": True,
+        "provider": "mock",
+        "account_id": "MOCK",
+        "broker_products": ["kis_domestic_stock"],
+    }
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
+    config.execution.order_posture = "armed"
+    config.execution.live_order_enabled = True
+    config.execution.live_order_dry_run = False
+    config.execution.order_status_max_polls = 1
+    config.execution.order_status_poll_interval_seconds = 0
+
+    orchestrator = MaestroOrchestrator(config)
+    orchestrator.order_capacity_lookup = lambda order: BrokerBuyingPower(
+        symbol=order.symbol,
+        order_price=order.price,
+        cash_buying_power=buying_power,
+        max_buy_quantity=None,
+        source="fake",
+    )
+    orchestrator.state_store.save_portfolio_snapshot(
+        "run_adopted_broker_baseline",
+        orchestrator.state_store.load_latest_portfolio_state(),
+    )
+    return orchestrator
