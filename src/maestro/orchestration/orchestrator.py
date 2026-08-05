@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from time import sleep
 from typing import Any
 
 from pydantic import BaseModel
@@ -162,6 +163,14 @@ class ScopedOrderTarget:
     target_weight: float = 1.0
     drift: float = 0.0
     requires_budget_request: bool = False
+
+
+_CANCEL_TERMINAL_STATUSES = {
+    OrderStatus.CANCELED,
+    OrderStatus.FILLED,
+    OrderStatus.REJECTED,
+    OrderStatus.FAILED,
+}
 
 
 class MaestroOrchestrator:
@@ -3026,25 +3035,34 @@ class MaestroOrchestrator:
                 }
             )
             return
-        try:
-            snapshot = status_service.poll_order_status(run_id, broker_order)
-        except Exception as exc:
+        # Brokers settle a cancellation asynchronously, so the order can keep
+        # reporting its old status for a poll or two. Give it the same bounded
+        # budget the lifecycle poller uses rather than judging on one reading.
+        snapshot = None
+        for attempt in range(max(1, self.config.execution.order_status_max_polls)):
+            if attempt > 0:
+                self._sleep_between_cancel_polls()
+            try:
+                snapshot = status_service.poll_order_status(run_id, broker_order)
+            except Exception as exc:
+                cancel_unconfirmed.append(
+                    {
+                        "order_id": result.order_id,
+                        "broker_order_id": broker_order.broker_order_id,
+                        "observed_status": "unknown",
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+                return
+            if snapshot.status in _CANCEL_TERMINAL_STATUSES:
+                break
+        if snapshot is None or snapshot.status != OrderStatus.CANCELED:
             cancel_unconfirmed.append(
                 {
                     "order_id": result.order_id,
                     "broker_order_id": broker_order.broker_order_id,
-                    "observed_status": "unknown",
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                }
-            )
-            return
-        if snapshot.status != OrderStatus.CANCELED:
-            cancel_unconfirmed.append(
-                {
-                    "order_id": result.order_id,
-                    "broker_order_id": broker_order.broker_order_id,
-                    "observed_status": snapshot.status.value,
+                    "observed_status": snapshot.status.value if snapshot else "unknown",
                 }
             )
             return
@@ -3056,6 +3074,11 @@ class MaestroOrchestrator:
                 "canceled_quantity": snapshot.partial_fill.remaining_quantity,
             }
         )
+
+    def _sleep_between_cancel_polls(self) -> None:
+        interval = self.config.execution.order_status_poll_interval_seconds
+        if interval > 0:
+            sleep(interval)
 
     def _notify_cohort_abort(
         self,

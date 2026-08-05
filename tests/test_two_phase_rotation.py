@@ -249,6 +249,7 @@ def _install_fakes(
     reject_submits: set[str] | None = None,
     keys: list[tuple[str, str | None]] | None = None,
     cancel_confirms: bool = True,
+    cancel_confirms_after: int = 1,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
@@ -264,6 +265,7 @@ def _install_fakes(
                 cancels if cancels is not None else [],
                 status_by_order,
                 cancel_confirms,
+                cancel_confirms_after,
             ),
         )
 
@@ -315,18 +317,23 @@ class _CancelService:
         cancels: list[str],
         status_by_order: dict[str, OrderStatus],
         confirms: bool,
+        confirms_after: int = 1,
     ) -> None:
         self.cancels = cancels
         self.status_by_order = status_by_order
         self.confirms = confirms
+        self.confirms_after = confirms_after
 
     def cancel_order(self, request, approval_decision):
         del approval_decision
         order_id = request.broker_order.order_id
         self.cancels.append(order_id)
         if self.confirms:
-            # A broker that actually cancels reports CANCELED on the next poll.
-            self.status_by_order[order_id] = OrderStatus.CANCELED
+            # A real broker settles the cancellation asynchronously: the order
+            # keeps reporting its old status for a poll or two first.
+            self.status_by_order[order_id] = _DelayedCancel(
+                self.status_by_order[order_id], self.confirms_after
+            )
         return LiveOrderCancelResult(
             broker_order=request.broker_order,
             status=OrderStatus.CANCELED,
@@ -343,6 +350,8 @@ class _StatusService:
         del run_id
         self.calls.append(f"poll:{broker_order.broker_order_id}")
         status = self.status_by_order[broker_order.order_id]
+        if isinstance(status, _DelayedCancel):
+            status = status.next_status()
         filled = 100.0 if status == OrderStatus.FILLED else 50.0
         return LiveOrderStatusSnapshot(
             broker_order=broker_order,
@@ -356,6 +365,20 @@ class _StatusService:
                 remaining_quantity=100.0 - filled,
             ),
         )
+
+
+class _DelayedCancel:
+    """A broker whose cancellation only shows up after `remaining` polls."""
+
+    def __init__(self, current: OrderStatus, remaining: int) -> None:
+        self.current = current
+        self.remaining = remaining
+
+    def next_status(self) -> OrderStatus:
+        self.remaining -= 1
+        if self.remaining <= 0:
+            return OrderStatus.CANCELED
+        return self.current
 
 
 class _FillService:
@@ -405,6 +428,7 @@ def _orchestrator(
     buying_power: float,
     max_buy_quantity: float | None = None,
     min_order_quantity: float | None = None,
+    max_polls: int = 1,
 ) -> MaestroOrchestrator:
     raw: dict[str, Any] = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["mode"] = "live_approval"
@@ -434,7 +458,7 @@ def _orchestrator(
     config.execution.order_posture = "armed"
     config.execution.live_order_enabled = True
     config.execution.live_order_dry_run = False
-    config.execution.order_status_max_polls = 1
+    config.execution.order_status_max_polls = max_polls
     config.execution.order_status_poll_interval_seconds = 0
 
     if min_order_quantity is not None:
@@ -849,3 +873,59 @@ def test_unresolved_buy_blocker_stops_the_next_live_execution(tmp_path, monkeypa
     ]
     assert recovery_blocks, "the unresolved buy must gate the next live execution"
     assert recovery_blocks[0]["order_id"] == "buy_b"
+
+
+def test_cancel_confirmation_polls_until_terminal(tmp_path, monkeypatch):
+    """Broker cancellation is asynchronous; one poll is not an answer.
+
+    A normal cancel that clears on the second poll was being filed as
+    cancel_unconfirmed, raising a recovery blocker the operator did not need.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.PARTIALLY_FILLED, "buy_b": OrderStatus.FILLED},
+        # Still working on the first confirmation poll, CANCELED on the second.
+        cancel_confirms_after=2,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    payload = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")[0][
+        "payload"
+    ]
+    assert payload["canceled"][0]["order_id"] == "sell_a"
+    assert payload["cancel_unconfirmed"] == []
+
+
+def test_cancel_confirmation_gives_up_at_the_poll_limit(tmp_path, monkeypatch):
+    """Bounded, not unbounded: an order that never clears still ends the run."""
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.PARTIALLY_FILLED, "buy_b": OrderStatus.FILLED},
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    payload = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")[0][
+        "payload"
+    ]
+    assert payload["cancel_unconfirmed"][0]["order_id"] == "sell_a"
