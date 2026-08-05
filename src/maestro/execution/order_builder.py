@@ -63,14 +63,22 @@ class OrderBuilder:
             return self._build_sleeve_orders(current_state, target, prices)
         orders: list[OrderIntent] = []
         total_value = current_state.total_value(prices)
-        for symbol, target_weight in target.allocations.items():
+        rebalance_symbols = list(
+            dict.fromkeys(
+                [
+                    *target.allocations.keys(),
+                    *self._exitable_positions(current_state),
+                ]
+            )
+        )
+        for symbol in rebalance_symbols:
             if is_cash_symbol(symbol):
                 continue
             if symbol not in prices:
                 raise MissingPriceError(f"Missing prices for symbols: {symbol}")
             current_qty = current_state.positions.get(symbol, 0.0)
             current_value = current_qty * prices[symbol]
-            target_value = total_value * target_weight
+            target_value = total_value * target.allocations.get(symbol, 0.0)
             delta_value = target_value - current_value
             if abs(delta_value) < 0.01:
                 continue
@@ -210,11 +218,41 @@ class OrderBuilder:
         fee_multiplier = max(0.0, 1.0 - self.config.live_order_limits.fee_buffer_pct)
         return max(0.0, cash) * fee_multiplier
 
+    def _exitable_positions(self, current_state: PortfolioState) -> list[str]:
+        """Held symbols this builder may sell down when the target drops them.
+
+        A rotation has to exit last month's winner, so holdings outside today's
+        target belong in the rebalance set. It stops at the instrument universe:
+        `portfolio.unknown_broker_position_policy=include_readonly` parks foreign
+        broker holdings in the same state so they can be valued, and those are
+        observed, not traded. An unconfigured builder has no universe to consult
+        and treats every holding as its own.
+        """
+        return [
+            symbol
+            for symbol, quantity in current_state.positions.items()
+            if quantity and (not self.instruments or symbol in self.instruments)
+        ]
+
+    def _sell_proceeds(self, orders: list[OrderIntent]) -> float:
+        """Cash the sells in this batch release, net of the fee buffer.
+
+        A fully invested rotation funds its buys entirely from the sells filed
+        alongside them, so sizing buys against the pre-rebalance cash balance
+        alone scales them to zero and leaves the book sitting in cash for a whole
+        cycle. Callers pass one sleeve's orders at a time, which keeps proceeds
+        from crossing a currency boundary.
+        """
+        proceeds = sum(order.notional for order in orders if order.side == OrderSide.SELL)
+        fee_multiplier = max(0.0, 1.0 - self.config.live_order_limits.fee_buffer_pct)
+        return proceeds * fee_multiplier
+
     def _scale_buy_orders_to_cash(
         self,
         orders: list[OrderIntent],
         cash_available: float,
     ) -> list[OrderIntent]:
+        cash_available += self._sell_proceeds(orders)
         buy_notional = sum(order.notional for order in orders if order.side == OrderSide.BUY)
         if buy_notional <= cash_available + 1e-9:
             return orders

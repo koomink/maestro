@@ -113,8 +113,10 @@ def test_order_builder_sells_sleeve_positions_missing_from_target():
     assert by_symbol["AAPL"].notional == 1_000.0
     assert by_symbol["AAPL"].sleeve == "USD"
     assert by_symbol["VOO"].side == OrderSide.BUY
-    assert by_symbol["VOO"].quantity == 5
-    assert by_symbol["VOO"].notional == 1_000.0
+    # The sleeve is worth $2,000 ($1,000 cash + $1,000 of AAPL) and the target is
+    # 100% VOO, so the AAPL proceeds buy the second half of the position.
+    assert by_symbol["VOO"].quantity == 10
+    assert by_symbol["VOO"].notional == 2_000.0
 
 
 def test_order_builder_scales_sleeve_buys_to_cash_after_fee_buffer():
@@ -150,25 +152,32 @@ def test_order_builder_scales_sleeve_buys_to_cash_after_fee_buffer():
     assert by_symbol["AAPL"].quantity == 10
     assert by_symbol["AAPL"].notional == 1_000.0
     buy_orders = [order for order in orders if order.side == OrderSide.BUY]
-    assert {order.symbol: order.notional for order in buy_orders} == {"VOO": 499.0, "QQQ": 499.0}
-    assert sum(order.notional for order in buy_orders) == 998.0
+    # $1,000 cash plus $1,000 of AAPL proceeds, each net of the 0.2% buffer, funds
+    # $1,996 of the $2,000 the target asks for.
+    assert {order.symbol: order.notional for order in buy_orders} == {"VOO": 998.0, "QQQ": 998.0}
+    assert sum(order.notional for order in buy_orders) == 1_996.0
     for order in buy_orders:
         assert order.metadata["cash_scaled"] is True
-        assert order.metadata["cash_available"] == 998.0
+        assert order.metadata["cash_available"] == 1_996.0
         assert order.metadata["buy_notional_before_scaling"] == 2_000.0
-        assert order.metadata["buy_notional_after_scaling"] == 998.0
+        assert order.metadata["buy_notional_after_scaling"] == 1_996.0
         assert order.metadata["fee_buffer_pct"] == 0.002
 
 
 def test_order_builder_drops_scaled_sleeve_buy_below_minimum():
+    # A 20% fee buffer leaves $800 of the $1,000 AAPL proceeds spendable, which
+    # scales the single $900 VOO share to 0.89 and below min_order_quantity.
     builder = OrderBuilder(
-        config=ExecutionConfig(order_posture="armed"),
+        config=ExecutionConfig(
+            order_posture="armed",
+            live_order_limits={"fee_buffer_pct": 0.2},
+        ),
         instruments=[_us_instrument("AAPL"), _us_instrument("VOO")],
         currency_sleeves={"USD": {"cash_symbol": "CASH_USD", "symbols": ["AAPL", "VOO"]}},
     )
     state = PortfolioState(
         cash=0,
-        cash_by_currency={"USD": 50.0},
+        cash_by_currency={"USD": 0.0},
         positions={"AAPL": 10},
     )
     target = PortfolioTarget(
@@ -177,7 +186,7 @@ def test_order_builder_drops_scaled_sleeve_buy_below_minimum():
         allocation_sleeves={"USD": {"VOO": 1.0}},
     )
 
-    orders = builder.build_orders(state, target, {"AAPL": 100.0, "VOO": 100.0})
+    orders = builder.build_orders(state, target, {"AAPL": 100.0, "VOO": 900.0})
 
     assert [order.symbol for order in orders] == ["AAPL"]
     assert orders[0].side == OrderSide.SELL
@@ -189,8 +198,8 @@ def test_order_builder_sleeve_buys_need_prices_in_the_sleeve_currency():
     Regression: the orchestrator used to size orders with base-currency (FX
     converted) prices while the sleeve's cash stayed in its own currency. The
     cash-scaling step then divided a USD cash figure by a KRW notional, shrinking
-    every buy by the FX rate until it rounded to zero shares. Sells were unaffected,
-    so a USD sleeve could liquidate but never buy.
+    every buy by the FX rate. Sells were unaffected, so a USD sleeve liquidated at
+    full size and bought back a fraction of it.
     """
     builder = OrderBuilder(
         config=ExecutionConfig(order_posture="armed"),
@@ -211,13 +220,17 @@ def test_order_builder_sleeve_buys_need_prices_in_the_sleeve_currency():
     converted = builder.build_orders(state, target, base_currency_prices)
 
     native_buys = {order.symbol: order.quantity for order in native if order.side == OrderSide.BUY}
-    # Sleeve value is $11,000 (cash $10,000 + AAPL 10 @ $100) but only $10,000 is
-    # spendable, so the $11,000 of buys scales down to 100 shares.
-    assert native_buys == {"VOO": 100.0}
-    # Same portfolio, same target, prices quoted in the base currency: every buy is
-    # lost while the sell survives.
-    assert [order.symbol for order in converted] == ["AAPL"]
-    assert converted[0].side == OrderSide.SELL
+    converted_buys = {
+        order.symbol: order.quantity for order in converted if order.side == OrderSide.BUY
+    }
+    # Sleeve value is $11,000 (cash $10,000 + AAPL 10 @ $100), all of it spendable
+    # once the AAPL sell in the same batch settles.
+    assert native_buys == {"VOO": 110.0}
+    # Same portfolio, same target, prices quoted in the base currency: the sleeve's
+    # USD cash is now a rounding error against KRW notionals, so the buy comes out
+    # roughly an FX rate too small while the sell goes out at full size.
+    assert converted_buys == {"VOO": 10.0}
+    assert {order.symbol for order in converted if order.side == OrderSide.SELL} == {"AAPL"}
 
 
 def test_paper_execution_updates_cash_by_order_currency():

@@ -618,7 +618,11 @@ class LiveExecutionGateService:
         fee_buffer = (
             buy_notional + sell_notional
         ) * self.config.execution.live_order_limits.fee_buffer_pct
-        required_buying_power = buy_notional + fee_buffer
+        # Net the sells the batch submits ahead of the buys, the same way
+        # cash_after_orders does. A fully invested rotation reports zero broker
+        # buying power and funds its buy entirely from its own sell, so charging
+        # the gross buy notional against a pre-sell balance blocks it outright.
+        required_buying_power = max(0.0, buy_notional - sell_notional) + fee_buffer
         cash_after_orders = cash - buy_notional + sell_notional - fee_buffer
         positions = _broker_position_quantities(account)
         prices = _broker_position_prices(account, current_prices)

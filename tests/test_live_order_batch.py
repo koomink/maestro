@@ -147,6 +147,47 @@ def test_batch_stops_later_submissions_after_ambiguous_halt(tmp_path):
     ]
 
 
+def test_batch_submits_sells_before_buys(tmp_path):
+    """A rotation's buy is funded by the sell filed alongside it.
+
+    The order builder sizes the buy against the proceeds of the same batch, so
+    reaching the broker buy-first asks it to spend cash the account has not
+    raised yet and earns an insufficient-funds rejection.
+    """
+    calls: list[str] = []
+    service, fill_service = _batch_service(tmp_path)
+    items = [
+        (
+            _request("ord_buy", symbol="TLT", side=OrderSide.BUY),
+            _dependencies(_SafetyService(calls), calls, fill_service),
+        ),
+        (
+            _request("ord_sell", symbol="QQQ", side=OrderSide.SELL),
+            _dependencies(_SafetyService(calls), calls, fill_service),
+        ),
+    ]
+
+    service.run(items, _approval())
+
+    assert calls[:2] == ["submit:ord_sell", "submit:ord_buy"]
+
+
+def test_batch_keeps_declared_order_within_a_side(tmp_path):
+    calls: list[str] = []
+    service, fill_service = _batch_service(tmp_path)
+    items = [
+        (
+            _request(f"ord_{index}", symbol=f"ETF_{index}", side=side),
+            _dependencies(_SafetyService(calls), calls, fill_service),
+        )
+        for index, side in enumerate([OrderSide.BUY, OrderSide.SELL, OrderSide.BUY, OrderSide.SELL])
+    ]
+
+    service.run(items, _approval())
+
+    assert calls[:4] == ["submit:ord_1", "submit:ord_3", "submit:ord_0", "submit:ord_2"]
+
+
 def _batch_service(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), initial_cash=1_000_000)
     fill_service = _FillService()
@@ -172,11 +213,16 @@ def _dependencies(safety_service, calls, fill_service):
     )
 
 
-def _request(order_id: str, *, symbol: str = "005930") -> LiveOrderRequest:
+def _request(
+    order_id: str,
+    *,
+    symbol: str = "005930",
+    side: OrderSide = OrderSide.BUY,
+) -> LiveOrderRequest:
     return LiveOrderRequest(
         order_id=order_id,
         symbol=symbol,
-        side=OrderSide.BUY,
+        side=side,
         quantity=2,
         limit_price=70_000,
         approval_id="appr_1",

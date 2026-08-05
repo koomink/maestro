@@ -765,6 +765,51 @@ def test_broker_risk_validation_blocks_when_fee_buffer_exceeds_buying_power(tmp_
     assert "buying_power_exceeded" in reasons
 
 
+def test_broker_risk_validation_counts_sell_proceeds_toward_buying_power(tmp_path):
+    """A fully invested rotation raises its own buying power.
+
+    The account holds MOCK_ETF_A and no spare cash, so the broker reports zero
+    buying power. Sizing the gate against that alone blocks every rotation the
+    strategy will ever propose: the buy is funded by the sell submitted ahead of
+    it in the same batch.
+    """
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_dry_run": True,
+        },
+    )
+    snapshot_id = _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=0.0,
+        buying_power=0.0,
+        positions={"MOCK_ETF_A": 1_000.0},
+    )
+    _save_passed_reconciliation(orchestrator.state_store, broker_snapshot_id=snapshot_id)
+    orders = [
+        _order("rotate_sell", "MOCK_ETF_A", Currency.KRW, 100_000.0).model_copy(
+            update={"side": OrderSide.SELL}
+        ),
+        _order("rotate_buy", "MOCK_ETF_B", Currency.KRW, 100_000.0),
+    ]
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run_rotation_buying_power", orders, [])
+
+    assert not [
+        issue
+        for block in blocks
+        if block.get("event_type") == "broker_risk_halt"
+        for issue in block.get("issues", [])
+        if issue.get("reason") == "buying_power_exceeded"
+    ]
+
+
 def test_broker_risk_validation_uses_order_account_snapshot(tmp_path):
     orchestrator = _live_orchestrator(
         tmp_path,

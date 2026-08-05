@@ -383,7 +383,10 @@ def test_live_approval_order_generation_fills_position_prices_from_broker_snapsh
 
     summary = orchestrator.run_once()
 
-    assert summary.orders_created == 2
+    # Two target legs plus the exit of MOCK_LEGACY, which the account holds and
+    # today's target dropped. Pricing it from the broker snapshot is what makes
+    # both its valuation and its exit possible.
+    assert summary.orders_created == 3
     proposal_snapshot = orchestrator.state_store.list_system_events_by_type(
         "live_proposal_data_snapshot"
     )[0]["payload"]
