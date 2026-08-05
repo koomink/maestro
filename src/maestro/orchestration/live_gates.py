@@ -603,9 +603,8 @@ class LiveExecutionGateService:
         self,
         orders: list[OrderIntent],
         account: dict[str, Any],
-        total_buying_power: float,
     ) -> list[dict[str, Any]]:
-        """Check buying power one currency at a time.
+        """Check buying power and cash one currency at a time.
 
         Sell proceeds fund the buys the batch submits after them, so the check
         nets them — but only within a currency. A KRW sell raises no dollars, and
@@ -619,19 +618,21 @@ class LiveExecutionGateService:
             totals = by_currency.setdefault(currency, {"buy": 0.0, "sell": 0.0})
             totals["buy" if order.side == OrderSide.BUY else "sell"] += order.notional
         buying_power_by_currency = account.get("buying_power_by_currency") or {}
+        cash_by_currency = account.get("cash_by_currency") or {}
+        ledgerless_cash = (
+            str(account.get("source") or "").startswith("toss_")
+            and "ledger_cash_by_currency" in account
+            and account.get("ledger_cash_by_currency") is None
+        )
         issues: list[dict[str, Any]] = []
         for currency, totals in sorted(by_currency.items()):
             fee_buffer = (totals["buy"] + totals["sell"]) * fee_buffer_pct
             required = max(0.0, totals["buy"] - totals["sell"]) + fee_buffer
-            if buying_power_by_currency:
-                available = float(buying_power_by_currency.get(currency, 0.0))
-            elif len(by_currency) == 1:
-                # Single-currency batch against a broker that reports one figure:
-                # that figure is unambiguously this currency's.
-                available = total_buying_power
-            else:
-                # Multiple currencies and no per-currency breakdown — there is no
-                # honest way to split one number, so fail closed.
+            # One aggregate number does not say which currency it is denominated
+            # in, so a single-currency batch cannot claim it either. Every real
+            # adapter — KIS domestic, KIS overseas, Toss — reports the breakdown;
+            # without it there is no honest split, so fail closed.
+            if currency not in buying_power_by_currency:
                 issues.append(
                     {
                         "reason": "buying_power_by_currency_unavailable",
@@ -639,14 +640,35 @@ class LiveExecutionGateService:
                         "required_buying_power": required,
                     }
                 )
-                continue
-            if required > available:
+            elif required > float(buying_power_by_currency[currency]):
                 issues.append(
                     {
                         "reason": "buying_power_exceeded",
                         "currency": currency,
                         "required_buying_power": required,
-                        "buying_power": available,
+                        "buying_power": float(buying_power_by_currency[currency]),
+                    }
+                )
+            if ledgerless_cash:
+                continue
+            if currency not in cash_by_currency:
+                issues.append(
+                    {
+                        "reason": "cash_by_currency_unavailable",
+                        "currency": currency,
+                    }
+                )
+                continue
+            cash_after = (
+                float(cash_by_currency[currency]) - totals["buy"] + totals["sell"] - fee_buffer
+            )
+            if cash_after < 0:
+                issues.append(
+                    {
+                        "reason": "cash_exceeded",
+                        "currency": currency,
+                        "cash_after_orders": cash_after,
+                        "cash": float(cash_by_currency[currency]),
                     }
                 )
         return issues
@@ -658,32 +680,13 @@ class LiveExecutionGateService:
     ) -> list[dict[str, Any]]:
         account = snapshot.get("account", {})
         current_prices = snapshot.get("current_prices", {})
-        cash = float(account.get("cash", 0.0))
-        buying_power = float(account.get("buying_power", 0.0))
-        ledgerless_cash = (
-            str(account.get("source") or "").startswith("toss_")
-            and "ledger_cash_by_currency" in account
-            and account.get("ledger_cash_by_currency") is None
-        )
-        buy_notional = sum(order.notional for order in orders if order.side == OrderSide.BUY)
-        sell_notional = sum(order.notional for order in orders if order.side == OrderSide.SELL)
-        fee_buffer = (
-            buy_notional + sell_notional
-        ) * self.config.execution.live_order_limits.fee_buffer_pct
-        cash_after_orders = cash - buy_notional + sell_notional - fee_buffer
         positions = _broker_position_quantities(account)
         prices = _broker_position_prices(account, current_prices)
         issues = []
 
-        issues.extend(self._buying_power_issues(orders, account, buying_power))
-        if not ledgerless_cash and cash_after_orders < 0:
-            issues.append(
-                {
-                    "reason": "cash_exceeded",
-                    "cash_after_orders": cash_after_orders,
-                    "cash": cash,
-                }
-            )
+        # Buying power and cash are both judged per currency; a KRW sale funds
+        # nothing denominated in dollars.
+        issues.extend(self._buying_power_issues(orders, account))
         for order in orders:
             prices[order.symbol] = _float_or_default(current_prices.get(order.symbol), order.price)
             signed_quantity = order.quantity if order.side == OrderSide.BUY else -order.quantity
@@ -702,6 +705,13 @@ class LiveExecutionGateService:
             for symbol, quantity in positions.items()
             if abs(quantity) > 1e-12
         }
+        # Equity is a whole-account figure, so it uses the account-level cash the
+        # broker reports rather than any single currency's balance.
+        cash_after_orders = (
+            float(account.get("cash", 0.0))
+            - sum(order.notional for order in orders if order.side == OrderSide.BUY)
+            + sum(order.notional for order in orders if order.side == OrderSide.SELL)
+        )
         total_value = cash_after_orders + sum(position_values.values())
         if total_value <= 0:
             issues.append({"reason": "nonpositive_broker_equity_after_orders"})

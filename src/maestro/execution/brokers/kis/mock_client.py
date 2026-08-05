@@ -26,6 +26,7 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
             cash=5_000_000.0,
             cash_by_currency={"KRW": 5_000_000.0},
             buying_power=buying_power.cash_buying_power,
+            buying_power_by_currency={"KRW": buying_power.cash_buying_power},
             positions=positions,
             cash_balance=KISCashBalance(cash=5_000_000.0, withdrawable_cash=5_000_000.0),
             buying_power_detail=buying_power,
