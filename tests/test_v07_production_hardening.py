@@ -1802,3 +1802,91 @@ def _request(quantity: float, limit_price: float) -> LiveOrderRequest:
         approval_id="appr_live",
         run_id="run_live",
     )
+
+
+def test_broker_risk_validation_does_not_net_across_currencies(tmp_path):
+    """A KRW sell must not fund a USD buy inside the same account.
+
+    The gate summed every currency's native notional into one number, so a large
+    KRW sell could offset a USD buy the account had no dollars for.
+    """
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_dry_run": True,
+        },
+    )
+    snapshot_id = _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=0.0,
+        buying_power=0.0,
+        account_overrides={
+            "cash_by_currency": {"KRW": 0.0, "USD": 0.0},
+            "buying_power_by_currency": {"KRW": 0.0, "USD": 0.0},
+        },
+    )
+    _save_passed_reconciliation(orchestrator.state_store, broker_snapshot_id=snapshot_id)
+    orders = [
+        _order("krw_sell", "MOCK_ETF_A", Currency.KRW, 10_000_000.0).model_copy(
+            update={"side": OrderSide.SELL}
+        ),
+        _order("usd_buy", "MOCK_ETF_B", Currency.USD, 5_000.0),
+    ]
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run_cross_currency_netting", orders, [])
+
+    reasons = {
+        issue.get("reason")
+        for block in blocks
+        if block.get("event_type") == "broker_risk_halt"
+        for issue in block.get("issues", [])
+    }
+    assert "buying_power_exceeded" in reasons
+
+
+def test_broker_risk_validation_still_nets_within_one_currency(tmp_path):
+    orchestrator = _live_orchestrator(
+        tmp_path,
+        execution_overrides={
+            "broker_validation": {"require_risk_validation": True},
+            "live_order_dry_run": True,
+        },
+    )
+    snapshot_id = _save_broker_snapshot_with_quotes(
+        orchestrator.state_store,
+        {"MOCK_ETF_A": 100.0, "MOCK_ETF_B": 50.0},
+        cash=0.0,
+        buying_power=0.0,
+        positions={"MOCK_ETF_A": 1_000.0},
+        account_overrides={
+            "cash_by_currency": {"KRW": 0.0},
+            "buying_power_by_currency": {"KRW": 0.0},
+        },
+    )
+    _save_passed_reconciliation(orchestrator.state_store, broker_snapshot_id=snapshot_id)
+    orders = [
+        _order("krw_sell", "MOCK_ETF_A", Currency.KRW, 100_000.0).model_copy(
+            update={"side": OrderSide.SELL}
+        ),
+        _order("krw_buy", "MOCK_ETF_B", Currency.KRW, 100_000.0),
+    ]
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run_same_currency_netting", orders, [])
+
+    assert not [
+        issue
+        for block in blocks
+        if block.get("event_type") == "broker_risk_halt"
+        for issue in block.get("issues", [])
+        if issue.get("reason") == "buying_power_exceeded"
+    ]

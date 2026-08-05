@@ -599,6 +599,58 @@ class LiveExecutionGateService:
             }
         ]
 
+    def _buying_power_issues(
+        self,
+        orders: list[OrderIntent],
+        account: dict[str, Any],
+        total_buying_power: float,
+    ) -> list[dict[str, Any]]:
+        """Check buying power one currency at a time.
+
+        Sell proceeds fund the buys the batch submits after them, so the check
+        nets them — but only within a currency. A KRW sell raises no dollars, and
+        summing native notionals across currencies lets a large KRW sale offset a
+        USD buy the account cannot pay for.
+        """
+        fee_buffer_pct = self.config.execution.live_order_limits.fee_buffer_pct
+        by_currency: dict[str, dict[str, float]] = {}
+        for order in orders:
+            currency = self._order_currency(order).value
+            totals = by_currency.setdefault(currency, {"buy": 0.0, "sell": 0.0})
+            totals["buy" if order.side == OrderSide.BUY else "sell"] += order.notional
+        buying_power_by_currency = account.get("buying_power_by_currency") or {}
+        issues: list[dict[str, Any]] = []
+        for currency, totals in sorted(by_currency.items()):
+            fee_buffer = (totals["buy"] + totals["sell"]) * fee_buffer_pct
+            required = max(0.0, totals["buy"] - totals["sell"]) + fee_buffer
+            if buying_power_by_currency:
+                available = float(buying_power_by_currency.get(currency, 0.0))
+            elif len(by_currency) == 1:
+                # Single-currency batch against a broker that reports one figure:
+                # that figure is unambiguously this currency's.
+                available = total_buying_power
+            else:
+                # Multiple currencies and no per-currency breakdown — there is no
+                # honest way to split one number, so fail closed.
+                issues.append(
+                    {
+                        "reason": "buying_power_by_currency_unavailable",
+                        "currency": currency,
+                        "required_buying_power": required,
+                    }
+                )
+                continue
+            if required > available:
+                issues.append(
+                    {
+                        "reason": "buying_power_exceeded",
+                        "currency": currency,
+                        "required_buying_power": required,
+                        "buying_power": available,
+                    }
+                )
+        return issues
+
     def _cash_and_exposure_risk_issues(
         self,
         orders: list[OrderIntent],
@@ -618,24 +670,12 @@ class LiveExecutionGateService:
         fee_buffer = (
             buy_notional + sell_notional
         ) * self.config.execution.live_order_limits.fee_buffer_pct
-        # Net the sells the batch submits ahead of the buys, the same way
-        # cash_after_orders does. A fully invested rotation reports zero broker
-        # buying power and funds its buy entirely from its own sell, so charging
-        # the gross buy notional against a pre-sell balance blocks it outright.
-        required_buying_power = max(0.0, buy_notional - sell_notional) + fee_buffer
         cash_after_orders = cash - buy_notional + sell_notional - fee_buffer
         positions = _broker_position_quantities(account)
         prices = _broker_position_prices(account, current_prices)
         issues = []
 
-        if required_buying_power > buying_power:
-            issues.append(
-                {
-                    "reason": "buying_power_exceeded",
-                    "required_buying_power": required_buying_power,
-                    "buying_power": buying_power,
-                }
-            )
+        issues.extend(self._buying_power_issues(orders, account, buying_power))
         if not ledgerless_cash and cash_after_orders < 0:
             issues.append(
                 {
