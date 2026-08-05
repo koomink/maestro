@@ -69,12 +69,18 @@ order whose cancel was accepted but not yet observed appears under
 like a failed cancel and check the broker UI.
 
 You may also see `Maestro rotation incomplete`. That one means the sells all
-filled but at least one approved buy did not. A buy leg can go missing three
-ways: resizing dropped it below a minimum order size, the post-fill capacity
-check blocked it, or it was submitted and never filled. The message lists which
-legs filled, which are missing, and which never reached the broker at all; the
-`rotation_cohort_incomplete` event carries the same four id sets. The account is
-holding cash it was meant to deploy.
+filled but at least one approved buy did not, so the account is holding cash it
+was meant to deploy. The Telegram message names which legs filled and which are
+missing; the `rotation_cohort_incomplete` event carries five id sets —
+`original_buy_order_ids`, `resized_buy_order_ids`,
+`capacity_accepted_buy_order_ids`, `submitted_buy_order_ids` and
+`filled_buy_order_ids`. The first set a leg is absent from tells you why it
+dropped out:
+
+- missing from `resized` → the realized cash could not stretch to a whole order
+- missing from `capacity_accepted` → the broker's own capacity check refused it
+- missing from `submitted` → it never reached the broker
+- missing from `filled` → it reached the broker but did not fill
 
 **Do not assume nothing is working at the broker.** A buy still `OPEN` or
 `PARTIALLY_FILLED` when polling ran out is live. Maestro cancels those and
