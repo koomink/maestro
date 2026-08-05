@@ -669,6 +669,20 @@ Completed scope:
   different state-affecting config identity, or no longer matches active account
   mappings.
 
+## v0.8.6 — Two-Phase Rotation Execution
+
+- Run each rebalance as sell-then-buy phases scoped to one account and currency,
+  since cash is fungible at that boundary and the broker re-checks buying power
+  against its own balance at submission time.
+- Hold every buy until its cohort's sells have filled completely, then re-query
+  broker buying power and shrink the approved buys to fit. Quantities only ever
+  shrink; a buy-only run is left untouched.
+- Keep sell-funded buys through the capacity partition as `sell_fill_pending`
+  rather than dropping them against pre-sell buying power.
+- On any incomplete sell, cancel the remaining quantity, skip the buys, record
+  `rotation_cohort_aborted`, and alert the operator so the rebalance can be
+  re-run the same day.
+
 ## Deferred / Explicitly Out of Scope for Now
 
 - Fully autonomous live trading

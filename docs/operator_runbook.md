@@ -37,6 +37,31 @@ such as `Asia/Seoul`, with the timezone suffix included. For example,
 `2026-05-23 06:43:23` in SQLite is shown as
 `2026-05-23 15:43:23 KST` when the operator timezone is `Asia/Seoul`.
 
+## Rotation Stopped
+
+A rebalance runs its sells and its buys as two phases against one account and
+currency at a time. The buys are funded by the sells, and the broker re-checks
+buying power against its own balance when an order is submitted, so the buys are
+held back until every sell in the cohort has filled completely.
+
+If any sell partially fills, is rejected, or is still working when the poll
+window closes, the cohort stops: no buys are sent, the remaining sell quantity
+is cancelled, and you get a `Maestro rotation stopped` Telegram message naming
+the sells that did not fill, the buys that were skipped, and what was cancelled.
+The matching `rotation_cohort_aborted` and `rotation_cohort_phase` system events
+carry the same detail.
+
+**What to do:** re-run the rebalance. The next run regenerates the signal and
+sizes orders from current holdings, so it converges on the same target without
+any manual arithmetic — a book left holding 10% of the old asset and 90% cash
+simply produces a smaller sell and a full-size buy next time.
+
+**One thing to check first.** If the message lists
+`cancel FAILED (still live at broker)`, an order is still working. Cancel it in
+the broker UI before re-running: the `pending_broker_orders` risk gate blocks the
+entire next run while any unfilled order exists, and an uncancelled DAY order
+does not clear until the market closes.
+
 ## Halt Recovery
 
 1. Stop scheduled jobs that could submit or approve work.
@@ -51,8 +76,9 @@ maestro health --config <config>
    `safety_execution_blocked`, `stale_data_halt`, `broker_reconciliation_halt`,
    `live_order_limit_halt`, `live_order_halt`, `live_order_status`,
    `fill_reconciliation`, `live_order_lifecycle`,
-   `live_order_recovery_required`, `live_order_recovery_halt`, and
-   `live_order_recovery_completed`.
+   `live_order_recovery_required`, `live_order_recovery_halt`,
+   `live_order_recovery_completed`, `rotation_cohort_phase`, and
+   `rotation_cohort_aborted`.
 4. Check broker account state in the broker UI.
 5. Run reconciliation and fill reconciliation. `reconcile` refreshes the KIS
    read-only broker snapshot before comparing it with Maestro state, so the
