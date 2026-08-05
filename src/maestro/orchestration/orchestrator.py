@@ -2663,6 +2663,32 @@ class MaestroOrchestrator:
                 available_cash,
                 {instrument.symbol: instrument for instrument in self.config.universe.instruments},
             )
+            # Now that the sells have settled, this is the authoritative capacity
+            # ruling. The partition is strict here precisely because the batch
+            # holds no sells: every dimension it reads — per-symbol quantity caps,
+            # per-order lookups, running cash reservations — is a settled figure.
+            buys, capacity_blocks = self._partition_orders_by_capacity(
+                run_id,
+                buys,
+                signal_run_id=signal_run_id,
+            )
+            if capacity_blocks:
+                self._record_event(
+                    run_id,
+                    "rotation_cohort_buys_capacity_blocked",
+                    {
+                        "account_id": cohort.account_id,
+                        "currency": cohort.currency,
+                        "blocked": [
+                            {
+                                "order_id": block.order.order_id,
+                                "reason": block.reason,
+                                "requested_quantity": block.requested_quantity,
+                            }
+                            for block in capacity_blocks
+                        ],
+                    },
+                )
         results.extend(
             self._run_batch_phase(
                 buys,

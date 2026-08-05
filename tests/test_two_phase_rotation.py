@@ -372,7 +372,12 @@ def _approval_decision(run_id: str) -> ApprovalDecision:
     )
 
 
-def _orchestrator(tmp_path, *, buying_power: float) -> MaestroOrchestrator:
+def _orchestrator(
+    tmp_path,
+    *,
+    buying_power: float,
+    max_buy_quantity: float | None = None,
+) -> MaestroOrchestrator:
     raw: dict[str, Any] = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["mode"] = "live_approval"
     raw["state"]["sqlite_path"] = str(tmp_path / "state.db")
@@ -409,7 +414,7 @@ def _orchestrator(tmp_path, *, buying_power: float) -> MaestroOrchestrator:
         symbol=order.symbol,
         order_price=order.price,
         cash_buying_power=buying_power,
-        max_buy_quantity=None,
+        max_buy_quantity=max_buy_quantity,
         source="fake",
     )
     orchestrator.state_store.save_portfolio_snapshot(
@@ -451,3 +456,68 @@ def test_buying_power_lookup_failure_after_fills_is_reported_not_raised(tmp_path
     aborted = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")
     assert "buying_power_unavailable" in aborted[0]["payload"]["reason"]
     assert telegram.messages
+
+
+def test_second_buy_is_checked_against_capacity_not_just_the_first(tmp_path, monkeypatch):
+    """Every buy gets its own post-sell capacity ruling, with cash reserved.
+
+    Sizing the whole cohort off one lookup for buys[0] let a later buy through on
+    cash the earlier one had already spent, and the broker rejected it — landing
+    the book back in cash for the part that failed.
+    """
+    calls: list[str] = []
+    submitted: list[tuple[str, float]] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.FILLED,
+            "buy_c": OrderStatus.FILLED,
+        },
+        submitted=submitted,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b"), _intent("buy_c", "MOCK_ETF_B", OrderSide.BUY)],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    # $10,000 of buying power against two $10,000 buys. Both go out, and their
+    # combined notional stays inside the balance — sizing either as if it had the
+    # whole balance to itself would have the second rejected by the broker.
+    submitted_buys = {
+        order_id: quantity for order_id, quantity in submitted if order_id.startswith("buy")
+    }
+    assert set(submitted_buys) == {"buy_b", "buy_c"}
+    assert sum(quantity * 100.0 for quantity in submitted_buys.values()) <= 10_000.0
+
+
+def test_max_buy_quantity_is_enforced_after_the_sells_fill(tmp_path, monkeypatch):
+    """The post-sell check is the authoritative one, so it must be a full check.
+
+    Only re-reading cash_buying_power let a buy through that the broker's own
+    per-symbol quantity cap would reject.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_buy_quantity=0.0)
+    telegram = _TelegramClient()
+    orchestrator.telegram_client = telegram
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.FILLED},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:buy_b" not in calls
+    assert telegram.messages, "a rotation that could not buy must not end silently"
