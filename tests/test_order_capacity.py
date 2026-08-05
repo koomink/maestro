@@ -1,4 +1,4 @@
-from maestro.core.enums import OrderSide
+from maestro.core.enums import Currency, OrderSide
 from maestro.execution.base import OrderIntent
 from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.order_capacity import OrderCapacityService
@@ -64,10 +64,15 @@ def test_capacity_fails_closed_per_buy_but_preserves_sell():
     def lookup(order):
         raise TimeoutError(f"capacity unavailable for {order.order_id}")
 
+    # Different currencies, so the sell does not fund the buy and the buy still
+    # has to stand on its own pre-fill capacity reading.
     accepted, blocked = OrderCapacityService(lookup).partition(
         [
-            _order("ord_buy", "AAA", 1, 100, "account"),
-            _order("ord_sell", "AAA", 1, 100, "account", side=OrderSide.SELL),
+            _order("ord_buy", "AAA", 1, 100, "account", currency=Currency.USD),
+            _order(
+                "ord_sell", "BBB", 1, 100, "account",
+                side=OrderSide.SELL, currency=Currency.KRW,
+            ),
         ]
     )
 
@@ -102,7 +107,14 @@ def test_buy_funded_by_a_sell_in_the_same_batch_is_kept():
     assert buy.metadata["sell_fill_pending"] is True
 
 
-def test_buy_beyond_cash_and_sell_proceeds_is_still_blocked():
+def test_buy_larger_than_its_funding_sell_is_deferred_not_blocked():
+    """Undersizing is the post-sell phase's job, not this one's.
+
+    Every figure here is read before the sell settles, so it cannot say how much
+    a rotation's buy should be. Blocking it now hides the buy leg from the
+    operator entirely; deferring lets the post-sell partition shrink it against
+    the balance that actually exists.
+    """
     service = OrderCapacityService(
         lambda order: BrokerBuyingPower(
             symbol=order.symbol,
@@ -120,9 +132,9 @@ def test_buy_beyond_cash_and_sell_proceeds_is_still_blocked():
         ]
     )
 
-    assert [order.order_id for order in accepted] == ["sell_qqq"]
-    assert [item.order.order_id for item in blocked] == ["buy_tlt"]
-    assert blocked[0].reason == "cash_buying_power_exceeded"
+    assert blocked == []
+    buy = next(order for order in accepted if order.order_id == "buy_tlt")
+    assert buy.metadata["sell_fill_pending"] is True
 
 
 def test_sell_proceeds_do_not_cross_accounts():
@@ -155,6 +167,7 @@ def _order(
     account_id: str,
     *,
     side: OrderSide = OrderSide.BUY,
+    currency: Currency | None = None,
 ) -> OrderIntent:
     return OrderIntent(
         order_id=order_id,
@@ -164,4 +177,71 @@ def _order(
         price=price,
         notional=quantity * price,
         account_id=account_id,
+        currency=currency,
     )
+
+
+def test_sell_funded_buy_defers_max_buy_quantity_too():
+    # A fully invested KIS account reports max_ord_psbl_qty = 0 before the sell
+    # settles. Deferring only the cash dimension still drops the rotation.
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=0.0,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order("sell_qqq", "QQQ", 100, 100, "kis", side=OrderSide.SELL),
+            _order("buy_tlt", "TLT", 100, 100, "kis"),
+        ]
+    )
+
+    assert blocked == []
+    assert {order.order_id for order in accepted} == {"sell_qqq", "buy_tlt"}
+
+
+def test_sell_funded_buy_defers_a_failed_capacity_lookup():
+    def lookup(order):
+        raise TimeoutError(f"capacity unavailable for {order.order_id}")
+
+    accepted, blocked = OrderCapacityService(lookup).partition(
+        [
+            _order("sell_qqq", "QQQ", 100, 100, "toss", side=OrderSide.SELL),
+            _order("buy_tlt", "TLT", 100, 100, "toss"),
+        ]
+    )
+
+    assert blocked == []
+    assert {order.order_id for order in accepted} == {"sell_qqq", "buy_tlt"}
+
+
+def test_sell_proceeds_do_not_cross_currencies():
+    # A KRW sell must not bankroll a USD buy: the numbers are not comparable and
+    # the USD buy would land in a cohort with no sells, so nothing re-checks it.
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order(
+                "sell_krw", "005930", 100, 100_000, "toss",
+                side=OrderSide.SELL, currency=Currency.KRW,
+            ),
+            _order("buy_usd", "TLT", 100, 100, "toss", currency=Currency.USD),
+        ]
+    )
+
+    assert [order.order_id for order in accepted] == ["sell_krw"]
+    assert [item.order.order_id for item in blocked] == ["buy_usd"]

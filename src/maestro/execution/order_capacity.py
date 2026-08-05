@@ -20,6 +20,12 @@ class OrderCapacityBlock(BaseModel):
     checked_at: str
 
 
+def _capacity_scope(order: OrderIntent) -> tuple[str, str | None]:
+    """Account and currency: the boundary broker cash is actually fungible across."""
+    currency = order.currency.value if order.currency is not None else order.sleeve
+    return (order.account_id or "default", currency)
+
+
 class OrderCapacityService:
     """Partition planned buys using authoritative, account-routed broker capacity."""
 
@@ -35,26 +41,38 @@ class OrderCapacityService:
     ) -> tuple[list[OrderIntent], list[OrderCapacityBlock]]:
         accepted: list[OrderIntent] = []
         blocked: list[OrderCapacityBlock] = []
-        reserved_by_account: dict[str, float] = {}
+        reserved_by_scope: dict[tuple[str, str | None], float] = {}
         # A rotation's buy is funded by the sell filed alongside it, so a fully
-        # invested account reports zero buying power right up until that sell
-        # settles. Blocking the buy here leaves the book in cash for a whole
-        # cycle; keep it and let the post-sell phase run the real check against
-        # the broker's own balance.
-        proceeds_by_account: dict[str, float] = {}
+        # invested account reports zero buying power — and zero max buy quantity —
+        # right up until that sell settles. Every dimension measured here is a
+        # pre-fill reading, so none of them can judge such a buy. Defer the whole
+        # check to the post-sell phase, which re-runs this partition against the
+        # broker's own settled balance.
+        #
+        # Cash is fungible per account AND currency: a KRW sell cannot fund a USD
+        # buy, and their notionals are not even comparable numbers.
+        proceeds_by_scope: dict[tuple[str, str | None], float] = {}
         for order in orders:
             if order.side == OrderSide.SELL:
-                sell_key = order.account_id or "default"
-                proceeds_by_account[sell_key] = (
-                    proceeds_by_account.get(sell_key, 0.0) + order.notional
+                sell_scope = _capacity_scope(order)
+                proceeds_by_scope[sell_scope] = (
+                    proceeds_by_scope.get(sell_scope, 0.0) + order.notional
                 )
         for order in orders:
             if order.side != OrderSide.BUY:
                 accepted.append(order)
                 continue
-            account_key = order.account_id or "default"
-            reserved = reserved_by_account.get(account_key, 0.0)
-            proceeds = proceeds_by_account.get(account_key, 0.0)
+            scope = _capacity_scope(order)
+            reserved = reserved_by_scope.get(scope, 0.0)
+            proceeds = proceeds_by_scope.get(scope, 0.0)
+            if proceeds > 0:
+                accepted.append(
+                    order.model_copy(
+                        update={"metadata": {**order.metadata, "sell_fill_pending": True}}
+                    )
+                )
+                reserved_by_scope[scope] = reserved + order.notional
+                continue
             try:
                 capacity = self.lookup(order)
             except Exception as exc:
@@ -71,7 +89,7 @@ class OrderCapacityService:
                 )
                 continue
 
-            available_cash = max(0.0, capacity.cash_buying_power + proceeds - reserved)
+            available_cash = max(0.0, capacity.cash_buying_power - reserved)
             cash_quantity = available_cash / order.price if order.price > 0 else 0.0
             available_quantity = (
                 cash_quantity
@@ -101,12 +119,8 @@ class OrderCapacityService:
                 )
                 continue
 
-            if proceeds > 0:
-                order = order.model_copy(
-                    update={"metadata": {**order.metadata, "sell_fill_pending": True}}
-                )
             accepted.append(order)
-            reserved_by_account[account_key] = reserved + order.notional
+            reserved_by_scope[scope] = reserved + order.notional
         return accepted, blocked
 
 
