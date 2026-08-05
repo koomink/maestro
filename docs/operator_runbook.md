@@ -69,10 +69,23 @@ order whose cancel was accepted but not yet observed appears under
 like a failed cancel and check the broker UI.
 
 You may also see `Maestro rotation incomplete`. That one means the sells all
-filled but the buys did not — either the broker rejected them, or the realized
-cash left nothing large enough to buy. The account is holding cash it was meant
-to deploy. Nothing is working at the broker in that case, so re-running the
-rebalance is the whole fix.
+filled but at least one approved buy did not. A buy leg can go missing three
+ways: resizing dropped it below a minimum order size, the post-fill capacity
+check blocked it, or it was submitted and never filled. The message lists which
+legs filled, which are missing, and which never reached the broker at all; the
+`rotation_cohort_incomplete` event carries the same four id sets. The account is
+holding cash it was meant to deploy.
+
+**Do not assume nothing is working at the broker.** A buy still `OPEN` or
+`PARTIALLY_FILLED` when polling ran out is live. Maestro cancels those and
+confirms the cancellation; if it cannot confirm one, it records a
+`live_order_recovery_required` blocker, and that blocker stops the next live
+execution until you clear it through `/recovery`. So:
+
+- No recovery blocker → nothing is working. Re-run the rebalance.
+- Recovery blocker present → resolve it through `/recovery` first. Re-running
+  before that is blocked by design, precisely so a recovery order cannot collide
+  with a buy that is still live.
 
 ## Halt Recovery
 

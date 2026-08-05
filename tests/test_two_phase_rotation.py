@@ -34,6 +34,7 @@ from maestro.execution.live_order_models import (
     PartialFillSummary,
 )
 from maestro.orchestration import orchestrator as orchestrator_module
+from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
 
 
@@ -735,3 +736,116 @@ def test_one_buy_blocked_by_capacity_marks_the_cohort_incomplete(tmp_path, monke
         "buy_b",
         "buy_c",
     }
+
+
+def test_working_buy_is_cancelled_and_confirmed(tmp_path, monkeypatch):
+    """A buy still OPEN at the poll limit is live at the broker, not finished."""
+    calls: list[str] = []
+    cancels: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.OPEN},
+        cancels=cancels,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert cancels == ["buy_b"]
+    blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
+    assert blockers == [], "a confirmed cancellation leaves nothing to recover"
+
+
+def test_unconfirmed_buy_cancel_raises_a_recovery_blocker(tmp_path, monkeypatch):
+    """Cancel not confirmed means an order may still be working.
+
+    Ending the run without a blocker lets the next execution collide with it, and
+    the runbook would wrongly tell the operator to just re-run.
+    """
+    calls: list[str] = []
+    cancels: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        cancels=cancels,
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert cancels == ["buy_b"]
+    blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
+    assert [row["payload"]["order_id"] for row in blockers] == ["buy_b"]
+    assert blockers[0]["payload"]["reason"] == "rotation_buy_unresolved_at_broker"
+
+
+def test_rejected_buy_raises_no_recovery_blocker(tmp_path, monkeypatch):
+    """A broker-terminal rejection leaves nothing working, so re-running is safe."""
+    calls: list[str] = []
+    cancels: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED},
+        cancels=cancels,
+        reject_submits={"buy_b"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert cancels == []
+    assert orchestrator.state_store.list_system_events_by_type("live_order_recovery_required") == []
+
+
+def test_unresolved_buy_blocker_stops_the_next_live_execution(tmp_path, monkeypatch):
+    """The blocker is only worth recording if it actually gates the next run."""
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    blocks = LiveExecutionGateService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).evaluate("run-2", [_buy("buy_next")], [])
+
+    recovery_blocks = [
+        block for block in blocks if block.get("reason") == "live_order_recovery_required"
+    ]
+    assert recovery_blocks, "the unresolved buy must gate the next live execution"
+    assert recovery_blocks[0]["order_id"] == "buy_b"

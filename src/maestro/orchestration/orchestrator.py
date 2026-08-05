@@ -2712,6 +2712,13 @@ class MaestroOrchestrator:
         ]
         omitted_ids = [order_id for order_id in original_ids if order_id not in filled_ids]
         if omitted_ids:
+            self._resolve_working_buys(
+                buy_results,
+                run_id=run_id,
+                approval_decision=approval_decision,
+                dependencies_by_account=dependencies_by_account,
+                account_id=cohort.account_id,
+            )
             buy_outcome = evaluate_sell_phase(buy_results)
             self._report_incomplete_buys(
                 cohort,
@@ -2723,6 +2730,64 @@ class MaestroOrchestrator:
                 omitted_buy_order_ids=omitted_ids,
             )
         return results
+
+    def _resolve_working_buys(
+        self,
+        buy_results: list[LiveOrderLifecycleResult],
+        *,
+        run_id: str,
+        approval_decision: ApprovalDecision,
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+        account_id: str | None,
+    ) -> None:
+        """Take unfinished buys off the broker's book, or raise a recovery blocker.
+
+        A buy still OPEN or PARTIALLY_FILLED when polling ran out is live at the
+        broker, not finished. Left alone it collides with the next run and trips
+        the pending-order gate. Anything that cannot be confirmed gone becomes a
+        LIVE_ORDER_RECOVERY_REQUIRED blocker, which stops the next live execution
+        until an operator resolves it. Broker-terminal states such as REJECTED
+        leave nothing working and need neither.
+        """
+        dependencies = dependencies_by_account.get(account_id)
+        if dependencies is None:
+            return
+        canceled: list[dict[str, Any]] = []
+        cancel_failures: list[dict[str, Any]] = []
+        cancel_unconfirmed: list[dict[str, Any]] = []
+        for result in buy_results:
+            if result.final_status not in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
+                continue
+            broker_order = result.submitted_order.broker_order if result.submitted_order else None
+            if broker_order is None:
+                continue
+            self._cancel_and_confirm(
+                result,
+                broker_order,
+                run_id=run_id,
+                approval_decision=approval_decision,
+                dependencies=dependencies,
+                canceled=canceled,
+                cancel_failures=cancel_failures,
+                cancel_unconfirmed=cancel_unconfirmed,
+            )
+        for entry in cancel_failures + cancel_unconfirmed:
+            save_audited_system_event(
+                self.state_store,
+                self.audit,
+                run_id,
+                SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+                {
+                    "reason": "rotation_buy_unresolved_at_broker",
+                    "order_id": entry["order_id"],
+                    "request": {"order_id": entry["order_id"]},
+                    "result": {
+                        "broker_order_id": entry["broker_order_id"],
+                        "observed_status": entry.get("observed_status"),
+                        "message": entry.get("error_message"),
+                    },
+                },
+            )
 
     def _report_incomplete_buys(
         self,
