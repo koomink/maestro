@@ -2611,7 +2611,7 @@ class MaestroOrchestrator:
         sitting in cash for a whole rebalance cycle.
         """
         results: list[LiveOrderLifecycleResult] = []
-        sell_results = self._run_batch_phase(
+        sell_results, _ = self._run_batch_phase(
             list(cohort.sells),
             run_id=run_id,
             approval_id=approval_id,
@@ -2699,7 +2699,7 @@ class MaestroOrchestrator:
                         ],
                     },
                 )
-        buy_results = self._run_batch_phase(
+        buy_results, buy_requests = self._run_batch_phase(
             buys,
             run_id=run_id,
             approval_id=approval_id,
@@ -2727,6 +2727,7 @@ class MaestroOrchestrator:
                 approval_decision=approval_decision,
                 dependencies_by_account=dependencies_by_account,
                 account_id=cohort.account_id,
+                requests_by_order_id=buy_requests,
             )
             buy_outcome = evaluate_sell_phase(buy_results)
             self._report_incomplete_buys(
@@ -2748,6 +2749,7 @@ class MaestroOrchestrator:
         approval_decision: ApprovalDecision,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
         account_id: str | None,
+        requests_by_order_id: dict[str, LiveOrderRequest],
     ) -> None:
         """Take unfinished buys off the broker's book, or raise a recovery blocker.
 
@@ -2781,18 +2783,38 @@ class MaestroOrchestrator:
                 cancel_unconfirmed=cancel_unconfirmed,
             )
         for entry in cancel_failures + cancel_unconfirmed:
+            request = requests_by_order_id.get(entry["order_id"])
+            broker_order = entry.get("broker_order")
+            if request is None or broker_order is None:
+                # Without both, /recovery cannot rebuild the order or look it up
+                # at the broker, and the blocker would gate the next run forever.
+                self._record_event(
+                    run_id,
+                    "rotation_buy_unresolvable",
+                    {
+                        "order_id": entry["order_id"],
+                        "broker_order_id": entry.get("broker_order_id"),
+                        "observed_status": entry.get("observed_status"),
+                    },
+                )
+                continue
             save_audited_system_event(
                 self.state_store,
                 self.audit,
                 run_id,
                 SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
                 {
+                    # /recovery rebuilds a LiveOrderRequest from `request` and
+                    # reads the broker id from `result.broker_order`, so both must
+                    # be the complete objects LiveOrderSafetyService records.
                     "reason": "rotation_buy_unresolved_at_broker",
                     "order_id": entry["order_id"],
-                    "request": {"order_id": entry["order_id"]},
+                    "signal_run_id": request.signal_run_id,
+                    "request": request.model_dump(mode="json"),
                     "result": {
-                        "broker_order_id": entry["broker_order_id"],
-                        "observed_status": entry.get("observed_status"),
+                        "order_id": entry["order_id"],
+                        "status": entry.get("observed_status") or "unknown",
+                        "broker_order": broker_order.model_dump(mode="json"),
                         "message": entry.get("error_message"),
                     },
                 },
@@ -2855,9 +2877,9 @@ class MaestroOrchestrator:
         approval_decision: ApprovalDecision,
         signal_run_id: str | None,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
-    ) -> list[LiveOrderLifecycleResult]:
+    ) -> tuple[list[LiveOrderLifecycleResult], dict[str, LiveOrderRequest]]:
         if not orders:
-            return []
+            return [], {}
         batch_items = self._build_batch_items(
             orders,
             run_id=run_id,
@@ -2878,7 +2900,7 @@ class MaestroOrchestrator:
             {order.order_id: order for order in orders},
             signal_run_id=signal_run_id,
         )
-        return lifecycles
+        return lifecycles, {item.request.order_id: item.request for item in batch.items}
 
     def _cohort_available_cash(self, cohort: RotationCohort) -> float:
         """Broker buying power once the sells settled, net of the fee buffer."""
@@ -3020,6 +3042,7 @@ class MaestroOrchestrator:
                 {
                     "order_id": result.order_id,
                     "broker_order_id": broker_order.broker_order_id,
+                    "broker_order": broker_order,
                     "error_type": type(exc).__name__,
                     "error_message": str(exc),
                 }
@@ -3062,6 +3085,7 @@ class MaestroOrchestrator:
                 {
                     "order_id": result.order_id,
                     "broker_order_id": broker_order.broker_order_id,
+                    "broker_order": broker_order,
                     "observed_status": snapshot.status.value if snapshot else "unknown",
                 }
             )

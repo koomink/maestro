@@ -8,6 +8,7 @@ cash for a whole cycle. These tests pin the ordering and the barrier.
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 
 from maestro.approval.models import ApprovalDecision
@@ -29,10 +30,12 @@ from maestro.execution.live_order_models import (
     BrokerOrderId,
     FillReconciliationResult,
     LiveOrderCancelResult,
+    LiveOrderRequest,
     LiveOrderResult,
     LiveOrderStatusSnapshot,
     PartialFillSummary,
 )
+from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.orchestration import orchestrator as orchestrator_module
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.orchestration.orchestrator import MaestroOrchestrator
@@ -408,7 +411,7 @@ def _intent(order_id: str, symbol: str, side: OrderSide) -> OrderIntent:
         price=100.0,
         notional=10_000.0,
         currency=Currency.KRW,
-        account_id="acct-a",
+        account_id=None,
     )
 
 
@@ -929,3 +932,76 @@ def test_cancel_confirmation_gives_up_at_the_poll_limit(tmp_path, monkeypatch):
         "payload"
     ]
     assert payload["cancel_unconfirmed"][0]["order_id"] == "sell_a"
+
+
+def test_unresolved_buy_blocker_can_actually_be_recovered(tmp_path, monkeypatch):
+    """A blocker that gates but cannot be matched leaves the operator stuck.
+
+    The recovery parser rebuilds a full LiveOrderRequest from the payload and
+    reads the broker id from result.broker_order. A payload that carries only an
+    order id gates the next run and then lands in `unmatched`.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    blockers = WorkflowRecoveryService(
+        orchestrator.config,
+        orchestrator.state_store,
+        orchestrator.audit,
+    ).preview().blockers
+    blocker = next(item for item in blockers if item.order_id == "buy_b")
+
+    assert blocker.broker_order_id == "buy_b", "recovery cannot look the order up"
+    # The parser must be able to rebuild the request it will re-poll with.
+    assert LiveOrderRequest.model_validate(blocker.request).symbol == "MOCK_ETF_B"
+
+    # And the real recovery run must match it against the broker rather than
+    # filing it unmatched, then clear it.
+    def _recovery_service() -> WorkflowRecoveryService:
+        return WorkflowRecoveryService(
+            orchestrator.config,
+            orchestrator.state_store,
+            orchestrator.audit,
+            status_client_for_account=lambda account_id: _RecoveryStatusClient(),
+        )
+
+    # recover_live_orders returns attestation_required the moment a blocker
+    # cannot be matched, before it touches any broker infrastructure. Getting
+    # past that point to the reconciliation step is proof it was matched.
+    with pytest.raises(ValueError, match="Broker reconciliation"):
+        _recovery_service().recover_live_orders(
+            reason="operator verified the broker book",
+            decided_by="telegram:test",
+        )
+
+
+class _RecoveryStatusClient:
+    """Broker that reports the working buy as cancelled when recovery re-polls."""
+
+    def get_order_status(self, broker_order):
+        return LiveOrderStatusSnapshot(
+            broker_order=broker_order,
+            status=OrderStatus.CANCELED,
+            checked_at=utc_now().isoformat(),
+            symbol="MOCK_ETF_B",
+            side=OrderSide.BUY,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=100.0,
+                filled_quantity=0.0,
+                remaining_quantity=100.0,
+            ),
+        )
