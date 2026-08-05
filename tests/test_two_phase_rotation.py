@@ -417,3 +417,37 @@ def _orchestrator(tmp_path, *, buying_power: float) -> MaestroOrchestrator:
         orchestrator.state_store.load_latest_portfolio_state(),
     )
     return orchestrator
+
+
+def test_buying_power_lookup_failure_after_fills_is_reported_not_raised(tmp_path, monkeypatch):
+    """The sells already filled, so the book is in cash and the operator must know.
+
+    Letting the broker lookup raise here unwinds the run with no notification and
+    no event — indistinguishable from the silent cash-drift bug this flow fixes.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    telegram = _TelegramClient()
+    orchestrator.telegram_client = telegram
+
+    def _unavailable(order):
+        raise TimeoutError(f"broker capacity unavailable for {order.order_id}")
+
+    orchestrator.order_capacity_lookup = _unavailable
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.FILLED},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:buy_b" not in calls
+    aborted = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")
+    assert "buying_power_unavailable" in aborted[0]["payload"]["reason"]
+    assert telegram.messages

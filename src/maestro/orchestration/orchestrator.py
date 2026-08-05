@@ -2640,9 +2640,27 @@ class MaestroOrchestrator:
         # gated against real cash at approval time, and nothing has moved since.
         buys = list(cohort.buys)
         if cohort.sells:
+            try:
+                available_cash = self._cohort_available_cash(cohort)
+            except Exception as exc:
+                # The sells already filled, so the book is sitting in cash. Letting
+                # this unwind the run would leave that state with no event and no
+                # alert — the same silent drift this flow exists to remove.
+                self._abort_cohort(
+                    cohort,
+                    SellPhaseOutcome(
+                        complete=False,
+                        reason=f"buying_power_unavailable:{type(exc).__name__}",
+                        unfilled=(),
+                    ),
+                    run_id=run_id,
+                    approval_decision=approval_decision,
+                    dependencies_by_account=dependencies_by_account,
+                )
+                return results
             buys = rescale_buys_to_cash(
                 buys,
-                self._cohort_available_cash(cohort),
+                available_cash,
                 {instrument.symbol: instrument for instrument in self.config.universe.instruments},
             )
         results.extend(
