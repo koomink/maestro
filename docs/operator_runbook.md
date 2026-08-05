@@ -62,6 +62,18 @@ the broker UI before re-running: the `pending_broker_orders` risk gate blocks th
 entire next run while any unfilled order exists, and an uncancelled DAY order
 does not clear until the market closes.
 
+A cancellation only counts once the broker's own status poll reports `CANCELED`.
+Broker cancel endpoints acknowledge the request rather than the outcome, so an
+order whose cancel was accepted but not yet observed appears under
+`cancel_unconfirmed` and is listed in the same Telegram line — treat it exactly
+like a failed cancel and check the broker UI.
+
+You may also see `Maestro rotation incomplete`. That one means the sells all
+filled but the buys did not — either the broker rejected them, or the realized
+cash left nothing large enough to buy. The account is holding cash it was meant
+to deploy. Nothing is working at the broker in that case, so re-running the
+rebalance is the whole fix.
+
 ## Halt Recovery
 
 1. Stop scheduled jobs that could submit or approve work.
@@ -77,8 +89,9 @@ maestro health --config <config>
    `live_order_limit_halt`, `live_order_halt`, `live_order_status`,
    `fill_reconciliation`, `live_order_lifecycle`,
    `live_order_recovery_required`, `live_order_recovery_halt`,
-   `live_order_recovery_completed`, `rotation_cohort_phase`, and
-   `rotation_cohort_aborted`.
+   `live_order_recovery_completed`, `rotation_cohort_phase`,
+   `rotation_cohort_aborted`, `rotation_cohort_incomplete`, and
+   `rotation_cohort_buys_capacity_blocked`.
 4. Check broker account state in the broker UI.
 5. Run reconciliation and fill reconciliation. `reconcile` refreshes the KIS
    read-only broker snapshot before comparing it with Maestro state, so the
