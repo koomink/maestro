@@ -2438,6 +2438,84 @@ class MaestroOrchestrator:
         self.state_store.save_strategy_book_snapshots(run_id, snapshots)
         return snapshots
 
+    def _build_batch_items(
+        self,
+        orders: list[OrderIntent],
+        *,
+        run_id: str,
+        approval_id: str,
+        signal_run_id: str | None,
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+    ) -> list[tuple[LiveOrderRequest, BatchOrderDependencies]]:
+        """Turn order intents into submittable batch items.
+
+        `dependencies_by_account` is both cache and output: a rotation runs its
+        sells and its buys as separate batches, and both need the same per-account
+        services.
+        """
+        batch_items: list[tuple[LiveOrderRequest, BatchOrderDependencies]] = []
+        for order in orders:
+            dependencies = dependencies_by_account.get(order.account_id)
+            if dependencies is None:
+                dependencies = build_live_approval_dependencies(
+                    self.config,
+                    self.state_store,
+                    self.audit,
+                    live_order_client=self.live_order_client,
+                    status_client=self.live_order_status_client,
+                    broker_reconciliation_service=self.broker_reconciliation_service,
+                    notification_client=self.live_order_notification_client,
+                    telegram_client=self.telegram_client,
+                    account_id=order.account_id,
+                    signal_run_id=signal_run_id,
+                )
+                dependencies_by_account[order.account_id] = dependencies
+            request = LiveOrderRequest(
+                order_id=order.order_id,
+                symbol=order.symbol,
+                side=order.side,
+                quantity=order.quantity,
+                limit_price=order.price,
+                order_type=OrderType.LIMIT,
+                approval_id=approval_id,
+                run_id=run_id,
+                duplicate_key=build_live_order_idempotency_key(
+                    signal_run_id=signal_run_id,
+                    account_id=order.account_id,
+                    order_intent_id=order.order_id,
+                    fallback_run_id=run_id,
+                ),
+                currency=order.currency,
+                sleeve=order.sleeve,
+                execution_sleeve=order.execution_sleeve,
+                account_id=order.account_id,
+                broker_product=order.broker_product,
+                signal_run_id=signal_run_id,
+            )
+            batch_items.append(
+                (
+                    request,
+                    BatchOrderDependencies(
+                        safety_service=dependencies.safety_service,
+                        status_service=dependencies.status_service,
+                        fill_reconciliation_service=dependencies.fill_reconciliation_service,
+                        broker_reconciliation_service=(dependencies.broker_reconciliation_service),
+                    ),
+                )
+            )
+        return batch_items
+
+    def _batch_notification_client(
+        self,
+        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+    ) -> LiveOrderNotificationClient | None:
+        if self.live_order_notification_client is not None:
+            return self.live_order_notification_client
+        for dependencies in dependencies_by_account.values():
+            if dependencies.notification_client is not None:
+                return dependencies.notification_client
+        return None
+
     def _execute_live_approval_orders(
         self,
         run_id: str,
@@ -2482,65 +2560,19 @@ class MaestroOrchestrator:
                 signal_run_id=signal_run_id,
             )
 
-        batch_items = []
         dependencies_by_account: dict[str | None, LiveApprovalDependencies] = {}
-        batch_notification_client = self.live_order_notification_client
-        for order in armed_orders:
-            dependencies = dependencies_by_account.get(order.account_id)
-            if dependencies is None:
-                dependencies = build_live_approval_dependencies(
-                    self.config,
-                    self.state_store,
-                    self.audit,
-                    live_order_client=self.live_order_client,
-                    status_client=self.live_order_status_client,
-                    broker_reconciliation_service=self.broker_reconciliation_service,
-                    notification_client=self.live_order_notification_client,
-                    telegram_client=self.telegram_client,
-                    account_id=order.account_id,
-                    signal_run_id=signal_run_id,
-                )
-                dependencies_by_account[order.account_id] = dependencies
-            if batch_notification_client is None:
-                batch_notification_client = dependencies.notification_client
-            request = LiveOrderRequest(
-                order_id=order.order_id,
-                symbol=order.symbol,
-                side=order.side,
-                quantity=order.quantity,
-                limit_price=order.price,
-                order_type=OrderType.LIMIT,
-                approval_id=approval_id,
-                run_id=run_id,
-                duplicate_key=build_live_order_idempotency_key(
-                    signal_run_id=signal_run_id,
-                    account_id=order.account_id,
-                    order_intent_id=order.order_id,
-                    fallback_run_id=run_id,
-                ),
-                currency=order.currency,
-                sleeve=order.sleeve,
-                execution_sleeve=order.execution_sleeve,
-                account_id=order.account_id,
-                broker_product=order.broker_product,
-                signal_run_id=signal_run_id,
-            )
-            batch_items.append(
-                (
-                    request,
-                    BatchOrderDependencies(
-                        safety_service=dependencies.safety_service,
-                        status_service=dependencies.status_service,
-                        fill_reconciliation_service=dependencies.fill_reconciliation_service,
-                        broker_reconciliation_service=(dependencies.broker_reconciliation_service),
-                    ),
-                )
-            )
+        batch_items = self._build_batch_items(
+            armed_orders,
+            run_id=run_id,
+            approval_id=approval_id,
+            signal_run_id=signal_run_id,
+            dependencies_by_account=dependencies_by_account,
+        )
         batch = LiveOrderBatchLifecycleService(
             self.config.execution,
             self.state_store,
             self.audit,
-            batch_notification_client,
+            self._batch_notification_client(dependencies_by_account),
         ).run(batch_items, approval_decision)
         orders_by_id = {order.order_id: order for order in armed_orders}
         for item in batch.items:
