@@ -20,6 +20,7 @@ from maestro.execution.live_order_factory import LiveApprovalDependencies
 from maestro.execution.live_order_models import (
     BrokerOrderId,
     FillReconciliationResult,
+    LiveOrderCancelResult,
     LiveOrderResult,
     LiveOrderStatusSnapshot,
     PartialFillSummary,
@@ -85,6 +86,58 @@ def test_buys_shrink_to_the_cash_the_sells_actually_raised(tmp_path, monkeypatch
     assert dict(submitted)["buy_b"] == 50.0
 
 
+def test_abort_cancels_the_outstanding_sell(tmp_path, monkeypatch):
+    """A working sell must come off the book so the operator can retry today.
+
+    An unfilled order left at the broker trips the pending_broker_orders gate,
+    which blocks the whole next run until the DAY order expires at the close.
+    """
+    calls: list[str] = []
+    cancels: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.PARTIALLY_FILLED, "buy_b": OrderStatus.FILLED},
+        cancels=cancels,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert cancels == ["sell_a"]
+    aborted = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")
+    assert aborted[0]["payload"]["canceled"][0]["order_id"] == "sell_a"
+
+
+def test_abort_skips_cancel_when_the_sell_never_reached_the_broker(tmp_path, monkeypatch):
+    """A rejected pre-submit order has nothing at the broker to cancel."""
+    calls: list[str] = []
+    cancels: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"buy_b": OrderStatus.FILLED},
+        cancels=cancels,
+        reject_submits={"sell_a"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert cancels == []
+    assert "submit:buy_b" not in calls
+
+
 def test_buy_only_run_is_not_resized_against_buying_power(tmp_path, monkeypatch):
     """A contribution has no sells to wait on, so nothing has moved since approval.
 
@@ -116,32 +169,47 @@ def _install_fakes(
     calls: list[str],
     status_by_order: dict[str, OrderStatus],
     submitted: list[tuple[str, float]] | None = None,
+    cancels: list[str] | None = None,
+    reject_submits: set[str] | None = None,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
         return LiveApprovalDependencies(
             state_store=state_store,
             audit_logger=audit_logger,
-            safety_service=_SafetyService(calls, submitted),
+            safety_service=_SafetyService(calls, submitted, reject_submits or set()),
             status_service=_StatusService(calls, status_by_order),
             fill_reconciliation_service=_FillService(),
             workflow_service=None,
             lifecycle_service=None,
+            cancel_service=_CancelService(cancels if cancels is not None else []),
         )
 
     monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
 
 
 class _SafetyService:
-    def __init__(self, calls: list[str], submitted: list[tuple[str, float]] | None) -> None:
+    def __init__(
+        self,
+        calls: list[str],
+        submitted: list[tuple[str, float]] | None,
+        reject_submits: set[str],
+    ) -> None:
         self.calls = calls
         self.submitted = submitted
+        self.reject_submits = reject_submits
 
     def submit_approved_order(self, request, approval):
         del approval
         self.calls.append(f"submit:{request.order_id}")
         if self.submitted is not None:
             self.submitted.append((request.order_id, request.quantity))
+        if request.order_id in self.reject_submits:
+            return LiveOrderResult(
+                order_id=request.order_id,
+                status=OrderStatus.REJECTED,
+                message="broker rejected before acceptance",
+            )
         return LiveOrderResult(
             order_id=request.order_id,
             status=OrderStatus.ACCEPTED_BY_BROKER,
@@ -152,6 +220,20 @@ class _SafetyService:
                 submitted_at=utc_now().isoformat(),
                 account_id=request.account_id,
             ),
+        )
+
+
+class _CancelService:
+    def __init__(self, cancels: list[str]) -> None:
+        self.cancels = cancels
+
+    def cancel_order(self, request, approval_decision):
+        del approval_decision
+        self.cancels.append(request.broker_order.order_id)
+        return LiveOrderCancelResult(
+            broker_order=request.broker_order,
+            status=OrderStatus.CANCELED,
+            canceled_quantity=50.0,
         )
 
 

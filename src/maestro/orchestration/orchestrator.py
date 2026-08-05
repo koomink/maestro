@@ -60,6 +60,7 @@ from maestro.execution.live_order_factory import (
 from maestro.execution.live_order_safety import build_live_order_idempotency_key
 from maestro.execution.live_orders import (
     BrokerReconciliationRunner,
+    LiveOrderCancelRequest,
     LiveOrderClient,
     LiveOrderLifecycleResult,
     LiveOrderNotificationClient,
@@ -2745,6 +2746,50 @@ class MaestroOrchestrator:
         approval_decision: ApprovalDecision,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
     ) -> None:
+        """Stop the rotation and hand the account back in a retryable state.
+
+        An order still working at the broker trips the pending-orders gate and
+        blocks the operator's entire next run, so the remaining sell quantity has
+        to come off the book before we hand back. Once it is gone the operator can
+        press rebalance again: the next run regenerates the signal and sizes
+        orders from current holdings, so it converges on the same target.
+        """
+        dependencies = dependencies_by_account.get(cohort.account_id)
+        cancel_service = dependencies.cancel_service if dependencies is not None else None
+        canceled: list[dict[str, Any]] = []
+        cancel_failures: list[dict[str, Any]] = []
+        for result in outcome.unfilled:
+            broker_order = result.submitted_order.broker_order if result.submitted_order else None
+            if broker_order is None or cancel_service is None:
+                continue
+            try:
+                cancel_result = cancel_service.cancel_order(
+                    LiveOrderCancelRequest(
+                        run_id=run_id,
+                        approval_id=approval_decision.approval_id,
+                        broker_order=broker_order,
+                        reason="rotation_cohort_aborted",
+                    ),
+                    approval_decision,
+                )
+            except Exception as exc:
+                cancel_failures.append(
+                    {
+                        "order_id": result.order_id,
+                        "broker_order_id": broker_order.broker_order_id,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    }
+                )
+                continue
+            canceled.append(
+                {
+                    "order_id": result.order_id,
+                    "broker_order_id": broker_order.broker_order_id,
+                    "status": cancel_result.status.value,
+                    "canceled_quantity": cancel_result.canceled_quantity,
+                }
+            )
         self._record_event(
             run_id,
             "rotation_cohort_aborted",
@@ -2754,6 +2799,8 @@ class MaestroOrchestrator:
                 "reason": outcome.reason,
                 "unfilled_order_ids": [result.order_id for result in outcome.unfilled],
                 "skipped_buy_order_ids": [order.order_id for order in cohort.buys],
+                "canceled": canceled,
+                "cancel_failures": cancel_failures,
             },
         )
 
