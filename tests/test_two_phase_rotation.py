@@ -13,7 +13,15 @@ import yaml
 from maestro.approval.models import ApprovalDecision
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
-from maestro.core.enums import Currency, OrderSide, OrderStatus
+from maestro.core.enums import (
+    AssetType,
+    BrokerProduct,
+    Currency,
+    MarketRegion,
+    OrderSide,
+    OrderStatus,
+)
+from maestro.core.instruments import TradableInstrument
 from maestro.execution.base import OrderIntent
 from maestro.execution.brokers.readonly import BrokerBuyingPower
 from maestro.execution.live_order_factory import LiveApprovalDependencies
@@ -395,6 +403,7 @@ def _orchestrator(
     *,
     buying_power: float,
     max_buy_quantity: float | None = None,
+    min_order_quantity: float | None = None,
 ) -> MaestroOrchestrator:
     raw: dict[str, Any] = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["mode"] = "live_approval"
@@ -426,6 +435,25 @@ def _orchestrator(
     config.execution.live_order_dry_run = False
     config.execution.order_status_max_polls = 1
     config.execution.order_status_poll_interval_seconds = 0
+
+    if min_order_quantity is not None:
+        config.universe.instruments = [
+            TradableInstrument(
+                symbol=symbol,
+                asset_type=AssetType.ETF,
+                region=MarketRegion.KR,
+                currency=Currency.KRW,
+                broker="toss",
+                broker_product=BrokerProduct.KIS_DOMESTIC_STOCK,
+                broker_symbol=symbol,
+                exchange_code="KRX",
+                quantity_step=1,
+                price_tick=1,
+                min_order_quantity=min_order_quantity,
+                min_order_notional=0,
+            )
+            for symbol in ("MOCK_ETF_A", "MOCK_ETF_B")
+        ]
 
     orchestrator = MaestroOrchestrator(config)
     orchestrator.order_capacity_lookup = lambda order: BrokerBuyingPower(
@@ -567,7 +595,8 @@ def test_rejected_buy_after_filled_sells_is_reported(tmp_path, monkeypatch):
 
     incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
     assert incomplete, "a rotation whose buy failed must record it"
-    assert incomplete[0]["payload"]["unfilled_buy_order_ids"] == ["buy_b"]
+    assert incomplete[0]["payload"]["omitted_buy_order_ids"] == ["buy_b"]
+    assert incomplete[0]["payload"]["filled_buy_order_ids"] == []
     assert telegram.messages
 
 
@@ -592,7 +621,8 @@ def test_buys_rescaled_out_of_existence_are_reported(tmp_path, monkeypatch):
 
     assert "submit:buy_b" not in calls
     incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
-    assert incomplete[0]["payload"]["reason"] == "no_buys_survived_resizing"
+    assert incomplete[0]["payload"]["omitted_buy_order_ids"] == ["buy_b"]
+    assert incomplete[0]["payload"]["submitted_buy_order_ids"] == []
     assert telegram.messages
 
 
@@ -628,3 +658,80 @@ def test_cancel_is_confirmed_by_polling_not_by_the_api_ack(tmp_path, monkeypatch
     assert payload["canceled"] == []
     assert payload["cancel_unconfirmed"][0]["order_id"] == "sell_a"
     assert payload["cancel_unconfirmed"][0]["observed_status"] == "partially_filled"
+
+
+def test_one_buy_dropped_by_resizing_still_marks_the_cohort_incomplete(tmp_path, monkeypatch):
+    """A rotation that bought back only part of what was approved is not a success.
+
+    Reporting only the all-buys-vanished case let a cohort finish 'complete' while
+    one approved leg was silently dropped by resizing.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, min_order_quantity=60.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.FILLED,
+            "buy_c": OrderStatus.FILLED,
+        },
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b"), _intent("buy_c", "MOCK_ETF_B", OrderSide.BUY)],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    # $10,000 over two $10,000 buys scales each to 50 shares, under the 60-share
+    # minimum, so both drop. Whatever survives, nothing may be reported complete
+    # while an approved leg went missing.
+    incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
+    assert incomplete, "an omitted buy leg must be recorded"
+    payload = incomplete[0]["payload"]
+    assert set(payload["original_buy_order_ids"]) == {"buy_b", "buy_c"}
+    assert set(payload["omitted_buy_order_ids"]) == {"buy_b", "buy_c"}
+    assert payload["filled_buy_order_ids"] == []
+
+
+def test_one_buy_blocked_by_capacity_marks_the_cohort_incomplete(tmp_path, monkeypatch):
+    """One leg blocked post-fill, the other filled: still an incomplete rotation."""
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.order_capacity_lookup = lambda order: BrokerBuyingPower(
+        symbol=order.symbol,
+        order_price=order.price,
+        cash_buying_power=10_000.0,
+        max_buy_quantity=1.0 if order.symbol == "MOCK_ETF_B" else None,
+        source="fake",
+    )
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.FILLED,
+            "buy_c": OrderStatus.FILLED,
+        },
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b"), _intent("buy_c", "MOCK_ETF_B", OrderSide.BUY)],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
+    assert incomplete
+    payload = incomplete[0]["payload"]
+    assert set(payload["original_buy_order_ids"]) == {"buy_b", "buy_c"}
+    assert payload["omitted_buy_order_ids"]
+    assert set(payload["filled_buy_order_ids"]) | set(payload["omitted_buy_order_ids"]) == {
+        "buy_b",
+        "buy_c",
+    }

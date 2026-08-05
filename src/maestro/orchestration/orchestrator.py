@@ -2690,17 +2690,6 @@ class MaestroOrchestrator:
                         ],
                     },
                 )
-        if cohort.buys and not buys:
-            # The sells are done and there is nothing left to buy with. Returning
-            # here quietly would leave the book in cash and look like a success —
-            # the very drift this flow exists to remove.
-            self._report_incomplete_buys(
-                cohort,
-                run_id=run_id,
-                reason="no_buys_survived_resizing",
-                unfilled_buy_order_ids=[order.order_id for order in cohort.buys],
-            )
-            return results
         buy_results = self._run_batch_phase(
             buys,
             run_id=run_id,
@@ -2710,15 +2699,28 @@ class MaestroOrchestrator:
             dependencies_by_account=dependencies_by_account,
         )
         results.extend(buy_results)
-        buy_outcome = evaluate_sell_phase(buy_results)
-        if not buy_outcome.complete:
-            # Same test as the sell phase: anything short of FILLED means the book
-            # is holding cash it was meant to have deployed.
+        # Every approved buy has to be accounted for. A leg can go missing at three
+        # separate points — dropped below a minimum by resizing, blocked by the
+        # post-fill capacity ruling, or submitted and never filled — and any one of
+        # them leaves the book holding cash it was meant to deploy.
+        original_ids = [order.order_id for order in cohort.buys]
+        submitted_ids = [order.order_id for order in buys]
+        filled_ids = [
+            result.order_id
+            for result in buy_results
+            if result.final_status == OrderStatus.FILLED
+        ]
+        omitted_ids = [order_id for order_id in original_ids if order_id not in filled_ids]
+        if omitted_ids:
+            buy_outcome = evaluate_sell_phase(buy_results)
             self._report_incomplete_buys(
                 cohort,
                 run_id=run_id,
-                reason=buy_outcome.reason or "buy_phase_incomplete",
-                unfilled_buy_order_ids=[result.order_id for result in buy_outcome.unfilled],
+                reason=buy_outcome.reason or "buy_legs_omitted",
+                original_buy_order_ids=original_ids,
+                submitted_buy_order_ids=submitted_ids,
+                filled_buy_order_ids=filled_ids,
+                omitted_buy_order_ids=omitted_ids,
             )
         return results
 
@@ -2728,7 +2730,10 @@ class MaestroOrchestrator:
         *,
         run_id: str,
         reason: str,
-        unfilled_buy_order_ids: list[str],
+        original_buy_order_ids: list[str],
+        submitted_buy_order_ids: list[str],
+        filled_buy_order_ids: list[str],
+        omitted_buy_order_ids: list[str],
     ) -> None:
         """Record and announce a rotation that sold but could not fully buy back."""
         self._record_event(
@@ -2738,10 +2743,18 @@ class MaestroOrchestrator:
                 "account_id": cohort.account_id,
                 "currency": cohort.currency,
                 "reason": reason,
+                "original_buy_order_ids": original_buy_order_ids,
+                "submitted_buy_order_ids": submitted_buy_order_ids,
+                "filled_buy_order_ids": filled_buy_order_ids,
+                "omitted_buy_order_ids": omitted_buy_order_ids,
                 "sell_order_ids": [order.order_id for order in cohort.sells],
-                "unfilled_buy_order_ids": unfilled_buy_order_ids,
             },
         )
+        never_submitted = [
+            order_id
+            for order_id in omitted_buy_order_ids
+            if order_id not in submitted_buy_order_ids
+        ]
         self._notify_rotation_stopped(
             run_id,
             cohort,
@@ -2751,7 +2764,9 @@ class MaestroOrchestrator:
                 f"currency: {cohort.currency or 'default'}",
                 f"reason: {reason}",
                 "sells: filled",
-                f"buys not filled: {', '.join(unfilled_buy_order_ids) or 'none'}",
+                f"buys filled: {', '.join(filled_buy_order_ids) or 'none'}",
+                f"buys missing: {', '.join(omitted_buy_order_ids) or 'none'}",
+                f"never submitted: {', '.join(never_submitted) or 'none'}",
                 "The account is holding cash it was meant to deploy.",
                 "Re-run the rebalance to resize against current holdings.",
             ],
