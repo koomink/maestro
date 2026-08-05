@@ -521,3 +521,58 @@ def test_max_buy_quantity_is_enforced_after_the_sells_fill(tmp_path, monkeypatch
 
     assert "submit:buy_b" not in calls
     assert telegram.messages, "a rotation that could not buy must not end silently"
+
+
+def test_rejected_buy_after_filled_sells_is_reported(tmp_path, monkeypatch):
+    """The sells are done, so a failed buy leaves the book in cash.
+
+    Only the sell phase was evaluated, so a rejected or partially filled buy
+    ended the run looking like a success.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    telegram = _TelegramClient()
+    orchestrator.telegram_client = telegram
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED},
+        reject_submits={"buy_b"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
+    assert incomplete, "a rotation whose buy failed must record it"
+    assert incomplete[0]["payload"]["unfilled_buy_order_ids"] == ["buy_b"]
+    assert telegram.messages
+
+
+def test_buys_rescaled_out_of_existence_are_reported(tmp_path, monkeypatch):
+    """Zero realized cash leaves the sells done and nothing bought.
+
+    An empty buy batch returned like a success — the same silent cash drift the
+    two-phase flow exists to remove.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=0.0)
+    telegram = _TelegramClient()
+    orchestrator.telegram_client = telegram
+    _install_fakes(monkeypatch, calls, {"sell_a": OrderStatus.FILLED})
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:buy_b" not in calls
+    incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
+    assert incomplete[0]["payload"]["reason"] == "no_buys_survived_resizing"
+    assert telegram.messages

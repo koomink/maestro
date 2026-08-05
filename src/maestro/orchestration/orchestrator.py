@@ -2689,17 +2689,72 @@ class MaestroOrchestrator:
                         ],
                     },
                 )
-        results.extend(
-            self._run_batch_phase(
-                buys,
+        if cohort.buys and not buys:
+            # The sells are done and there is nothing left to buy with. Returning
+            # here quietly would leave the book in cash and look like a success —
+            # the very drift this flow exists to remove.
+            self._report_incomplete_buys(
+                cohort,
                 run_id=run_id,
-                approval_id=approval_id,
-                approval_decision=approval_decision,
-                signal_run_id=signal_run_id,
-                dependencies_by_account=dependencies_by_account,
+                reason="no_buys_survived_resizing",
+                unfilled_buy_order_ids=[order.order_id for order in cohort.buys],
             )
+            return results
+        buy_results = self._run_batch_phase(
+            buys,
+            run_id=run_id,
+            approval_id=approval_id,
+            approval_decision=approval_decision,
+            signal_run_id=signal_run_id,
+            dependencies_by_account=dependencies_by_account,
         )
+        results.extend(buy_results)
+        buy_outcome = evaluate_sell_phase(buy_results)
+        if not buy_outcome.complete:
+            # Same test as the sell phase: anything short of FILLED means the book
+            # is holding cash it was meant to have deployed.
+            self._report_incomplete_buys(
+                cohort,
+                run_id=run_id,
+                reason=buy_outcome.reason or "buy_phase_incomplete",
+                unfilled_buy_order_ids=[result.order_id for result in buy_outcome.unfilled],
+            )
         return results
+
+    def _report_incomplete_buys(
+        self,
+        cohort: RotationCohort,
+        *,
+        run_id: str,
+        reason: str,
+        unfilled_buy_order_ids: list[str],
+    ) -> None:
+        """Record and announce a rotation that sold but could not fully buy back."""
+        self._record_event(
+            run_id,
+            "rotation_cohort_incomplete",
+            {
+                "account_id": cohort.account_id,
+                "currency": cohort.currency,
+                "reason": reason,
+                "sell_order_ids": [order.order_id for order in cohort.sells],
+                "unfilled_buy_order_ids": unfilled_buy_order_ids,
+            },
+        )
+        self._notify_rotation_stopped(
+            run_id,
+            cohort,
+            [
+                "Maestro rotation incomplete",
+                f"account_id: {cohort.account_id or 'default'}",
+                f"currency: {cohort.currency or 'default'}",
+                f"reason: {reason}",
+                "sells: filled",
+                f"buys not filled: {', '.join(unfilled_buy_order_ids) or 'none'}",
+                "The account is holding cash it was meant to deploy.",
+                "Re-run the rebalance to resize against current holdings.",
+            ],
+        )
 
     def _run_batch_phase(
         self,
@@ -2862,23 +2917,6 @@ class MaestroOrchestrator:
         An abort leaves the book part-rotated, which looks exactly like the bug
         this two-phase flow exists to fix. It must never pass silently.
         """
-        try:
-            client = self.telegram_client or TelegramBotAPIClient(
-                token_env=self.config.approval.telegram_bot_token_env,
-                timeout_seconds=10.0,
-            )
-        except Exception as exc:
-            self._record_event(
-                run_id,
-                "live_order_notification_failed",
-                {
-                    "status": "rotation_cohort_aborted",
-                    "account_id": cohort.account_id,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
-            )
-            return
         unfilled = ", ".join(result.order_id for result in outcome.unfilled) or "none"
         skipped = ", ".join(order.order_id for order in cohort.buys) or "none"
         canceled_text = ", ".join(entry["order_id"] for entry in canceled) or "none"
@@ -2895,6 +2933,31 @@ class MaestroOrchestrator:
             failures = ", ".join(entry["order_id"] for entry in cancel_failures)
             lines.append(f"cancel FAILED (still live at broker): {failures}")
         lines.append("Re-run the rebalance to resize against current holdings.")
+        self._notify_rotation_stopped(run_id, cohort, lines)
+
+    def _notify_rotation_stopped(
+        self,
+        run_id: str,
+        cohort: RotationCohort,
+        lines: list[str],
+    ) -> None:
+        try:
+            client = self.telegram_client or TelegramBotAPIClient(
+                token_env=self.config.approval.telegram_bot_token_env,
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:
+            self._record_event(
+                run_id,
+                "live_order_notification_failed",
+                {
+                    "status": "rotation_stopped",
+                    "account_id": cohort.account_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return
         text = "\n".join(lines)
         for chat_id in self.config.approval.telegram_allowed_chat_ids:
             try:
@@ -2904,7 +2967,7 @@ class MaestroOrchestrator:
                     run_id,
                     "live_order_notification_failed",
                     {
-                        "status": "rotation_cohort_aborted",
+                        "status": "rotation_stopped",
                         "account_id": cohort.account_id,
                         "error_type": type(exc).__name__,
                         "error_message": str(exc),
