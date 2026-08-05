@@ -2649,6 +2649,7 @@ class MaestroOrchestrator:
         # A buy-only run — a monthly contribution, say — was already sized and
         # gated against real cash at approval time, and nothing has moved since.
         buys = list(cohort.buys)
+        resized_ids = [order.order_id for order in buys]
         if cohort.sells:
             try:
                 available_cash = self._cohort_available_cash(cohort)
@@ -2673,6 +2674,7 @@ class MaestroOrchestrator:
                 available_cash,
                 {instrument.symbol: instrument for instrument in self.config.universe.instruments},
             )
+            resized_ids = [order.order_id for order in buys]
             # Now that the sells have settled, this is the authoritative capacity
             # ruling. The partition is strict here precisely because the batch
             # holds no sells: every dimension it reads — per-symbol quantity caps,
@@ -2708,20 +2710,22 @@ class MaestroOrchestrator:
             dependencies_by_account=dependencies_by_account,
         )
         results.extend(buy_results)
-        # Every approved buy has to be accounted for. A leg can go missing at three
-        # separate points — dropped below a minimum by resizing, blocked by the
-        # post-fill capacity ruling, or submitted and never filled — and any one of
-        # them leaves the book holding cash it was meant to deploy.
+        # Every approved buy has to be accounted for, and a leg can go missing at
+        # four distinct points. Keeping the stages apart is what lets an operator
+        # tell "the cash would not stretch" from "the broker refused it".
         original_ids = [order.order_id for order in cohort.buys]
-        submitted_ids = [order.order_id for order in buys]
+        capacity_accepted_ids = [order.order_id for order in buys]
+        submitted_ids = list(buy_requests)
         filled_ids = [
             result.order_id
             for result in buy_results
             if result.final_status == OrderStatus.FILLED
         ]
-        omitted_ids = [order_id for order_id in original_ids if order_id not in filled_ids]
-        if omitted_ids:
-            self._resolve_working_buys(
+        if len(filled_ids) < len(original_ids):
+            # Take any still-working buy off the broker's book first: the attempt
+            # can reveal that one of them actually filled, which changes who is
+            # missing.
+            resolved_statuses = self._resolve_working_buys(
                 buy_results,
                 run_id=run_id,
                 approval_decision=approval_decision,
@@ -2729,12 +2733,24 @@ class MaestroOrchestrator:
                 account_id=cohort.account_id,
                 requests_by_order_id=buy_requests,
             )
+            filled_ids = sorted(
+                set(filled_ids)
+                | {
+                    order_id
+                    for order_id, status in resolved_statuses.items()
+                    if status == OrderStatus.FILLED
+                }
+            )
+        omitted_ids = [order_id for order_id in original_ids if order_id not in filled_ids]
+        if omitted_ids:
             buy_outcome = evaluate_sell_phase(buy_results)
             self._report_incomplete_buys(
                 cohort,
                 run_id=run_id,
                 reason=buy_outcome.reason or "buy_legs_omitted",
                 original_buy_order_ids=original_ids,
+                resized_buy_order_ids=resized_ids,
+                capacity_accepted_buy_order_ids=capacity_accepted_ids,
                 submitted_buy_order_ids=submitted_ids,
                 filled_buy_order_ids=filled_ids,
                 omitted_buy_order_ids=omitted_ids,
@@ -2750,7 +2766,7 @@ class MaestroOrchestrator:
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
         account_id: str | None,
         requests_by_order_id: dict[str, LiveOrderRequest],
-    ) -> None:
+    ) -> dict[str, OrderStatus]:
         """Take unfinished buys off the broker's book, or raise a recovery blocker.
 
         A buy still OPEN or PARTIALLY_FILLED when polling ran out is live at the
@@ -2762,10 +2778,11 @@ class MaestroOrchestrator:
         """
         dependencies = dependencies_by_account.get(account_id)
         if dependencies is None:
-            return
+            return {}
         canceled: list[dict[str, Any]] = []
         cancel_failures: list[dict[str, Any]] = []
         cancel_unconfirmed: list[dict[str, Any]] = []
+        resolved_statuses: dict[str, OrderStatus] = {}
         for result in buy_results:
             if result.final_status not in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
                 continue
@@ -2781,6 +2798,7 @@ class MaestroOrchestrator:
                 canceled=canceled,
                 cancel_failures=cancel_failures,
                 cancel_unconfirmed=cancel_unconfirmed,
+                resolved_statuses=resolved_statuses,
             )
         for entry in cancel_failures + cancel_unconfirmed:
             request = requests_by_order_id.get(entry["order_id"])
@@ -2819,6 +2837,7 @@ class MaestroOrchestrator:
                     },
                 },
             )
+        return resolved_statuses
 
     def _report_incomplete_buys(
         self,
@@ -2827,6 +2846,8 @@ class MaestroOrchestrator:
         run_id: str,
         reason: str,
         original_buy_order_ids: list[str],
+        resized_buy_order_ids: list[str],
+        capacity_accepted_buy_order_ids: list[str],
         submitted_buy_order_ids: list[str],
         filled_buy_order_ids: list[str],
         omitted_buy_order_ids: list[str],
@@ -2840,6 +2861,8 @@ class MaestroOrchestrator:
                 "currency": cohort.currency,
                 "reason": reason,
                 "original_buy_order_ids": original_buy_order_ids,
+                "resized_buy_order_ids": resized_buy_order_ids,
+                "capacity_accepted_buy_order_ids": capacity_accepted_buy_order_ids,
                 "submitted_buy_order_ids": submitted_buy_order_ids,
                 "filled_buy_order_ids": filled_buy_order_ids,
                 "omitted_buy_order_ids": omitted_buy_order_ids,
@@ -3016,6 +3039,7 @@ class MaestroOrchestrator:
         canceled: list[dict[str, Any]],
         cancel_failures: list[dict[str, Any]],
         cancel_unconfirmed: list[dict[str, Any]],
+        resolved_statuses: dict[str, OrderStatus] | None = None,
     ) -> None:
         """Cancel a working order and re-poll until the broker agrees it is gone.
 
@@ -3026,6 +3050,17 @@ class MaestroOrchestrator:
         """
         cancel_service = dependencies.cancel_service
         if cancel_service is None:
+            # Multi-product KIS routing supplies no cancel client. The order is
+            # still working at the broker; saying nothing would strand it.
+            cancel_unconfirmed.append(
+                {
+                    "order_id": result.order_id,
+                    "broker_order_id": broker_order.broker_order_id,
+                    "broker_order": broker_order,
+                    "observed_status": result.final_status.value,
+                    "error_message": "no cancel client is configured for this account",
+                }
+            )
             return
         try:
             cancel_service.cancel_order(
@@ -3080,22 +3115,31 @@ class MaestroOrchestrator:
                 return
             if snapshot.status in _CANCEL_TERMINAL_STATUSES:
                 break
-        if snapshot is None or snapshot.status != OrderStatus.CANCELED:
-            cancel_unconfirmed.append(
+        if snapshot is not None and snapshot.status in _CANCEL_TERMINAL_STATUSES:
+            # A cancel can lose the race to a fill or a rejection. Either way the
+            # order stopped working, so it needs no recovery blocker — it is the
+            # still-open ones that strand the operator.
+            canceled.append(
                 {
                     "order_id": result.order_id,
                     "broker_order_id": broker_order.broker_order_id,
-                    "broker_order": broker_order,
-                    "observed_status": snapshot.status.value if snapshot else "unknown",
+                    "status": snapshot.status.value,
+                    "canceled_quantity": (
+                        snapshot.partial_fill.remaining_quantity
+                        if snapshot.status == OrderStatus.CANCELED
+                        else 0.0
+                    ),
                 }
             )
+            if resolved_statuses is not None:
+                resolved_statuses[result.order_id] = snapshot.status
             return
-        canceled.append(
+        cancel_unconfirmed.append(
             {
                 "order_id": result.order_id,
                 "broker_order_id": broker_order.broker_order_id,
-                "status": snapshot.status.value,
-                "canceled_quantity": snapshot.partial_fill.remaining_quantity,
+                "broker_order": broker_order,
+                "observed_status": snapshot.status.value if snapshot else "unknown",
             }
         )
 

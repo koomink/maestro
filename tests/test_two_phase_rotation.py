@@ -253,6 +253,8 @@ def _install_fakes(
     keys: list[tuple[str, str | None]] | None = None,
     cancel_confirms: bool = True,
     cancel_confirms_after: int = 1,
+    cancel_service: str | None = "fake",
+    fills_during_cancel: set[str] | None = None,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
@@ -264,11 +266,16 @@ def _install_fakes(
             fill_reconciliation_service=_FillService(),
             workflow_service=None,
             lifecycle_service=None,
-            cancel_service=_CancelService(
-                cancels if cancels is not None else [],
-                status_by_order,
-                cancel_confirms,
-                cancel_confirms_after,
+            cancel_service=(
+                _CancelService(
+                    cancels if cancels is not None else [],
+                    status_by_order,
+                    cancel_confirms,
+                    cancel_confirms_after,
+                    fills_during_cancel or set(),
+                )
+                if cancel_service is not None
+                else None
             ),
         )
 
@@ -321,17 +328,22 @@ class _CancelService:
         status_by_order: dict[str, OrderStatus],
         confirms: bool,
         confirms_after: int = 1,
+        fills_during_cancel: set[str] | None = None,
     ) -> None:
         self.cancels = cancels
         self.status_by_order = status_by_order
         self.confirms = confirms
         self.confirms_after = confirms_after
+        self.fills_during_cancel = fills_during_cancel or set()
 
     def cancel_order(self, request, approval_decision):
         del approval_decision
         order_id = request.broker_order.order_id
         self.cancels.append(order_id)
-        if self.confirms:
+        if order_id in self.fills_during_cancel:
+            # The broker filled it before the cancel landed.
+            self.status_by_order[order_id] = OrderStatus.FILLED
+        elif self.confirms:
             # A real broker settles the cancellation asynchronously: the order
             # keeps reporting its old status for a poll or two first.
             self.status_by_order[order_id] = _DelayedCancel(
@@ -1005,3 +1017,103 @@ class _RecoveryStatusClient:
                 remaining_quantity=100.0,
             ),
         )
+
+
+def test_missing_cancel_client_still_raises_a_blocker(tmp_path, monkeypatch):
+    """Multi-product KIS routing supplies no cancel client.
+
+    Returning quietly there leaves a working buy at the broker with nothing
+    recorded — the exact state the blocker exists to prevent.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        cancel_service=None,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
+    assert [row["payload"]["order_id"] for row in blockers] == ["buy_b"]
+
+
+def test_buy_that_fills_during_the_cancel_race_is_not_a_blocker(tmp_path, monkeypatch):
+    """Losing the race to a fill is a completed buy, not an unresolved order.
+
+    It is no longer working at the broker, so it must not gate the next run — and
+    it has to count as filled rather than as a missing leg.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.OPEN},
+        fills_during_cancel={"buy_b"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert orchestrator.state_store.list_system_events_by_type("live_order_recovery_required") == []
+    incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
+    assert incomplete == [], "a buy that filled is not a missing leg"
+
+
+def test_resize_and_capacity_omissions_are_distinguishable(tmp_path, monkeypatch):
+    """An operator has to tell 'the cash would not stretch' from 'the broker refused'.
+
+    Recording one flat submitted set collapsed those into the same report.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.order_capacity_lookup = lambda order: BrokerBuyingPower(
+        symbol=order.symbol,
+        order_price=order.price,
+        cash_buying_power=10_000.0,
+        # Only buy_c's symbol carries a quantity cap below the resized size.
+        max_buy_quantity=1.0 if order.symbol == "MOCK_ETF_A" else None,
+        source="fake",
+    )
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.FILLED,
+            "buy_c": OrderStatus.FILLED,
+        },
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b"), _intent("buy_c", "MOCK_ETF_A", OrderSide.BUY)],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    payload = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")[0][
+        "payload"
+    ]
+    # buy_c survived resizing but the broker's quantity cap rejected it, so the
+    # stage where it dropped out is visible.
+    assert "buy_c" in payload["resized_buy_order_ids"]
+    assert "buy_c" not in payload["capacity_accepted_buy_order_ids"]
+    assert "buy_c" not in payload["submitted_buy_order_ids"]
+    assert "buy_c" in payload["omitted_buy_order_ids"]
+    assert "buy_b" in payload["submitted_buy_order_ids"]
