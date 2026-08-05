@@ -36,12 +36,25 @@ class OrderCapacityService:
         accepted: list[OrderIntent] = []
         blocked: list[OrderCapacityBlock] = []
         reserved_by_account: dict[str, float] = {}
+        # A rotation's buy is funded by the sell filed alongside it, so a fully
+        # invested account reports zero buying power right up until that sell
+        # settles. Blocking the buy here leaves the book in cash for a whole
+        # cycle; keep it and let the post-sell phase run the real check against
+        # the broker's own balance.
+        proceeds_by_account: dict[str, float] = {}
+        for order in orders:
+            if order.side == OrderSide.SELL:
+                sell_key = order.account_id or "default"
+                proceeds_by_account[sell_key] = (
+                    proceeds_by_account.get(sell_key, 0.0) + order.notional
+                )
         for order in orders:
             if order.side != OrderSide.BUY:
                 accepted.append(order)
                 continue
             account_key = order.account_id or "default"
             reserved = reserved_by_account.get(account_key, 0.0)
+            proceeds = proceeds_by_account.get(account_key, 0.0)
             try:
                 capacity = self.lookup(order)
             except Exception as exc:
@@ -58,7 +71,7 @@ class OrderCapacityService:
                 )
                 continue
 
-            available_cash = max(0.0, capacity.cash_buying_power - reserved)
+            available_cash = max(0.0, capacity.cash_buying_power + proceeds - reserved)
             cash_quantity = available_cash / order.price if order.price > 0 else 0.0
             available_quantity = (
                 cash_quantity
@@ -88,6 +101,10 @@ class OrderCapacityService:
                 )
                 continue
 
+            if proceeds > 0:
+                order = order.model_copy(
+                    update={"metadata": {**order.metadata, "sell_fill_pending": True}}
+                )
             accepted.append(order)
             reserved_by_account[account_key] = reserved + order.notional
         return accepted, blocked

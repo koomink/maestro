@@ -76,6 +76,77 @@ def test_capacity_fails_closed_per_buy_but_preserves_sell():
     assert blocked[0].error_type == "TimeoutError"
 
 
+def test_buy_funded_by_a_sell_in_the_same_batch_is_kept():
+    # Fully invested account: the broker reports zero buying power until the
+    # sell settles, which is exactly when a rotation needs to size its buy.
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order("sell_qqq", "QQQ", 100, 100, "toss", side=OrderSide.SELL),
+            _order("buy_tlt", "TLT", 100, 100, "toss"),
+        ]
+    )
+
+    assert blocked == []
+    assert {order.order_id for order in accepted} == {"sell_qqq", "buy_tlt"}
+    buy = next(order for order in accepted if order.order_id == "buy_tlt")
+    assert buy.metadata["sell_fill_pending"] is True
+
+
+def test_buy_beyond_cash_and_sell_proceeds_is_still_blocked():
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order("sell_qqq", "QQQ", 10, 100, "toss", side=OrderSide.SELL),
+            _order("buy_tlt", "TLT", 100, 100, "toss"),
+        ]
+    )
+
+    assert [order.order_id for order in accepted] == ["sell_qqq"]
+    assert [item.order.order_id for item in blocked] == ["buy_tlt"]
+    assert blocked[0].reason == "cash_buying_power_exceeded"
+
+
+def test_sell_proceeds_do_not_cross_accounts():
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order("sell_a", "QQQ", 100, 100, "account_a", side=OrderSide.SELL),
+            _order("buy_b", "TLT", 100, 100, "account_b"),
+        ]
+    )
+
+    assert [order.order_id for order in accepted] == ["sell_a"]
+    assert [item.order.order_id for item in blocked] == ["buy_b"]
+
+
 def _order(
     order_id: str,
     symbol: str,
