@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 
-from maestro.core.enums import OrderSide
+from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.base import OrderIntent
+from maestro.execution.live_order_models import LiveOrderLifecycleResult
 
 
 @dataclass(frozen=True)
@@ -42,3 +43,28 @@ def split_rotation_cohorts(orders: list[OrderIntent]) -> list[RotationCohort]:
         )
         for (account_id, currency), (sells, buys) in grouped.items()
     ]
+
+
+@dataclass(frozen=True)
+class SellPhaseOutcome:
+    complete: bool
+    reason: str | None
+    unfilled: tuple[LiveOrderLifecycleResult, ...]
+
+
+def evaluate_sell_phase(results: list[LiveOrderLifecycleResult]) -> SellPhaseOutcome:
+    """Decide whether the buy phase may run.
+
+    Only a completely filled sell releases the cash the buy was sized against, so
+    anything short of FILLED — partial, rejected, still working at the deadline —
+    stops the cohort.
+    """
+    unfilled = tuple(result for result in results if result.final_status != OrderStatus.FILLED)
+    if not unfilled:
+        return SellPhaseOutcome(complete=True, reason=None, unfilled=())
+    statuses = sorted({result.final_status.value for result in unfilled})
+    return SellPhaseOutcome(
+        complete=False,
+        reason="sell_phase_incomplete:" + ",".join(statuses),
+        unfilled=unfilled,
+    )
