@@ -20,7 +20,7 @@ from maestro.config.identity import ConfigIdentity
 from maestro.config.models import MaestroConfig
 from maestro.config.multi_account_contributions import is_multi_account_contribution_account_id
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderType, RunMode
+from maestro.core.enums import OrderStatus, OrderType, RunMode
 from maestro.core.ids import new_run_id, new_signal_run_id
 from maestro.core.provenance import current_deployment_identity
 from maestro.core.symbols import is_cash_symbol
@@ -59,6 +59,7 @@ from maestro.execution.live_order_factory import (
 )
 from maestro.execution.live_order_safety import build_live_order_idempotency_key
 from maestro.execution.live_orders import (
+    BrokerOrderId,
     BrokerReconciliationRunner,
     LiveOrderCancelRequest,
     LiveOrderClient,
@@ -2854,40 +2855,22 @@ class MaestroOrchestrator:
         orders from current holdings, so it converges on the same target.
         """
         dependencies = dependencies_by_account.get(cohort.account_id)
-        cancel_service = dependencies.cancel_service if dependencies is not None else None
         canceled: list[dict[str, Any]] = []
         cancel_failures: list[dict[str, Any]] = []
+        cancel_unconfirmed: list[dict[str, Any]] = []
         for result in outcome.unfilled:
             broker_order = result.submitted_order.broker_order if result.submitted_order else None
-            if broker_order is None or cancel_service is None:
+            if broker_order is None or dependencies is None:
                 continue
-            try:
-                cancel_result = cancel_service.cancel_order(
-                    LiveOrderCancelRequest(
-                        run_id=run_id,
-                        approval_id=approval_decision.approval_id,
-                        broker_order=broker_order,
-                        reason="rotation_cohort_aborted",
-                    ),
-                    approval_decision,
-                )
-            except Exception as exc:
-                cancel_failures.append(
-                    {
-                        "order_id": result.order_id,
-                        "broker_order_id": broker_order.broker_order_id,
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc),
-                    }
-                )
-                continue
-            canceled.append(
-                {
-                    "order_id": result.order_id,
-                    "broker_order_id": broker_order.broker_order_id,
-                    "status": cancel_result.status.value,
-                    "canceled_quantity": cancel_result.canceled_quantity,
-                }
+            self._cancel_and_confirm(
+                result,
+                broker_order,
+                run_id=run_id,
+                approval_decision=approval_decision,
+                dependencies=dependencies,
+                canceled=canceled,
+                cancel_failures=cancel_failures,
+                cancel_unconfirmed=cancel_unconfirmed,
             )
         self._record_event(
             run_id,
@@ -2900,9 +2883,99 @@ class MaestroOrchestrator:
                 "skipped_buy_order_ids": [order.order_id for order in cohort.buys],
                 "canceled": canceled,
                 "cancel_failures": cancel_failures,
+                "cancel_unconfirmed": cancel_unconfirmed,
             },
         )
-        self._notify_cohort_abort(cohort, outcome, run_id, canceled, cancel_failures)
+        self._notify_cohort_abort(
+            cohort,
+            outcome,
+            run_id,
+            canceled,
+            cancel_failures + cancel_unconfirmed,
+        )
+
+    def _cancel_and_confirm(
+        self,
+        result: LiveOrderLifecycleResult,
+        broker_order: BrokerOrderId,
+        *,
+        run_id: str,
+        approval_decision: ApprovalDecision,
+        dependencies: LiveApprovalDependencies,
+        canceled: list[dict[str, Any]],
+        cancel_failures: list[dict[str, Any]],
+        cancel_unconfirmed: list[dict[str, Any]],
+    ) -> None:
+        """Cancel a working order and re-poll until the broker agrees it is gone.
+
+        Broker cancel endpoints acknowledge the request, not the outcome — the
+        Toss adapter reports CANCELED straight from the POST response. Trusting
+        that would tell the operator the book is clear while the order is still
+        working, and a working order blocks their entire next run.
+        """
+        cancel_service = dependencies.cancel_service
+        if cancel_service is None:
+            return
+        try:
+            cancel_service.cancel_order(
+                LiveOrderCancelRequest(
+                    run_id=run_id,
+                    approval_id=approval_decision.approval_id,
+                    broker_order=broker_order,
+                    reason="rotation_cohort_aborted",
+                ),
+                approval_decision,
+            )
+        except Exception as exc:
+            cancel_failures.append(
+                {
+                    "order_id": result.order_id,
+                    "broker_order_id": broker_order.broker_order_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+            )
+            return
+        status_service = dependencies.status_service
+        if status_service is None:
+            cancel_unconfirmed.append(
+                {
+                    "order_id": result.order_id,
+                    "broker_order_id": broker_order.broker_order_id,
+                    "observed_status": "unknown",
+                }
+            )
+            return
+        try:
+            snapshot = status_service.poll_order_status(run_id, broker_order)
+        except Exception as exc:
+            cancel_unconfirmed.append(
+                {
+                    "order_id": result.order_id,
+                    "broker_order_id": broker_order.broker_order_id,
+                    "observed_status": "unknown",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                }
+            )
+            return
+        if snapshot.status != OrderStatus.CANCELED:
+            cancel_unconfirmed.append(
+                {
+                    "order_id": result.order_id,
+                    "broker_order_id": broker_order.broker_order_id,
+                    "observed_status": snapshot.status.value,
+                }
+            )
+            return
+        canceled.append(
+            {
+                "order_id": result.order_id,
+                "broker_order_id": broker_order.broker_order_id,
+                "status": snapshot.status.value,
+                "canceled_quantity": snapshot.partial_fill.remaining_quantity,
+            }
+        )
 
     def _notify_cohort_abort(
         self,

@@ -111,7 +111,9 @@ def test_abort_cancels_the_outstanding_sell(tmp_path, monkeypatch):
 
     assert cancels == ["sell_a"]
     aborted = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")
+    # The broker confirms the order is gone on the follow-up poll.
     assert aborted[0]["payload"]["canceled"][0]["order_id"] == "sell_a"
+    assert aborted[0]["payload"]["cancel_unconfirmed"] == []
 
 
 def test_abort_skips_cancel_when_the_sell_never_reached_the_broker(tmp_path, monkeypatch):
@@ -237,6 +239,7 @@ def _install_fakes(
     cancels: list[str] | None = None,
     reject_submits: set[str] | None = None,
     keys: list[tuple[str, str | None]] | None = None,
+    cancel_confirms: bool = True,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
@@ -248,7 +251,11 @@ def _install_fakes(
             fill_reconciliation_service=_FillService(),
             workflow_service=None,
             lifecycle_service=None,
-            cancel_service=_CancelService(cancels if cancels is not None else []),
+            cancel_service=_CancelService(
+                cancels if cancels is not None else [],
+                status_by_order,
+                cancel_confirms,
+            ),
         )
 
     monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
@@ -294,12 +301,23 @@ class _SafetyService:
 
 
 class _CancelService:
-    def __init__(self, cancels: list[str]) -> None:
+    def __init__(
+        self,
+        cancels: list[str],
+        status_by_order: dict[str, OrderStatus],
+        confirms: bool,
+    ) -> None:
         self.cancels = cancels
+        self.status_by_order = status_by_order
+        self.confirms = confirms
 
     def cancel_order(self, request, approval_decision):
         del approval_decision
-        self.cancels.append(request.broker_order.order_id)
+        order_id = request.broker_order.order_id
+        self.cancels.append(order_id)
+        if self.confirms:
+            # A broker that actually cancels reports CANCELED on the next poll.
+            self.status_by_order[order_id] = OrderStatus.CANCELED
         return LiveOrderCancelResult(
             broker_order=request.broker_order,
             status=OrderStatus.CANCELED,
@@ -576,3 +594,37 @@ def test_buys_rescaled_out_of_existence_are_reported(tmp_path, monkeypatch):
     incomplete = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")
     assert incomplete[0]["payload"]["reason"] == "no_buys_survived_resizing"
     assert telegram.messages
+
+
+def test_cancel_is_confirmed_by_polling_not_by_the_api_ack(tmp_path, monkeypatch):
+    """The Toss adapter returns CANCELED straight from the POST acknowledgement.
+
+    Recording that as a confirmed cancellation tells the operator the book is
+    clear when the order may still be working — and a working order blocks their
+    whole next run.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        # Still PARTIALLY_FILLED when re-polled after the cancel: not confirmed.
+        {"sell_a": OrderStatus.PARTIALLY_FILLED, "buy_b": OrderStatus.FILLED},
+        cancels=[],
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    payload = orchestrator.state_store.list_system_events_by_type("rotation_cohort_aborted")[0][
+        "payload"
+    ]
+    assert payload["canceled"] == []
+    assert payload["cancel_unconfirmed"][0]["order_id"] == "sell_a"
+    assert payload["cancel_unconfirmed"][0]["observed_status"] == "partially_filled"
