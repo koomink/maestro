@@ -164,6 +164,71 @@ def test_buy_only_run_is_not_resized_against_buying_power(tmp_path, monkeypatch)
     assert dict(submitted)["buy_b"] == 100.0
 
 
+def test_rerun_reuses_the_same_idempotency_key(tmp_path, monkeypatch):
+    """Two-phase submission must not mint a fresh duplicate_key per run.
+
+    LiveOrderSafetyService refuses a submission whose duplicate_key it has already
+    seen. That guard is only worth anything if the key is stable for a given
+    signal run and order, so a retry cannot double-fill.
+    """
+    keys: list[tuple[str, str | None]] = []
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.FILLED},
+        keys=keys,
+    )
+
+    for run_id in ("run-1", "run-2"):
+        orchestrator._execute_live_approval_orders(
+            run_id,
+            [_sell("sell_a"), _buy("buy_b")],
+            "appr-1",
+            _approval_decision(run_id),
+            signal_run_id="sig-1",
+        )
+
+    by_order: dict[str, set[str | None]] = {}
+    for order_id, key in keys:
+        by_order.setdefault(order_id, set()).add(key)
+    assert all(len(seen) == 1 for seen in by_order.values()), by_order
+
+
+def test_abort_notifies_the_operator(tmp_path, monkeypatch):
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    telegram = _TelegramClient()
+    orchestrator.telegram_client = telegram
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.PARTIALLY_FILLED, "buy_b": OrderStatus.FILLED},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert telegram.messages, "operator was never told the rotation stopped"
+    text = telegram.messages[0][1]
+    assert "sell_a" in text
+    assert "buy_b" in text
+
+
+class _TelegramClient:
+    def __init__(self) -> None:
+        self.messages: list[tuple[int, str]] = []
+
+    def send_message(self, chat_id, text, **kwargs):
+        del kwargs
+        self.messages.append((chat_id, text))
+
+
 def _install_fakes(
     monkeypatch,
     calls: list[str],
@@ -171,13 +236,14 @@ def _install_fakes(
     submitted: list[tuple[str, float]] | None = None,
     cancels: list[str] | None = None,
     reject_submits: set[str] | None = None,
+    keys: list[tuple[str, str | None]] | None = None,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
         return LiveApprovalDependencies(
             state_store=state_store,
             audit_logger=audit_logger,
-            safety_service=_SafetyService(calls, submitted, reject_submits or set()),
+            safety_service=_SafetyService(calls, submitted, reject_submits or set(), keys),
             status_service=_StatusService(calls, status_by_order),
             fill_reconciliation_service=_FillService(),
             workflow_service=None,
@@ -194,14 +260,18 @@ class _SafetyService:
         calls: list[str],
         submitted: list[tuple[str, float]] | None,
         reject_submits: set[str],
+        keys: list[tuple[str, str | None]] | None = None,
     ) -> None:
         self.calls = calls
         self.submitted = submitted
         self.reject_submits = reject_submits
+        self.keys = keys
 
     def submit_approved_order(self, request, approval):
         del approval
         self.calls.append(f"submit:{request.order_id}")
+        if self.keys is not None:
+            self.keys.append((request.order_id, request.duplicate_key))
         if self.submitted is not None:
             self.submitted.append((request.order_id, request.quantity))
         if request.order_id in self.reject_submits:

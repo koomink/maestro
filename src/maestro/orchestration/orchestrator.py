@@ -2803,6 +2803,69 @@ class MaestroOrchestrator:
                 "cancel_failures": cancel_failures,
             },
         )
+        self._notify_cohort_abort(cohort, outcome, run_id, canceled, cancel_failures)
+
+    def _notify_cohort_abort(
+        self,
+        cohort: RotationCohort,
+        outcome: SellPhaseOutcome,
+        run_id: str,
+        canceled: list[dict[str, Any]],
+        cancel_failures: list[dict[str, Any]],
+    ) -> None:
+        """Tell the operator the rotation stopped and what state it left behind.
+
+        An abort leaves the book part-rotated, which looks exactly like the bug
+        this two-phase flow exists to fix. It must never pass silently.
+        """
+        try:
+            client = self.telegram_client or TelegramBotAPIClient(
+                token_env=self.config.approval.telegram_bot_token_env,
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:
+            self._record_event(
+                run_id,
+                "live_order_notification_failed",
+                {
+                    "status": "rotation_cohort_aborted",
+                    "account_id": cohort.account_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return
+        unfilled = ", ".join(result.order_id for result in outcome.unfilled) or "none"
+        skipped = ", ".join(order.order_id for order in cohort.buys) or "none"
+        canceled_text = ", ".join(entry["order_id"] for entry in canceled) or "none"
+        lines = [
+            "Maestro rotation stopped",
+            f"account_id: {cohort.account_id or 'default'}",
+            f"currency: {cohort.currency or 'default'}",
+            f"reason: {outcome.reason}",
+            f"sells not filled: {unfilled}",
+            f"buys skipped: {skipped}",
+            f"canceled: {canceled_text}",
+        ]
+        if cancel_failures:
+            failures = ", ".join(entry["order_id"] for entry in cancel_failures)
+            lines.append(f"cancel FAILED (still live at broker): {failures}")
+        lines.append("Re-run the rebalance to resize against current holdings.")
+        text = "\n".join(lines)
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            try:
+                client.send_message(chat_id, text)
+            except Exception as exc:
+                self._record_event(
+                    run_id,
+                    "live_order_notification_failed",
+                    {
+                        "status": "rotation_cohort_aborted",
+                        "account_id": cohort.account_id,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
 
     def _record_live_order_dry_run(
         self,
