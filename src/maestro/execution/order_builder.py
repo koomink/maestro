@@ -28,16 +28,35 @@ def round_price_to_tick(raw_price: float, instrument: TradableInstrument | None)
     return float(Decimal(ticks) * Decimal(str(instrument.price_tick)))
 
 
-def floor_quantity_to_step(raw_quantity: float, instrument: TradableInstrument | None) -> float:
-    """Round a quantity down to the instrument's tradable step.
+# Float slack for a quantity derived by dividing cash by a price. Shared by the
+# capacity block report and the Telegram retry review so the maximum they quote
+# an operator is the same number.
+QUOTED_QUANTITY_TOLERANCE = 1e-9
+
+
+def floor_to_step(raw_quantity: float, step: float, *, tolerance: float = 0.0) -> float:
+    """Round a quantity down to a tradable step.
 
     Rounding down rather than to nearest keeps an order inside whatever budget
     sized it: a rounded-up share is one the account may not be able to pay for.
+
+    `tolerance` absorbs the float error of a quantity that was divided out of a
+    cash figure — 0.3 / 0.1 is 2.9999999999999996, and truncating that to two
+    shares hides a third the account can actually pay for. Callers that size a
+    real order leave it at zero, so no order is ever rounded up into money that
+    is not there.
     """
+    if step <= 0:
+        return raw_quantity
+    steps = int(Decimal(str(raw_quantity + tolerance)) / Decimal(str(step)))
+    return float(Decimal(steps) * Decimal(str(step)))
+
+
+def floor_quantity_to_step(raw_quantity: float, instrument: TradableInstrument | None) -> float:
+    """`floor_to_step` for callers that hold the instrument rather than the step."""
     if instrument is None:
         return raw_quantity
-    steps = int(Decimal(str(raw_quantity)) / Decimal(str(instrument.quantity_step)))
-    return float(Decimal(steps) * Decimal(str(instrument.quantity_step)))
+    return floor_to_step(raw_quantity, instrument.quantity_step)
 
 
 class OrderBuilder:

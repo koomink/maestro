@@ -57,7 +57,12 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
         self,
         symbol: str | None = None,
         order_price: float | None = None,
+        currency: str | None = None,
     ) -> KISBuyingPower:
+        # This account trades one market in one currency, so `currency` cannot
+        # change the answer — but the reply names KRW so a mis-routed order in
+        # another currency is caught by the caller rather than silently paid for
+        # out of the won balance.
         pdno = symbol or ""
         payload = self._get(
             "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
@@ -77,6 +82,7 @@ class KISRestDomesticStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
             symbol=symbol,
             order_price=_optional_float(output.get("ord_unpr")),
             cash_buying_power=_first_float(output, "nrcvb_buy_amt", "max_buy_amt", "ord_psbl_cash"),
+            currency="KRW",
             max_buy_quantity=_optional_first_float(output, "nrcvb_buy_qty", "max_buy_qty"),
             source="kis_rest_readonly",
         )

@@ -523,11 +523,30 @@ the same `signal_run_id`.
   call `/uapi/overseas-stock/v1/trading/inquire-psamount`. Insufficient KIS
   buying power or max buy quantity fails before any order endpoint call.
 - `OrderCapacityService` is the common pre-approval capacity gate. It calls the
-  account-routed `BrokerReadOnlyClient.get_buying_power(symbol, price)` for each
-  buy, reserves accepted notional within the account, and partitions only the
-  failing orders into `live_order_capacity_blocked` events. Lookup failures fail
-  closed per order. Broker pre-submit validation remains in place to catch
-  balance or open-order changes after approval.
+  account-routed `BrokerReadOnlyClient.get_buying_power(symbol, price, currency)`
+  for each buy, reserves accepted notional within the account and currency, and
+  partitions only the failing orders into `live_order_capacity_blocked` events.
+  Lookup failures fail closed per order. Broker pre-submit validation remains in
+  place to catch balance or open-order changes after approval.
+- Buying power is answered per currency, never per account. A Toss account holds
+  a KRW pot and a USD pot, and its account-level `buying_power_detail` reports
+  whichever the parser named primary — judging a dollar buy against it blocks
+  orders the account can afford. `execution/broker_capacity_lookup.py` resolves
+  each order's currency (order → instrument → base currency; shared with
+  `LiveExecutionGateService`) and asks the adapter for that currency. An adapter
+  that cannot answer for it, answers in another currency, or returns a figure
+  naming no currency at all raises `BuyingPowerCurrencyUnavailable`, and the
+  order is blocked with reason `buying_power_by_currency_unavailable` rather
+  than measured against the wrong pot. Every adapter names its currency —
+  single-market KIS ones state their own (KRW domestic, USD overseas), which
+  also catches a mis-routed order.
+- Blocked-order reports carry `capacity_currency` when a balance was read, and
+  `requested_currency` plus `available_currencies` when none was. Their
+  `max_buy_quantity` is rounded down to the instrument's `quantity_step`, with a
+  small tolerance so a share is not lost to the float error of dividing cash by
+  a price, giving a quantity the operator can actually retry with. The
+  block/allow ruling itself still uses the unrounded cash figure, and order
+  sizing keeps exact truncation.
 - KIS domestic buying-power lookup uses `ORD_DVSN=00` with the intended limit
   price so `max_buy_quantity` is calculated with the same semantics as the
   eventual limit order, rather than a market-order upper-limit price.

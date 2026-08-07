@@ -2,7 +2,7 @@ import os
 import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timedelta
-from math import floor, isfinite
+from math import isfinite
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -35,6 +35,7 @@ from maestro.dashboard.read_models import (
 )
 from maestro.execution.account_cash_flows import AccountCashFlowService
 from maestro.execution.base import OrderIntent
+from maestro.execution.broker_capacity_lookup import get_order_buying_power
 from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.execution.broker_state import portfolio_state_from_broker_account
 from maestro.execution.brokers.readonly_factory import (
@@ -67,7 +68,11 @@ from maestro.execution.live_order_models import (
     LiveOrderStatusSnapshot,
 )
 from maestro.execution.live_order_tracking import list_unreconciled_live_order_fills
-from maestro.execution.order_builder import round_price_to_tick
+from maestro.execution.order_builder import (
+    QUOTED_QUANTITY_TOLERANCE,
+    floor_to_step,
+    round_price_to_tick,
+)
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.monitoring.audit_logger import AuditLogger
@@ -885,7 +890,8 @@ class TelegramOperatorCommandRouter:
             }
         )
         capacity_service = OrderCapacityService(
-            lambda candidate: self._lookup_retry_capacity(config, candidate)
+            lambda candidate: self._lookup_retry_capacity(config, candidate),
+            quantity_step=lambda candidate: _quantity_step(config, candidate),
         )
         accepted, capacity_blocks = capacity_service.partition([order])
         if capacity_blocks or not accepted:
@@ -1107,9 +1113,13 @@ class TelegramOperatorCommandRouter:
             maximum = min(original.quantity, cash_quantity)
             if capacity.max_buy_quantity is not None:
                 maximum = min(maximum, float(capacity.max_buy_quantity))
-        instrument = config.universe.get(original.symbol)
-        step = float(instrument.quantity_step) if instrument is not None else 1.0
-        maximum = floor((max(0.0, maximum) + 1e-9) / step) * step
+        # Same rounding the pre-approval block report uses, so the quantity the
+        # operator is offered here matches the one the alert quoted.
+        maximum = floor_to_step(
+            max(0.0, maximum),
+            _quantity_step(config, original),
+            tolerance=QUOTED_QUANTITY_TOLERANCE,
+        )
         return candidate, original, price, maximum
 
     def _process_retry_quantity_reply(
@@ -1241,7 +1251,8 @@ class TelegramOperatorCommandRouter:
                 raise ValueError("retry orders require live_approval mode")
             order = OrderIntent.model_validate(proposal["order"])
             accepted, capacity_blocks = OrderCapacityService(
-                lambda candidate: self._lookup_retry_capacity(config, candidate)
+                lambda candidate: self._lookup_retry_capacity(config, candidate),
+                quantity_step=lambda candidate: _quantity_step(config, candidate),
             ).partition([order])
             if capacity_blocks or not accepted:
                 reason = capacity_blocks[0].reason if capacity_blocks else "capacity unavailable"
@@ -1544,9 +1555,7 @@ class TelegramOperatorCommandRouter:
             service = service.inner
         account = BrokerAccountRouter(config).account(order.account_id)
         broker = account.broker if account is not None else "kis"
-        instrument = config.universe.get(order.symbol)
-        symbol = instrument.symbol_for_broker(broker) if instrument is not None else order.symbol
-        return service.client.get_buying_power(symbol, order.price)
+        return get_order_buying_power(service.client, config, broker, order)
 
     def _lookup_retry_price(self, config: MaestroConfig, order: OrderIntent) -> float:
         service = build_broker_readonly_service(
@@ -4544,6 +4553,17 @@ def _portfolio_position_line(
         f"{label}: {_number(quantity)} @ {_number(current_price)} {currency} "
         f"= {_number(market_value)} {currency}"
     )
+
+
+def _quantity_step(config: MaestroConfig, order: OrderIntent) -> float:
+    """The instrument's tradable step, defaulting to whole units.
+
+    An unknown instrument is not evidence that fractional quantities are
+    tradable, and quoting a partial share the broker would reject is worse than
+    quoting one share fewer.
+    """
+    instrument = config.universe.get(order.symbol)
+    return float(instrument.quantity_step) if instrument is not None else 1.0
 
 
 def _mapping(value: object) -> dict[str, Any]:

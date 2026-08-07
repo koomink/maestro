@@ -747,11 +747,12 @@ class FakeLiveOrderClient(LiveOrderClient):
             broker_order=_broker_order(request),
         )
 
-    def get_buying_power(self, symbol, order_price):
+    def get_buying_power(self, symbol, order_price, currency=None):
         return BrokerBuyingPower(
             symbol=symbol,
             order_price=order_price,
             cash_buying_power=1_000_000_000,
+            currency=currency,
             max_buy_quantity=1_000_000,
             source="test",
         )

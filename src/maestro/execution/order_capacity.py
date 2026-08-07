@@ -5,7 +5,11 @@ from pydantic import BaseModel
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide
 from maestro.execution.base import OrderIntent
-from maestro.execution.brokers.readonly import BrokerBuyingPower
+from maestro.execution.brokers.readonly import (
+    BrokerBuyingPower,
+    BuyingPowerCurrencyUnavailable,
+)
+from maestro.execution.order_builder import QUOTED_QUANTITY_TOLERANCE, floor_to_step
 
 
 class OrderCapacityBlock(BaseModel):
@@ -13,6 +17,13 @@ class OrderCapacityBlock(BaseModel):
     requested_quantity: float
     requested_notional: float
     cash_buying_power: float | None = None
+    # Which currency's balance the figures above were actually read from, so a
+    # blocked-order report can be checked against the account snapshot. Null
+    # when no figure was obtained — the currency asked for is `requested_currency`
+    # and what the broker did report is `available_currencies`.
+    capacity_currency: str | None = None
+    requested_currency: str | None = None
+    available_currencies: list[str] | None = None
     max_buy_quantity: float | None = None
     reason: str
     error_type: str | None = None
@@ -42,8 +53,14 @@ class OrderCapacityService:
     def __init__(
         self,
         lookup: Callable[[OrderIntent], BrokerBuyingPower],
+        quantity_step: Callable[[OrderIntent], float] | None = None,
     ) -> None:
         self.lookup = lookup
+        # Reported maximums are what the operator retries with, so a figure that
+        # is not a whole tradable lot is not an offer they can accept. Callers
+        # that know the instrument's step pass it; without one the raw cash
+        # quantity stands.
+        self.quantity_step = quantity_step
 
     def partition(
         self,
@@ -85,6 +102,25 @@ class OrderCapacityService:
                 continue
             try:
                 capacity = self.lookup(order)
+            except BuyingPowerCurrencyUnavailable as exc:
+                # Distinct from an outage: the broker answered, just not about
+                # the currency this order spends. Nothing to retry against.
+                blocked.append(
+                    OrderCapacityBlock(
+                        order=order,
+                        requested_quantity=order.quantity,
+                        requested_notional=order.notional,
+                        # No balance was read, so there is no capacity currency
+                        # to name — only what was asked for and what existed.
+                        requested_currency=exc.currency,
+                        available_currencies=list(exc.available_currencies),
+                        reason="buying_power_by_currency_unavailable",
+                        error_type=type(exc).__name__,
+                        error_message=str(exc),
+                        checked_at=utc_now().isoformat(),
+                    )
+                )
+                continue
             except Exception as exc:
                 blocked.append(
                     OrderCapacityBlock(
@@ -106,6 +142,7 @@ class OrderCapacityService:
                 if capacity.max_buy_quantity is None
                 else min(capacity.max_buy_quantity, cash_quantity)
             )
+            available_quantity = self._tradable_quantity(order, available_quantity)
             reason = None
             if order.notional > available_cash + 1e-9:
                 reason = "cash_buying_power_exceeded"
@@ -122,6 +159,7 @@ class OrderCapacityService:
                         requested_quantity=order.quantity,
                         requested_notional=order.notional,
                         cash_buying_power=available_cash,
+                        capacity_currency=capacity.currency,
                         max_buy_quantity=available_quantity,
                         reason=reason,
                         checked_at=utc_now().isoformat(),
@@ -132,6 +170,21 @@ class OrderCapacityService:
             accepted.append(order)
             reserved_by_scope[scope] = reserved + order.notional
         return accepted, blocked
+
+    def _tradable_quantity(self, order: OrderIntent, quantity: float) -> float:
+        """Round a reported maximum down to something the broker would accept.
+
+        The block/allow ruling above stays on the raw cash figure; this only
+        shapes the number the operator is offered, so a partial share of a
+        whole-lot instrument is not presented as a retry.
+        """
+        if self.quantity_step is None:
+            return quantity
+        return floor_to_step(
+            max(0.0, quantity),
+            self.quantity_step(order),
+            tolerance=QUOTED_QUANTITY_TOLERANCE,
+        )
 
 
 __all__ = ["OrderCapacityBlock", "OrderCapacityService"]

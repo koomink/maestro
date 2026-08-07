@@ -1,6 +1,11 @@
+import pytest
+
 from maestro.core.enums import Currency, OrderSide
 from maestro.execution.base import OrderIntent
-from maestro.execution.brokers.readonly import BrokerBuyingPower
+from maestro.execution.brokers.readonly import (
+    BrokerBuyingPower,
+    BuyingPowerCurrencyUnavailable,
+)
 from maestro.execution.order_capacity import OrderCapacityService
 
 
@@ -157,6 +162,154 @@ def test_sell_proceeds_do_not_cross_accounts():
 
     assert [order.order_id for order in accepted] == ["sell_a"]
     assert [item.order.order_id for item in blocked] == ["buy_b"]
+
+
+def test_the_whole_us_cohort_fits_inside_the_dollar_buying_power():
+    """Regression for the 2026-08-05 Toss block.
+
+    Five USD buys totalling 25,594.50 were rejected against a KRW figure of 2.0
+    while the account held 26,072 USD. Given the dollar figure they all fit.
+    """
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=26_072.0,
+            currency="USD",
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(_us_cohort())
+
+    assert blocked == []
+    assert [order.order_id for order in accepted] == [
+        "ord_bil",
+        "ord_spy",
+        "ord_sso",
+        "ord_agg",
+        "ord_pdbc",
+    ]
+
+
+def test_dollar_reservations_accumulate_until_the_dollars_run_out():
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=26_072.0,
+            currency="USD",
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            *_us_cohort(),
+            # 25,594.50 is already reserved, leaving 477.50.
+            _order("ord_over", "IEF", 10, 95.0, "toss_brokerage", currency=Currency.USD,
+                   strategy="crescendo_us"),
+        ]
+    )
+
+    assert [item.order.order_id for item in blocked] == ["ord_over"]
+    assert blocked[0].cash_buying_power == pytest.approx(477.5)
+    assert blocked[0].capacity_currency == "USD"
+    assert len(accepted) == 5
+
+
+def test_a_currency_the_broker_cannot_price_blocks_with_its_own_reason():
+    def lookup(order):
+        raise BuyingPowerCurrencyUnavailable("USD", ["KRW"])
+
+    _, blocked = OrderCapacityService(lookup).partition(
+        [_order("ord_bil", "BIL", 102, 91.43, "toss_brokerage", currency=Currency.USD)]
+    )
+
+    assert blocked[0].reason == "buying_power_by_currency_unavailable"
+    assert blocked[0].requested_currency == "USD"
+    assert blocked[0].available_currencies == ["KRW"]
+    # Nothing was measured, so no currency can be named as the one measured.
+    assert blocked[0].capacity_currency is None
+    assert blocked[0].error_type == "BuyingPowerCurrencyUnavailable"
+
+
+def test_max_buy_quantity_is_reported_in_whole_shares_when_the_step_is_known():
+    """0.0218747 shares of BIL is not an order anyone can place."""
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=2.0,
+            currency="USD",
+            max_buy_quantity=None,
+            source="fake",
+        ),
+        quantity_step=lambda order: 1.0,
+    )
+
+    _, blocked = service.partition(
+        [_order("ord_bil", "BIL", 102, 91.43, "toss_brokerage", currency=Currency.USD)]
+    )
+
+    assert blocked[0].max_buy_quantity == 0.0
+
+
+def test_a_whole_share_is_not_lost_to_float_division():
+    """0.3 / 0.1 is 2.9999999999999996, and the account can afford three."""
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0.3,
+            currency="USD",
+            max_buy_quantity=None,
+            source="fake",
+        ),
+        quantity_step=lambda order: 1.0,
+    )
+
+    _, blocked = service.partition(
+        [_order("ord_penny", "PENNY", 10, 0.1, "toss_brokerage", currency=Currency.USD)]
+    )
+
+    assert blocked[0].max_buy_quantity == 3.0
+
+
+def test_max_buy_quantity_stays_continuous_without_a_step_lookup():
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=2.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    _, blocked = service.partition(
+        [_order("ord_bil", "BIL", 102, 91.43, "toss_brokerage", currency=Currency.USD)]
+    )
+
+    assert blocked[0].max_buy_quantity == pytest.approx(2.0 / 91.43)
+
+
+def _us_cohort() -> list[OrderIntent]:
+    """The five buys from run_71d88f73a23c42c48c4688d0639c2b8d, one approval group."""
+    return [
+        _order("ord_bil", "BIL", 102, 91.43, "toss_brokerage",
+               currency=Currency.USD, strategy="crescendo_us"),
+        _order("ord_spy", "SPY", 8, 775.86, "toss_brokerage",
+               currency=Currency.USD, strategy="crescendo_us"),
+        _order("ord_sso", "SSO", 89, 72.24, "toss_brokerage",
+               currency=Currency.USD, strategy="crescendo_us"),
+        _order("ord_agg", "AGG", 25, 97.64, "toss_brokerage",
+               currency=Currency.USD, strategy="crescendo_us"),
+        _order("ord_pdbc", "PDBC", 70, 17.02, "toss_brokerage",
+               currency=Currency.USD, strategy="crescendo_us"),
+    ]
 
 
 def _order(

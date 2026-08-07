@@ -27,6 +27,11 @@ from maestro.core.provenance import current_deployment_identity
 from maestro.core.symbols import is_cash_symbol
 from maestro.datahub.base import BaseDataProvider, build_data_provider
 from maestro.execution.base import OrderIntent
+from maestro.execution.broker_capacity_lookup import (
+    check_capacity_currency,
+    get_order_buying_power,
+    resolve_order_currency,
+)
 from maestro.execution.broker_router import (
     PAPER_DEFAULT_ACCOUNT_ID,
     BrokerAccountRouter,
@@ -2092,7 +2097,10 @@ class MaestroOrchestrator:
         armed = [order for order in orders if self._effective_order_posture(order) == "armed"]
         if not armed:
             return orders, []
-        service = OrderCapacityService(self.order_capacity_lookup or self._lookup_order_capacity)
+        service = OrderCapacityService(
+            self.order_capacity_lookup or self._lookup_order_capacity,
+            quantity_step=self._order_quantity_step,
+        )
         accepted_armed, blocked = service.partition(armed)
         accepted_ids = {order.order_id for order in accepted_armed}
         accepted = [
@@ -2117,11 +2125,28 @@ class MaestroOrchestrator:
             self._notify_capacity_block(run_id, item)
         return accepted, blocked
 
+    def _order_quantity_step(self, order: OrderIntent) -> float:
+        """Tradable step for the quantity quoted in a capacity block alert.
+
+        Unknown instruments fall back to whole units, the same assumption the
+        Telegram retry review makes, so the two quote the same maximum.
+        """
+        instrument = self.config.universe.get(order.symbol)
+        return float(instrument.quantity_step) if instrument is not None else 1.0
+
     def _lookup_order_capacity(self, order: OrderIntent) -> BrokerBuyingPower:
         if self.live_order_client is not None and hasattr(
             self.live_order_client, "get_buying_power"
         ):
-            return self.live_order_client.get_buying_power(order.symbol, order.price)
+            currency = resolve_order_currency(self.config, order)
+            return check_capacity_currency(
+                self.live_order_client.get_buying_power(
+                    order.symbol,
+                    order.price,
+                    currency=currency.value,
+                ),
+                currency,
+            )
 
         account_id = order.account_id
         client = self._order_capacity_clients.get(account_id)
@@ -2138,9 +2163,7 @@ class MaestroOrchestrator:
             self._order_capacity_clients[account_id] = client
         account = self.account_router.account(account_id)
         broker = account.broker if account is not None else "kis"
-        instrument = self.config.universe.get(order.symbol)
-        symbol = instrument.symbol_for_broker(broker) if instrument is not None else order.symbol
-        return client.get_buying_power(symbol, order.price)
+        return get_order_buying_power(client, self.config, broker, order)
 
     def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> None:
         client = self.telegram_client or TelegramBotAPIClient(

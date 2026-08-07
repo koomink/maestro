@@ -7,7 +7,11 @@ import pytest
 
 from maestro.config.broker import BrokerAccountConfig
 from maestro.execution.brokers.kis.service import KISReadOnlyService
-from maestro.execution.brokers.readonly import BrokerReadOnlyService
+from maestro.execution.brokers.readonly import (
+    BrokerReadOnlyService,
+    BuyingPowerCurrencyUnavailable,
+    buying_power_for_currency,
+)
 from maestro.execution.brokers.readonly_factory import (
     AttributionAwareReadOnlyService,
     broker_readonly_account_ids,
@@ -204,6 +208,95 @@ def test_toss_snapshot_keeps_open_buy_reservations_out_of_cash_fields():
         "PENDING",
         "PARTIAL_FILLED",
     ]
+
+
+def test_toss_buying_power_answers_in_the_currency_the_order_is_denominated_in():
+    """Regression for the 2026-08-05 block.
+
+    The account held 26,072 USD and 2 KRW. Every USD buy was judged against the
+    KRW figure because the account-level `buying_power_detail` carries whichever
+    currency the parser picked as primary.
+    """
+    client = _toss_client({"KRW": "2", "USD": "26072"})
+
+    usd = client.get_buying_power("BIL", 91.43, currency="USD")
+    krw = client.get_buying_power("005930", 72_000.0, currency="KRW")
+
+    assert usd.cash_buying_power == 26_072.0
+    assert usd.currency == "USD"
+    assert krw.cash_buying_power == 2.0
+    assert krw.currency == "KRW"
+
+
+def test_toss_buying_power_fails_closed_for_a_currency_the_account_does_not_report():
+    client = _toss_client({"KRW": "2", "USD": "26072"})
+
+    with pytest.raises(BuyingPowerCurrencyUnavailable) as exc_info:
+        client.get_buying_power("7203", 2_500.0, currency="JPY")
+
+    assert exc_info.value.currency == "JPY"
+    assert sorted(exc_info.value.available_currencies) == ["KRW", "USD"]
+
+
+def test_toss_buying_power_fails_closed_when_no_currency_is_named():
+    """Two currencies and no order currency: there is no honest answer."""
+    client = _toss_client({"KRW": "2", "USD": "26072"})
+
+    with pytest.raises(BuyingPowerCurrencyUnavailable):
+        client.get_buying_power("BIL", 91.43)
+
+
+def test_buying_power_for_currency_reads_a_single_currency_account_either_way():
+    account = toss_snapshot_from_payloads(
+        account={"accountNo": "12345678901", "accountSeq": 7},
+        holdings={"items": []},
+        buying_power={"currency": "KRW", "cashBuyingPower": "5000000"},
+    ).account
+
+    assert buying_power_for_currency(account, "KRW").cash_buying_power == 5_000_000.0
+    assert buying_power_for_currency(account, None).cash_buying_power == 5_000_000.0
+    with pytest.raises(BuyingPowerCurrencyUnavailable):
+        buying_power_for_currency(account, "USD")
+
+
+def _toss_client(buying_power_by_currency: dict[str, str]) -> TossReadOnlyClient:
+    return TossReadOnlyClient(
+        BrokerAccountConfig(
+            id="toss_brokerage",
+            broker="toss",
+            client_id_env="TOSS_CLIENT_ID",
+            client_secret_env="TOSS_CLIENT_SECRET",
+            account_seq=7,
+        ),
+        transport=CurrencyTossTransport(buying_power_by_currency),
+    )
+
+
+class CurrencyTossTransport:
+    """Serves a distinct buying-power figure per currency, as the live API does."""
+
+    def __init__(self, buying_power_by_currency):
+        self.buying_power_by_currency = buying_power_by_currency
+
+    def get(self, path, params=None, *, account_seq=None):
+        params = dict(params or {})
+        if path == "/api/v1/accounts":
+            return {"result": [{"accountNo": "12345678901", "accountSeq": 7}]}
+        if path == "/api/v1/holdings":
+            return {"result": {"items": []}}
+        if path == "/api/v1/buying-power":
+            currency = params["currency"]
+            return {
+                "result": {
+                    "currency": currency,
+                    "cashBuyingPower": self.buying_power_by_currency.get(currency, "0"),
+                }
+            }
+        if path == "/api/v1/orders":
+            return {"result": {"orders": [], "nextCursor": None, "hasNext": False}}
+        if path == "/api/v1/commissions":
+            return {"result": []}
+        raise AssertionError(f"unexpected Toss path: {path}")
 
 
 def test_toss_readonly_client_fetches_account_snapshot_with_account_header():
@@ -705,8 +798,13 @@ class StaticBrokerClient:
     def get_positions(self):
         return list(self.snapshot.account.positions)
 
-    def get_buying_power(self, symbol=None, order_price=None):
-        return self.snapshot.account.buying_power_detail
+    def get_buying_power(self, symbol=None, order_price=None, currency=None):
+        return buying_power_for_currency(
+            self.snapshot.account,
+            currency,
+            symbol=symbol,
+            order_price=order_price,
+        )
 
     def get_current_prices(self, symbols):
         return dict(self.snapshot.current_prices)

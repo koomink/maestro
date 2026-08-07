@@ -56,11 +56,15 @@ class MockKISReadOnlyClient(KISReadOnlyClient):
         self,
         symbol: str | None = None,
         order_price: float | None = None,
+        currency: str | None = None,
     ) -> KISBuyingPower:
+        # Mirrors the live domestic adapter: one market, one currency, named so
+        # that a mis-routed order in another currency is caught.
         return KISBuyingPower(
             symbol=symbol,
             order_price=order_price,
             cash_buying_power=5_000_000.0,
+            currency="KRW",
             max_buy_quantity=None,
             source="kis_mock",
         )

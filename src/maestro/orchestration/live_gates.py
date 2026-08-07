@@ -8,6 +8,7 @@ from maestro.core.clock import utc_now
 from maestro.core.enums import Currency, OrderSide, OrderType, RunMode
 from maestro.core.trading_day import trading_day_bounds_utc_str
 from maestro.execution.base import OrderIntent
+from maestro.execution.broker_capacity_lookup import resolve_order_currency
 from maestro.execution.broker_router import BrokerAccountRouter
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.ops.workflow_recovery import WorkflowRecoveryService
@@ -392,15 +393,9 @@ class LiveExecutionGateService:
         return None
 
     def _order_currency(self, order: OrderIntent) -> Currency:
-        if order.currency is not None:
-            return order.currency
-        instruments = {
-            instrument.symbol: instrument for instrument in self.config.universe.instruments
-        }
-        instrument = instruments.get(order.symbol)
-        if instrument is not None:
-            return instrument.currency
-        return Currency(self.config.portfolio.base_currency)
+        # Shared with the capacity lookups so the gate and the pre-approval
+        # partition cannot disagree about which pot an order draws from.
+        return resolve_order_currency(self.config, order)
 
     def _event_currency(self, payload: dict[str, Any]) -> Currency:
         request = payload.get("request")

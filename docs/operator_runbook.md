@@ -145,6 +145,14 @@ maestro recover-live-order --config <config> --reason "broker truth reconciled"
 
 If an order was excluded before approval, review the
 `live_order_capacity_blocked` event and Telegram's planned/available quantity.
+Its `capacity_currency` says which balance the order was actually judged against;
+check it against the same currency in the snapshot's `buying_power_by_currency`.
+A reason of `buying_power_by_currency_unavailable` means no balance was read at
+all: `requested_currency` is the currency the order needed and
+`available_currencies` is what the broker reported instead (empty when the
+adapter named no currency). The order was failed closed rather than compared
+against another currency, so there is nothing to retry until the broker reports
+that currency.
 Tap `재주문 검토` in the failure alert or `/orders`, then choose the original
 quantity, the freshly calculated maximum quantity, or `직접 수량 입력`. Direct
 input must be sent as a reply to Maestro's quantity prompt within 10 minutes.

@@ -10,6 +10,7 @@ from maestro.execution.brokers.readonly import (
     BrokerOrderSummary,
     BrokerPosition,
     BrokerReadOnlyClient,
+    buying_power_for_currency,
 )
 from maestro.execution.brokers.toss.auth import TossAuthManager
 from maestro.execution.brokers.toss.order_history import list_toss_orders
@@ -45,8 +46,17 @@ class TossReadOnlyClient(BrokerReadOnlyClient):
         self,
         symbol: str | None = None,
         order_price: float | None = None,
+        currency: str | None = None,
     ) -> BrokerBuyingPower:
-        return self._read_snapshot().account.buying_power_detail
+        # One Toss account holds a KRW pot and a USD pot. `buying_power_detail`
+        # reports whichever the parser named primary, so answering with it would
+        # judge a dollar order against the won balance.
+        return buying_power_for_currency(
+            self._read_snapshot().account,
+            currency,
+            symbol=symbol,
+            order_price=order_price,
+        )
 
     def get_current_prices(self, symbols: list[str]) -> dict[str, float]:
         prices = dict(self._read_snapshot().current_prices)
