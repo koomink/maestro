@@ -255,14 +255,19 @@ def _install_fakes(
     cancel_confirms_after: int = 1,
     cancel_service: str | None = "fake",
     fills_during_cancel: set[str] | None = None,
+    poll_raises_after_cancel: set[str] | None = None,
+    presubmit_raises: set[str] | None = None,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
+        status = _StatusService(calls, status_by_order, poll_raises_after_cancel or set())
         return LiveApprovalDependencies(
             state_store=state_store,
             audit_logger=audit_logger,
-            safety_service=_SafetyService(calls, submitted, reject_submits or set(), keys),
-            status_service=_StatusService(calls, status_by_order),
+            safety_service=_SafetyService(
+                calls, submitted, reject_submits or set(), keys, presubmit_raises or set()
+            ),
+            status_service=status,
             fill_reconciliation_service=_FillService(),
             workflow_service=None,
             lifecycle_service=None,
@@ -273,6 +278,7 @@ def _install_fakes(
                     cancel_confirms,
                     cancel_confirms_after,
                     fills_during_cancel or set(),
+                    status,
                 )
                 if cancel_service is not None
                 else None
@@ -289,11 +295,13 @@ class _SafetyService:
         submitted: list[tuple[str, float]] | None,
         reject_submits: set[str],
         keys: list[tuple[str, str | None]] | None = None,
+        presubmit_raises: set[str] | None = None,
     ) -> None:
         self.calls = calls
         self.submitted = submitted
         self.reject_submits = reject_submits
         self.keys = keys
+        self.presubmit_raises = presubmit_raises or set()
 
     def submit_approved_order(self, request, approval):
         del approval
@@ -302,6 +310,8 @@ class _SafetyService:
             self.keys.append((request.order_id, request.duplicate_key))
         if self.submitted is not None:
             self.submitted.append((request.order_id, request.quantity))
+        if request.order_id in self.presubmit_raises:
+            raise ValueError("pre-submit validation failed")
         if request.order_id in self.reject_submits:
             return LiveOrderResult(
                 order_id=request.order_id,
@@ -329,17 +339,21 @@ class _CancelService:
         confirms: bool,
         confirms_after: int = 1,
         fills_during_cancel: set[str] | None = None,
+        status_service: "_StatusService | None" = None,
     ) -> None:
         self.cancels = cancels
         self.status_by_order = status_by_order
         self.confirms = confirms
         self.confirms_after = confirms_after
         self.fills_during_cancel = fills_during_cancel or set()
+        self.status_service = status_service
 
     def cancel_order(self, request, approval_decision):
         del approval_decision
         order_id = request.broker_order.order_id
         self.cancels.append(order_id)
+        if self.status_service is not None:
+            self.status_service.cancelled.add(order_id)
         if order_id in self.fills_during_cancel:
             # The broker filled it before the cancel landed.
             self.status_by_order[order_id] = OrderStatus.FILLED
@@ -357,13 +371,24 @@ class _CancelService:
 
 
 class _StatusService:
-    def __init__(self, calls: list[str], status_by_order: dict[str, OrderStatus]) -> None:
+    def __init__(
+        self,
+        calls: list[str],
+        status_by_order: dict[str, OrderStatus],
+        raises_after_cancel: set[str] | None = None,
+    ) -> None:
         self.calls = calls
         self.status_by_order = status_by_order
+        self.raises_after_cancel = raises_after_cancel or set()
+        self.cancelled: set[str] = set()
 
     def poll_order_status(self, run_id, broker_order):
         del run_id
         self.calls.append(f"poll:{broker_order.broker_order_id}")
+        if broker_order.order_id in self.raises_after_cancel and broker_order.order_id in (
+            self.cancelled
+        ):
+            raise TimeoutError("broker status unavailable")
         status = self.status_by_order[broker_order.order_id]
         if isinstance(status, _DelayedCancel):
             status = status.next_status()
@@ -1117,3 +1142,61 @@ def test_resize_and_capacity_omissions_are_distinguishable(tmp_path, monkeypatch
     assert "buy_c" not in payload["submitted_buy_order_ids"]
     assert "buy_c" in payload["omitted_buy_order_ids"]
     assert "buy_b" in payload["submitted_buy_order_ids"]
+
+
+def test_status_poll_failure_still_raises_a_recovery_blocker(tmp_path, monkeypatch):
+    """The cancel went out but we never confirmed it — that order is still live.
+
+    Dropping the broker order from the failure entry made the blocker
+    unresolvable, so it was skipped entirely and the next run was left unguarded.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        poll_raises_after_cancel={"buy_b"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
+    assert [row["payload"]["order_id"] for row in blockers] == ["buy_b"]
+    assert orchestrator.state_store.list_system_events_by_type("rotation_buy_unresolvable") == []
+
+
+def test_submitted_ids_exclude_orders_that_never_reached_the_broker(tmp_path, monkeypatch):
+    """Pre-submit failures were counted as submitted.
+
+    That made submitted_buy_order_ids identical to the capacity-accepted set and
+    hid the stage a leg actually dropped out at.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED},
+        presubmit_raises={"buy_b"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    payload = orchestrator.state_store.list_system_events_by_type("rotation_cohort_incomplete")[0][
+        "payload"
+    ]
+    assert payload["capacity_accepted_buy_order_ids"] == ["buy_b"]
+    assert payload["submitted_buy_order_ids"] == []

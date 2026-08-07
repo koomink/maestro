@@ -458,3 +458,38 @@ def test_sell_in_the_same_approval_group_still_funds_a_buy():
     assert blocked == []
     buy = next(order for order in accepted if order.order_id == "buy_b")
     assert buy.metadata["sell_fill_pending"] is True
+
+
+def test_cash_reservation_is_shared_across_approval_groups():
+    """Two strategies draw on one balance, not one each.
+
+    Scoping reservations by strategy group let each of two buy-only groups be
+    approved for the whole account balance, and the second one is then rejected
+    by the broker.
+    """
+    service = OrderCapacityService(
+        lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=10_000.0,
+            max_buy_quantity=None,
+            source="fake",
+        )
+    )
+
+    accepted, blocked = service.partition(
+        [
+            _order(
+                "buy_alpha", "TLT", 100, 100, "toss",
+                currency=Currency.USD, strategy="alpha",
+            ),
+            _order(
+                "buy_beta", "SCHD", 100, 100, "toss",
+                currency=Currency.USD, strategy="beta",
+            ),
+        ]
+    )
+
+    assert [order.order_id for order in accepted] == ["buy_alpha"]
+    assert [item.order.order_id for item in blocked] == ["buy_beta"]
+    assert blocked[0].reason == "cash_buying_power_exceeded"

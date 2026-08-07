@@ -2738,7 +2738,9 @@ class MaestroOrchestrator:
         # tell "the cash would not stretch" from "the broker refused it".
         original_ids = [order.order_id for order in cohort.buys]
         capacity_accepted_ids = [order.order_id for order in buys]
-        submitted_ids = list(buy_requests)
+        submitted_ids = [
+            result.order_id for result in buy_results if result.submitted_order is not None
+        ]
         filled_ids = [
             result.order_id
             for result in buy_results
@@ -3112,6 +3114,7 @@ class MaestroOrchestrator:
                 {
                     "order_id": result.order_id,
                     "broker_order_id": broker_order.broker_order_id,
+                    "broker_order": broker_order,
                     "observed_status": "unknown",
                 }
             )
@@ -3130,6 +3133,7 @@ class MaestroOrchestrator:
                     {
                         "order_id": result.order_id,
                         "broker_order_id": broker_order.broker_order_id,
+                        "broker_order": broker_order,
                         "observed_status": "unknown",
                         "error_type": type(exc).__name__,
                         "error_message": str(exc),

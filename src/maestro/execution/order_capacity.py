@@ -68,7 +68,7 @@ class OrderCapacityService:
     ) -> tuple[list[OrderIntent], list[OrderCapacityBlock]]:
         accepted: list[OrderIntent] = []
         blocked: list[OrderCapacityBlock] = []
-        reserved_by_scope: dict[tuple[str, str | None, tuple[str, ...]], float] = {}
+        reserved_by_scope: dict[tuple[str, str | None], float] = {}
         # A rotation's buy is funded by the sell filed alongside it, so a fully
         # invested account reports zero buying power — and zero max buy quantity —
         # right up until that sell settles. Every dimension measured here is a
@@ -90,7 +90,10 @@ class OrderCapacityService:
                 accepted.append(order)
                 continue
             scope = _capacity_scope(order)
-            reserved = reserved_by_scope.get(scope, 0.0)
+            # Reservations track one real cash balance, which every strategy group
+            # on the account draws from, so they are not group-scoped.
+            cash_scope = scope[:2]
+            reserved = reserved_by_scope.get(cash_scope, 0.0)
             proceeds = proceeds_by_scope.get(scope, 0.0)
             if proceeds > 0:
                 accepted.append(
@@ -98,7 +101,7 @@ class OrderCapacityService:
                         update={"metadata": {**order.metadata, "sell_fill_pending": True}}
                     )
                 )
-                reserved_by_scope[scope] = reserved + order.notional
+                reserved_by_scope[cash_scope] = reserved + order.notional
                 continue
             try:
                 capacity = self.lookup(order)
@@ -168,7 +171,7 @@ class OrderCapacityService:
                 continue
 
             accepted.append(order)
-            reserved_by_scope[scope] = reserved + order.notional
+            reserved_by_scope[cash_scope] = reserved + order.notional
         return accepted, blocked
 
     def _tradable_quantity(self, order: OrderIntent, quantity: float) -> float:
