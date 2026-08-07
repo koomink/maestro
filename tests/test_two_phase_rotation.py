@@ -57,7 +57,8 @@ def test_buys_are_submitted_only_after_every_sell_filled(tmp_path, monkeypatch):
     )
 
     # The sell is submitted and confirmed filled before the buy is even sent.
-    assert calls == ["submit:sell_a", "poll:sell_a", "submit:buy_b", "poll:buy_b"]
+    broker_calls = [name for name in calls if name.startswith(("submit:", "poll:"))]
+    assert broker_calls == ["submit:sell_a", "poll:sell_a", "submit:buy_b", "poll:buy_b"]
 
 
 def test_partially_filled_sell_blocks_every_buy(tmp_path, monkeypatch):
@@ -272,7 +273,7 @@ def _install_fakes(
                 calls, submitted, reject_submits or set(), keys, presubmit_raises or set()
             ),
             status_service=status,
-            fill_reconciliation_service=_FillService(reconciles),
+            fill_reconciliation_service=_FillService(reconciles, calls),
             workflow_service=None,
             lifecycle_service=None,
             cancel_service=(
@@ -283,6 +284,7 @@ def _install_fakes(
                     cancel_confirms_after,
                     fills_during_cancel or set(),
                     status,
+                    calls,
                 )
                 if cancel_service is not None
                 else None
@@ -344,7 +346,9 @@ class _CancelService:
         confirms_after: int = 1,
         fills_during_cancel: set[str] | None = None,
         status_service: "_StatusService | None" = None,
+        calls: list[str] | None = None,
     ) -> None:
+        self.calls = calls if calls is not None else []
         self.cancels = cancels
         self.status_by_order = status_by_order
         self.confirms = confirms
@@ -356,6 +360,7 @@ class _CancelService:
         del approval_decision
         order_id = request.broker_order.order_id
         self.cancels.append(order_id)
+        self.calls.append(f"cancel:{order_id}")
         if self.status_service is not None:
             self.status_service.cancelled.add(order_id)
         if order_id in self.fills_during_cancel:
@@ -426,12 +431,19 @@ class _DelayedCancel:
 
 
 class _FillService:
-    def __init__(self, reconciles: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        reconciles: list[str] | None = None,
+        calls: list[str] | None = None,
+    ) -> None:
         self.reconciles = reconciles
+        self.calls = calls
 
     def reconcile_latest(self, run_id):
         if self.reconciles is not None:
             self.reconciles.append(run_id)
+        if self.calls is not None:
+            self.calls.append("reconcile")
         return FillReconciliationResult(
             run_id=run_id,
             checked_at=utc_now().isoformat(),
@@ -1237,9 +1249,11 @@ def test_fill_found_while_confirming_a_cancel_is_reconciled(tmp_path, monkeypatc
         _approval_decision("run-1"),
     )
 
-    # The cancel poll observed the fill, so reconciliation must run again after
-    # it rather than leaving the batch's earlier pass as the last word.
-    assert reconciles.count("run-1") >= 2
+    # The cancel poll observed the fill, so a reconciliation has to follow it.
+    # The batch's own passes all happen before the cancel goes out.
+    cancel_at = calls.index("cancel:buy_b")
+    assert "reconcile" in calls[cancel_at:], calls
+    assert reconciles
     resolved = orchestrator.state_store.list_system_events_by_type("rotation_buy_resolved")
     assert resolved[0]["payload"]["order_id"] == "buy_b"
     assert resolved[0]["payload"]["final_status"] == "filled"
