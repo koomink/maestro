@@ -24,7 +24,10 @@ from maestro.core.enums import (
 )
 from maestro.core.instruments import TradableInstrument
 from maestro.execution.base import OrderIntent
-from maestro.execution.brokers.readonly import BrokerBuyingPower
+from maestro.execution.brokers.readonly import (
+    BrokerBuyingPower,
+    BuyingPowerCurrencyUnavailable,
+)
 from maestro.execution.live_order_factory import LiveApprovalDependencies
 from maestro.execution.live_order_models import (
     BrokerOrderId,
@@ -1240,3 +1243,59 @@ def test_fill_found_while_confirming_a_cancel_is_reconciled(tmp_path, monkeypatc
     resolved = orchestrator.state_store.list_system_events_by_type("rotation_buy_resolved")
     assert resolved[0]["payload"]["order_id"] == "buy_b"
     assert resolved[0]["payload"]["final_status"] == "filled"
+
+
+def test_multi_product_account_uses_the_composite_snapshot_for_capacity(
+    tmp_path, monkeypatch
+):
+    """KISReadOnlyService has no single client when it spans broker products.
+
+    It composes a per-product snapshot instead, so reaching for `service.client`
+    got None and the lookup raised. A rotation on such an account sold and then
+    failed every post-fill capacity lookup, landing back in cash.
+    """
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.order_capacity_lookup = None
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_broker_readonly_service",
+        lambda *args, **kwargs: _CompositeService(),
+    )
+    order = _buy("buy_b").model_copy(update={"currency": Currency.KRW})
+
+    capacity = orchestrator._lookup_order_capacity(order)
+
+    assert capacity.cash_buying_power == 4_200_000.0
+    assert capacity.currency == "KRW"
+
+
+def test_multi_product_capacity_fails_closed_on_an_unpriced_currency(tmp_path, monkeypatch):
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.order_capacity_lookup = None
+    monkeypatch.setattr(
+        orchestrator_module,
+        "build_broker_readonly_service",
+        lambda *args, **kwargs: _CompositeService(),
+    )
+    order = _buy("buy_b").model_copy(update={"currency": Currency.USD})
+
+    with pytest.raises(BuyingPowerCurrencyUnavailable):
+        orchestrator._lookup_order_capacity(order)
+
+
+class _CompositeService:
+    """A multi-product KIS service: no single client, one merged snapshot."""
+
+    client = None
+
+    def fetch_and_store_snapshot(self, symbols, run_id=None):
+        del symbols, run_id
+        return _CompositeSnapshot()
+
+
+class _CompositeAccount:
+    buying_power_by_currency = {"KRW": 4_200_000.0}
+
+
+class _CompositeSnapshot:
+    account = _CompositeAccount()

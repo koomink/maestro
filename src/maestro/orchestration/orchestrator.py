@@ -38,7 +38,10 @@ from maestro.execution.broker_router import (
     UnsupportedBrokerOperation,
 )
 from maestro.execution.broker_state import portfolio_state_from_broker_account
-from maestro.execution.brokers.readonly import BrokerBuyingPower
+from maestro.execution.brokers.readonly import (
+    BrokerBuyingPower,
+    BuyingPowerCurrencyUnavailable,
+)
 from maestro.execution.brokers.readonly_factory import build_broker_readonly_service
 from maestro.execution.budget_requests import (
     ContributionBudgetRequest,
@@ -2149,8 +2152,8 @@ class MaestroOrchestrator:
             )
 
         account_id = order.account_id
-        client = self._order_capacity_clients.get(account_id)
-        if client is None:
+        service = self._order_capacity_clients.get(account_id)
+        if service is None:
             service = build_broker_readonly_service(
                 self.config,
                 self.state_store,
@@ -2159,11 +2162,36 @@ class MaestroOrchestrator:
             )
             while hasattr(service, "inner"):
                 service = service.inner
-            client = service.client
-            self._order_capacity_clients[account_id] = client
+            self._order_capacity_clients[account_id] = service
+        client = getattr(service, "client", None)
+        if client is None:
+            # A KIS service spanning several broker products has no single
+            # client; it composes one snapshot per product instead. Reaching for
+            # `service.client` there raised, and a rotation that had already sold
+            # was left holding cash.
+            return self._capacity_from_composite_snapshot(service, order)
         account = self.account_router.account(account_id)
         broker = account.broker if account is not None else "kis"
         return get_order_buying_power(client, self.config, broker, order)
+
+    def _capacity_from_composite_snapshot(
+        self,
+        service: Any,
+        order: OrderIntent,
+    ) -> BrokerBuyingPower:
+        """Read the order's currency out of a merged multi-product snapshot."""
+        currency = resolve_order_currency(self.config, order)
+        snapshot = service.fetch_and_store_snapshot([order.symbol])
+        by_currency = dict(getattr(snapshot.account, "buying_power_by_currency", {}) or {})
+        if currency.value not in by_currency:
+            raise BuyingPowerCurrencyUnavailable(currency.value, sorted(by_currency))
+        return BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=float(by_currency[currency.value]),
+            currency=currency.value,
+            source="broker_composite_snapshot",
+        )
 
     def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> None:
         client = self.telegram_client or TelegramBotAPIClient(
