@@ -2825,6 +2825,35 @@ class MaestroOrchestrator:
                 cancel_unconfirmed=cancel_unconfirmed,
                 resolved_statuses=resolved_statuses,
             )
+        if resolved_statuses:
+            # These polls persisted fresh LIVE_ORDER_STATUS snapshots, and the
+            # batch's own reconciliation pass ran before them. Without replaying
+            # them a fill discovered here never reaches the ledger, so positions
+            # and cash drift from broker truth.
+            for order_id, status in sorted(resolved_statuses.items()):
+                self._record_event(
+                    run_id,
+                    "rotation_buy_resolved",
+                    {
+                        "order_id": order_id,
+                        "final_status": status.value,
+                        "account_id": account_id,
+                    },
+                )
+            fill_service = dependencies.fill_reconciliation_service
+            if fill_service is not None:
+                try:
+                    fill_service.reconcile_latest(run_id)
+                except Exception as exc:
+                    self._record_event(
+                        run_id,
+                        "rotation_buy_fill_reconciliation_failed",
+                        {
+                            "account_id": account_id,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                        },
+                    )
         for entry in cancel_failures + cancel_unconfirmed:
             request = requests_by_order_id.get(entry["order_id"])
             broker_order = entry.get("broker_order")

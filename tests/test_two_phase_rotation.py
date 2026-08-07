@@ -257,6 +257,7 @@ def _install_fakes(
     fills_during_cancel: set[str] | None = None,
     poll_raises_after_cancel: set[str] | None = None,
     presubmit_raises: set[str] | None = None,
+    reconciles: list[str] | None = None,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
@@ -268,7 +269,7 @@ def _install_fakes(
                 calls, submitted, reject_submits or set(), keys, presubmit_raises or set()
             ),
             status_service=status,
-            fill_reconciliation_service=_FillService(),
+            fill_reconciliation_service=_FillService(reconciles),
             workflow_service=None,
             lifecycle_service=None,
             cancel_service=(
@@ -422,7 +423,12 @@ class _DelayedCancel:
 
 
 class _FillService:
+    def __init__(self, reconciles: list[str] | None = None) -> None:
+        self.reconciles = reconciles
+
     def reconcile_latest(self, run_id):
+        if self.reconciles is not None:
+            self.reconciles.append(run_id)
         return FillReconciliationResult(
             run_id=run_id,
             checked_at=utc_now().isoformat(),
@@ -1200,3 +1206,37 @@ def test_submitted_ids_exclude_orders_that_never_reached_the_broker(tmp_path, mo
     ]
     assert payload["capacity_accepted_buy_order_ids"] == ["buy_b"]
     assert payload["submitted_buy_order_ids"] == []
+
+
+def test_fill_found_while_confirming_a_cancel_is_reconciled(tmp_path, monkeypatch):
+    """The batch already reconciled fills before this poll happened.
+
+    Counting the fill in filled_ids without replaying it leaves the ledger and
+    the recorded lifecycle believing the order is still open, so positions and
+    cash drift from broker truth.
+    """
+    calls: list[str] = []
+    reconciles: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.OPEN},
+        fills_during_cancel={"buy_b"},
+        reconciles=reconciles,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    # The cancel poll observed the fill, so reconciliation must run again after
+    # it rather than leaving the batch's earlier pass as the last word.
+    assert reconciles.count("run-1") >= 2
+    resolved = orchestrator.state_store.list_system_events_by_type("rotation_buy_resolved")
+    assert resolved[0]["payload"]["order_id"] == "buy_b"
+    assert resolved[0]["payload"]["final_status"] == "filled"
