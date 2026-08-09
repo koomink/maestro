@@ -4,6 +4,8 @@
 상태: 설계 승인 완료 (구현 계획 대기)
 개정: 2026-08-09 Codex 적대적 리뷰 반영 — 승인 카드 2계층화,
 UI 실패 fallback 경로, funding_workflow_id 도입
+개정 2차: 2026-08-09 Codex 적대적 리뷰 2차 반영 — funding_workflow_id를
+scope 복합 키로 재정의, 액션 라우팅은 request_id에만 바인딩
 
 ## 배경과 목표
 
@@ -123,11 +125,37 @@ execution 모듈은 데이터만 넘긴다.
 **안정적인 워크플로우 키**: 현재 흐름에서는 입금 확인 후 새 signal run이
 생성되고 별도의 `budget_<uuid>` 요청이 만들어지므로, 최초 요청 ID로 카드를
 고정하면 카드가 멈추거나 중복 생성된다. 이를 막기 위해 영속 키
-`funding_workflow_id = <account_id>:<YYYY-MM>` (월 단위 계좌별)를 도입하고,
-funding 요청·재생성된 signal run·budget 요청을 모두 이 키로 연결한다.
-카드 상태에는 **현재 활성 request_id와 요청 교체 이력**을 기록하여, 어떤
-단계에서 요청이 재발급되어도 같은 카드가 이어서 갱신된다. 재시작 및 중복
-callback(교체 전 요청의 버튼 클릭) 시나리오를 테스트로 명시한다.
+`funding_workflow_id`로 funding 요청·재생성된 signal run·budget 요청을
+연결한다.
+
+**키의 유일성 범위**: `<account_id>:<YYYY-MM>`는 유일 키가 아니다.
+funding/budget 요청은 order scope 단위로 생성되며 `account_id`는 nullable이고,
+같은 계좌·같은 달에도 `contribution_group_id`·`execution_sleeve`·`currency`가
+다른 독립 요청이 공존할 수 있다 (orchestrator의
+`_contribution_funding_request` / `_contribution_budget_request`가 order
+scope마다 호출됨). 따라서 워크플로우 키는 scope 전체를 포함한 복합 키로
+정의한다:
+
+```
+funding_scope = (contribution_group_id or "-", account_id or "-",
+                 execution_sleeve or "-", currency)
+funding_workflow_id = funding:<scope_hash>:<month_key>
+```
+
+`scope_hash`는 funding_scope 정규화 튜플의 짧은 해시(예: sha1 앞 8자리)로,
+callback data 64바이트 제한 안에서 card_key로 쓸 수 있게 한다. 원본
+funding_scope 튜플은 `telegram_ui_card` 이벤트 payload에 그대로 기록해
+디버깅 시 역추적할 수 있게 한다. 이 필드들은 funding/budget 요청 payload에
+이미 모두 존재하므로 **비즈니스 로직 변경 없이 UI 계층에서 파생 가능**하다
+(접근 A 원칙 유지).
+
+**액션 라우팅은 request_id에만 바인딩**: `funding_workflow_id`는 카드
+식별·집계 전용이며, 버튼 callback은 항상 구체적인 `request_id`를 담는다.
+교체·만료된 request_id의 callback은 활성 요청으로 위임하지 않고 "이미
+지난 요청이에요. 최신 카드를 확인해 주세요."로 거절한다 — 구 버튼이 다른
+요청을 취소/선택하는 오동작을 원천 차단한다. 카드 상태에는 **현재 활성
+request_id와 요청 교체 이력**을 기록하여, 어떤 단계에서 요청이 재발급되어도
+같은 카드가 이어서 갱신된다.
 
 ### C. 예외 카드 (가이드형 마법사)
 
@@ -197,7 +225,9 @@ callback(교체 전 요청의 버튼 클릭) 시나리오를 테스트로 명시
    `card_key`는 카드 유형별 원천 ID로 정한다:
    승인 카드 = `approval:<approval_id>` (유일한 액션 카드),
    데일리 요약 카드 = `daily:<signal_run_id>` (읽기 전용 집계),
-   월간 자금 카드 = `funding:<account_id>:<YYYY-MM>` (funding_workflow_id),
+   월간 자금 카드 = `funding:<scope_hash>:<YYYY-MM>` (funding_workflow_id;
+   scope_hash는 contribution_group_id·account_id·execution_sleeve·currency
+   정규화 튜플의 짧은 해시, 원본 튜플은 이벤트 payload에 기록),
    예외 카드 = `<유형>:<원천 event id>`.
 2. poll 루프 sweep에 `_sweep_lifecycle_cards()` 추가: 활성 카드의 원천 이벤트
    (승인 ack, 주문 상태, 정산 결과)를 조회해 단계 변화 시 re-render →
@@ -229,7 +259,11 @@ callback(교체 전 요청의 버튼 클릭) 시나리오를 테스트로 명시
   - 한 signal run의 복수 승인 그룹 혼합 상태 (완료+대기, 완료+실패)
   - 순서가 뒤바뀐 이벤트 도착 (주문 체결 이벤트가 승인 ack보다 먼저 조회됨)
   - 운영자 프로세스 재시작 후 활성 카드 복원
-  - funding 요청 교체 후 구 요청 버튼의 중복 callback
+  - funding 요청 교체 후 구 요청 버튼의 중복 callback (거절 응답 확인,
+    활성 요청에 도달하지 않음)
+  - 같은 계좌·같은 달에 sleeve/group/currency가 다른 복수 funding scope →
+    scope별 독립 카드 생성 (합쳐지지 않음)
+  - `account_id`가 없는(null) funding scope의 카드 생성·갱신
   - 연속 렌더/edit 실패 → 고정 템플릿 fallback 발송 + 헬스 degraded
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
@@ -254,6 +288,9 @@ callback(교체 전 요청의 버튼 클릭) 시나리오를 테스트로 명시
 - 운영자 프로세스 재시작 후 활성 카드가 정상 복원·갱신된다.
 - 복수 승인 그룹이 있는 signal run에서 카드가 그룹별로 올바르게 동작한다.
 - funding/budget 요청 교체 시 카드가 이어지고 중복 카드가 생기지 않는다.
+- 같은 달 복수 funding scope(다른 sleeve/group/currency) 및 account_id=null
+  환경에서 카드가 scope별로 분리되고, 구 request_id callback이 다른 scope의
+  요청에 도달하지 않는다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
 
