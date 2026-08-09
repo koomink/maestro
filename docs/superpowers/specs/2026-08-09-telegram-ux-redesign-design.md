@@ -35,6 +35,9 @@ dispatch_group_id로 approval get-or-create, 롤백 preflight를 quiesce
 개정 12차: 2026-08-10 Codex 적대적 리뷰 12차 반영 — 3a 업그레이드에도
 quiesce 장벽 적용, migration_started/completed 분리 + immutable cutoff,
 backfill 멱등 재개 규약
+개정 13차: 2026-08-10 Codex 적대적 리뷰 13차 반영 — completed와 legacy
+종결 이벤트의 원자적 dual-write(롤백 호환), preflight에 legacy 종결
+누락 검사 추가
 
 ## 배경과 목표
 
@@ -284,6 +287,16 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    종결돼 월간 투자가 조용히 멈춘다. 개편 후에는 decision이 저장돼도
    `completed` 이벤트가 없으면 워크플로우는 미완으로 취급되어 복구 대상이
    된다.
+   **completed는 legacy 종결 이벤트와 원자적으로 dual-write한다**:
+   구버전 `_load_pending_funding_request()`는
+   `contribution_funding_request_ack`만으로 종결을 판정하므로, 새
+   `completed` 이벤트가 legacy ack를 **대체**하면 롤백 후 구버전이
+   완료된 요청을 pending으로 오판해 `run_signal()`과 현금흐름 처리를
+   재실행한다. 따라서 funding/budget 전이의 `completed` 기록은 대응하는
+   legacy 종결 이벤트(funding은 `contribution_funding_request_ack`,
+   budget은 `contribution_budget_request_decision`)와 **같은 원자 커밋**
+   (`save_system_events_atomic`)으로 함께 기록해, 롤백 시 구버전이 추가
+   조치 없이 종결로 인식하게 한다.
 4. **child run lineage 영속화 + 생성 유일성(get-or-create)**: 현재
    `run_signal()`은 원천 request를 알지 못하므로 "claim 이후 생성된 run"을
    같은 전략·scope의 다른 수동/예약 run과 구분할 수 없다. `run_signal()`에
@@ -581,6 +594,9 @@ preflight**를 통과한 뒤에만 롤백한다. preflight를 정지 없이 실�
   유실된다
 - `decision_recorded`는 있으나 `resolution_completed`가 없는 승인 —
   구 handler는 ack만으로 영구 종결로 취급해 승인된 주문이 유실된다
+- `completed`이지만 대응하는 legacy 종결 이벤트(funding ack / budget
+  decision)가 없는 요청 — dual-write 규약 위반이며, 발견 시 롤백 CLI가
+  legacy 이벤트를 멱등 backfill한 뒤 재검사한다
 
 3. **구버전 배포**: preflight 통과 후, unit이 정지된 상태 그대로 구버전
    코드를 배포한다. preflight와 배포 사이에 어떤 unit도 재시작하지
@@ -671,6 +687,9 @@ telegram-operator와 per-market signal 타이머 등 여러 writer가 있으므�
   상태에서의 롤백 시나리오가 테스트되어 있으며, preflight는 quiesce
   (writer·callback 유입 정지 + DB 배타 lock) 아래에서만 유효한 것으로
   절차화되어 있다.
+- (단계 3a) 완료된 funding/budget 요청이 있는 DB를 구버전으로 롤백해도
+  dual-write된 legacy 종결 이벤트 덕분에 구버전이 요청을 pending으로
+  오판하지 않고, 구 callback이 거절된다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
 
