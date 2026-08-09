@@ -15,7 +15,7 @@ from maestro.execution.live_orders import (
     LiveOrderLifecycleNotification,
     LiveOrderNotificationClient,
 )
-from maestro.integrations.telegram.formatter import format_approval_request
+from maestro.integrations.telegram.ui.cards import render_approval_card
 
 
 class TelegramBotClient(Protocol):
@@ -175,7 +175,7 @@ class TelegramApprovalNotifier:
     """No-network formatter used by non-Telegram approval providers."""
 
     def send_approval_request(self, request: ApprovalRequest) -> str:
-        return format_approval_request(request)
+        return render_approval_card(request, expanded=False).text
 
 
 class TelegramLiveOrderNotificationClient(LiveOrderNotificationClient):
@@ -213,7 +213,9 @@ class TelegramApprovalService:
         self.poll_interval_seconds = poll_interval_seconds
 
     def request_decision(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
-        message = format_approval_request(request)
+        # sync 경로에는 ui:d callback을 처리할 라우터가 없어 자세히 버튼 없이
+        # 접힌 카드 텍스트만 사용한다.
+        message = render_approval_card(request, expanded=False).text
         reply_markup = _approval_reply_markup(request.approval_id)
         for chat_id in self.chat_ids:
             self._send_message(chat_id, message, reply_markup)

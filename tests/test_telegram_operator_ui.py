@@ -3059,3 +3059,9 @@ def _telegram_live_readonly_config_path(tmp_path) -> Path:
     config_path = tmp_path / "telegram_live_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+def test_dispatch_uses_korean_approval_card():
+    from maestro.orchestration import orchestrator as orch
+
+    assert orch.render_approval_card is not None

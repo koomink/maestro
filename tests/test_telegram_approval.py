@@ -197,13 +197,10 @@ def test_telegram_service_sends_request_and_receives_approval():
             ]
         ]
     }
-    assert "📋 Order Details" in message
-    assert "1. 🟢 BUY · unknown" in message
-    assert "종목: MOCK_ETF_A" in message
-    assert "금액: 600.00" in message
+    assert message.startswith("📩 투자 주문을 진행할까요?")
+    assert "MOCK_ETF_A" in message
     assert "approve appr_test" not in message
     assert "reject appr_test" not in message
-    assert "✅ Tap Approve to submit, or Reject to stop this proposal." in message
 
 
 def test_telegram_approval_message_shows_order_details_and_strategy_source():
@@ -295,8 +292,8 @@ def test_approval_manager_records_source_strategy_ids():
     assert message is not None
     assert request.source_strategy_ids == ["strategy_a", "strategy_b"]
     assert request.profile_name == "kis_brokerage_us"
-    assert "📁 Profile: kis_brokerage_us" in message
-    assert "🧠 Strategy: strategy_a, strategy_b" in message
+    assert message.startswith("📩 투자 주문을 진행할까요?")
+    assert "strategy_a, strategy_b 전략" in message
 
 
 def test_approval_formatter_shows_operator_profile_name():
