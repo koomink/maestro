@@ -262,6 +262,7 @@ def _install_fakes(
     poll_raises_after_cancel: set[str] | None = None,
     presubmit_raises: set[str] | None = None,
     reconciles: list[str] | None = None,
+    reconcile_raises: bool = False,
 ) -> None:
     def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
         del config, kwargs
@@ -273,7 +274,7 @@ def _install_fakes(
                 calls, submitted, reject_submits or set(), keys, presubmit_raises or set()
             ),
             status_service=status,
-            fill_reconciliation_service=_FillService(reconciles, calls),
+            fill_reconciliation_service=_FillService(reconciles, calls, reconcile_raises),
             workflow_service=None,
             lifecycle_service=None,
             cancel_service=(
@@ -435,15 +436,25 @@ class _FillService:
         self,
         reconciles: list[str] | None = None,
         calls: list[str] | None = None,
+        raises: bool = False,
     ) -> None:
         self.reconciles = reconciles
         self.calls = calls
+        self.raises = raises
+        self.seen = 0
 
     def reconcile_latest(self, run_id):
+        self.seen += 1
         if self.reconciles is not None:
             self.reconciles.append(run_id)
         if self.calls is not None:
             self.calls.append("reconcile")
+        if self.raises and any(
+            name.startswith("cancel:") for name in (self.calls or [])
+        ):
+            # The batch's own passes succeed; only the replay that follows a
+            # cancel fails.
+            raise RuntimeError("ledger unavailable")
         return FillReconciliationResult(
             run_id=run_id,
             checked_at=utc_now().isoformat(),
@@ -1334,3 +1345,86 @@ class _CompositeAccount:
 
 class _CompositeSnapshot:
     account = _CompositeAccount()
+
+
+def test_partial_fill_seen_while_confirming_a_cancel_is_reconciled(tmp_path, monkeypatch):
+    """A cancel poll can see fresh fill quantity without reaching a terminal state.
+
+    Reconciling only on terminal statuses left that delta out of the run, so the
+    ledger lagged the broker even though a blocker was raised.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    cancel_at = calls.index("cancel:buy_b")
+    assert "reconcile" in calls[cancel_at:], calls
+
+
+def test_failed_post_cancel_reconciliation_fails_closed(tmp_path, monkeypatch):
+    """A stale ledger must stop the next run, not be logged and waved through.
+
+    The order was already counted as filled, so without a blocker nothing else
+    was going to notice the ledger never caught up.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.OPEN},
+        fills_during_cancel={"buy_b"},
+        reconcile_raises=True,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
+    assert [row["payload"]["order_id"] for row in blockers] == ["buy_b"]
+    assert blockers[0]["payload"]["reason"] == "rotation_buy_fill_reconciliation_failed"
+
+
+def test_cancel_race_fill_updates_the_returned_lifecycle(tmp_path, monkeypatch):
+    """orders_filled and the dashboard read the lifecycle, not our side table.
+
+    Recording the fill only in filled_ids left the canonical result saying OPEN,
+    so the run reported zero fills for an order the broker had filled.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.OPEN},
+        fills_during_cancel={"buy_b"},
+    )
+
+    lifecycles, _ = orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    by_order = {result.order_id: result for result in lifecycles}
+    assert by_order["buy_b"].final_status == OrderStatus.FILLED

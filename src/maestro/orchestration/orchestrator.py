@@ -2815,6 +2815,25 @@ class MaestroOrchestrator:
                 account_id=cohort.account_id,
                 requests_by_order_id=buy_requests,
             )
+            # The lifecycle the batch recorded predates these polls. Anything
+            # reading the run — orders_filled, the dashboard, the audit trail —
+            # goes through that object, so it has to carry the status the broker
+            # actually ended on rather than the one polling gave up at.
+            if resolved_statuses:
+                buy_results = [
+                    result.model_copy(update={"final_status": resolved_statuses[result.order_id]})
+                    if result.order_id in resolved_statuses
+                    else result
+                    for result in buy_results
+                ]
+                results = [
+                    result
+                    if result.order_id not in resolved_statuses
+                    else result.model_copy(
+                        update={"final_status": resolved_statuses[result.order_id]}
+                    )
+                    for result in results
+                ]
             filled_ids = sorted(
                 set(filled_ids)
                 | {
@@ -2865,6 +2884,7 @@ class MaestroOrchestrator:
         cancel_failures: list[dict[str, Any]] = []
         cancel_unconfirmed: list[dict[str, Any]] = []
         resolved_statuses: dict[str, OrderStatus] = {}
+        polled_orders: dict[str, BrokerOrderId] = {}
         for result in buy_results:
             if result.final_status not in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
                 continue
@@ -2881,27 +2901,30 @@ class MaestroOrchestrator:
                 cancel_failures=cancel_failures,
                 cancel_unconfirmed=cancel_unconfirmed,
                 resolved_statuses=resolved_statuses,
+                polled_orders=polled_orders,
             )
-        if resolved_statuses:
-            # These polls persisted fresh LIVE_ORDER_STATUS snapshots, and the
-            # batch's own reconciliation pass ran before them. Without replaying
-            # them a fill discovered here never reaches the ledger, so positions
-            # and cash drift from broker truth.
-            for order_id, status in sorted(resolved_statuses.items()):
-                self._record_event(
-                    run_id,
-                    "rotation_buy_resolved",
-                    {
-                        "order_id": order_id,
-                        "final_status": status.value,
-                        "account_id": account_id,
-                    },
-                )
+        for order_id, status in sorted(resolved_statuses.items()):
+            self._record_event(
+                run_id,
+                "rotation_buy_resolved",
+                {
+                    "order_id": order_id,
+                    "final_status": status.value,
+                    "account_id": account_id,
+                },
+            )
+        if polled_orders:
+            # Any of these polls can have seen fill quantity the batch's earlier
+            # reconciliation pass never had — a partial fill counts as much as a
+            # terminal one — so replay whenever one happened at all.
             fill_service = dependencies.fill_reconciliation_service
             if fill_service is not None:
                 try:
                     fill_service.reconcile_latest(run_id)
                 except Exception as exc:
+                    # The order is already counted as filled, so nothing further
+                    # downstream would notice the ledger never caught up. Block
+                    # the next run until an operator resolves it.
                     self._record_event(
                         run_id,
                         "rotation_buy_fill_reconciliation_failed",
@@ -2911,6 +2934,31 @@ class MaestroOrchestrator:
                             "error_message": str(exc),
                         },
                     )
+                    for order_id in sorted(polled_orders):
+                        request = requests_by_order_id.get(order_id)
+                        broker_order = polled_orders[order_id]
+                        if request is None:
+                            continue
+                        save_audited_system_event(
+                            self.state_store,
+                            self.audit,
+                            run_id,
+                            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+                            {
+                                "reason": "rotation_buy_fill_reconciliation_failed",
+                                "order_id": order_id,
+                                "signal_run_id": request.signal_run_id,
+                                "request": request.model_dump(mode="json"),
+                                "result": {
+                                    "order_id": order_id,
+                                    "status": resolved_statuses.get(
+                                        order_id, OrderStatus.UNKNOWN
+                                    ).value,
+                                    "broker_order": broker_order.model_dump(mode="json"),
+                                    "message": str(exc),
+                                },
+                            },
+                        )
         for entry in cancel_failures + cancel_unconfirmed:
             request = requests_by_order_id.get(entry["order_id"])
             broker_order = entry.get("broker_order")
@@ -3151,6 +3199,7 @@ class MaestroOrchestrator:
         cancel_failures: list[dict[str, Any]],
         cancel_unconfirmed: list[dict[str, Any]],
         resolved_statuses: dict[str, OrderStatus] | None = None,
+        polled_orders: dict[str, BrokerOrderId] | None = None,
     ) -> None:
         """Cancel a working order and re-poll until the broker agrees it is gone.
 
@@ -3214,6 +3263,8 @@ class MaestroOrchestrator:
                 self._sleep_between_cancel_polls()
             try:
                 snapshot = status_service.poll_order_status(run_id, broker_order)
+                if polled_orders is not None:
+                    polled_orders[result.order_id] = broker_order
             except Exception as exc:
                 cancel_unconfirmed.append(
                     {
