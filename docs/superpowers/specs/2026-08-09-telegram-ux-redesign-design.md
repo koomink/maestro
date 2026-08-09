@@ -23,6 +23,9 @@ exactly-once 포기(at-least-once + 중복 카드 정리), 단계 3을 3a/3b로 
 개정 8차: 2026-08-09 Codex 적대적 리뷰 8차 반영 — 워크플로우 영속 식별자를
 전체 정규화 scope로 변경(해시는 표시용 토큰으로 격하), 유실 카드
 자동 정리 불가 불변식 + callback self-heal
+개정 9차: 2026-08-09 Codex 적대적 리뷰 9차 반영 — 승인 결정의 2단계
+영속화(ack ≠ 종결, resolution 재개 규약), scope 직렬화를 타입 보존
+canonical JSON으로 변경(sentinel 치환 금지)
 
 ## 배경과 목표
 
@@ -154,10 +157,22 @@ scope마다 호출됨). 따라서 워크플로우 키는 scope 전체를 포함�
 정의한다:
 
 ```
-funding_scope = (contribution_group_id or "-", account_id or "-",
-                 execution_sleeve or "-", currency)
-funding_workflow_id = funding:<정규화된 funding_scope 전체>:<month_key>
+funding_scope = 타입 보존 canonical JSON 배열
+  [contribution_group_id, account_id, execution_sleeve, currency]
+  - null은 JSON null 그대로 (문자열 sentinel로 치환하지 않는다)
+  - 문자열은 NFC 유니코드 정규화 후 직렬화
+  - json.dumps(..., ensure_ascii=False, separators=(",", ":")) 고정 표기
+funding_workflow_id = "funding:" + funding_scope JSON + ":" + month_key
 ```
+
+직렬화 규약을 이렇게 고정하는 이유: nullable 값을 `-` 같은 문자열
+sentinel로 치환하면 실제 값 `-`와 null이 즉시 충돌하고, 구분자
+escaping이 없는 단순 join은 구분자를 포함한 식별자(현재
+account/group/sleeve는 일반 str로 이를 금지하지 않음)끼리 같은 ID로
+합쳐질 수 있다. JSON 배열 직렬화는 타입(null vs 문자열)과 경계(escaping)
+를 모두 보존하므로 서로 다른 scope가 같은 workflow_id가 되는 경로가
+없다. null·`-`·구분자 포함 문자열·유니코드 정규화 차이 scope의 충돌
+테스트를 명시한다.
 
 **영속 식별자에 해시를 쓰지 않는다**: head/claim/lineage 등 정합성을
 결정하는 모든 system event는 `funding_workflow_id`를 **전체 정규화 scope
@@ -320,7 +335,31 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    - resume 진입 조건: consumed이지만 완료 이벤트가 없는 package.
    이 변경은 funding 재생성 run만이 아니라 승인 dispatch 전체에 적용되며,
    접근 A 예외 범위에 포함된다.
-7. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
+7. **승인 결정의 2단계 영속화 (ack ≠ 종결)**: 현재
+   `_resolve_async_approval`은 `telegram_approval_ack`를 먼저 저장한 뒤
+   주문 해석(`resolve_pending_signal_approval`)을 수행하고,
+   `_pending_async_approval`과 `_sweep_pending_approvals`는 ack 존재만으로
+   승인을 종결로 간주한다. 따라서 ack 저장 직후 프로세스 종료·config load
+   실패·broker timeout이 발생하면 운영자의 승인 의사는 기록됐지만 주문은
+   생성되지 않고, callback 재클릭도 "already decided"로 거절되어 **승인이
+   영구 유실**된다. 개편 후 규약:
+   - 승인 결정도 `decision_recorded → resolution_completed` 2단계로
+     영속화한다. ack(=decision_recorded)는 운영자 의사의 기록일 뿐 종결이
+     아니며, **pending envelope 제외 판정은 `resolution_completed`
+     기준**으로 바꾼다.
+   - decision_recorded만 있는 승인은 "결정됨·집행 미완"으로 분류되어
+     sweep이 재개를 시도한다. 기록된 결정을 그대로 사용하므로 운영자
+     재클릭은 필요 없다. 재개 진입은 항목 2의 attempt 규약을 준용해 한
+     건만 진입한다.
+   - resolution 재개는 approval_id 기반 멱등이어야 한다: 이미 생성된
+     주문(부분 실행 포함)을 조회해 재사용하고, 중복 주문을 만들지 않는다.
+   - 반복 실패 시 승인 카드를 ⚠️ 확인 필요 상태로 전환하고 복구 카드
+     ([다시 시도])로 라우팅한다 — 기존
+     `telegram_approval_resolution_failed` 이벤트를 카드 상태 원천으로
+     사용한다.
+   - 라이프사이클 카드는 ack만으로 완료를 표시하지 않고
+     `resolution_completed` 후에만 ✅/종결 상태로 렌더한다.
+8. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
    duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
 
 ### C. 예외 카드 (가이드형 마법사)
@@ -452,6 +491,13 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
     눌러도 한 번만 처리되고, 전부 끝난 뒤에야 dispatch 완료가 기록된다
   - **scope 불일치 방어**: head/claim 이벤트 payload의 원본 scope가 기대
     scope와 다르면(식별자 오염 가정) 처리가 거부된다
+  - **scope 직렬화 충돌**: null vs 문자열 `-`, 구분자(`:` 등)를 포함한
+    식별자, NFC 정규화 전후가 다른 유니코드 문자열로 구성된 서로 다른
+    scope 쌍이 서로 다른 funding_workflow_id로 직렬화된다
+  - **승인 resolution crash-boundary**: ack 저장 직후·주문 해석 도중·완료
+    직전 각 지점에서 중단 — ack-only 승인이 종결로 오인되지 않고 sweep이
+    기록된 결정으로 재개하며, 주문이 중복 생성되지 않고, 카드는
+    `resolution_completed` 전까지 완료로 렌더되지 않는다
   - **head 트랜잭션 crash 주입**: 요청 생성·superseded·head 전환의 원자
     커밋을 중단 지점별로 검증하고, 인위적으로 만든 orphan 요청/dangling
     head가 복구 sweep에서 수렴된다
@@ -474,7 +520,7 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 |---|---|---|
 | 1 | `ui/` 모듈 신설 + 승인 카드 교체 + 자세히 토글 + 메뉴 5개 등록 | 가장 자주 보는 메시지 즉시 개선 |
 | 2 | 라이프사이클 카드 매니저 + 승인/데일리 카드 + 노옵 한 줄 + fallback 알림 경로 | 구조 개편의 핵심 |
-| 3a | **정합성 기반 작업 (UI 아님, 접근 A 예외)**: StateStore 원자 커밋 API, 워크플로우 head/CAS, attempt 기반 claim·재개, lineage, dispatch idempotent resume, 수렴 sweep | 기존 교체 경합·중단 복구 결함 해소 (독립 배포·검증) |
+| 3a | **정합성 기반 작업 (UI 아님, 접근 A 예외)**: StateStore 원자 커밋 API, 워크플로우 head/CAS, attempt 기반 claim·재개, lineage, dispatch idempotent resume, 승인 결정 2단계 영속화, 수렴 sweep | 기존 교체 경합·중단 복구 결함 해소 (독립 배포·검증) |
 | 3b | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합, 3a 위에 구축) | 월초 경험 개선 |
 | 4 | 예외 마법사 (재주문·cash drift·복구·안전 정지) | 장애 대응 경험 개선 |
 | 5 | 조회 카드 5종 + 구 명령어 메뉴 숨김 + 구 알림 경로 제거 | 마무리 |
@@ -513,6 +559,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   같은 scope/month의 병행 pending 요청 경쟁에서 head인 요청만 처리된다.
 - claim-only 상태의 워크플로우가 복구 카드 [재개]로 정확히 한 번 재개되고,
   orphan 요청/dangling head가 sweep에서 수렴된다.
+- 승인 ack 이후 resolution 실패/중단이 영구 유실로 남지 않는다: sweep이
+  기록된 결정으로 재개하고, 주문은 중복 생성되지 않으며, 반복 실패는
+  ⚠️ 복구 카드로 노출된다.
 - (단계 3a) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
   중복 실행 위험을 확인하고, roll-forward-only 운영 절차가 문서화되어 있다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
