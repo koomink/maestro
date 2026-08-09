@@ -17,6 +17,9 @@ CAS로 단일 활성 요청 보장, 승인 dispatch의 idempotent resume
 개정 6차: 2026-08-09 Codex 적대적 리뷰 6차 반영 — head 갱신의 트랜잭션
 결합 + 수렴 sweep, claim의 attempt 기반 재개(fencing), Telegram 전송
 exactly-once 포기(at-least-once + 중복 카드 정리), 단계 3을 3a/3b로 분리
+개정 7차: 2026-08-09 Codex 적대적 리뷰 7차 반영 — head 검증·claim 삽입을
+조건부 트랜잭션으로 결합(TOCTOU 차단), child 생성의
+(source_request_id, phase) 유일성 + lock 경계 내 재검증
 
 ## 배경과 목표
 
@@ -203,12 +206,21 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    거절"인 잠금으로 정의하면 child 생성 전에 중단된 워크플로우는 어떤
    경로로도 재진입하지 못해 영구 정지한다. claim은 **attempt 단위의 전이
    시도 기록**으로 정의한다:
-   - funding/budget callback 처리 시작 시 먼저 해당 request_id가 **현재
-     head인지 검증**하고(head가 아니면 거절), `funding_workflow_claim`을
-     `duplicate_key = <funding_workflow_id>:<phase>:<request_id>:a<attempt>`
-     로 기록한다. 최초 진입은 attempt=1이며, 커밋에 실패하면(이미 존재)
-     처리에 진입하지 않고 "이미 처리 중이거나 완료된 요청이에요"로
-     응답한다 — 동시 중복 callback을 상태 변경 이전에 차단한다.
+   - **head 검증과 claim 삽입은 하나의 조건부 트랜잭션이다**: "head 조회 →
+     별도 claim 기록" 순서로는 그 사이에 예약/수동 run이 새 요청과 head를
+     원자 커밋하는 TOCTOU가 생겨, 이미 superseded된 구 callback이 유효한
+     claim을 얻을 수 있다 (claim duplicate_key는 같은 request의 callback만
+     직렬화할 뿐 head 교체와는 경쟁하지 않는다). 따라서 claim은
+     `save_system_events_atomic`의 **precondition 기능**으로 커밋한다:
+     트랜잭션 안에서 "현재 head의 request_id와 version이 기대값과 일치"를
+     재검증하고, 일치할 때만 `funding_workflow_claim`
+     (`duplicate_key = <funding_workflow_id>:<phase>:<request_id>:a<attempt>`,
+     payload에 검증된 head version 포함)을 삽입한다. head가 그 사이
+     바뀌었으면 claim 전체가 실패하고 callback은 거절된다.
+   - 최초 진입은 attempt=1이며, 커밋에 실패하면(이미 존재하거나
+     precondition 불일치) 처리에 진입하지 않고 "이미 처리 중이거나 완료된
+     요청이에요"로 응답한다 — 동시 중복 callback과 head 교체 경쟁을 모두
+     상태 변경 이전에 차단한다.
    - **재개는 attempt 증가로만**: 미완 attempt(claim은 있으나
      `completed`/`child_created` 없음)가 발견되면 복구 카드가 [재개] 버튼을
      제시하고, 운영자 승인 시 attempt+1 claim을 CAS로 커밋한 실행만이
@@ -225,13 +237,26 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    종결돼 월간 투자가 조용히 멈춘다. 개편 후에는 decision이 저장돼도
    `completed` 이벤트가 없으면 워크플로우는 미완으로 취급되어 복구 대상이
    된다.
-4. **child run lineage 영속화**: 현재 `run_signal()`은 원천 request를 알지
-   못하므로 "claim 이후 생성된 run"을 같은 전략·scope의 다른 수동/예약
-   run과 구분할 수 없다. `run_signal()`에 `source_request_id`(및
-   funding_workflow_id)를 전달해 signal run 기록/package에 영속화하고,
-   복구 시 이 lineage로만 child run을 조회한다 (추론적 연결 금지).
-   같은 scope에서 동시에 존재하는 수동 run과의 조회 유일성을 테스트로
-   보장한다.
+4. **child run lineage 영속화 + 생성 유일성(get-or-create)**: 현재
+   `run_signal()`은 원천 request를 알지 못하므로 "claim 이후 생성된 run"을
+   같은 전략·scope의 다른 수동/예약 run과 구분할 수 없다. `run_signal()`에
+   `source_request_id`(및 funding_workflow_id)를 전달해 signal run
+   기록/package에 영속화하고, 복구 시 이 lineage로만 child run을 조회한다
+   (추론적 연결 금지). 같은 scope에서 동시에 존재하는 수동 run과의 조회
+   유일성을 테스트로 보장한다.
+   **attempt fencing만으로는 부족하다**: fencing은 상태 이벤트 커밋을
+   거부할 뿐, `run_signal()`이 만드는 signal package·승인 흐름이라는
+   부작용 자체를 막지 못한다. 이전 attempt가 `run_signal()` 내부에서
+   지연된 사이 재개 attempt가 lineage를 조회하면 둘 다 "child 없음"을
+   관찰할 수 있고, 전역 writer lock은 두 실행을 순차화할 뿐 두 번째
+   실행의 재검증을 강제하지 않는다. 따라서:
+   - source가 있는 child 생성은 **get-or-create**로 정의한다: signal run
+     기록을 `duplicate_key = child:<source_request_id>:<phase>`로 커밋해,
+     같은 원천 요청에서 child가 DB 수준에서 최대 1개만 생성되게 한다.
+     duplicate_key 충돌 시 새 package를 만들지 않고 기존 child를 반환한다.
+   - **최신 attempt 검증 → lineage 재조회 → child get-or-create**를 같은
+     writer lock/트랜잭션 경계 안에서 수행한다. lock을 획득한 실행은
+     진입 시점의 관찰이 아니라 lock 안에서 다시 읽은 상태로만 진행한다.
 5. **중단 전환의 자동 재실행 금지**: claim은 있으나 `completed`가 없는
    상태로 재시작되면 같은 전환을 자동 재실행하지 않는다. lineage로 child
    signal run을 조회해 **있으면 재사용**하여 나머지 단계(승인 dispatch,
@@ -404,6 +429,12 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   - **단일 재개(fencing)**: child 생성 전 각 중단 지점에서 복구 카드
     [재개]를 동시에 두 번 승인해도 attempt CAS에 의해 한 건만 진입하고,
     이전 attempt의 잔여 실행은 상태 커밋이 거부된다
+  - **head 교체 TOCTOU**: callback의 head 검증 직후·claim 커밋 직전에
+    예약/수동 run이 새 요청과 head를 원자 커밋 — claim precondition이
+    불일치를 감지해 구 callback이 거절되고 아무 부작용도 남기지 않는다
+  - **child 생성 경쟁**: 이전 attempt가 `run_signal()` 내부에서 지연된
+    상태로 재개 attempt가 진입 — get-or-create duplicate_key에 의해
+    signal package와 승인 흐름이 원천 요청당 1개만 생성된다
   - 연속 렌더/edit 실패 → 고정 템플릿 fallback 발송 + 헬스 degraded
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
