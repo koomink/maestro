@@ -462,8 +462,12 @@ and matching limit-order semantics immediately before broker submit and rejects
 the order if KIS reports insufficient capacity.
 
 Before Telegram approval, Maestro applies the same account-routed broker
-capacity check to every live buy order. An order that exceeds current cash or
-maximum buy quantity is excluded without blocking valid orders for other
+capacity check to every live buy order. The check is made against the buying
+power of the order's own currency: a multi-currency account such as Toss holds a
+separate KRW and USD balance, and won cannot pay for a dollar purchase. When the
+broker reports no figure for that currency the order is blocked rather than
+measured against another currency's balance. An order that exceeds current cash
+or maximum buy quantity is excluded without blocking valid orders for other
 accounts, and is persisted as `live_order_capacity_blocked`. The Telegram alert
 includes a recovery-review button. `/orders` exposes the same button for
 capacity blocks, pre-broker failures, and expired approvals. The review fetches

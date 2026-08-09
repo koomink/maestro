@@ -809,6 +809,20 @@
       cash-suspense incidents explicitly, and alert on fills that remain above
       the ledger watermark for 15 minutes
 
+- [x] Run rebalances as sell-then-buy cohort phases per account and currency:
+      hold buys until every sell fills, re-query broker buying power and shrink
+      the approved buys to it, and on any incomplete sell cancel the remainder,
+      skip the buys, and alert the operator
+- [x] Check pre-approval and retry capacity against the order's own currency:
+      have Toss answer from `buying_power_by_currency`, fail closed when the
+      currency is missing or the adapter answers in another one, share the
+      currency fallback with the live gate, and quote blocked maximums in whole
+      tradable steps
+- [ ] Price rotation orders off the Toss order book (`/api/v1/orderbook`), walking
+      to the level where cumulative volume covers the order and capping at
+      `max_quote_deviation_pct`, to raise the sell fill rate. See
+      [specs/2026-08-05-rotation-two-phase-execution-design.md](superpowers/specs/2026-08-05-rotation-two-phase-execution-design.md)
+
 ## Completed / Historical Notes
 
 - v0.1.0 delivered the bootable paper-mode skeleton described in [ROADMAP.md](ROADMAP.md).

@@ -21,8 +21,10 @@ from maestro.execution.brokers.readonly import (
     BrokerPosition,
     BrokerReadOnlySnapshot,
 )
+from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.handlers import (
     TelegramOperatorCommandRouter,
+    _quantity_step,
     telegram_bot_commands,
 )
 from maestro.monitoring.audit_logger import AuditLogger
@@ -2596,6 +2598,44 @@ def test_rejected_retry_proposal_allows_another_recovery_review(tmp_path):
     )
 
     assert router._pending_recovery_candidate(order.order_id) is not None
+
+
+def test_retry_review_offers_the_same_maximum_the_block_alert_quoted(monkeypatch, tmp_path):
+    """A retry the operator is offered must be one the capacity gate accepts.
+
+    Both sides round the affordable quantity down to the instrument's step, so
+    a partial share is never quoted as a retryable amount.
+    """
+    config = load_config(_telegram_config_path(tmp_path)).model_copy(
+        update={"mode": RunMode.LIVE_APPROVAL}
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=FakeTelegramClient(),
+    )
+    order = _store_recoverable_order(store, quantity=38)
+    # 250 KRW at 100 KRW a share buys two whole shares, not 2.5.
+    capacity = BrokerBuyingPower(
+        symbol=order.symbol,
+        order_price=100.0,
+        cash_buying_power=250.0,
+        currency="KRW",
+        source="test",
+    )
+    monkeypatch.setattr(router, "_lookup_retry_price", lambda config, order: 100.0)
+    monkeypatch.setattr(router, "_lookup_retry_capacity", lambda config, order: capacity)
+
+    _, _, _, review_maximum = router._retry_order_review(order.order_id)
+    _, blocked = OrderCapacityService(
+        lambda candidate: capacity,
+        quantity_step=lambda candidate: _quantity_step(config, candidate),
+    ).partition([order.model_copy(update={"price": 100.0, "notional": 3_800.0})])
+
+    assert review_maximum == 2.0
+    assert blocked[0].max_buy_quantity == review_maximum
 
 
 def _store_recoverable_order(

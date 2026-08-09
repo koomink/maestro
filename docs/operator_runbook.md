@@ -37,6 +37,62 @@ such as `Asia/Seoul`, with the timezone suffix included. For example,
 `2026-05-23 06:43:23` in SQLite is shown as
 `2026-05-23 15:43:23 KST` when the operator timezone is `Asia/Seoul`.
 
+## Rotation Stopped
+
+A rebalance runs its sells and its buys as two phases against one account and
+currency at a time. The buys are funded by the sells, and the broker re-checks
+buying power against its own balance when an order is submitted, so the buys are
+held back until every sell in the cohort has filled completely.
+
+If any sell partially fills, is rejected, or is still working when the poll
+window closes, the cohort stops: no buys are sent, the remaining sell quantity
+is cancelled, and you get a `Maestro rotation stopped` Telegram message naming
+the sells that did not fill, the buys that were skipped, and what was cancelled.
+The matching `rotation_cohort_aborted` and `rotation_cohort_phase` system events
+carry the same detail.
+
+**What to do:** re-run the rebalance. The next run regenerates the signal and
+sizes orders from current holdings, so it converges on the same target without
+any manual arithmetic — a book left holding 10% of the old asset and 90% cash
+simply produces a smaller sell and a full-size buy next time.
+
+**One thing to check first.** If the message lists
+`cancel FAILED (still live at broker)`, an order is still working. Cancel it in
+the broker UI before re-running: the `pending_broker_orders` risk gate blocks the
+entire next run while any unfilled order exists, and an uncancelled DAY order
+does not clear until the market closes.
+
+A cancellation only counts once the broker's own status poll reports `CANCELED`.
+Broker cancel endpoints acknowledge the request rather than the outcome, so an
+order whose cancel was accepted but not yet observed appears under
+`cancel_unconfirmed` and is listed in the same Telegram line — treat it exactly
+like a failed cancel and check the broker UI.
+
+You may also see `Maestro rotation incomplete`. That one means the sells all
+filled but at least one approved buy did not, so the account is holding cash it
+was meant to deploy. The Telegram message names which legs filled and which are
+missing; the `rotation_cohort_incomplete` event carries five id sets —
+`original_buy_order_ids`, `resized_buy_order_ids`,
+`capacity_accepted_buy_order_ids`, `submitted_buy_order_ids` and
+`filled_buy_order_ids`. The first set a leg is absent from tells you why it
+dropped out:
+
+- missing from `resized` → the realized cash could not stretch to a whole order
+- missing from `capacity_accepted` → the broker's own capacity check refused it
+- missing from `submitted` → it never reached the broker
+- missing from `filled` → it reached the broker but did not fill
+
+**Do not assume nothing is working at the broker.** A buy still `OPEN` or
+`PARTIALLY_FILLED` when polling ran out is live. Maestro cancels those and
+confirms the cancellation; if it cannot confirm one, it records a
+`live_order_recovery_required` blocker, and that blocker stops the next live
+execution until you clear it through `/recovery`. So:
+
+- No recovery blocker → nothing is working. Re-run the rebalance.
+- Recovery blocker present → resolve it through `/recovery` first. Re-running
+  before that is blocked by design, precisely so a recovery order cannot collide
+  with a buy that is still live.
+
 ## Halt Recovery
 
 1. Stop scheduled jobs that could submit or approve work.
@@ -51,8 +107,10 @@ maestro health --config <config>
    `safety_execution_blocked`, `stale_data_halt`, `broker_reconciliation_halt`,
    `live_order_limit_halt`, `live_order_halt`, `live_order_status`,
    `fill_reconciliation`, `live_order_lifecycle`,
-   `live_order_recovery_required`, `live_order_recovery_halt`, and
-   `live_order_recovery_completed`.
+   `live_order_recovery_required`, `live_order_recovery_halt`,
+   `live_order_recovery_completed`, `rotation_cohort_phase`,
+   `rotation_cohort_aborted`, `rotation_cohort_incomplete`, and
+   `rotation_cohort_buys_capacity_blocked`.
 4. Check broker account state in the broker UI.
 5. Run reconciliation and fill reconciliation. `reconcile` refreshes the KIS
    read-only broker snapshot before comparing it with Maestro state, so the
@@ -87,6 +145,14 @@ maestro recover-live-order --config <config> --reason "broker truth reconciled"
 
 If an order was excluded before approval, review the
 `live_order_capacity_blocked` event and Telegram's planned/available quantity.
+Its `capacity_currency` says which balance the order was actually judged against;
+check it against the same currency in the snapshot's `buying_power_by_currency`.
+A reason of `buying_power_by_currency_unavailable` means no balance was read at
+all: `requested_currency` is the currency the order needed and
+`available_currencies` is what the broker reported instead (empty when the
+adapter named no currency). The order was failed closed rather than compared
+against another currency, so there is nothing to retry until the broker reports
+that currency.
 Tap `재주문 검토` in the failure alert or `/orders`, then choose the original
 quantity, the freshly calculated maximum quantity, or `직접 수량 입력`. Direct
 input must be sent as a reply to Maestro's quantity prompt within 10 minutes.

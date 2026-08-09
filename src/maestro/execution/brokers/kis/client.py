@@ -22,6 +22,7 @@ class KISReadOnlyClient(ABC):
         self,
         symbol: str | None = None,
         order_price: float | None = None,
+        currency: str | None = None,
     ) -> KISBuyingPower:
         raise NotImplementedError
 

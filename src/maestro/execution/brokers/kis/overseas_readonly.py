@@ -54,7 +54,11 @@ class KISRestOverseasStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
         self,
         symbol: str | None = None,
         order_price: float | None = None,
+        currency: str | None = None,
     ) -> KISBuyingPower:
+        # One market, one currency: `currency` cannot change the answer, but the
+        # reply names USD so a mis-routed order in another currency is caught by
+        # the caller instead of being paid for out of the dollar balance.
         broker_symbol, exchange_code = self._buying_power_symbol(symbol)
         price_text = "1" if order_price is None else _format_kis_decimal(order_price)
         payload = self._get(
@@ -79,6 +83,7 @@ class KISRestOverseasStockReadOnlyClient(KISRestBaseClient, KISReadOnlyClient):
                 "ord_psbl_amt",
                 "max_ord_psbl_amt",
             ),
+            currency="USD",
             max_buy_quantity=_optional_first_float(
                 output,
                 "max_ord_psbl_qty",

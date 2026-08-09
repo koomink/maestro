@@ -242,6 +242,7 @@ def _save_broker_snapshot(store: StateStore) -> int:
                 "cash": 10_000_000.0,
                 "cash_by_currency": {"KRW": 10_000_000.0},
                 "buying_power": 10_000_000.0,
+                "buying_power_by_currency": {"KRW": 10_000_000.0},
                 "positions": [],
                 "daily_pnl": 0.0,
             },

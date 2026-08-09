@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from datetime import date, datetime, timedelta
 
 from pydantic import BaseModel, Field
@@ -38,10 +39,33 @@ class BrokerPosition(BaseModel):
         return self.quantity * self.current_price
 
 
+class BuyingPowerCurrencyUnavailable(ValueError):
+    """No buying-power figure exists for the currency an order is denominated in.
+
+    A multi-currency account holds a separate pot per currency, and one pot says
+    nothing about another: a KRW balance cannot fund a dollar purchase. Rather
+    than let a caller stand in the account's representative figure for the
+    currency it actually needs, adapters raise this and the capacity gate blocks.
+    """
+
+    def __init__(self, currency: str | None, available_currencies: Collection[str]) -> None:
+        self.currency = currency
+        self.available_currencies = tuple(available_currencies)
+        named = currency or "an unnamed currency"
+        reported = ", ".join(self.available_currencies) or "nothing"
+        super().__init__(
+            f"Broker buying power for {named} is unavailable; the account reports {reported}"
+        )
+
+
 class BrokerBuyingPower(BaseModel):
     symbol: str | None = None
     order_price: float | None = None
     cash_buying_power: float
+    # Which currency `cash_buying_power` is denominated in. A figure without one
+    # cannot be checked against an order's currency, so leaving this None means
+    # "trust the caller's routing" — every adapter here fills it in.
+    currency: str | None = None
     max_buy_quantity: float | None = None
     source: str
 
@@ -122,7 +146,13 @@ class BrokerReadOnlyClient(ABC):
         self,
         symbol: str | None = None,
         order_price: float | None = None,
+        currency: str | None = None,
     ) -> BrokerBuyingPower:
+        """Capacity for a buy of `symbol`, denominated in `currency`.
+
+        Implementations that hold more than one currency must answer for the one
+        asked for and raise `BuyingPowerCurrencyUnavailable` when they cannot.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -234,6 +264,40 @@ class BrokerReadOnlyService:
         return payload
 
 
+def buying_power_for_currency(
+    account: BrokerAccountSnapshot,
+    currency: str | None,
+    *,
+    symbol: str | None = None,
+    order_price: float | None = None,
+) -> BrokerBuyingPower:
+    """Pick one currency's buying power out of a multi-currency account.
+
+    The account-level `buying_power_detail` carries whichever currency the
+    adapter treats as primary, which is the wrong number for every other
+    currency the account holds. Read the per-currency breakdown instead, and
+    fail closed rather than substitute a figure from a currency nobody asked
+    about.
+
+    An unnamed currency is only answerable when the account holds exactly one —
+    with two pots there is no way to tell which the caller meant.
+    """
+    by_currency = account.buying_power_by_currency
+    if currency is None:
+        if len(by_currency) != 1:
+            raise BuyingPowerCurrencyUnavailable(None, by_currency)
+        currency = next(iter(by_currency))
+    if currency not in by_currency:
+        raise BuyingPowerCurrencyUnavailable(currency, by_currency)
+    return BrokerBuyingPower(
+        symbol=symbol,
+        order_price=order_price,
+        cash_buying_power=by_currency[currency],
+        currency=currency,
+        source=account.source,
+    )
+
+
 def _prices_with_position_prices(
     account: BrokerAccountSnapshot,
     current_prices: dict[str, float],
@@ -254,4 +318,6 @@ __all__ = [
     "BrokerReadOnlyClient",
     "BrokerReadOnlyService",
     "BrokerReadOnlySnapshot",
+    "BuyingPowerCurrencyUnavailable",
+    "buying_power_for_currency",
 ]

@@ -6,7 +6,7 @@ from typing import Any
 from maestro.approval.models import ApprovalDecision
 from maestro.config.models import ExecutionConfig
 from maestro.core.clock import utc_now
-from maestro.core.enums import OrderStatus
+from maestro.core.enums import OrderSide, OrderStatus
 from maestro.execution.live_order_models import (
     AppliedFill,
     FillReconciliationResult,
@@ -30,6 +30,19 @@ class BatchOrderDependencies:
     status_service: Any
     fill_reconciliation_service: Any
     broker_reconciliation_service: Any | None = None
+
+
+def _sells_first(
+    items: list[tuple[LiveOrderRequest, BatchOrderDependencies]],
+) -> list[tuple[LiveOrderRequest, BatchOrderDependencies]]:
+    """Order a batch so every sell is submitted before any buy.
+
+    A rebalance sizes its buys against the proceeds of the sells filed in the
+    same batch, so submitting buy-first asks the broker to spend cash the account
+    has not raised yet. Sorting is stable, so the builder's ordering survives
+    within each side.
+    """
+    return sorted(items, key=lambda item: item[0].side != OrderSide.SELL)
 
 
 @dataclass
@@ -74,7 +87,10 @@ class LiveOrderBatchLifecycleService:
         approval_decision: ApprovalDecision,
     ) -> LiveOrderBatchLifecycleResult:
         run_started = monotonic()
-        states = [_OrderState(request=request, dependencies=deps) for request, deps in items]
+        states = [
+            _OrderState(request=request, dependencies=deps)
+            for request, deps in _sells_first(items)
+        ]
         submission_started = monotonic()
         stop_submissions = False
         for state in states:
