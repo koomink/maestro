@@ -1281,6 +1281,9 @@ def test_multi_product_account_uses_the_composite_snapshot_for_capacity(
 
     assert capacity.cash_buying_power == 4_200_000.0
     assert capacity.currency == "KRW"
+    # The per-symbol lot cap has to survive, or the post-sell partition approves
+    # a quantity the product's own pre-submit check then rejects.
+    assert capacity.max_buy_quantity == 7.0
 
 
 def test_multi_product_capacity_fails_closed_on_an_unpriced_currency(tmp_path, monkeypatch):
@@ -1298,9 +1301,27 @@ def test_multi_product_capacity_fails_closed_on_an_unpriced_currency(tmp_path, m
 
 
 class _CompositeService:
-    """A multi-product KIS service: no single client, one merged snapshot."""
+    """A multi-product KIS service: no single client, one client per product."""
 
     client = None
+
+    def __init__(self) -> None:
+        self.asked: list[tuple[str, float, str | None, object]] = []
+
+    def get_buying_power_for_product(self, symbol, order_price, *, currency, broker_product):
+        self.asked.append((symbol, order_price, currency, broker_product))
+        if currency != "KRW":
+            raise BuyingPowerCurrencyUnavailable(currency, ["KRW"])
+        return BrokerBuyingPower(
+            symbol=symbol,
+            order_price=order_price,
+            cash_buying_power=4_200_000.0,
+            currency="KRW",
+            # The product client prices the symbol, so it knows the lot cap the
+            # merged snapshot cannot express.
+            max_buy_quantity=7.0,
+            source="kis_domestic_stock_readonly",
+        )
 
     def fetch_and_store_snapshot(self, symbols, run_id=None):
         del symbols, run_id

@@ -2165,21 +2165,50 @@ class MaestroOrchestrator:
             self._order_capacity_clients[account_id] = service
         client = getattr(service, "client", None)
         if client is None:
-            # A KIS service spanning several broker products has no single
-            # client; it composes one snapshot per product instead. Reaching for
-            # `service.client` there raised, and a rotation that had already sold
-            # was left holding cash.
-            return self._capacity_from_composite_snapshot(service, order)
+            # A KIS service spanning several broker products keeps no single
+            # client. Ask the one that owns this order's product: the merged
+            # snapshot has only per-currency cash, and dropping the per-symbol
+            # quantity cap lets the post-sell partition approve a size the
+            # product's own pre-submit check then rejects.
+            return self._capacity_from_product_client(service, order)
         account = self.account_router.account(account_id)
         broker = account.broker if account is not None else "kis"
         return get_order_buying_power(client, self.config, broker, order)
+
+    def _capacity_from_product_client(
+        self,
+        service: Any,
+        order: OrderIntent,
+    ) -> BrokerBuyingPower:
+        """Price the order through the read-only client that owns its product."""
+        currency = resolve_order_currency(self.config, order)
+        per_product = getattr(service, "get_buying_power_for_product", None)
+        if per_product is not None:
+            instrument = self.config.universe.get(order.symbol)
+            symbol = (
+                instrument.symbol_for_broker("kis") if instrument is not None else order.symbol
+            )
+            return check_capacity_currency(
+                per_product(
+                    symbol,
+                    order.price,
+                    currency=currency.value,
+                    broker_product=order.broker_product,
+                ),
+                currency,
+            )
+        return self._capacity_from_composite_snapshot(service, order)
 
     def _capacity_from_composite_snapshot(
         self,
         service: Any,
         order: OrderIntent,
     ) -> BrokerBuyingPower:
-        """Read the order's currency out of a merged multi-product snapshot."""
+        """Fall back to per-currency cash from a merged snapshot.
+
+        Carries no quantity cap, so it is a last resort for a service that
+        cannot price a single product.
+        """
         currency = resolve_order_currency(self.config, order)
         snapshot = service.fetch_and_store_snapshot([order.symbol])
         by_currency = dict(getattr(snapshot.account, "buying_power_by_currency", {}) or {})

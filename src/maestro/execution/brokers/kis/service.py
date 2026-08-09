@@ -4,7 +4,11 @@ from maestro.core.instruments import TradableInstrument
 from maestro.execution.brokers.kis.auth import KISAuthManager
 from maestro.execution.brokers.kis.client import KISReadOnlyClient
 from maestro.execution.brokers.kis.mock_client import MockKISReadOnlyClient
-from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnlySnapshot
+from maestro.execution.brokers.kis.models import (
+    KISAccountSnapshot,
+    KISBuyingPower,
+    KISReadOnlySnapshot,
+)
 from maestro.execution.brokers.kis.readonly_client import build_kis_rest_readonly_client
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
@@ -63,6 +67,33 @@ class KISReadOnlyService:
             payload,
         )
         return snapshot
+
+    def get_buying_power_for_product(
+        self,
+        symbol: str,
+        order_price: float,
+        *,
+        currency: str,
+        broker_product=None,
+    ) -> KISBuyingPower:
+        """Buying power from the one product client that can price this order.
+
+        A service spanning several broker products keeps no single client, and
+        the merged snapshot carries only per-currency cash. Quantity caps are
+        per symbol and per product, so the order has to be priced by the client
+        that owns its product or the cap is simply lost.
+        """
+        client = self.client or self._build_client(
+            self.config,
+            self.instruments,
+            broker_product=broker_product,
+        )
+        if client is None:
+            raise ValueError(
+                "KIS read-only client is unavailable for broker_product="
+                f"{broker_product}"
+            )
+        return client.get_buying_power(symbol, order_price, currency=currency)
 
     def _build_client(
         self,
