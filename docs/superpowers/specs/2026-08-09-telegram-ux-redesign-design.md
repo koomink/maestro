@@ -14,6 +14,9 @@ decision의 비종결화, 단계 3 roll-forward-only 명시
 개정 5차: 2026-08-09 Codex 적대적 리뷰 5차 반영 — 워크플로우 head/version
 CAS로 단일 활성 요청 보장, 승인 dispatch의 idempotent resume
 (consumed와 dispatch 완료 분리)
+개정 6차: 2026-08-09 Codex 적대적 리뷰 6차 반영 — head 갱신의 트랜잭션
+결합 + 수렴 sweep, claim의 attempt 기반 재개(fencing), Telegram 전송
+exactly-once 포기(at-least-once + 중복 카드 정리), 단계 3을 3a/3b로 분리
 
 ## 배경과 목표
 
@@ -173,7 +176,7 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 이미 존재한다. `_load_pending_funding_request()`는 해당 request_id의 ack
 유무만 확인하므로 구 버튼의 재시도가 signal run·현금흐름 기록을 중복
 생성할 수 있다 — UI 개편 이전부터 존재하는 결함이며, funding 카드가
-약속하는 상태 일관성의 전제이므로 단계 3에서 함께 해결한다. 이 부분은
+약속하는 상태 일관성의 전제이므로 단계 3a에서 함께 해결한다. 이 부분은
 **"비즈니스 로직 불변" 원칙(접근 A)의 명시적 예외**로, handlers의 funding
 확인 경로에 다음 규약을 도입한다:
 
@@ -187,13 +190,32 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    커밋한다. duplicate_key의 전역 유일성이 같은 버전 전이의 동시 커밋을
    한 건으로 직렬화하므로 요청 생성·교체가 CAS로 동작한다. head에서
    밀려난 요청은 명시적 `superseded` 종결 상태로 기록한다.
-2. **원자적 claim**: funding/budget callback 처리 시작 시 먼저 해당
-   request_id가 **현재 head인지 검증**하고(head가 아니면 거절),
-   `funding_workflow_claim` system event를
-   `duplicate_key = <funding_workflow_id>:<phase>:<request_id>`로 기록한다
-   (기존 duplicate_key 멱등 컨벤션 재사용). 이미 claim이 존재하면 처리에
-   진입하지 않고 "이미 처리 중이거나 완료된 요청이에요"로 응답한다 —
-   동시 중복 callback과 교체 전 요청의 재실행을 상태 변경 이전에 차단한다.
+   **head 갱신은 요청 생성과 한 트랜잭션이어야 한다**: 버전 duplicate_key
+   만으로는 "요청 저장 후 head 갱신 전 중단 → head에 연결되지 않은 orphan
+   요청" 또는 그 반대의 dangling head가 남는다. state store는 단일 SQLite
+   이므로, 여러 system event(신규 요청, 이전 요청 superseded, 새 head)를
+   duplicate_key 조건과 함께 **하나의 DB 트랜잭션으로 커밋하는 StateStore
+   API**(`save_system_events_atomic`)를 신설해 요청 생성·교체·head 전환을
+   원자화한다. 방어선으로, 복구 sweep가 재시작 시 불변식을 검사해
+   orphan pending 요청(head 미연결)은 `superseded`로, dangling head
+   (요청 실체 없음)는 직전 버전으로 수렴시키고 audit 이벤트를 남긴다.
+2. **원자적 claim (attempt 기반, 재개 가능)**: claim을 "존재하면 영원히
+   거절"인 잠금으로 정의하면 child 생성 전에 중단된 워크플로우는 어떤
+   경로로도 재진입하지 못해 영구 정지한다. claim은 **attempt 단위의 전이
+   시도 기록**으로 정의한다:
+   - funding/budget callback 처리 시작 시 먼저 해당 request_id가 **현재
+     head인지 검증**하고(head가 아니면 거절), `funding_workflow_claim`을
+     `duplicate_key = <funding_workflow_id>:<phase>:<request_id>:a<attempt>`
+     로 기록한다. 최초 진입은 attempt=1이며, 커밋에 실패하면(이미 존재)
+     처리에 진입하지 않고 "이미 처리 중이거나 완료된 요청이에요"로
+     응답한다 — 동시 중복 callback을 상태 변경 이전에 차단한다.
+   - **재개는 attempt 증가로만**: 미완 attempt(claim은 있으나
+     `completed`/`child_created` 없음)가 발견되면 복구 카드가 [재개] 버튼을
+     제시하고, 운영자 승인 시 attempt+1 claim을 CAS로 커밋한 실행만이
+     전이를 이어간다. attempt 번호가 fencing token 역할을 하므로 운영자가
+     동시에 두 번 승인해도 재개는 한 건만 진입한다. 이전 attempt의 잔여
+     실행이 뒤늦게 상태를 커밋하려 해도 자신의 attempt가 최신이 아니면
+     기록을 거부한다.
 3. **공통 상태 전이 `claimed → child_created → completed`**: funding과
    budget 전환 모두 이 3단계를 system event로 영속화한다. `completed`만이
    종결 상태다. 특히 **budget decision은 종결 ack가 아니라** 전환의 입력값
@@ -214,7 +236,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    상태로 재시작되면 같은 전환을 자동 재실행하지 않는다. lineage로 child
    signal run을 조회해 **있으면 재사용**하여 나머지 단계(승인 dispatch,
    completed 기록)만 이어서 수행하고, 없으면 기존 워크플로우 복구 카드
-   ("이전 작업이 중단된 상태예요")로 라우팅해 운영자 확인 후 진행한다.
+   ("이전 작업이 중단된 상태예요")로 라우팅한다. 복구 카드의 [재개]는
+   항목 2의 attempt 증가 규약으로만 전이에 진입한다 — 운영자 승인 없이
+   자동 재실행되는 경로는 없고, 승인돼도 실행은 한 건만 진입한다.
    budget의 경우 저장된 decision 금액을 그대로 사용해 재개한다.
 6. **승인 dispatch의 idempotent resume**: "child run이 있으면 승인
    dispatch부터 재개"가 성립하려면 dispatch 자체가 재개 가능해야 한다.
@@ -230,8 +254,18 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
      나오게 하고, 이미 저장된 그룹별 `telegram_approval_pending` envelope
      (approval_id duplicate_key로 durable)이 있으면 새 approval을 만들지
      않고 재사용한다.
-   - 채팅별 전송 성공을 `duplicate_key = sent:<approval_id>:<chat_id>`
-     이벤트로 기록해, 재개 시 미전송 채팅만 발송한다.
+   - **전송은 exactly-once가 아니라 at-least-once**: sendMessage 성공과
+     성공 이벤트 저장 사이의 중단은 원리적으로 구분할 수 없으므로
+     "미전송 채팅만 정확히 발송"은 보장 대상이 아니다. 채팅별로 전송
+     **intent**(`intent:<approval_id>:<chat_id>`)를 먼저 영속화하고,
+     sendMessage 성공 후 결과(message_id)를 기록한다. 재개 시 intent도
+     없는 채팅만 새로 발송하고, intent는 있으나 결과가 없는 **ambiguous
+     채팅은 재발송한다** — 중복 카드가 생길 수 있음을 수용한다.
+   - **중복 카드는 안전하고, 정리된다**: 승인 callback은 approval_id 기반
+     멱등이므로(기존 pending envelope 소비는 1회) 중복 카드 중 어느 것을
+     눌러도 결과는 같다. 라이프사이클 매니저는 `approval:<approval_id>`
+     card_key로 같은 승인의 카드 메시지를 추적하므로, 중복이 감지되면 구
+     메시지를 "아래 새 카드로 대체되었어요"로 edit해 무력화한다.
    - resume 진입 조건: consumed이지만 완료 이벤트가 없는 package.
    이 변경은 funding 재생성 run만이 아니라 승인 dispatch 전체에 적용되며,
    접근 A 예외 범위에 포함된다.
@@ -360,8 +394,16 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
     처리되어도 claim에 의해 한 건만 진입하고 나머지는 거절된다
   - **dispatch crash 주입**: consumed 직후 / 각 그룹 pending 이벤트 저장
     전후 / 각 채팅 전송 전후에 중단 후 재개 — 기존 approval_id·envelope이
-    재사용되고, 미전송 채팅에만 발송되며, 전부 끝난 뒤에야 dispatch 완료가
-    기록된다
+    재사용되고, intent 없는 채팅은 발송·ambiguous 채팅은 재발송(중복 허용)
+    되며, 중복 카드는 구 메시지 무력화 edit로 정리되고, 승인 callback은
+    어느 카드에서 눌러도 한 번만 처리되며, 전부 끝난 뒤에야 dispatch
+    완료가 기록된다
+  - **head 트랜잭션 crash 주입**: 요청 생성·superseded·head 전환의 원자
+    커밋을 중단 지점별로 검증하고, 인위적으로 만든 orphan 요청/dangling
+    head가 복구 sweep에서 수렴된다
+  - **단일 재개(fencing)**: child 생성 전 각 중단 지점에서 복구 카드
+    [재개]를 동시에 두 번 승인해도 attempt CAS에 의해 한 건만 진입하고,
+    이전 attempt의 잔여 실행은 상태 커밋이 거부된다
   - 연속 렌더/edit 실패 → 고정 템플릿 fallback 발송 + 헬스 degraded
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
@@ -372,7 +414,8 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 |---|---|---|
 | 1 | `ui/` 모듈 신설 + 승인 카드 교체 + 자세히 토글 + 메뉴 5개 등록 | 가장 자주 보는 메시지 즉시 개선 |
 | 2 | 라이프사이클 카드 매니저 + 승인/데일리 카드 + 노옵 한 줄 + fallback 알림 경로 | 구조 개편의 핵심 |
-| 3 | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합) + funding/budget 확인 경로의 상태 머신·원자적 claim·lineage (접근 A 예외) | 월초 경험 개선 + 기존 교체 경합 결함 해소 |
+| 3a | **정합성 기반 작업 (UI 아님, 접근 A 예외)**: StateStore 원자 커밋 API, 워크플로우 head/CAS, attempt 기반 claim·재개, lineage, dispatch idempotent resume, 수렴 sweep | 기존 교체 경합·중단 복구 결함 해소 (독립 배포·검증) |
+| 3b | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합, 3a 위에 구축) | 월초 경험 개선 |
 | 4 | 예외 마법사 (재주문·cash drift·복구·안전 정지) | 장애 대응 경험 개선 |
 | 5 | 조회 카드 5종 + 구 명령어 메뉴 숨김 + 구 알림 경로 제거 | 마무리 |
 
@@ -381,13 +424,13 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 카드 전달 성공률이 실운영에서 검증된 후(아래 승인 조건 충족) 단계 5에서
 구 경로를 제거한다.
 
-**단계 3은 roll-forward-only**: 단계 1·2·4·5는 UI 전용이므로 코드 롤백만으로
-안전하게 되돌릴 수 있지만, 단계 3은 다르다. 새 코드가 남긴
+**단계 3a는 roll-forward-only**: 단계 1·2·3b·4·5는 UI 전용이므로 코드
+롤백만으로 안전하게 되돌릴 수 있지만, 단계 3a는 다르다. 새 코드가 남긴
 `funding_workflow_claim`을 구 handlers는 확인하지 않으므로, claim 이후
 `completed` 이전 상태에서 구버전으로 롤백하면
 `_load_pending_funding_request()`가 요청을 다시 pending으로 간주해
 `run_signal()`을 중복 실행할 수 있다 — 즉 장애 시점의 롤백이 새 불변식을
-제거한다. 따라서 단계 3 이후에는 **버그 대응도 수정 배포(roll-forward)로만
+제거한다. 따라서 단계 3a 이후에는 **버그 대응도 수정 배포(roll-forward)로만
 진행**하고, 부득이하게 롤백해야 하면 미완(claim-only) 워크플로우가 없음을
 먼저 확인하거나 해당 워크플로우를 수동 종결한 뒤 롤백한다. 이 절차는 운영
 문서에 명시한다.
@@ -405,9 +448,12 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   동시 중복 callback은 claim에 의해 한 건만 처리되고, 중단된 워크플로우는
   복구 대상으로 잡혀 재개된다.
 - 승인 dispatch 중단(consumed 직후, 그룹 이벤트 전후, 채팅 전송 전후) 후
-  재개 시 approval이 중복 생성되지 않고 미전송 채팅만 발송되며, 같은
-  scope/month의 병행 pending 요청 경쟁에서 head인 요청만 처리된다.
-- (단계 3) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
+  재개 시 approval이 중복 생성되지 않고, ambiguous 전송의 중복 카드는
+  정리되며 승인 callback은 멱등하고, 같은 scope/month의 병행 pending 요청
+  경쟁에서 head인 요청만 처리된다.
+- claim-only 상태의 워크플로우가 복구 카드 [재개]로 정확히 한 번 재개되고,
+  orphan 요청/dangling head가 sweep에서 수렴된다.
+- (단계 3a) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
   중복 실행 위험을 확인하고, roll-forward-only 운영 절차가 문서화되어 있다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
