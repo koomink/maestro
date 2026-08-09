@@ -26,6 +26,9 @@ exactly-once 포기(at-least-once + 중복 카드 정리), 단계 3을 3a/3b로 
 개정 9차: 2026-08-09 Codex 적대적 리뷰 9차 반영 — 승인 결정의 2단계
 영속화(ack ≠ 종결, resolution 재개 규약), scope 직렬화를 타입 보존
 canonical JSON으로 변경(sentinel 치환 금지)
+개정 10차: 2026-08-09 Codex 적대적 리뷰 10차 반영 — 3a 업그레이드
+backfill(legacy 요청 v1 head 생성, legacy ack 완료 판정), 롤백 preflight
+조건 확장, scope 직렬화에서 NFC 정규화 제거(원시 코드포인트 보존)
 
 ## 배경과 목표
 
@@ -160,7 +163,11 @@ scope마다 호출됨). 따라서 워크플로우 키는 scope 전체를 포함�
 funding_scope = 타입 보존 canonical JSON 배열
   [contribution_group_id, account_id, execution_sleeve, currency]
   - null은 JSON null 그대로 (문자열 sentinel로 치환하지 않는다)
-  - 문자열은 NFC 유니코드 정규화 후 직렬화
+  - 문자열은 **원시 코드포인트 그대로 보존** — 키 생성 시 유니코드
+    정규화를 하지 않는다. 정규화하면 원시 값이 다른 NFC 등가 문자열이
+    같은 head/CAS를 공유해 서로를 supersede할 수 있고, 이는 "서로 다른
+    scope는 충돌하지 않는다"는 불변식과 모순된다. 식별자는 항상 동일한
+    config 소스에서 나오므로 표기 등가성 병합은 필요하지 않다.
   - json.dumps(..., ensure_ascii=False, separators=(",", ":")) 고정 표기
 funding_workflow_id = "funding:" + funding_scope JSON + ":" + month_key
 ```
@@ -232,6 +239,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    원자화한다. 방어선으로, 복구 sweep가 재시작 시 불변식을 검사해
    orphan pending 요청(head 미연결)은 `superseded`로, dangling head
    (요청 실체 없음)는 직전 버전으로 수렴시키고 audit 이벤트를 남긴다.
+   단, 이 수렴은 **마이그레이션 watermark 이후에 생성된 요청에만**
+   적용한다 — 3a 이전에 생성된 요청은 head가 원래 없으므로 orphan이
+   아니며, 아래 "3a 업그레이드 backfill" 절차가 처리한다.
 2. **원자적 claim (attempt 기반, 재개 가능)**: claim을 "존재하면 영원히
    거절"인 잠금으로 정의하면 child 생성 전에 중단된 워크플로우는 어떤
    경로로도 재진입하지 못해 영구 정지한다. claim은 **attempt 단위의 전이
@@ -537,9 +547,42 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 `_load_pending_funding_request()`가 요청을 다시 pending으로 간주해
 `run_signal()`을 중복 실행할 수 있다 — 즉 장애 시점의 롤백이 새 불변식을
 제거한다. 따라서 단계 3a 이후에는 **버그 대응도 수정 배포(roll-forward)로만
-진행**하고, 부득이하게 롤백해야 하면 미완(claim-only) 워크플로우가 없음을
-먼저 확인하거나 해당 워크플로우를 수동 종결한 뒤 롤백한다. 이 절차는 운영
-문서에 명시한다.
+진행**하고, 부득이하게 롤백해야 하면 **롤백 preflight**를 통과한 뒤에만
+롤백한다. preflight는 다음이 모두 0건임을 확인한다 (하나라도 있으면 먼저
+수동 종결):
+
+- 미완 funding/budget 전이 (claim은 있으나 `completed` 없음)
+- consumed이지만 dispatch 완료(`signal_approval_pending`)가 없는
+  signal package — 구버전은 이를 영구 consumed로 취급해 승인 카드가
+  유실된다
+- `decision_recorded`는 있으나 `resolution_completed`가 없는 승인 —
+  구 handler는 ack만으로 영구 종결로 취급해 승인된 주문이 유실된다
+
+preflight 검사와 미완 상태의 수동 종결을 수행하는 운영 도구(CLI 점검
+명령)를 3a에 포함하고, 각 미완 상태에서의 롤백 시나리오를 테스트한다.
+이 절차는 운영 문서에 명시한다.
+
+**3a 업그레이드 backfill (첫 기동 시 1회)**: 새 불변식은 3a 이전에 쌓인
+상태를 모르므로, backfill 없이 켜면 두 가지 오판이 발생한다 — (a) 기존
+pending funding/budget 요청은 head가 없어 수렴 sweep이 orphan으로 오판해
+supersede할 수 있고, (b) 기존에 정상 완료된 승인 ack는
+`resolution_completed`가 없어 sweep이 미완으로 오판해 재집행할 수 있다.
+따라서 3a 첫 기동은 다음 backfill을 마친 뒤에만 sweep을 활성화한다:
+
+1. **마이그레이션 watermark 기록**: backfill 시점을 system event로 남기고,
+   새 수렴·재개 로직은 watermark 이후 상태에만 적용한다.
+2. **legacy pending 요청의 head 초기화**: watermark 이전 pending
+   funding/budget 요청을 workflow(scope+month)별로 묶어 v1 head를
+   원자적으로 생성한다. 같은 workflow에 pending이 2건 이상인 모호한
+   그룹은 **자동 supersede하지 않고** 운영자 검토 카드로 격리한다.
+3. **legacy ack의 완료 판정**: 결정 이벤트에 스키마 버전 필드를 추가해
+   신·구 이벤트를 구분한다. watermark 이전 ack는
+   `signal_approval_completed` 이벤트와 주문·실행 기록을 증거로 완료
+   여부를 판정해 `resolution_completed`를 backfill하고, 증거가 모호한
+   ack는 **자동 재실행하지 않고** 운영자 검토 카드로 격리한다.
+4. **업그레이드 테스트**: 실제 구버전 DB 스냅샷(fixture)으로 backfill을
+   실행해 — 정상 pending 요청이 유지되고, 완료된 승인이 재집행되지
+   않으며, 모호 케이스가 격리되는지 검증한다.
 
 **각 단계의 배포 승인 조건** (다음 단계로 넘어가기 전 확인):
 
@@ -564,6 +607,14 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   ⚠️ 복구 카드로 노출된다.
 - (단계 3a) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
   중복 실행 위험을 확인하고, roll-forward-only 운영 절차가 문서화되어 있다.
+- (단계 3a) 구버전 DB fixture로 업그레이드 backfill을 검증한다: 기존
+  pending 요청이 v1 head로 연결되어 유지되고, 완료된 legacy 승인이
+  재집행되지 않으며, 모호 케이스(복수 pending, 증거 불충분 ack)는 자동
+  처리 대신 운영자 검토로 격리된다.
+- (단계 3a) 롤백 preflight가 미완 funding/budget 전이,
+  consumed-without-dispatch-completion,
+  decision_recorded-without-resolution_completed를 모두 검출하고, 각 미완
+  상태에서의 롤백 시나리오가 테스트되어 있다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
 
