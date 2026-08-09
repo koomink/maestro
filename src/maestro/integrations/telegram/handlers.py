@@ -75,6 +75,8 @@ from maestro.execution.order_builder import (
 )
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
+from maestro.integrations.telegram.ui import catalog as ui_catalog
+from maestro.integrations.telegram.ui.cards import render_approval_card
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
@@ -421,6 +423,8 @@ class TelegramOperatorCommandRouter:
                 user_id,
                 username,
             )
+        if action.startswith("ui:"):
+            return self._process_ui_toggle(callback, action, chat_id, user_id, username)
         if action.startswith("appr:"):
             return self._process_async_approval_callback(
                 callback,
@@ -1305,6 +1309,43 @@ class TelegramOperatorCommandRouter:
             ),
         )
         self._record("/retry_order", chat_id, user_id, username, "approved")
+        return True
+
+    def _process_ui_toggle(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[1] not in {"d", "f"}:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            return True
+        envelope = self._pending_async_approval(parts[2])
+        if envelope is None:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            self._record("/approval", chat_id, user_id, username, "stale_callback")
+            return True
+        card = render_approval_card(envelope.request, expanded=parts[1] == "d")
+        message = callback.get("message")
+        message_id = message.get("message_id") if isinstance(message, Mapping) else None
+        if message_id is None:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            return True
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                int(message_id),
+                card.text,
+                reply_markup=card.reply_markup,
+            )
+        except (RuntimeError, ValueError):
+            self._answer(callback, ui_catalog.CALLBACK_FAILED_TEXT)
+            return True
+        self._answer(callback, "")
+        self._record("/approval", chat_id, user_id, username, "ui_toggle")
         return True
 
     def _process_async_approval_callback(

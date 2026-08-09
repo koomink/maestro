@@ -3065,3 +3065,50 @@ def test_dispatch_uses_korean_approval_card():
     from maestro.orchestration import orchestrator as orch
 
     assert orch.render_approval_card is not None
+
+
+def test_ui_detail_callback_expands_approval_card(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    handled = router.process_update(
+        callback_update(f"operator:ui:d:{envelope.approval_id}")
+    )
+
+    assert handled
+    edited = client.edited_messages[-1]
+    assert envelope.approval_id in edited["text"]  # 펼친 뷰에는 ID 노출
+    fold_row = edited["reply_markup"]["inline_keyboard"][1][0]
+    assert fold_row["callback_data"] == f"operator:ui:f:{envelope.approval_id}"
+
+    handled = router.process_update(
+        callback_update(f"operator:ui:f:{envelope.approval_id}", update_id=3)
+    )
+    assert handled
+    folded = client.edited_messages[-1]
+    assert envelope.approval_id not in folded["text"]  # 접힌 뷰에는 ID 숨김
+
+
+def test_ui_detail_callback_for_stale_approval_answers_only(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    handled = router.process_update(callback_update("operator:ui:d:appr_missing"))
+
+    assert handled
+    assert client.edited_messages == []
+    assert client.answered_callbacks[-1]["text"] == "이미 처리됐거나 만료된 요청이에요."
