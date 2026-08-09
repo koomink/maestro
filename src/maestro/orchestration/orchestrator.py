@@ -173,6 +173,15 @@ class ScopedOrderTarget:
     requires_budget_request: bool = False
 
 
+@dataclass(frozen=True)
+class _CancelResolution:
+    resolved_statuses: dict[str, OrderStatus]
+    canceled: list[dict[str, Any]]
+    cancel_failures: list[dict[str, Any]]
+    cancel_unconfirmed: list[dict[str, Any]]
+    reconciliation_failed: bool
+
+
 _CANCEL_TERMINAL_STATUSES = {
     OrderStatus.CANCELED,
     OrderStatus.FILLED,
@@ -2661,16 +2670,22 @@ class MaestroOrchestrator:
         dependencies_by_account: dict[str | None, LiveApprovalDependencies] = {}
         lifecycle_results: list[LiveOrderLifecycleResult] = []
         for cohort in split_rotation_cohorts(armed_orders):
-            lifecycle_results.extend(
-                self._run_cohort_phases(
-                    cohort,
-                    run_id=run_id,
-                    approval_id=approval_id,
-                    approval_decision=approval_decision,
-                    signal_run_id=signal_run_id,
-                    dependencies_by_account=dependencies_by_account,
-                )
+            cohort_results, stop = self._run_cohort_phases(
+                cohort,
+                run_id=run_id,
+                approval_id=approval_id,
+                approval_decision=approval_decision,
+                signal_run_id=signal_run_id,
+                dependencies_by_account=dependencies_by_account,
             )
+            lifecycle_results.extend(cohort_results)
+            if stop:
+                self._record_event(
+                    run_id,
+                    "rotation_cohorts_halted",
+                    {"reason": "ledger_disagrees_with_broker", "after_cohort": cohort.account_id},
+                )
+                break
         return lifecycle_results, self.state_store.load_latest_portfolio_state()
 
     def _run_cohort_phases(
@@ -2682,7 +2697,7 @@ class MaestroOrchestrator:
         approval_decision: ApprovalDecision,
         signal_run_id: str | None,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
-    ) -> list[LiveOrderLifecycleResult]:
+    ) -> tuple[list[LiveOrderLifecycleResult], bool]:
         """Sell, wait for the fills, then buy against the cash they raised.
 
         The broker re-checks buying power against its own live balance when the
@@ -2691,7 +2706,8 @@ class MaestroOrchestrator:
         sitting in cash for a whole rebalance cycle.
         """
         results: list[LiveOrderLifecycleResult] = []
-        sell_results, _ = self._run_batch_phase(
+        stop_remaining_cohorts = False
+        sell_results, sell_requests = self._run_batch_phase(
             list(cohort.sells),
             run_id=run_id,
             approval_id=approval_id,
@@ -2715,16 +2731,18 @@ class MaestroOrchestrator:
             },
         )
         if not outcome.complete:
-            self._abort_cohort(
+            results, stop_remaining_cohorts = self._abort_cohort(
                 cohort,
                 outcome,
+                results,
                 run_id=run_id,
                 approval_decision=approval_decision,
                 dependencies_by_account=dependencies_by_account,
+                requests_by_order_id=sell_requests,
             )
-            return results
+            return results, stop_remaining_cohorts
         if not cohort.buys:
-            return results
+            return results, stop_remaining_cohorts
         # Only a cohort whose buys were funded by its own sells needs resizing.
         # A buy-only run — a monthly contribution, say — was already sized and
         # gated against real cash at approval time, and nothing has moved since.
@@ -2737,18 +2755,20 @@ class MaestroOrchestrator:
                 # The sells already filled, so the book is sitting in cash. Letting
                 # this unwind the run would leave that state with no event and no
                 # alert — the same silent drift this flow exists to remove.
-                self._abort_cohort(
+                results, stop_remaining_cohorts = self._abort_cohort(
                     cohort,
                     SellPhaseOutcome(
                         complete=False,
                         reason=f"buying_power_unavailable:{type(exc).__name__}",
                         unfilled=(),
                     ),
+                    results,
                     run_id=run_id,
                     approval_decision=approval_decision,
                     dependencies_by_account=dependencies_by_account,
+                    requests_by_order_id=sell_requests,
                 )
-                return results
+                return results, stop_remaining_cohorts
             buys = rescale_buys_to_cash(
                 buys,
                 available_cash,
@@ -2807,33 +2827,31 @@ class MaestroOrchestrator:
             # Take any still-working buy off the broker's book first: the attempt
             # can reveal that one of them actually filled, which changes who is
             # missing.
-            resolved_statuses = self._resolve_working_buys(
-                buy_results,
-                run_id=run_id,
-                approval_decision=approval_decision,
-                dependencies_by_account=dependencies_by_account,
-                account_id=cohort.account_id,
-                requests_by_order_id=buy_requests,
+            dependencies = dependencies_by_account.get(cohort.account_id)
+            resolution = (
+                self._resolve_working_orders(
+                    buy_results,
+                    run_id=run_id,
+                    approval_decision=approval_decision,
+                    dependencies=dependencies,
+                    account_id=cohort.account_id,
+                    requests_by_order_id=buy_requests,
+                    side_label="buy",
+                )
+                if dependencies is not None
+                else _CancelResolution({}, [], [], [], False)
             )
+            resolved_statuses = resolution.resolved_statuses
+            if resolution.reconciliation_failed:
+                # The ledger is known to disagree with the broker. Anything that
+                # follows would be sized against numbers we no longer trust.
+                stop_remaining_cohorts = True
             # The lifecycle the batch recorded predates these polls. Anything
             # reading the run — orders_filled, the dashboard, the audit trail —
             # goes through that object, so it has to carry the status the broker
             # actually ended on rather than the one polling gave up at.
-            if resolved_statuses:
-                buy_results = [
-                    result.model_copy(update={"final_status": resolved_statuses[result.order_id]})
-                    if result.order_id in resolved_statuses
-                    else result
-                    for result in buy_results
-                ]
-                results = [
-                    result
-                    if result.order_id not in resolved_statuses
-                    else result.model_copy(
-                        update={"final_status": resolved_statuses[result.order_id]}
-                    )
-                    for result in results
-                ]
+            buy_results = self._with_resolved_statuses(buy_results, resolved_statuses)
+            results = self._with_resolved_statuses(results, resolved_statuses)
             filled_ids = sorted(
                 set(filled_ids)
                 | {
@@ -2856,36 +2874,38 @@ class MaestroOrchestrator:
                 filled_buy_order_ids=filled_ids,
                 omitted_buy_order_ids=omitted_ids,
             )
-        return results
+        return results, stop_remaining_cohorts
 
-    def _resolve_working_buys(
+    def _resolve_working_orders(
         self,
-        buy_results: list[LiveOrderLifecycleResult],
+        results: list[LiveOrderLifecycleResult],
         *,
         run_id: str,
         approval_decision: ApprovalDecision,
-        dependencies_by_account: dict[str | None, LiveApprovalDependencies],
+        dependencies: LiveApprovalDependencies,
         account_id: str | None,
         requests_by_order_id: dict[str, LiveOrderRequest],
-    ) -> dict[str, OrderStatus]:
-        """Take unfinished buys off the broker's book, or raise a recovery blocker.
+        side_label: str,
+    ) -> "_CancelResolution":
+        """Take unfinished orders off the broker's book, or raise a blocker.
 
-        A buy still OPEN or PARTIALLY_FILLED when polling ran out is live at the
-        broker, not finished. Left alone it collides with the next run and trips
-        the pending-order gate. Anything that cannot be confirmed gone becomes a
-        LIVE_ORDER_RECOVERY_REQUIRED blocker, which stops the next live execution
-        until an operator resolves it. Broker-terminal states such as REJECTED
-        leave nothing working and need neither.
+        An order still OPEN or PARTIALLY_FILLED when polling ran out is live at
+        the broker, not finished. Left alone it collides with the next run and
+        trips the pending-order gate. Anything that cannot be confirmed gone
+        becomes a LIVE_ORDER_RECOVERY_REQUIRED blocker, which stops the next live
+        execution until an operator resolves it. Broker-terminal states such as
+        REJECTED leave nothing working and need neither.
+
+        Sells and buys go through here identically: a cancellation race can
+        reveal fresh fill on either side, and either way the ledger has to learn
+        about it.
         """
-        dependencies = dependencies_by_account.get(account_id)
-        if dependencies is None:
-            return {}
         canceled: list[dict[str, Any]] = []
         cancel_failures: list[dict[str, Any]] = []
         cancel_unconfirmed: list[dict[str, Any]] = []
         resolved_statuses: dict[str, OrderStatus] = {}
         polled_orders: dict[str, BrokerOrderId] = {}
-        for result in buy_results:
+        for result in results:
             if result.final_status not in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
                 continue
             broker_order = result.submitted_order.broker_order if result.submitted_order else None
@@ -2906,13 +2926,14 @@ class MaestroOrchestrator:
         for order_id, status in sorted(resolved_statuses.items()):
             self._record_event(
                 run_id,
-                "rotation_buy_resolved",
+                f"rotation_{side_label}_resolved",
                 {
                     "order_id": order_id,
                     "final_status": status.value,
                     "account_id": account_id,
                 },
             )
+        reconciliation_error: Exception | None = None
         if polled_orders:
             # Any of these polls can have seen fill quantity the batch's earlier
             # reconciliation pass never had — a partial fill counts as much as a
@@ -2922,81 +2943,103 @@ class MaestroOrchestrator:
                 try:
                     fill_service.reconcile_latest(run_id)
                 except Exception as exc:
-                    # The order is already counted as filled, so nothing further
-                    # downstream would notice the ledger never caught up. Block
-                    # the next run until an operator resolves it.
+                    reconciliation_error = exc
                     self._record_event(
                         run_id,
-                        "rotation_buy_fill_reconciliation_failed",
+                        f"rotation_{side_label}_fill_reconciliation_failed",
                         {
                             "account_id": account_id,
                             "error_type": type(exc).__name__,
                             "error_message": str(exc),
                         },
                     )
-                    for order_id in sorted(polled_orders):
-                        request = requests_by_order_id.get(order_id)
-                        broker_order = polled_orders[order_id]
-                        if request is None:
-                            continue
-                        save_audited_system_event(
-                            self.state_store,
-                            self.audit,
-                            run_id,
-                            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
-                            {
-                                "reason": "rotation_buy_fill_reconciliation_failed",
-                                "order_id": order_id,
-                                "signal_run_id": request.signal_run_id,
-                                "request": request.model_dump(mode="json"),
-                                "result": {
-                                    "order_id": order_id,
-                                    "status": resolved_statuses.get(
-                                        order_id, OrderStatus.UNKNOWN
-                                    ).value,
-                                    "broker_order": broker_order.model_dump(mode="json"),
-                                    "message": str(exc),
-                                },
-                            },
-                        )
-        for entry in cancel_failures + cancel_unconfirmed:
-            request = requests_by_order_id.get(entry["order_id"])
-            broker_order = entry.get("broker_order")
-            if request is None or broker_order is None:
-                # Without both, /recovery cannot rebuild the order or look it up
-                # at the broker, and the blocker would gate the next run forever.
-                self._record_event(
+        # One blocker per order: a stale ledger and an unconfirmed cancel on the
+        # same order are one problem for the operator, and WorkflowRecoveryService
+        # does not deduplicate explicit required events.
+        blocked_order_ids: set[str] = set()
+        if reconciliation_error is not None:
+            for order_id in sorted(polled_orders):
+                self._save_rotation_recovery_blocker(
                     run_id,
-                    "rotation_buy_unresolvable",
-                    {
-                        "order_id": entry["order_id"],
-                        "broker_order_id": entry.get("broker_order_id"),
-                        "observed_status": entry.get("observed_status"),
-                    },
+                    order_id=order_id,
+                    request=requests_by_order_id.get(order_id),
+                    broker_order=polled_orders[order_id],
+                    status=resolved_statuses.get(order_id, OrderStatus.UNKNOWN).value,
+                    reason=f"rotation_{side_label}_fill_reconciliation_failed",
+                    message=str(reconciliation_error),
+                    blocked_order_ids=blocked_order_ids,
+                    side_label=side_label,
                 )
-                continue
-            save_audited_system_event(
-                self.state_store,
-                self.audit,
+        for entry in cancel_failures + cancel_unconfirmed:
+            self._save_rotation_recovery_blocker(
                 run_id,
-                SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+                order_id=entry["order_id"],
+                request=requests_by_order_id.get(entry["order_id"]),
+                broker_order=entry.get("broker_order"),
+                status=entry.get("observed_status") or "unknown",
+                reason=f"rotation_{side_label}_unresolved_at_broker",
+                message=entry.get("error_message"),
+                blocked_order_ids=blocked_order_ids,
+                side_label=side_label,
+            )
+        return _CancelResolution(
+            resolved_statuses=resolved_statuses,
+            canceled=canceled,
+            cancel_failures=cancel_failures,
+            cancel_unconfirmed=cancel_unconfirmed,
+            reconciliation_failed=reconciliation_error is not None,
+        )
+
+    def _save_rotation_recovery_blocker(
+        self,
+        run_id: str,
+        *,
+        order_id: str,
+        request: LiveOrderRequest | None,
+        broker_order: BrokerOrderId | None,
+        status: str,
+        reason: str,
+        message: str | None,
+        blocked_order_ids: set[str],
+        side_label: str,
+    ) -> None:
+        if order_id in blocked_order_ids:
+            return
+        if request is None or broker_order is None:
+            # Without both, /recovery cannot rebuild the order or look it up at
+            # the broker, and the blocker would gate the next run forever.
+            self._record_event(
+                run_id,
+                f"rotation_{side_label}_unresolvable",
                 {
-                    # /recovery rebuilds a LiveOrderRequest from `request` and
-                    # reads the broker id from `result.broker_order`, so both must
-                    # be the complete objects LiveOrderSafetyService records.
-                    "reason": "rotation_buy_unresolved_at_broker",
-                    "order_id": entry["order_id"],
-                    "signal_run_id": request.signal_run_id,
-                    "request": request.model_dump(mode="json"),
-                    "result": {
-                        "order_id": entry["order_id"],
-                        "status": entry.get("observed_status") or "unknown",
-                        "broker_order": broker_order.model_dump(mode="json"),
-                        "message": entry.get("error_message"),
-                    },
+                    "order_id": order_id,
+                    "broker_order_id": broker_order.broker_order_id if broker_order else None,
+                    "observed_status": status,
                 },
             )
-        return resolved_statuses
+            return
+        blocked_order_ids.add(order_id)
+        save_audited_system_event(
+            self.state_store,
+            self.audit,
+            run_id,
+            SystemEventType.LIVE_ORDER_RECOVERY_REQUIRED,
+            {
+                # /recovery rebuilds a LiveOrderRequest from `request` and reads
+                # the broker id from `result.broker_order`, so both must be the
+                # complete objects LiveOrderSafetyService records.
+                "reason": reason,
+                "order_id": order_id,
+                "signal_run_id": request.signal_run_id,
+                "request": request.model_dump(mode="json"),
+                "result": {
+                    "order_id": order_id,
+                    "status": status,
+                    "broker_order": broker_order.model_dump(mode="json"),
+                    "message": message,
+                },
+            },
+        )
 
     def _report_incomplete_buys(
         self,
@@ -3134,11 +3177,13 @@ class MaestroOrchestrator:
         self,
         cohort: RotationCohort,
         outcome: SellPhaseOutcome,
+        results: list[LiveOrderLifecycleResult],
         *,
         run_id: str,
         approval_decision: ApprovalDecision,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
-    ) -> None:
+        requests_by_order_id: dict[str, LiveOrderRequest],
+    ) -> tuple[list[LiveOrderLifecycleResult], bool]:
         """Stop the rotation and hand the account back in a retryable state.
 
         An order still working at the broker trips the pending-orders gate and
@@ -3146,25 +3191,24 @@ class MaestroOrchestrator:
         to come off the book before we hand back. Once it is gone the operator can
         press rebalance again: the next run regenerates the signal and sizes
         orders from current holdings, so it converges on the same target.
+
+        Cancelling can itself reveal fresh fill, so the sell side gets the same
+        ledger replay and lifecycle correction the buy side does.
         """
         dependencies = dependencies_by_account.get(cohort.account_id)
-        canceled: list[dict[str, Any]] = []
-        cancel_failures: list[dict[str, Any]] = []
-        cancel_unconfirmed: list[dict[str, Any]] = []
-        for result in outcome.unfilled:
-            broker_order = result.submitted_order.broker_order if result.submitted_order else None
-            if broker_order is None or dependencies is None:
-                continue
-            self._cancel_and_confirm(
-                result,
-                broker_order,
+        if dependencies is None:
+            resolution = _CancelResolution({}, [], [], [], False)
+        else:
+            resolution = self._resolve_working_orders(
+                list(outcome.unfilled),
                 run_id=run_id,
                 approval_decision=approval_decision,
                 dependencies=dependencies,
-                canceled=canceled,
-                cancel_failures=cancel_failures,
-                cancel_unconfirmed=cancel_unconfirmed,
+                account_id=cohort.account_id,
+                requests_by_order_id=requests_by_order_id,
+                side_label="sell",
             )
+        results = self._with_resolved_statuses(results, resolution.resolved_statuses)
         self._record_event(
             run_id,
             "rotation_cohort_aborted",
@@ -3174,18 +3218,106 @@ class MaestroOrchestrator:
                 "reason": outcome.reason,
                 "unfilled_order_ids": [result.order_id for result in outcome.unfilled],
                 "skipped_buy_order_ids": [order.order_id for order in cohort.buys],
-                "canceled": canceled,
-                "cancel_failures": cancel_failures,
-                "cancel_unconfirmed": cancel_unconfirmed,
+                "canceled": resolution.canceled,
+                "cancel_failures": resolution.cancel_failures,
+                "cancel_unconfirmed": resolution.cancel_unconfirmed,
             },
         )
         self._notify_cohort_abort(
             cohort,
             outcome,
             run_id,
-            canceled,
-            cancel_failures + cancel_unconfirmed,
+            resolution.canceled,
+            resolution.cancel_failures + resolution.cancel_unconfirmed,
         )
+        return results, resolution.reconciliation_failed
+
+    def _with_resolved_statuses(
+        self,
+        results: list[LiveOrderLifecycleResult],
+        resolved_statuses: dict[str, OrderStatus],
+    ) -> list[LiveOrderLifecycleResult]:
+        """Carry a status observed after the batch onto the canonical results."""
+        if not resolved_statuses:
+            return results
+        return [
+            result
+            if result.order_id not in resolved_statuses
+            else result.model_copy(
+                update={"final_status": resolved_statuses[result.order_id]}
+            )
+            for result in results
+        ]
+
+    def _notify_cohort_abort(
+        self,
+        cohort: RotationCohort,
+        outcome: SellPhaseOutcome,
+        run_id: str,
+        canceled: list[dict[str, Any]],
+        cancel_failures: list[dict[str, Any]],
+    ) -> None:
+        """Tell the operator the rotation stopped and what state it left behind.
+
+        An abort leaves the book part-rotated, which looks exactly like the bug
+        this two-phase flow exists to fix. It must never pass silently.
+        """
+        unfilled = ", ".join(result.order_id for result in outcome.unfilled) or "none"
+        skipped = ", ".join(order.order_id for order in cohort.buys) or "none"
+        canceled_text = ", ".join(entry["order_id"] for entry in canceled) or "none"
+        lines = [
+            "Maestro rotation stopped",
+            f"account_id: {cohort.account_id or 'default'}",
+            f"currency: {cohort.currency or 'default'}",
+            f"reason: {outcome.reason}",
+            f"sells not filled: {unfilled}",
+            f"buys skipped: {skipped}",
+            f"canceled: {canceled_text}",
+        ]
+        if cancel_failures:
+            failures = ", ".join(entry["order_id"] for entry in cancel_failures)
+            lines.append(f"cancel FAILED (still live at broker): {failures}")
+        lines.append("Re-run the rebalance to resize against current holdings.")
+        self._notify_rotation_stopped(run_id, cohort, lines)
+
+    def _notify_rotation_stopped(
+        self,
+        run_id: str,
+        cohort: RotationCohort,
+        lines: list[str],
+    ) -> None:
+        try:
+            client = self.telegram_client or TelegramBotAPIClient(
+                token_env=self.config.approval.telegram_bot_token_env,
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:
+            self._record_event(
+                run_id,
+                "live_order_notification_failed",
+                {
+                    "status": "rotation_stopped",
+                    "account_id": cohort.account_id,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            )
+            return
+        text = "\n".join(lines)
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            try:
+                client.send_message(chat_id, text)
+            except Exception as exc:
+                self._record_event(
+                    run_id,
+                    "live_order_notification_failed",
+                    {
+                        "status": "rotation_stopped",
+                        "account_id": cohort.account_id,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
 
     def _cancel_and_confirm(
         self,

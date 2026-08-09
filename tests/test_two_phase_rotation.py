@@ -1482,12 +1482,32 @@ def test_cancel_race_fill_reaches_the_ledger_through_the_real_services(tmp_path,
 class _BrokerStatusClient:
     """Broker that fills the buy only once its cancellation is requested."""
 
-    def __init__(self, fills_after_cancel: set[str]) -> None:
+    def __init__(
+        self,
+        fills_after_cancel: set[str],
+        open_orders: set[str] | None = None,
+    ) -> None:
         self.fills_after_cancel = fills_after_cancel
+        self.open_orders = open_orders or set()
         self.cancel_requested: set[str] = set()
 
     def get_order_status(self, broker_order):
         order_id = broker_order.order_id
+        if order_id in self.open_orders and order_id not in self.cancel_requested:
+            filled = 0.0
+            status = OrderStatus.OPEN
+            return LiveOrderStatusSnapshot(
+                broker_order=broker_order,
+                status=status,
+                checked_at=utc_now().isoformat(),
+                symbol="MOCK_ETF_A" if order_id.startswith("sell") else "MOCK_ETF_B",
+                side=OrderSide.SELL if order_id.startswith("sell") else OrderSide.BUY,
+                partial_fill=PartialFillSummary(
+                    ordered_quantity=100.0,
+                    filled_quantity=filled,
+                    remaining_quantity=100.0,
+                ),
+            )
         if order_id.startswith("sell") or order_id in self.cancel_requested:
             filled = 100.0
             status = OrderStatus.FILLED
@@ -1525,3 +1545,114 @@ class _BrokerCancelService:
             status=OrderStatus.CANCELED,
             canceled_quantity=0.0,
         )
+
+
+def test_sell_cancel_race_fill_reaches_the_ledger(tmp_path, monkeypatch):
+    """The sell abort path needs the same ledger treatment the buy path got.
+
+    Cancelling an incomplete sell can observe further fill, and that delta has to
+    land in the ledger and on the returned lifecycle just as it does for a buy.
+    The buy phase still stays blocked.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    orchestrator.state_store.save_portfolio_snapshot(
+        "seed",
+        orchestrator.state_store.load_latest_portfolio_state().model_copy(
+            update={"positions": {"MOCK_ETF_A": 100.0}}
+        ),
+    )
+    status_client = _BrokerStatusClient(fills_after_cancel={"sell_a"}, open_orders={"sell_a"})
+
+    def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
+        del config, kwargs
+        return LiveApprovalDependencies(
+            state_store=state_store,
+            audit_logger=audit_logger,
+            safety_service=_SafetyService(calls, None, set(), None, set()),
+            status_service=LiveOrderStatusService(state_store, audit_logger, status_client),
+            fill_reconciliation_service=PartialFillReconciliationService(
+                state_store, audit_logger
+            ),
+            workflow_service=None,
+            lifecycle_service=None,
+            cancel_service=_BrokerCancelService(status_client, calls),
+        )
+
+    monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
+
+    lifecycles, _ = orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    after = orchestrator.state_store.load_latest_portfolio_state()
+    assert after.positions.get("MOCK_ETF_A", 0.0) == 0.0, "the sell's fill never reached the ledger"
+    by_order = {result.order_id: result for result in lifecycles}
+    assert by_order["sell_a"].final_status == OrderStatus.FILLED
+    assert "submit:buy_b" not in calls, "an aborted cohort must still not buy"
+
+
+def test_reconciliation_failure_stops_the_remaining_cohorts(tmp_path, monkeypatch):
+    """A ledger known to disagree with the broker must not fund another cohort."""
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.OPEN,
+            "sell_k": OrderStatus.FILLED,
+            "buy_k": OrderStatus.FILLED,
+        },
+        fills_during_cancel={"buy_b"},
+        reconcile_raises=True,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [
+            _sell("sell_a"),
+            _buy("buy_b"),
+            # A second account, so this is a separate cohort that runs after.
+            _intent("sell_k", "MOCK_ETF_A", OrderSide.SELL).model_copy(
+                update={"account_id": "second"}
+            ),
+            _intent("buy_k", "MOCK_ETF_B", OrderSide.BUY).model_copy(
+                update={"account_id": "second"}
+            ),
+        ],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:sell_k" not in calls, "the second cohort ran on a ledger known to be stale"
+
+
+def test_one_recovery_blocker_per_order(tmp_path, monkeypatch):
+    """A reconciliation failure and an unconfirmed cancel are one problem, not two."""
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.PARTIALLY_FILLED},
+        cancel_confirms=False,
+        reconcile_raises=True,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
+    assert [row["payload"]["order_id"] for row in blockers] == ["buy_b"]
