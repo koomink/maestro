@@ -8,6 +8,9 @@ UI 실패 fallback 경로, funding_workflow_id 도입
 scope 복합 키로 재정의, 액션 라우팅은 request_id에만 바인딩
 개정 3차: 2026-08-09 Codex 적대적 리뷰 3차 반영 — funding 요청 교체의
 비원자성 대응: 영속 workflow 상태 머신 + 원자적 claim (접근 A의 명시적 예외)
+개정 4차: 2026-08-09 Codex 적대적 리뷰 4차 반영 — child run lineage 영속화,
+funding/budget 공통 상태 전이(claimed→child_created→completed), budget
+decision의 비종결화, 단계 3 roll-forward-only 명시
 
 ## 배경과 목표
 
@@ -177,12 +180,29 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    (기존 duplicate_key 멱등 컨벤션 재사용). 이미 claim이 존재하면 처리에
    진입하지 않고 "이미 처리 중이거나 완료된 요청이에요"로 응답한다 —
    동시 중복 callback과 교체 전 요청의 재실행을 상태 변경 이전에 차단한다.
-2. **중단 전환의 자동 재실행 금지**: claim은 있으나 완료 ack가 없는 상태로
-   재시작되면 같은 전환을 자동 재실행하지 않는다. 먼저 claim 이후 생성된
-   child signal run(원천 request_id로 조회)을 찾아 **있으면 재사용**하여
-   ack만 저장하고, 판별이 불가능하면 기존 워크플로우 복구 카드("이전 작업이
-   중단된 상태예요")로 라우팅해 운영자 확인 후 진행한다.
-3. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
+2. **공통 상태 전이 `claimed → child_created → completed`**: funding과
+   budget 전환 모두 이 3단계를 system event로 영속화한다. `completed`만이
+   종결 상태다. 특히 **budget decision은 종결 ack가 아니라** 전환의 입력값
+   (선택 금액)일 뿐이다 — 현재 코드는 `contribution_budget_request_decision`
+   저장 즉시 요청을 pending에서 제외하므로, decision 직후
+   refresh/config load/`run_signal()`에서 실패하면 child run 없이 요청이
+   종결돼 월간 투자가 조용히 멈춘다. 개편 후에는 decision이 저장돼도
+   `completed` 이벤트가 없으면 워크플로우는 미완으로 취급되어 복구 대상이
+   된다.
+3. **child run lineage 영속화**: 현재 `run_signal()`은 원천 request를 알지
+   못하므로 "claim 이후 생성된 run"을 같은 전략·scope의 다른 수동/예약
+   run과 구분할 수 없다. `run_signal()`에 `source_request_id`(및
+   funding_workflow_id)를 전달해 signal run 기록/package에 영속화하고,
+   복구 시 이 lineage로만 child run을 조회한다 (추론적 연결 금지).
+   같은 scope에서 동시에 존재하는 수동 run과의 조회 유일성을 테스트로
+   보장한다.
+4. **중단 전환의 자동 재실행 금지**: claim은 있으나 `completed`가 없는
+   상태로 재시작되면 같은 전환을 자동 재실행하지 않는다. lineage로 child
+   signal run을 조회해 **있으면 재사용**하여 나머지 단계(승인 dispatch,
+   completed 기록)만 이어서 수행하고, 없으면 기존 워크플로우 복구 카드
+   ("이전 작업이 중단된 상태예요")로 라우팅해 운영자 확인 후 진행한다.
+   budget의 경우 저장된 decision 금액을 그대로 사용해 재개한다.
+5. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
    duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
 
 ### C. 예외 카드 (가이드형 마법사)
@@ -292,22 +312,27 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   - 같은 계좌·같은 달에 sleeve/group/currency가 다른 복수 funding scope →
     scope별 독립 카드 생성 (합쳐지지 않음)
   - `account_id`가 없는(null) funding scope의 카드 생성·갱신
-  - **crash-boundary**: `run_signal()` 완료 직전/직후에 프로세스가 중단된 뒤
-    재시작 — 신규 signal/요청이 하나만 존재하고, 구 요청 버튼은 거절되며,
-    child signal run이 이미 있으면 재사용된다
+  - **crash-boundary (funding)**: `run_signal()` 완료 직전/직후에 프로세스가
+    중단된 뒤 재시작 — 신규 signal/요청이 하나만 존재하고, 구 요청 버튼은
+    거절되며, child signal run이 이미 있으면 lineage로 조회해 재사용된다
+  - **crash-boundary (budget)**: budget decision 저장 직후(refresh/config
+    load/`run_signal()` 실패 포함) 중단 — 요청이 종결로 오인되지 않고
+    복구 대상으로 잡히며, 저장된 decision 금액으로 재개된다
+  - **lineage 조회 유일성**: claim된 워크플로우와 같은 전략·scope의 수동
+    run이 동시에 존재해도 child run 조회가 잘못된 run을 연결하지 않는다
   - **동시 중복 callback**: 같은 funding 요청의 버튼이 동시에 두 번
     처리되어도 claim에 의해 한 건만 진입하고 나머지는 거절된다
   - 연속 렌더/edit 실패 → 고정 템플릿 fallback 발송 + 헬스 degraded
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
 
-## 마이그레이션 순서 (단계별 독립 배포·롤백 가능)
+## 마이그레이션 순서 (단계별 독립 배포, 롤백 규칙은 단계별로 명시)
 
 | 단계 | 내용 | 효과 |
 |---|---|---|
 | 1 | `ui/` 모듈 신설 + 승인 카드 교체 + 자세히 토글 + 메뉴 5개 등록 | 가장 자주 보는 메시지 즉시 개선 |
 | 2 | 라이프사이클 카드 매니저 + 승인/데일리 카드 + 노옵 한 줄 + fallback 알림 경로 | 구조 개편의 핵심 |
-| 3 | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합) + funding 확인 경로의 원자적 claim·복구 규약 (접근 A 예외) | 월초 경험 개선 + 기존 교체 경합 결함 해소 |
+| 3 | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합) + funding/budget 확인 경로의 상태 머신·원자적 claim·lineage (접근 A 예외) | 월초 경험 개선 + 기존 교체 경합 결함 해소 |
 | 4 | 예외 마법사 (재주문·cash drift·복구·안전 정지) | 장애 대응 경험 개선 |
 | 5 | 조회 카드 5종 + 구 명령어 메뉴 숨김 + 구 알림 경로 제거 | 마무리 |
 
@@ -315,6 +340,17 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 **기존 전송 경로는 단계 2에서 제거하지 않고 카드와 병행 유지**한다.
 카드 전달 성공률이 실운영에서 검증된 후(아래 승인 조건 충족) 단계 5에서
 구 경로를 제거한다.
+
+**단계 3은 roll-forward-only**: 단계 1·2·4·5는 UI 전용이므로 코드 롤백만으로
+안전하게 되돌릴 수 있지만, 단계 3은 다르다. 새 코드가 남긴
+`funding_workflow_claim`을 구 handlers는 확인하지 않으므로, claim 이후
+`completed` 이전 상태에서 구버전으로 롤백하면
+`_load_pending_funding_request()`가 요청을 다시 pending으로 간주해
+`run_signal()`을 중복 실행할 수 있다 — 즉 장애 시점의 롤백이 새 불변식을
+제거한다. 따라서 단계 3 이후에는 **버그 대응도 수정 배포(roll-forward)로만
+진행**하고, 부득이하게 롤백해야 하면 미완(claim-only) 워크플로우가 없음을
+먼저 확인하거나 해당 워크플로우를 수동 종결한 뒤 롤백한다. 이 절차는 운영
+문서에 명시한다.
 
 **각 단계의 배포 승인 조건** (다음 단계로 넘어가기 전 확인):
 
@@ -324,9 +360,12 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 - 같은 달 복수 funding scope(다른 sleeve/group/currency) 및 account_id=null
   환경에서 카드가 scope별로 분리되고, 구 request_id callback이 다른 scope의
   요청에 도달하지 않는다.
-- 요청 전환 중 crash를 주입해도(run_signal 완료 직전/직후) 신규 요청은
-  하나만 생성되고 구 요청 callback은 거절되며, 동시 중복 callback은
-  claim에 의해 한 건만 처리된다.
+- 요청 전환 중 crash를 주입해도(run_signal 완료 직전/직후, budget decision
+  저장 직후) 신규 요청은 하나만 생성되고 구 요청 callback은 거절되며,
+  동시 중복 callback은 claim에 의해 한 건만 처리되고, 중단된 워크플로우는
+  복구 대상으로 잡혀 재개된다.
+- (단계 3) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
+  중복 실행 위험을 확인하고, roll-forward-only 운영 절차가 문서화되어 있다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
 
