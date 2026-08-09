@@ -6,6 +6,8 @@
 UI 실패 fallback 경로, funding_workflow_id 도입
 개정 2차: 2026-08-09 Codex 적대적 리뷰 2차 반영 — funding_workflow_id를
 scope 복합 키로 재정의, 액션 라우팅은 request_id에만 바인딩
+개정 3차: 2026-08-09 Codex 적대적 리뷰 3차 반영 — funding 요청 교체의
+비원자성 대응: 영속 workflow 상태 머신 + 원자적 claim (접근 A의 명시적 예외)
 
 ## 배경과 목표
 
@@ -157,6 +159,32 @@ funding_scope 튜플은 `telegram_ui_card` 이벤트 payload에 그대로 기록
 request_id와 요청 교체 이력**을 기록하여, 어떤 단계에서 요청이 재발급되어도
 같은 카드가 이어서 갱신된다.
 
+**요청 교체의 비원자성 대응 (영속 workflow 상태 머신)**: "교체된 request_id
+거절"은 UI 레이어만으로는 보장할 수 없다. 현재 funding 확인 흐름
+(`_confirm_funding_request`)은 **현금흐름 기록 → `run_signal()`(신규
+signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완료와 ack
+저장 사이에 프로세스가 종료되면 구 요청은 여전히 pending이고 신규 요청도
+이미 존재한다. `_load_pending_funding_request()`는 해당 request_id의 ack
+유무만 확인하므로 구 버튼의 재시도가 signal run·현금흐름 기록을 중복
+생성할 수 있다 — UI 개편 이전부터 존재하는 결함이며, funding 카드가
+약속하는 상태 일관성의 전제이므로 단계 3에서 함께 해결한다. 이 부분은
+**"비즈니스 로직 불변" 원칙(접근 A)의 명시적 예외**로, handlers의 funding
+확인 경로에 다음 규약을 도입한다:
+
+1. **원자적 claim**: funding/budget callback 처리 시작 시
+   `funding_workflow_claim` system event를
+   `duplicate_key = <funding_workflow_id>:<phase>:<request_id>`로 기록한다
+   (기존 duplicate_key 멱등 컨벤션 재사용). 이미 claim이 존재하면 처리에
+   진입하지 않고 "이미 처리 중이거나 완료된 요청이에요"로 응답한다 —
+   동시 중복 callback과 교체 전 요청의 재실행을 상태 변경 이전에 차단한다.
+2. **중단 전환의 자동 재실행 금지**: claim은 있으나 완료 ack가 없는 상태로
+   재시작되면 같은 전환을 자동 재실행하지 않는다. 먼저 claim 이후 생성된
+   child signal run(원천 request_id로 조회)을 찾아 **있으면 재사용**하여
+   ack만 저장하고, 판별이 불가능하면 기존 워크플로우 복구 카드("이전 작업이
+   중단된 상태예요")로 라우팅해 운영자 확인 후 진행한다.
+3. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
+   duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
+
 ### C. 예외 카드 (가이드형 마법사)
 
 공통 3단 구성: **무슨 일인지(일상 언어) → 지금 선택할 수 있는 것(버튼 2~4개) →
@@ -264,6 +292,11 @@ request_id와 요청 교체 이력**을 기록하여, 어떤 단계에서 요청
   - 같은 계좌·같은 달에 sleeve/group/currency가 다른 복수 funding scope →
     scope별 독립 카드 생성 (합쳐지지 않음)
   - `account_id`가 없는(null) funding scope의 카드 생성·갱신
+  - **crash-boundary**: `run_signal()` 완료 직전/직후에 프로세스가 중단된 뒤
+    재시작 — 신규 signal/요청이 하나만 존재하고, 구 요청 버튼은 거절되며,
+    child signal run이 이미 있으면 재사용된다
+  - **동시 중복 callback**: 같은 funding 요청의 버튼이 동시에 두 번
+    처리되어도 claim에 의해 한 건만 진입하고 나머지는 거절된다
   - 연속 렌더/edit 실패 → 고정 템플릿 fallback 발송 + 헬스 degraded
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
@@ -274,7 +307,7 @@ request_id와 요청 교체 이력**을 기록하여, 어떤 단계에서 요청
 |---|---|---|
 | 1 | `ui/` 모듈 신설 + 승인 카드 교체 + 자세히 토글 + 메뉴 5개 등록 | 가장 자주 보는 메시지 즉시 개선 |
 | 2 | 라이프사이클 카드 매니저 + 승인/데일리 카드 + 노옵 한 줄 + fallback 알림 경로 | 구조 개편의 핵심 |
-| 3 | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합) | 월초 경험 개선 |
+| 3 | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합) + funding 확인 경로의 원자적 claim·복구 규약 (접근 A 예외) | 월초 경험 개선 + 기존 교체 경합 결함 해소 |
 | 4 | 예외 마법사 (재주문·cash drift·복구·안전 정지) | 장애 대응 경험 개선 |
 | 5 | 조회 카드 5종 + 구 명령어 메뉴 숨김 + 구 알림 경로 제거 | 마무리 |
 
@@ -291,6 +324,9 @@ request_id와 요청 교체 이력**을 기록하여, 어떤 단계에서 요청
 - 같은 달 복수 funding scope(다른 sleeve/group/currency) 및 account_id=null
   환경에서 카드가 scope별로 분리되고, 구 request_id callback이 다른 scope의
   요청에 도달하지 않는다.
+- 요청 전환 중 crash를 주입해도(run_signal 완료 직전/직후) 신규 요청은
+  하나만 생성되고 구 요청 callback은 거절되며, 동시 중복 callback은
+  claim에 의해 한 건만 처리된다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
 
