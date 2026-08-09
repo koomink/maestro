@@ -3292,7 +3292,13 @@ class MaestroOrchestrator:
             if not snapshots and not applied:
                 corrected.append(result)
                 continue
-            status = resolution.resolved_statuses.get(result.order_id, result.final_status)
+            # The newest reading is the truth about this order, terminal or not.
+            # Falling back to the pre-cancel status would leave the record
+            # claiming OPEN while carrying a PARTIALLY_FILLED snapshot.
+            if snapshots:
+                status = snapshots[-1].status
+            else:
+                status = resolution.resolved_statuses.get(result.order_id, result.final_status)
             update: dict[str, Any] = {
                 "final_status": status,
                 "status_snapshots": [*result.status_snapshots, *snapshots],

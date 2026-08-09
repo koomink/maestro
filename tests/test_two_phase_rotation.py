@@ -1960,3 +1960,71 @@ def _snapshot(broker_order, symbol, side, filled, status):
             fill_count=1 if filled else 0,
         ),
     )
+
+
+def test_unresolved_lifecycle_status_matches_its_newest_snapshot(tmp_path, monkeypatch):
+    """A record cannot claim OPEN while carrying a PARTIALLY_FILLED snapshot.
+
+    The status fell back to the pre-cancel value whenever the order failed to
+    reach a terminal state, which is the same internal contradiction the terminal
+    case was already fixed for.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=2)
+    orchestrator.telegram_client = _TelegramClient()
+    status_client = _FillsOnlyAfterCancelStatusClient()
+
+    def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
+        del config, kwargs
+        return LiveApprovalDependencies(
+            state_store=state_store,
+            audit_logger=audit_logger,
+            safety_service=_SafetyService(calls, None, set(), None, set()),
+            status_service=LiveOrderStatusService(state_store, audit_logger, status_client),
+            fill_reconciliation_service=PartialFillReconciliationService(
+                state_store, audit_logger
+            ),
+            workflow_service=None,
+            lifecycle_service=None,
+            cancel_service=_BrokerCancelService(status_client, calls),
+        )
+
+    monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
+
+    lifecycles, _ = orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    buy = next(result for result in lifecycles if result.order_id == "buy_b")
+    assert buy.status_snapshots[-1].status == OrderStatus.PARTIALLY_FILLED
+    assert buy.final_status == OrderStatus.PARTIALLY_FILLED
+    # Still unresolved: polling ran out without the order reaching a terminal
+    # state, and that has to stay visible.
+    assert buy.max_polls_reached is True
+
+    persisted = [
+        row["payload"]
+        for row in orchestrator.state_store.list_system_events_by_type("live_order_lifecycle")
+        if row["payload"].get("order_id") == "buy_b"
+    ][0]
+    assert persisted["final_status"] == "partially_filled"
+
+
+class _FillsOnlyAfterCancelStatusClient:
+    """The buy sits OPEN until the cancellation is in flight, then part-fills."""
+
+    def __init__(self) -> None:
+        self.cancel_requested: set[str] = set()
+
+    def get_order_status(self, broker_order):
+        order_id = broker_order.order_id
+        if order_id.startswith("sell"):
+            return _snapshot(broker_order, "MOCK_ETF_A", OrderSide.SELL, 100.0, OrderStatus.FILLED)
+        if order_id in self.cancel_requested:
+            return _snapshot(
+                broker_order, "MOCK_ETF_B", OrderSide.BUY, 40.0, OrderStatus.PARTIALLY_FILLED
+            )
+        return _snapshot(broker_order, "MOCK_ETF_B", OrderSide.BUY, 0.0, OrderStatus.OPEN)
