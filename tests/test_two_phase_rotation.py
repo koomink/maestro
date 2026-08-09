@@ -23,6 +23,7 @@ from maestro.core.enums import (
     OrderStatus,
 )
 from maestro.core.instruments import TradableInstrument
+from maestro.dashboard.read_models import build_live_order_lifecycle_summary
 from maestro.execution.base import OrderIntent
 from maestro.execution.brokers.readonly import (
     BrokerBuyingPower,
@@ -1288,15 +1289,25 @@ def test_multi_product_account_uses_the_composite_snapshot_for_capacity(
         "build_broker_readonly_service",
         lambda *args, **kwargs: _CompositeService(),
     )
-    order = _buy("buy_b").model_copy(update={"currency": Currency.KRW})
+    order = _buy("buy_b").model_copy(
+        update={
+            "currency": Currency.KRW,
+            "broker_product": BrokerProduct.KIS_DOMESTIC_STOCK,
+        }
+    )
 
     capacity = orchestrator._lookup_order_capacity(order)
+    service = orchestrator._order_capacity_clients[order.account_id]
 
     assert capacity.cash_buying_power == 4_200_000.0
     assert capacity.currency == "KRW"
     # The per-symbol lot cap has to survive, or the post-sell partition approves
     # a quantity the product's own pre-submit check then rejects.
     assert capacity.max_buy_quantity == 7.0
+    # Routing is the point: the right product client, priced for this symbol.
+    assert service.asked == [
+        ("MOCK_ETF_B", 100.0, "KRW", BrokerProduct.KIS_DOMESTIC_STOCK)
+    ]
 
 
 def test_multi_product_capacity_fails_closed_on_an_unpriced_currency(tmp_path, monkeypatch):
@@ -1656,3 +1667,34 @@ def test_one_recovery_blocker_per_order(tmp_path, monkeypatch):
 
     blockers = orchestrator.state_store.list_system_events_by_type("live_order_recovery_required")
     assert [row["payload"]["order_id"] for row in blockers] == ["buy_b"]
+
+
+def test_dashboard_lifecycle_summary_shows_the_corrected_status(tmp_path, monkeypatch):
+    """The operator screen reads live_order_lifecycle, not our side events.
+
+    Correcting only the returned object left the persisted record — and so the
+    dashboard and the audit trail — saying the order was still open.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {"sell_a": OrderStatus.FILLED, "buy_b": OrderStatus.OPEN},
+        fills_during_cancel={"buy_b"},
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    summary = build_live_order_lifecycle_summary(orchestrator.state_store)
+    buy_rows = [row for row in summary["recent"] if row.get("order_id") == "buy_b"]
+    assert buy_rows, summary
+    # One row per order, carrying the status the broker actually ended on.
+    assert len(buy_rows) == 1
+    assert buy_rows[0]["status"] == "filled"

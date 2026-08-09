@@ -2851,7 +2851,9 @@ class MaestroOrchestrator:
             # goes through that object, so it has to carry the status the broker
             # actually ended on rather than the one polling gave up at.
             buy_results = self._with_resolved_statuses(buy_results, resolved_statuses)
-            results = self._with_resolved_statuses(results, resolved_statuses)
+            results = self._with_resolved_statuses(
+                results, resolved_statuses, run_id=run_id
+            )
             filled_ids = sorted(
                 set(filled_ids)
                 | {
@@ -3208,7 +3210,9 @@ class MaestroOrchestrator:
                 requests_by_order_id=requests_by_order_id,
                 side_label="sell",
             )
-        results = self._with_resolved_statuses(results, resolution.resolved_statuses)
+        results = self._with_resolved_statuses(
+            results, resolution.resolved_statuses, run_id=run_id
+        )
         self._record_event(
             run_id,
             "rotation_cohort_aborted",
@@ -3236,18 +3240,37 @@ class MaestroOrchestrator:
         self,
         results: list[LiveOrderLifecycleResult],
         resolved_statuses: dict[str, OrderStatus],
+        *,
+        run_id: str | None = None,
     ) -> list[LiveOrderLifecycleResult]:
-        """Carry a status observed after the batch onto the canonical results."""
+        """Carry a status observed after the batch onto the canonical results.
+
+        The batch wrote its lifecycle record before these polls happened, and the
+        dashboard and audit trail read that record rather than any side event.
+        Persist a superseding one so the operator's view matches the broker.
+        """
         if not resolved_statuses:
             return results
-        return [
-            result
-            if result.order_id not in resolved_statuses
-            else result.model_copy(
-                update={"final_status": resolved_statuses[result.order_id]}
-            )
-            for result in results
-        ]
+        corrected: list[LiveOrderLifecycleResult] = []
+        for result in results:
+            status = resolved_statuses.get(result.order_id)
+            if status is None or status == result.final_status:
+                corrected.append(result)
+                continue
+            updated = result.model_copy(update={"final_status": status})
+            corrected.append(updated)
+            if run_id is not None:
+                save_audited_system_event(
+                    self.state_store,
+                    self.audit,
+                    run_id,
+                    SystemEventType.LIVE_ORDER_LIFECYCLE,
+                    {
+                        **updated.model_dump(mode="json"),
+                        "supersedes_final_status": result.final_status.value,
+                    },
+                )
+        return corrected
 
     def _notify_cohort_abort(
         self,

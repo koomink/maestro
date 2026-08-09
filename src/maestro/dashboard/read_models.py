@@ -3058,11 +3058,21 @@ def build_live_order_lifecycle_summary(
 ) -> dict[str, Any]:
     rows = []
     status_counts: dict[str, int] = {}
+    # A lifecycle record can be superseded when a later poll — cancel
+    # confirmation, say — sees the order reach a different final state. Events
+    # arrive newest first, so the first sighting of an order is the current one
+    # and older records must not be counted again.
+    seen_order_ids: set[str] = set()
     for row in store.list_system_events(limit=200):
         event_type = str(row.get("event_type") or "")
         if event_type not in {"live_order_lifecycle", "live_order_workflow"}:
             continue
         payload = _mapping(row.get("payload"))
+        order_id = payload.get("order_id")
+        if event_type == "live_order_lifecycle" and order_id is not None:
+            if order_id in seen_order_ids:
+                continue
+            seen_order_ids.add(str(order_id))
         status = _live_order_summary_status(payload)
         if status:
             status_counts[status] = status_counts.get(status, 0) + 1

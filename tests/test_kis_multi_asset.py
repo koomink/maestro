@@ -7,6 +7,7 @@ from maestro.config.execution import ExecutionConfig
 from maestro.config.loader import load_config
 from maestro.core.enums import BrokerProduct, Currency, OrderSide
 from maestro.core.instruments import TradableInstrument
+from maestro.execution.brokers.kis.models import KISBuyingPower
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.live_order_factory import ProductRoutingKISLiveOrderClient
 from maestro.execution.order_builder import OrderBuilder
@@ -352,3 +353,53 @@ def _us_instrument(symbol: str) -> TradableInstrument:
         min_order_quantity=1,
         min_order_notional=1,
     )
+
+
+def test_kis_service_prices_through_the_client_for_the_orders_product():
+    """A service spanning products must ask the one that owns the order's.
+
+    Quantity caps are per symbol and per product, so asking the wrong client — or
+    a merged snapshot — silently loses the cap the pre-submit check enforces.
+    """
+    config = load_config("tests/fixtures/configs/live_approval_kis_multi_asset.yaml")
+    built: list[object] = []
+
+    class _ProductClient:
+        def __init__(self, product) -> None:
+            self.product = product
+
+        def get_buying_power(self, symbol, order_price, currency=None):
+            return KISBuyingPower(
+                symbol=symbol,
+                order_price=order_price,
+                cash_buying_power=1_000.0,
+                currency=currency,
+                max_buy_quantity=3.0,
+                source=str(self.product),
+            )
+
+    service = KISReadOnlyService(
+        config.kis,
+        StateStore(":memory:"),
+        AuditLogger("/dev/null"),
+        instruments=config.universe.instruments,
+    )
+    service.client = None
+
+    def _build(cfg, instruments=None, broker_product=None):
+        built.append(broker_product)
+        return _ProductClient(broker_product)
+
+    service._build_client = _build
+
+    capacity = service.get_buying_power_for_product(
+        "AAPL",
+        190.0,
+        currency="USD",
+        broker_product=BrokerProduct.KIS_OVERSEAS_STOCK,
+    )
+
+    assert built == [BrokerProduct.KIS_OVERSEAS_STOCK]
+    assert capacity.source == str(BrokerProduct.KIS_OVERSEAS_STOCK)
+    assert capacity.max_buy_quantity == 3.0
+    assert capacity.currency == "USD"
