@@ -29,6 +29,7 @@ from maestro.execution.brokers.readonly import (
     BuyingPowerCurrencyUnavailable,
 )
 from maestro.execution.live_order_factory import LiveApprovalDependencies
+from maestro.execution.live_order_fills import PartialFillReconciliationService
 from maestro.execution.live_order_models import (
     BrokerOrderId,
     FillReconciliationResult,
@@ -38,6 +39,7 @@ from maestro.execution.live_order_models import (
     LiveOrderStatusSnapshot,
     PartialFillSummary,
 )
+from maestro.execution.live_order_status import LiveOrderStatusService
 from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.orchestration import orchestrator as orchestrator_module
 from maestro.orchestration.live_gates import LiveExecutionGateService
@@ -1428,3 +1430,98 @@ def test_cancel_race_fill_updates_the_returned_lifecycle(tmp_path, monkeypatch):
 
     by_order = {result.order_id: result for result in lifecycles}
     assert by_order["buy_b"].final_status == OrderStatus.FILLED
+
+
+def test_cancel_race_fill_reaches_the_ledger_through_the_real_services(tmp_path, monkeypatch):
+    """End to end through the production status and fill-reconciliation services.
+
+    The other reconciliation tests use a fake reconciler, so they prove the call
+    happens rather than that the fill lands. This one runs the real
+    LiveOrderStatusService and PartialFillReconciliationService and checks the
+    position actually moved.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    before = orchestrator.state_store.load_latest_portfolio_state()
+    assert before.positions.get("MOCK_ETF_B", 0.0) == 0.0
+
+    status_client = _BrokerStatusClient(fills_after_cancel={"buy_b"})
+
+    def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
+        del config, kwargs
+        status = LiveOrderStatusService(state_store, audit_logger, status_client)
+        return LiveApprovalDependencies(
+            state_store=state_store,
+            audit_logger=audit_logger,
+            safety_service=_SafetyService(calls, None, set(), None, set()),
+            status_service=status,
+            fill_reconciliation_service=PartialFillReconciliationService(
+                state_store, audit_logger
+            ),
+            workflow_service=None,
+            lifecycle_service=None,
+            cancel_service=_BrokerCancelService(status_client, calls),
+        )
+
+    monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
+
+    lifecycles, _ = orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    after = orchestrator.state_store.load_latest_portfolio_state()
+    assert after.positions.get("MOCK_ETF_B", 0.0) == 100.0
+    by_order = {result.order_id: result for result in lifecycles}
+    assert by_order["buy_b"].final_status == OrderStatus.FILLED
+
+
+class _BrokerStatusClient:
+    """Broker that fills the buy only once its cancellation is requested."""
+
+    def __init__(self, fills_after_cancel: set[str]) -> None:
+        self.fills_after_cancel = fills_after_cancel
+        self.cancel_requested: set[str] = set()
+
+    def get_order_status(self, broker_order):
+        order_id = broker_order.order_id
+        if order_id.startswith("sell") or order_id in self.cancel_requested:
+            filled = 100.0
+            status = OrderStatus.FILLED
+        else:
+            filled = 0.0
+            status = OrderStatus.OPEN
+        return LiveOrderStatusSnapshot(
+            broker_order=broker_order,
+            status=status,
+            checked_at=utc_now().isoformat(),
+            symbol="MOCK_ETF_A" if order_id.startswith("sell") else "MOCK_ETF_B",
+            side=OrderSide.SELL if order_id.startswith("sell") else OrderSide.BUY,
+            partial_fill=PartialFillSummary(
+                ordered_quantity=100.0,
+                filled_quantity=filled,
+                remaining_quantity=100.0 - filled,
+                average_fill_price=100.0,
+                fill_count=1 if filled else 0,
+            ),
+        )
+
+
+class _BrokerCancelService:
+    def __init__(self, status_client: _BrokerStatusClient, calls: list[str]) -> None:
+        self.status_client = status_client
+        self.calls = calls
+
+    def cancel_order(self, request, approval_decision):
+        del approval_decision
+        order_id = request.broker_order.order_id
+        self.calls.append(f"cancel:{order_id}")
+        self.status_client.cancel_requested.add(order_id)
+        return LiveOrderCancelResult(
+            broker_order=request.broker_order,
+            status=OrderStatus.CANCELED,
+            canceled_quantity=0.0,
+        )
