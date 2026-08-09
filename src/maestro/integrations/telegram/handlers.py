@@ -142,6 +142,14 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("kill_switch", "Confirm emergency live execution stop"),
 )
 
+TELEGRAM_UI_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("today", "오늘의 투자 현황"),
+    ("portfolio", "내 자산"),
+    ("system", "시스템 상태"),
+    ("history", "지난 기록"),
+    ("help", "도움말"),
+)
+
 
 class TelegramOperatorCommandRouter:
     def __init__(
@@ -239,6 +247,9 @@ class TelegramOperatorCommandRouter:
                 "status": self._status,
                 "health": self._health,
                 "signal": self._signal,
+                "today": self._signal,
+                "system": self._health,
+                "history": self._orders,
                 "account": self._account,
                 "portfolio": self._portfolio,
                 "apps": self._apps,
@@ -2918,11 +2929,16 @@ class TelegramOperatorCommandRouter:
             chat_id,
             "\n".join(
                 [
-                    "Maestro Telegram commands",
+                    "Maestro 명령어",
                     *[
                         f"/{command} - {description}"
-                        for command, description in TELEGRAM_OPERATOR_COMMANDS
+                        for command, description in TELEGRAM_UI_COMMANDS
                     ],
+                    "",
+                    "이런 알림이 올 수 있어요:",
+                    "- 📩 투자 승인 요청 (버튼으로 승인/거절)",
+                    "- ⏰ 승인 응답 리마인더",
+                    "- ⚠️ 확인이 필요한 상황 안내",
                 ]
             ),
         )
@@ -4623,29 +4639,12 @@ def _operator_time(value: object, config: MaestroConfig) -> str:
 
 
 def telegram_bot_commands(signal_config: MaestroConfig | None = None) -> list[dict[str, str]]:
-    commands = [
+    # 메뉴에는 UI 명령 5개만 노출한다. 기존 20개와 per-strategy 명령은
+    # 타이핑하면 여전히 동작한다 (signal_config 인자는 하위 호환용으로 유지).
+    return [
         {"command": command, "description": description}
-        for command, description in TELEGRAM_OPERATOR_COMMANDS
+        for command, description in TELEGRAM_UI_COMMANDS
     ]
-    if signal_config is None:
-        return commands
-    seen = {command["command"] for command in commands}
-    for strategy in signal_config.strategies:
-        if not strategy.enabled or not strategy.signal_enabled:
-            continue
-        display_name = _telegram_strategy_display_name(strategy.id)
-        for command, description in (
-            (_primary_signal_command(strategy.id), f"Generate {display_name} signal"),
-            (
-                _primary_rebalance_command(strategy.id),
-                f"Run {display_name} manual rebalance",
-            ),
-        ):
-            if command in seen:
-                continue
-            seen.add(command)
-            commands.append({"command": command, "description": description})
-    return commands
 
 
 def _strategy_id_for_signal_command(command: str, config: MaestroConfig) -> str | None:

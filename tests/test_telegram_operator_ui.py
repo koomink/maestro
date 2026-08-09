@@ -324,14 +324,17 @@ def test_telegram_rebalance_usage_lists_available_commands(tmp_path, monkeypatch
     assert "/rebalance_crescendo - Crescendo" in text
 
 
-def test_telegram_bot_commands_include_rebalance_commands(tmp_path):
+def test_telegram_bot_commands_hide_rebalance_and_signal_commands_from_menu(tmp_path):
+    # 메뉴에는 UI 명령 5개만 노출한다. per-strategy 명령은 타이핑하면 여전히
+    # 동작하지만 메뉴에는 등록하지 않는다.
     signal_config = load_config(_telegram_signal_config_path(tmp_path))
 
     commands = {item["command"] for item in telegram_bot_commands(signal_config)}
 
-    assert "rebalance_tranquillo" in commands
-    assert "rebalance_crescendo" in commands
-    assert "signal_tranquillo" in commands
+    assert "rebalance_tranquillo" not in commands
+    assert "rebalance_crescendo" not in commands
+    assert "signal_tranquillo" not in commands
+    assert commands == {"today", "portfolio", "system", "history", "help"}
 
 
 def test_telegram_operator_funding_complete_regenerates_signal_and_creates_approval(tmp_path):
@@ -1072,7 +1075,7 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
         assert router.process_update(message_update(command))
 
     sent_text = "\n\n".join(message["text"] for message in client.sent_messages)
-    assert "Maestro Telegram commands" in sent_text
+    assert "Maestro 명령어" in sent_text
     assert "Maestro status" in sent_text
     assert "maestro_cash:" not in sent_text
     assert "maestro_positions:" not in sent_text
@@ -2153,15 +2156,13 @@ def test_telegram_operator_poll_once_routes_updates(tmp_path):
     assert client.sent_messages[-1]["text"].startswith("Maestro status")
 
 
-def test_telegram_bot_commands_cover_operator_commands():
+def test_telegram_bot_commands_hide_legacy_operator_commands_from_menu():
     commands = telegram_bot_commands()
 
-    assert {"command": "status", "description": "Show Maestro status summary"} in commands
-    assert {"command": "health", "description": "Show health checks"} in commands
-    assert {
-        "command": "kill_switch",
-        "description": "Confirm emergency live execution stop",
-    } in commands
+    names = {item["command"] for item in commands}
+    assert "status" not in names
+    assert "health" not in names
+    assert "kill_switch" not in names
     assert all(not item["command"].startswith("/") for item in commands)
 
 
@@ -2241,39 +2242,14 @@ def test_telegram_operator_cli_passes_signal_config_to_router(tmp_path, monkeypa
     assert captured["timeout_seconds"] == 0
 
 
-def test_telegram_bot_commands_include_signal_generation_commands(tmp_path):
+def test_telegram_bot_commands_do_not_expose_signal_commands_in_menu(tmp_path):
+    # 메뉴는 signal_config와 무관하게 UI 명령 5개로 고정된다.
     signal_config = load_config(_telegram_signal_config_path(tmp_path))
 
     commands = telegram_bot_commands(signal_config)
 
-    assert {"command": "signal_tranquillo", "description": "Generate Tranquillo signal"} in commands
-    assert {"command": "signal_crescendo", "description": "Generate Crescendo signal"} in commands
-    assert {
-        "command": "signal_crescendo_us",
-        "description": "Generate Crescendo signal",
-    } not in commands
-
-
-def test_telegram_bot_commands_do_not_expose_legacy_signal_aliases(tmp_path):
-    config_path = _telegram_signal_config_path(tmp_path)
-    raw = yaml.safe_load(config_path.read_text())
-    raw["strategies"][0]["id"] = "ataraxia"
-    raw["strategies"][1]["id"] = "snowball_us"
-    config_path.write_text(yaml.safe_dump(raw))
-    signal_config = load_config(config_path)
-
-    commands = telegram_bot_commands(signal_config)
-
-    assert {"command": "signal_tranquillo", "description": "Generate Tranquillo signal"} in commands
-    assert {"command": "signal_crescendo", "description": "Generate Crescendo signal"} in commands
-    assert {
-        "command": "signal_ataraxia",
-        "description": "Generate Tranquillo signal",
-    } not in commands
-    assert {
-        "command": "signal_snowball_us",
-        "description": "Generate Crescendo signal",
-    } not in commands
+    assert commands == telegram_bot_commands()
+    assert all(not item["command"].startswith("signal_") for item in commands)
 
 
 def test_telegram_operator_cli_rejects_placeholder_chat_ids(tmp_path):
@@ -3144,3 +3120,47 @@ def test_approval_callback_edits_card_with_korean_result(tmp_path):
     assert handled
     assert client.answered_callbacks[-1]["text"] == "거절했어요."
     assert client.edited_messages[-1]["text"].startswith("❌ 거절했어요")
+
+
+def test_telegram_bot_commands_registers_only_five_korean_commands():
+    commands = telegram_bot_commands()
+    assert commands == [
+        {"command": "today", "description": "오늘의 투자 현황"},
+        {"command": "portfolio", "description": "내 자산"},
+        {"command": "system", "description": "시스템 상태"},
+        {"command": "history", "description": "지난 기록"},
+        {"command": "help", "description": "도움말"},
+    ]
+
+
+def test_new_command_aliases_route_to_existing_handlers(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/system"))
+    system_text = client.sent_messages[-1]["text"]
+    assert router.process_update(message_update("/health", update_id=5))
+    health_text = client.sent_messages[-1]["text"]
+    # 별칭은 기존 핸들러와 동일 형식 (타임스탬프가 달라질 수 있어 첫 줄만 비교)
+    assert system_text.splitlines()[0] == health_text.splitlines()[0]
+
+
+def test_help_is_korean_and_lists_five_commands(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/help"))
+    text = client.sent_messages[-1]["text"]
+    assert "/today" in text and "/portfolio" in text and "/system" in text
+    assert "/history" in text and "/help" in text
+    assert "이런 알림이 올 수 있어요" in text
