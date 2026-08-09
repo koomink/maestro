@@ -1835,3 +1835,128 @@ def test_unconfirmed_buy_cancel_also_stops_the_remaining_cohorts(tmp_path, monke
     assert "submit:buy_b" in calls
     assert "submit:sell_k" not in calls, "a cohort ran while a buy was still live"
     assert orchestrator.state_store.list_system_events_by_type("rotation_cohorts_halted")
+
+
+def test_unresolved_order_lifecycle_still_records_the_new_evidence(tmp_path, monkeypatch):
+    """The orders needing recovery are the ones whose record went stale.
+
+    A cancel poll can see extra fill without the order leaving PARTIALLY_FILLED.
+    Superseding only on a status change skipped exactly those, so the dashboard
+    and audit trail kept the pre-cancel view of the order an operator must chase.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=2)
+    orchestrator.telegram_client = _TelegramClient()
+    status_client = _CreepingFillStatusClient()
+
+    def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
+        del config, kwargs
+        return LiveApprovalDependencies(
+            state_store=state_store,
+            audit_logger=audit_logger,
+            safety_service=_SafetyService(calls, None, set(), None, set()),
+            status_service=LiveOrderStatusService(state_store, audit_logger, status_client),
+            fill_reconciliation_service=PartialFillReconciliationService(
+                state_store, audit_logger
+            ),
+            workflow_service=None,
+            lifecycle_service=None,
+            cancel_service=_BrokerCancelService(status_client, calls),
+        )
+
+    monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
+
+    lifecycles, _ = orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    buy = next(result for result in lifecycles if result.order_id == "buy_b")
+    assert buy.final_status == OrderStatus.PARTIALLY_FILLED
+    # It never reached a terminal state, but the record still has to show what
+    # the cancel polls saw.
+    assert buy.status_snapshots[-1].partial_fill.filled_quantity == 60.0
+    assert buy.poll_count == len(buy.status_snapshots)
+    assert buy.applied_fills, "the extra fill is missing from the record"
+    assert buy.fill_reconciliations
+
+    persisted = [
+        row["payload"]
+        for row in orchestrator.state_store.list_system_events_by_type("live_order_lifecycle")
+        if row["payload"].get("order_id") == "buy_b"
+    ][0]
+    assert persisted["applied_fills"]
+
+
+def test_halt_reason_names_the_actual_cause(tmp_path, monkeypatch):
+    """A working order is not a ledger disagreement, and needs a different fix."""
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.OPEN,
+            "sell_k": OrderStatus.FILLED,
+            "buy_k": OrderStatus.FILLED,
+        },
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [
+            _sell("sell_a"),
+            _buy("buy_b"),
+            _intent("sell_k", "MOCK_ETF_A", OrderSide.SELL).model_copy(
+                update={"account_id": "second"}
+            ),
+            _intent("buy_k", "MOCK_ETF_B", OrderSide.BUY).model_copy(
+                update={"account_id": "second"}
+            ),
+        ],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    halted = orchestrator.state_store.list_system_events_by_type("rotation_cohorts_halted")
+    assert halted[0]["payload"]["reason"] == "unresolved_broker_order"
+
+
+class _CreepingFillStatusClient:
+    """The buy keeps filling but never leaves PARTIALLY_FILLED."""
+
+    def __init__(self) -> None:
+        self.cancel_requested: set[str] = set()
+
+    def get_order_status(self, broker_order):
+        order_id = broker_order.order_id
+        if order_id.startswith("sell"):
+            return _snapshot(broker_order, "MOCK_ETF_A", OrderSide.SELL, 100.0, OrderStatus.FILLED)
+        # The extra fill only shows up once the cancellation is in flight, so it
+        # is invisible to the batch's own polling.
+        filled = 60.0 if order_id in self.cancel_requested else 30.0
+        return _snapshot(
+            broker_order, "MOCK_ETF_B", OrderSide.BUY, filled, OrderStatus.PARTIALLY_FILLED
+        )
+
+
+def _snapshot(broker_order, symbol, side, filled, status):
+    return LiveOrderStatusSnapshot(
+        broker_order=broker_order,
+        status=status,
+        checked_at=utc_now().isoformat(),
+        symbol=symbol,
+        side=side,
+        partial_fill=PartialFillSummary(
+            ordered_quantity=100.0,
+            filled_quantity=filled,
+            remaining_quantity=100.0 - filled,
+            average_fill_price=100.0,
+            fill_count=1 if filled else 0,
+        ),
+    )

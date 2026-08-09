@@ -189,16 +189,23 @@ class _CancelResolution:
     fill_result: FillReconciliationResult | None = None
 
     @property
-    def blocks_further_cohorts(self) -> bool:
-        """Whether it is still safe to submit more orders under this approval.
+    def halt_reason(self) -> str | None:
+        """Why it is no longer safe to submit more orders under this approval.
 
-        A stale ledger means later sizing cannot be trusted. An order we could
-        not confirm gone is worse: it is still working, and unknown quantity may
-        yet fill while we send more.
+        The two causes need different responses from the operator, so they must
+        not be reported as the same thing: a stale ledger means later sizing
+        cannot be trusted, while an unconfirmed cancel means an order is still
+        working and unknown quantity may yet fill while we send more.
         """
-        return bool(
-            self.reconciliation_failed or self.cancel_failures or self.cancel_unconfirmed
-        )
+        if self.reconciliation_failed:
+            return "ledger_disagrees_with_broker"
+        if self.cancel_failures or self.cancel_unconfirmed:
+            return "unresolved_broker_order"
+        return None
+
+    @property
+    def blocks_further_cohorts(self) -> bool:
+        return self.halt_reason is not None
 
 
 _CANCEL_TERMINAL_STATUSES = {
@@ -2689,7 +2696,7 @@ class MaestroOrchestrator:
         dependencies_by_account: dict[str | None, LiveApprovalDependencies] = {}
         lifecycle_results: list[LiveOrderLifecycleResult] = []
         for cohort in split_rotation_cohorts(armed_orders):
-            cohort_results, stop = self._run_cohort_phases(
+            cohort_results, halt_reason = self._run_cohort_phases(
                 cohort,
                 run_id=run_id,
                 approval_id=approval_id,
@@ -2698,11 +2705,11 @@ class MaestroOrchestrator:
                 dependencies_by_account=dependencies_by_account,
             )
             lifecycle_results.extend(cohort_results)
-            if stop:
+            if halt_reason is not None:
                 self._record_event(
                     run_id,
                     "rotation_cohorts_halted",
-                    {"reason": "ledger_disagrees_with_broker", "after_cohort": cohort.account_id},
+                    {"reason": halt_reason, "after_cohort": cohort.account_id},
                 )
                 break
         return lifecycle_results, self.state_store.load_latest_portfolio_state()
@@ -2716,7 +2723,7 @@ class MaestroOrchestrator:
         approval_decision: ApprovalDecision,
         signal_run_id: str | None,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
-    ) -> tuple[list[LiveOrderLifecycleResult], bool]:
+    ) -> tuple[list[LiveOrderLifecycleResult], str | None]:
         """Sell, wait for the fills, then buy against the cash they raised.
 
         The broker re-checks buying power against its own live balance when the
@@ -2725,7 +2732,7 @@ class MaestroOrchestrator:
         sitting in cash for a whole rebalance cycle.
         """
         results: list[LiveOrderLifecycleResult] = []
-        stop_remaining_cohorts = False
+        stop_remaining_cohorts: str | None = None
         sell_results, sell_requests = self._run_batch_phase(
             list(cohort.sells),
             run_id=run_id,
@@ -2861,8 +2868,7 @@ class MaestroOrchestrator:
                 else _CancelResolution({}, [], [], [], False)
             )
             resolved_statuses = resolution.resolved_statuses
-            if resolution.blocks_further_cohorts:
-                stop_remaining_cohorts = True
+            stop_remaining_cohorts = resolution.halt_reason
             # The lifecycle the batch recorded predates these polls. Anything
             # reading the run — orders_filled, the dashboard, the audit trail —
             # goes through that object, so it has to carry the status the broker
@@ -3205,7 +3211,7 @@ class MaestroOrchestrator:
         approval_decision: ApprovalDecision,
         dependencies_by_account: dict[str | None, LiveApprovalDependencies],
         requests_by_order_id: dict[str, LiveOrderRequest],
-    ) -> tuple[list[LiveOrderLifecycleResult], bool]:
+    ) -> tuple[list[LiveOrderLifecycleResult], str | None]:
         """Stop the rotation and hand the account back in a retryable state.
 
         An order still working at the broker trips the pending-orders gate and
@@ -3252,7 +3258,7 @@ class MaestroOrchestrator:
             resolution.canceled,
             resolution.cancel_failures + resolution.cancel_unconfirmed,
         )
-        return results, resolution.blocks_further_cohorts
+        return results, resolution.halt_reason
 
     def _with_resolved_statuses(
         self,
@@ -3261,40 +3267,42 @@ class MaestroOrchestrator:
         *,
         run_id: str | None = None,
     ) -> list[LiveOrderLifecycleResult]:
-        """Carry a status observed after the batch onto the canonical results.
+        """Fold everything the cancel polls learned into the canonical results.
 
         The batch wrote its lifecycle record before these polls happened, and the
         dashboard and audit trail read that record rather than any side event.
-        Persist a superseding one — with the polls and fills that justify the new
-        status, or the record would claim FILLED while showing nothing filled.
+        The trigger is fresh evidence, not a status change: an order that stayed
+        PARTIALLY_FILLED can still have filled further, and those are precisely
+        the orders an operator has to chase.
         """
-        resolved_statuses = resolution.resolved_statuses
-        if not resolved_statuses:
-            return results
         fills_by_broker_order: dict[str, list[AppliedFill]] = {}
         if resolution.fill_result is not None:
             for fill in resolution.fill_result.applied_fills:
                 fills_by_broker_order.setdefault(fill.broker_order_id, []).append(fill)
+        if not resolution.snapshots and not fills_by_broker_order:
+            return results
         corrected: list[LiveOrderLifecycleResult] = []
         for result in results:
-            status = resolved_statuses.get(result.order_id)
-            if status is None or status == result.final_status:
-                corrected.append(result)
-                continue
             snapshots = resolution.snapshots.get(result.order_id, [])
             applied = (
                 fills_by_broker_order.get(result.broker_order_id, [])
                 if result.broker_order_id
                 else []
             )
+            if not snapshots and not applied:
+                corrected.append(result)
+                continue
+            status = resolution.resolved_statuses.get(result.order_id, result.final_status)
             update: dict[str, Any] = {
                 "final_status": status,
                 "status_snapshots": [*result.status_snapshots, *snapshots],
                 "poll_count": result.poll_count + len(snapshots),
-                # Polling did conclude — that is how we learned the new status.
-                "max_polls_reached": False,
                 "applied_fills": [*result.applied_fills, *applied],
+                "checked_at": utc_now().isoformat(),
             }
+            if result.order_id in resolution.resolved_statuses:
+                # Polling did conclude — that is how we learned the new status.
+                update["max_polls_reached"] = False
             if resolution.fill_result is not None:
                 update["fill_reconciliations"] = [
                     *result.fill_reconciliations,
