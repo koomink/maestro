@@ -29,6 +29,9 @@ canonical JSON으로 변경(sentinel 치환 금지)
 개정 10차: 2026-08-09 Codex 적대적 리뷰 10차 반영 — 3a 업그레이드
 backfill(legacy 요청 v1 head 생성, legacy ack 완료 판정), 롤백 preflight
 조건 확장, scope 직렬화에서 NFC 정규화 제거(원시 코드포인트 보존)
+개정 11차: 2026-08-10 Codex 적대적 리뷰 11차 반영 — 결정적
+dispatch_group_id로 approval get-or-create, 롤백 preflight를 quiesce
+장벽 아래로 이동
 
 ## 배경과 목표
 
@@ -315,10 +318,18 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    - consumed는 "dispatch 배타 시작" 표지로 재정의하고, **dispatch 완료
      판정과 분리**한다. 완료(`signal_approval_pending`)는 모든 그룹×채팅
      전송이 끝난 뒤에만 기록한다.
-   - 그룹 분할·순서를 결정적으로 만들어(정렬) 재개 시 동일한 그룹이
-     나오게 하고, 이미 저장된 그룹별 `telegram_approval_pending` envelope
-     (approval_id duplicate_key로 durable)이 있으면 새 approval을 만들지
-     않고 재사용한다.
+   - **결정적 dispatch_group_id로 approval을 get-or-create한다**: 현재
+     `ApprovalManager.create_request`는 매번 무작위 approval_id를
+     발급하므로, 일부 그룹 저장 후 crash한 재개 실행은 기존 그룹의
+     approval_id를 알 수 없어 같은 주문 그룹에 새 approval을 만들 수
+     있다. 이를 막기 위해 그룹 분할·순서를 결정적으로 만들고(정렬),
+     `dispatch_group_id = <signal_run_id> + canonical 그룹 구성(정렬된
+     전략 ID·계좌 ID)`을 정의한다. envelope 저장은
+     `duplicate_key = dispatch-group:<dispatch_group_id>`의 유일성 제약
+     아래 **원자적 get-or-create**로 수행한다 — 이미 존재하면 새
+     approval_id를 발급하지 않고 저장된 envelope(approval_id·**최초
+     만료시각 포함**)을 그대로 재사용한다. 같은 주문 그룹에 승인 카드나
+     결정 경로가 둘 이상 생기는 일이 DB 수준에서 차단된다.
    - **전송은 exactly-once가 아니라 at-least-once**: sendMessage 성공과
      성공 이벤트 저장 사이의 중단은 원리적으로 구분할 수 없으므로
      "미전송 채팅만 정확히 발송"은 보장 대상이 아니다. 채팅별로 전송
@@ -493,8 +504,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   - **동시 중복 callback**: 같은 funding 요청의 버튼이 동시에 두 번
     처리되어도 claim에 의해 한 건만 진입하고 나머지는 거절된다
   - **dispatch crash 주입**: consumed 직후 / 각 그룹 pending 이벤트 저장
-    전후 / 각 채팅 전송 전후에 중단 후 재개 — 기존 approval_id·envelope이
-    재사용되고, intent 없는 채팅은 발송·ambiguous 채팅은 재발송(중복 허용)
+    전후 / 각 채팅 전송 전후에 중단 후 재개 — dispatch_group_id
+    get-or-create에 의해 기존 approval_id·envelope·최초 만료시각이
+    재사용되고(일부 그룹만 저장된 상태 포함), intent 없는 채팅은 발송·ambiguous 채팅은 재발송(중복 허용)
     되며, message_id가 알려진 중복 복사본은 무력화 edit로 정리되고,
     message_id가 유실된 복사본은 클릭 시 self-heal(그 메시지가 즉시 최종
     상태로 edit되고 추적 목록에 등록)되며, 승인 callback은 어느 카드에서
@@ -547,9 +559,17 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 `_load_pending_funding_request()`가 요청을 다시 pending으로 간주해
 `run_signal()`을 중복 실행할 수 있다 — 즉 장애 시점의 롤백이 새 불변식을
 제거한다. 따라서 단계 3a 이후에는 **버그 대응도 수정 배포(roll-forward)로만
-진행**하고, 부득이하게 롤백해야 하면 **롤백 preflight**를 통과한 뒤에만
-롤백한다. preflight는 다음이 모두 0건임을 확인한다 (하나라도 있으면 먼저
-수동 종결):
+진행**하고, 부득이하게 롤백해야 하면 **quiesce 장벽 아래에서 롤백
+preflight**를 통과한 뒤에만 롤백한다. preflight를 정지 없이 실행하면 검사
+직후 구버전 기동 전까지 callback·sweep·예약 run이 새 미완 상태를 만들 수
+있어 통과가 무의미해지므로, 롤백은 다음 순서를 강제한다:
+
+1. **quiesce**: telegram-operator 서비스와 per-market signal 타이머 등
+   state store에 쓰는 모든 systemd unit을 정지해 writer와 callback 유입을
+   차단한다.
+2. **최종 preflight**: 정지 상태에서 DB 배타 lock을 잡고 실행한다.
+   아래 미완 상태가 모두 0건임을 확인한다 (하나라도 있으면 먼저 수동
+   종결 후 재검사):
 
 - 미완 funding/budget 전이 (claim은 있으나 `completed` 없음)
 - consumed이지만 dispatch 완료(`signal_approval_pending`)가 없는
@@ -558,8 +578,14 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 - `decision_recorded`는 있으나 `resolution_completed`가 없는 승인 —
   구 handler는 ack만으로 영구 종결로 취급해 승인된 주문이 유실된다
 
+3. **구버전 배포**: preflight 통과 후, unit이 정지된 상태 그대로 구버전
+   코드를 배포한다. preflight와 배포 사이에 어떤 unit도 재시작하지
+   않는다 — 장벽은 구버전 기동이 완료될 때까지 유지된다.
+4. **재개**: 구버전 기동을 확인한 뒤에만 타이머·서비스를 재개한다.
+
 preflight 검사와 미완 상태의 수동 종결을 수행하는 운영 도구(CLI 점검
-명령)를 3a에 포함하고, 각 미완 상태에서의 롤백 시나리오를 테스트한다.
+명령)를 3a에 포함하고, 각 미완 상태에서의 롤백 시나리오와 quiesce 순서
+위반(정지 없이 preflight만 통과) 시의 위험을 테스트로 문서화한다.
 이 절차는 운영 문서에 명시한다.
 
 **3a 업그레이드 backfill (첫 기동 시 1회)**: 새 불변식은 3a 이전에 쌓인
@@ -614,7 +640,9 @@ supersede할 수 있고, (b) 기존에 정상 완료된 승인 ack는
 - (단계 3a) 롤백 preflight가 미완 funding/budget 전이,
   consumed-without-dispatch-completion,
   decision_recorded-without-resolution_completed를 모두 검출하고, 각 미완
-  상태에서의 롤백 시나리오가 테스트되어 있다.
+  상태에서의 롤백 시나리오가 테스트되어 있으며, preflight는 quiesce
+  (writer·callback 유입 정지 + DB 배타 lock) 아래에서만 유효한 것으로
+  절차화되어 있다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
   헬스체크에 반영된다.
 
