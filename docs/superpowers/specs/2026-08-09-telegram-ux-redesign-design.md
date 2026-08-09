@@ -11,6 +11,9 @@ scope 복합 키로 재정의, 액션 라우팅은 request_id에만 바인딩
 개정 4차: 2026-08-09 Codex 적대적 리뷰 4차 반영 — child run lineage 영속화,
 funding/budget 공통 상태 전이(claimed→child_created→completed), budget
 decision의 비종결화, 단계 3 roll-forward-only 명시
+개정 5차: 2026-08-09 Codex 적대적 리뷰 5차 반영 — 워크플로우 head/version
+CAS로 단일 활성 요청 보장, 승인 dispatch의 idempotent resume
+(consumed와 dispatch 완료 분리)
 
 ## 배경과 목표
 
@@ -174,13 +177,24 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 **"비즈니스 로직 불변" 원칙(접근 A)의 명시적 예외**로, handlers의 funding
 확인 경로에 다음 규약을 도입한다:
 
-1. **원자적 claim**: funding/budget callback 처리 시작 시
+1. **워크플로우 head와 원자적 교체(CAS)**: request_id별 claim만으로는
+   부족하다 — 같은 scope/month에 pending 요청 두 개가 공존하면(중단 후
+   재생성, 수동/예약 run) 각자 다른 claim을 얻어 양쪽 모두 처리될 수 있다.
+   워크플로우별 단일 활성 요청을 영속 head로 관리한다:
+   `funding_workflow_head` system event에 (workflow_id, version, 활성
+   request_id, 상태)를 기록하고, 갱신은
+   `duplicate_key = head:<funding_workflow_id>:v<다음 version>`으로만
+   커밋한다. duplicate_key의 전역 유일성이 같은 버전 전이의 동시 커밋을
+   한 건으로 직렬화하므로 요청 생성·교체가 CAS로 동작한다. head에서
+   밀려난 요청은 명시적 `superseded` 종결 상태로 기록한다.
+2. **원자적 claim**: funding/budget callback 처리 시작 시 먼저 해당
+   request_id가 **현재 head인지 검증**하고(head가 아니면 거절),
    `funding_workflow_claim` system event를
    `duplicate_key = <funding_workflow_id>:<phase>:<request_id>`로 기록한다
    (기존 duplicate_key 멱등 컨벤션 재사용). 이미 claim이 존재하면 처리에
    진입하지 않고 "이미 처리 중이거나 완료된 요청이에요"로 응답한다 —
    동시 중복 callback과 교체 전 요청의 재실행을 상태 변경 이전에 차단한다.
-2. **공통 상태 전이 `claimed → child_created → completed`**: funding과
+3. **공통 상태 전이 `claimed → child_created → completed`**: funding과
    budget 전환 모두 이 3단계를 system event로 영속화한다. `completed`만이
    종결 상태다. 특히 **budget decision은 종결 ack가 아니라** 전환의 입력값
    (선택 금액)일 뿐이다 — 현재 코드는 `contribution_budget_request_decision`
@@ -189,20 +203,39 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    종결돼 월간 투자가 조용히 멈춘다. 개편 후에는 decision이 저장돼도
    `completed` 이벤트가 없으면 워크플로우는 미완으로 취급되어 복구 대상이
    된다.
-3. **child run lineage 영속화**: 현재 `run_signal()`은 원천 request를 알지
+4. **child run lineage 영속화**: 현재 `run_signal()`은 원천 request를 알지
    못하므로 "claim 이후 생성된 run"을 같은 전략·scope의 다른 수동/예약
    run과 구분할 수 없다. `run_signal()`에 `source_request_id`(및
    funding_workflow_id)를 전달해 signal run 기록/package에 영속화하고,
    복구 시 이 lineage로만 child run을 조회한다 (추론적 연결 금지).
    같은 scope에서 동시에 존재하는 수동 run과의 조회 유일성을 테스트로
    보장한다.
-4. **중단 전환의 자동 재실행 금지**: claim은 있으나 `completed`가 없는
+5. **중단 전환의 자동 재실행 금지**: claim은 있으나 `completed`가 없는
    상태로 재시작되면 같은 전환을 자동 재실행하지 않는다. lineage로 child
    signal run을 조회해 **있으면 재사용**하여 나머지 단계(승인 dispatch,
    completed 기록)만 이어서 수행하고, 없으면 기존 워크플로우 복구 카드
    ("이전 작업이 중단된 상태예요")로 라우팅해 운영자 확인 후 진행한다.
    budget의 경우 저장된 decision 금액을 그대로 사용해 재개한다.
-5. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
+6. **승인 dispatch의 idempotent resume**: "child run이 있으면 승인
+   dispatch부터 재개"가 성립하려면 dispatch 자체가 재개 가능해야 한다.
+   현재 `dispatch_signal_approval`은 package를 **consumed로 먼저 기록한 뒤**
+   그룹별 pending 이벤트 저장과 채팅별 Telegram 전송을 수행하므로,
+   consumed 직후 또는 일부 그룹/채팅 전송 후 crash하면 재호출이
+   "Signal package already consumed"로 거부되어 워크플로우가 영구 미완이
+   되거나 일부 승인 카드만 노출된다. 개편 후 규약:
+   - consumed는 "dispatch 배타 시작" 표지로 재정의하고, **dispatch 완료
+     판정과 분리**한다. 완료(`signal_approval_pending`)는 모든 그룹×채팅
+     전송이 끝난 뒤에만 기록한다.
+   - 그룹 분할·순서를 결정적으로 만들어(정렬) 재개 시 동일한 그룹이
+     나오게 하고, 이미 저장된 그룹별 `telegram_approval_pending` envelope
+     (approval_id duplicate_key로 durable)이 있으면 새 approval을 만들지
+     않고 재사용한다.
+   - 채팅별 전송 성공을 `duplicate_key = sent:<approval_id>:<chat_id>`
+     이벤트로 기록해, 재개 시 미전송 채팅만 발송한다.
+   - resume 진입 조건: consumed이지만 완료 이벤트가 없는 package.
+   이 변경은 funding 재생성 run만이 아니라 승인 dispatch 전체에 적용되며,
+   접근 A 예외 범위에 포함된다.
+7. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
    duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
 
 ### C. 예외 카드 (가이드형 마법사)
@@ -320,8 +353,15 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
     복구 대상으로 잡히며, 저장된 decision 금액으로 재개된다
   - **lineage 조회 유일성**: claim된 워크플로우와 같은 전략·scope의 수동
     run이 동시에 존재해도 child run 조회가 잘못된 run을 연결하지 않는다
+  - **head 경쟁**: 같은 scope/month에 pending 요청 두 개가 공존하는 상태
+    (중단 후 재생성, 수동 run)에서 head인 요청만 처리되고, 밀려난 요청은
+    `superseded`로 종결되며 그 버튼은 거절된다
   - **동시 중복 callback**: 같은 funding 요청의 버튼이 동시에 두 번
     처리되어도 claim에 의해 한 건만 진입하고 나머지는 거절된다
+  - **dispatch crash 주입**: consumed 직후 / 각 그룹 pending 이벤트 저장
+    전후 / 각 채팅 전송 전후에 중단 후 재개 — 기존 approval_id·envelope이
+    재사용되고, 미전송 채팅에만 발송되며, 전부 끝난 뒤에야 dispatch 완료가
+    기록된다
   - 연속 렌더/edit 실패 → 고정 템플릿 fallback 발송 + 헬스 degraded
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
@@ -364,6 +404,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   저장 직후) 신규 요청은 하나만 생성되고 구 요청 callback은 거절되며,
   동시 중복 callback은 claim에 의해 한 건만 처리되고, 중단된 워크플로우는
   복구 대상으로 잡혀 재개된다.
+- 승인 dispatch 중단(consumed 직후, 그룹 이벤트 전후, 채팅 전송 전후) 후
+  재개 시 approval이 중복 생성되지 않고 미전송 채팅만 발송되며, 같은
+  scope/month의 병행 pending 요청 경쟁에서 head인 요청만 처리된다.
 - (단계 3) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
   중복 실행 위험을 확인하고, roll-forward-only 운영 절차가 문서화되어 있다.
 - 부분 전송 실패(일부 chat_id 실패, edit 실패) 시 fallback 경로가 동작하고
