@@ -32,6 +32,9 @@ backfill(legacy 요청 v1 head 생성, legacy ack 완료 판정), 롤백 preflig
 개정 11차: 2026-08-10 Codex 적대적 리뷰 11차 반영 — 결정적
 dispatch_group_id로 approval get-or-create, 롤백 preflight를 quiesce
 장벽 아래로 이동
+개정 12차: 2026-08-10 Codex 적대적 리뷰 12차 반영 — 3a 업그레이드에도
+quiesce 장벽 적용, migration_started/completed 분리 + immutable cutoff,
+backfill 멱등 재개 규약
 
 ## 배경과 목표
 
@@ -242,9 +245,10 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    원자화한다. 방어선으로, 복구 sweep가 재시작 시 불변식을 검사해
    orphan pending 요청(head 미연결)은 `superseded`로, dangling head
    (요청 실체 없음)는 직전 버전으로 수렴시키고 audit 이벤트를 남긴다.
-   단, 이 수렴은 **마이그레이션 watermark 이후에 생성된 요청에만**
+   단, 이 수렴은 **마이그레이션 cutoff 이후에 생성된 요청에만**
    적용한다 — 3a 이전에 생성된 요청은 head가 원래 없으므로 orphan이
-   아니며, 아래 "3a 업그레이드 backfill" 절차가 처리한다.
+   아니며, 아래 "3a 업그레이드 backfill" 절차가 처리하고, 수렴 sweep
+   자체가 `migration_completed` 마커 이전에는 활성화되지 않는다.
 2. **원자적 claim (attempt 기반, 재개 가능)**: claim을 "존재하면 영원히
    거절"인 잠금으로 정의하면 child 생성 전에 중단된 워크플로우는 어떤
    경로로도 재진입하지 못해 영구 정지한다. claim은 **attempt 단위의 전이
@@ -588,27 +592,48 @@ preflight 검사와 미완 상태의 수동 종결을 수행하는 운영 도구
 위반(정지 없이 preflight만 통과) 시의 위험을 테스트로 문서화한다.
 이 절차는 운영 문서에 명시한다.
 
-**3a 업그레이드 backfill (첫 기동 시 1회)**: 새 불변식은 3a 이전에 쌓인
-상태를 모르므로, backfill 없이 켜면 두 가지 오판이 발생한다 — (a) 기존
-pending funding/budget 요청은 head가 없어 수렴 sweep이 orphan으로 오판해
+**3a 업그레이드 backfill**: 새 불변식은 3a 이전에 쌓인 상태를 모르므로,
+backfill 없이 켜면 두 가지 오판이 발생한다 — (a) 기존 pending
+funding/budget 요청은 head가 없어 수렴 sweep이 orphan으로 오판해
 supersede할 수 있고, (b) 기존에 정상 완료된 승인 ack는
 `resolution_completed`가 없어 sweep이 미완으로 오판해 재집행할 수 있다.
-따라서 3a 첫 기동은 다음 backfill을 마친 뒤에만 sweep을 활성화한다:
 
-1. **마이그레이션 watermark 기록**: backfill 시점을 system event로 남기고,
-   새 수렴·재개 로직은 watermark 이후 상태에만 적용한다.
-2. **legacy pending 요청의 head 초기화**: watermark 이전 pending
+**업그레이드도 롤백과 같은 quiesce 장벽을 요구한다**: state store에는
+telegram-operator와 per-market signal 타이머 등 여러 writer가 있으므로,
+장벽 없이 backfill하면 그 사이 구버전 writer가 head 없는 legacy 요청을
+새로 만들거나(경계 오염), 다른 프로세스가 watermark만 보고 sweep을
+켤 수 있다. 절차:
+
+1. **quiesce**: 롤백 절차와 동일하게 state store에 쓰는 모든 systemd
+   unit을 정지하고 DB 배타 lock을 잡는다. backfill은 이 장벽 아래에서만
+   실행된다.
+2. **`migration_started` 기록 + immutable cutoff**: started 이벤트에
+   cutoff(그 시점 system_events의 최대 id)를 저장한다. 모든 backfill
+   판정은 이 cutoff를 기준으로 하며, **재기동 시 미완 마이그레이션이
+   발견되면 새 watermark를 만들지 않고 기존 started의 cutoff로
+   재개한다.**
+3. **legacy pending 요청의 head 초기화**: cutoff 이전 pending
    funding/budget 요청을 workflow(scope+month)별로 묶어 v1 head를
    원자적으로 생성한다. 같은 workflow에 pending이 2건 이상인 모호한
    그룹은 **자동 supersede하지 않고** 운영자 검토 카드로 격리한다.
-3. **legacy ack의 완료 판정**: 결정 이벤트에 스키마 버전 필드를 추가해
-   신·구 이벤트를 구분한다. watermark 이전 ack는
+4. **legacy ack의 완료 판정**: 결정 이벤트에 스키마 버전 필드를 추가해
+   신·구 이벤트를 구분한다. cutoff 이전 ack는
    `signal_approval_completed` 이벤트와 주문·실행 기록을 증거로 완료
    여부를 판정해 `resolution_completed`를 backfill하고, 증거가 모호한
    ack는 **자동 재실행하지 않고** 운영자 검토 카드로 격리한다.
-4. **업그레이드 테스트**: 실제 구버전 DB 스냅샷(fixture)으로 backfill을
-   실행해 — 정상 pending 요청이 유지되고, 완료된 승인이 재집행되지
-   않으며, 모호 케이스가 격리되는지 검증한다.
+5. **`migration_completed` 기록 후에만 재개**: 모든 backfill 쓰기는
+   결정적 duplicate_key(workflow_id·approval_id 기반)로 멱등화해 중단
+   후 반복 실행이 안전하다. 3~4가 전부 끝난 뒤 `migration_completed`를
+   기록하고, **completed 마커가 확인되기 전에는 어떤 프로세스도 신규
+   스키마 write·수렴 sweep·funding/budget callback 처리를 시작하지
+   않는다** (started만 있으면 기동 시 backfill 재개로 진입). completed
+   후에 unit을 재개한다.
+6. **업그레이드 테스트**: 실제 구버전 DB 스냅샷(fixture)으로 검증한다 —
+   정상 pending 요청이 유지되고, 완료된 승인이 재집행되지 않으며, 모호
+   케이스가 격리된다. 실패 주입: backfill 각 단계 사이의 crash 후 재개
+   (같은 cutoff 재사용, 결과 불변), 구·신 버전 동시 기동(completed 전
+   신규 스키마 write 차단), started 직후 legacy 요청이 생기는 경계
+   오염(quiesce가 차단함을 확인).
 
 **각 단계의 배포 승인 조건** (다음 단계로 넘어가기 전 확인):
 
@@ -636,7 +661,10 @@ supersede할 수 있고, (b) 기존에 정상 완료된 승인 ack는
 - (단계 3a) 구버전 DB fixture로 업그레이드 backfill을 검증한다: 기존
   pending 요청이 v1 head로 연결되어 유지되고, 완료된 legacy 승인이
   재집행되지 않으며, 모호 케이스(복수 pending, 증거 불충분 ack)는 자동
-  처리 대신 운영자 검토로 격리된다.
+  처리 대신 운영자 검토로 격리된다. 실패 주입 포함: backfill 단계 사이
+  crash 후 같은 cutoff로 멱등 재개, 구·신 버전 동시 기동 시 completed
+  마커 이전의 신규 스키마 write·sweep 차단, quiesce 없이 진행할 경우의
+  경계 오염 검출.
 - (단계 3a) 롤백 preflight가 미완 funding/budget 전이,
   consumed-without-dispatch-completion,
   decision_recorded-without-resolution_completed를 모두 검출하고, 각 미완
