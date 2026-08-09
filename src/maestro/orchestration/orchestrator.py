@@ -1,7 +1,7 @@
 import json
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -65,6 +65,11 @@ from maestro.execution.live_order_batch import (
 from maestro.execution.live_order_factory import (
     LiveApprovalDependencies,
     build_live_approval_dependencies,
+)
+from maestro.execution.live_order_models import (
+    AppliedFill,
+    FillReconciliationResult,
+    LiveOrderStatusSnapshot,
 )
 from maestro.execution.live_order_safety import build_live_order_idempotency_key
 from maestro.execution.live_orders import (
@@ -180,6 +185,20 @@ class _CancelResolution:
     cancel_failures: list[dict[str, Any]]
     cancel_unconfirmed: list[dict[str, Any]]
     reconciliation_failed: bool
+    snapshots: dict[str, list[LiveOrderStatusSnapshot]] = field(default_factory=dict)
+    fill_result: FillReconciliationResult | None = None
+
+    @property
+    def blocks_further_cohorts(self) -> bool:
+        """Whether it is still safe to submit more orders under this approval.
+
+        A stale ledger means later sizing cannot be trusted. An order we could
+        not confirm gone is worse: it is still working, and unknown quantity may
+        yet fill while we send more.
+        """
+        return bool(
+            self.reconciliation_failed or self.cancel_failures or self.cancel_unconfirmed
+        )
 
 
 _CANCEL_TERMINAL_STATUSES = {
@@ -2842,18 +2861,14 @@ class MaestroOrchestrator:
                 else _CancelResolution({}, [], [], [], False)
             )
             resolved_statuses = resolution.resolved_statuses
-            if resolution.reconciliation_failed:
-                # The ledger is known to disagree with the broker. Anything that
-                # follows would be sized against numbers we no longer trust.
+            if resolution.blocks_further_cohorts:
                 stop_remaining_cohorts = True
             # The lifecycle the batch recorded predates these polls. Anything
             # reading the run — orders_filled, the dashboard, the audit trail —
             # goes through that object, so it has to carry the status the broker
             # actually ended on rather than the one polling gave up at.
-            buy_results = self._with_resolved_statuses(buy_results, resolved_statuses)
-            results = self._with_resolved_statuses(
-                results, resolved_statuses, run_id=run_id
-            )
+            buy_results = self._with_resolved_statuses(buy_results, resolution)
+            results = self._with_resolved_statuses(results, resolution, run_id=run_id)
             filled_ids = sorted(
                 set(filled_ids)
                 | {
@@ -2907,6 +2922,7 @@ class MaestroOrchestrator:
         cancel_unconfirmed: list[dict[str, Any]] = []
         resolved_statuses: dict[str, OrderStatus] = {}
         polled_orders: dict[str, BrokerOrderId] = {}
+        snapshots: dict[str, list[LiveOrderStatusSnapshot]] = {}
         for result in results:
             if result.final_status not in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}:
                 continue
@@ -2924,6 +2940,7 @@ class MaestroOrchestrator:
                 cancel_unconfirmed=cancel_unconfirmed,
                 resolved_statuses=resolved_statuses,
                 polled_orders=polled_orders,
+                snapshots=snapshots,
             )
         for order_id, status in sorted(resolved_statuses.items()):
             self._record_event(
@@ -2936,6 +2953,7 @@ class MaestroOrchestrator:
                 },
             )
         reconciliation_error: Exception | None = None
+        fill_result: FillReconciliationResult | None = None
         if polled_orders:
             # Any of these polls can have seen fill quantity the batch's earlier
             # reconciliation pass never had — a partial fill counts as much as a
@@ -2943,7 +2961,7 @@ class MaestroOrchestrator:
             fill_service = dependencies.fill_reconciliation_service
             if fill_service is not None:
                 try:
-                    fill_service.reconcile_latest(run_id)
+                    fill_result = fill_service.reconcile_latest(run_id)
                 except Exception as exc:
                     reconciliation_error = exc
                     self._record_event(
@@ -2990,6 +3008,8 @@ class MaestroOrchestrator:
             cancel_failures=cancel_failures,
             cancel_unconfirmed=cancel_unconfirmed,
             reconciliation_failed=reconciliation_error is not None,
+            snapshots=snapshots,
+            fill_result=fill_result,
         )
 
     def _save_rotation_recovery_blocker(
@@ -3210,9 +3230,7 @@ class MaestroOrchestrator:
                 requests_by_order_id=requests_by_order_id,
                 side_label="sell",
             )
-        results = self._with_resolved_statuses(
-            results, resolution.resolved_statuses, run_id=run_id
-        )
+        results = self._with_resolved_statuses(results, resolution, run_id=run_id)
         self._record_event(
             run_id,
             "rotation_cohort_aborted",
@@ -3234,12 +3252,12 @@ class MaestroOrchestrator:
             resolution.canceled,
             resolution.cancel_failures + resolution.cancel_unconfirmed,
         )
-        return results, resolution.reconciliation_failed
+        return results, resolution.blocks_further_cohorts
 
     def _with_resolved_statuses(
         self,
         results: list[LiveOrderLifecycleResult],
-        resolved_statuses: dict[str, OrderStatus],
+        resolution: "_CancelResolution",
         *,
         run_id: str | None = None,
     ) -> list[LiveOrderLifecycleResult]:
@@ -3247,17 +3265,42 @@ class MaestroOrchestrator:
 
         The batch wrote its lifecycle record before these polls happened, and the
         dashboard and audit trail read that record rather than any side event.
-        Persist a superseding one so the operator's view matches the broker.
+        Persist a superseding one — with the polls and fills that justify the new
+        status, or the record would claim FILLED while showing nothing filled.
         """
+        resolved_statuses = resolution.resolved_statuses
         if not resolved_statuses:
             return results
+        fills_by_broker_order: dict[str, list[AppliedFill]] = {}
+        if resolution.fill_result is not None:
+            for fill in resolution.fill_result.applied_fills:
+                fills_by_broker_order.setdefault(fill.broker_order_id, []).append(fill)
         corrected: list[LiveOrderLifecycleResult] = []
         for result in results:
             status = resolved_statuses.get(result.order_id)
             if status is None or status == result.final_status:
                 corrected.append(result)
                 continue
-            updated = result.model_copy(update={"final_status": status})
+            snapshots = resolution.snapshots.get(result.order_id, [])
+            applied = (
+                fills_by_broker_order.get(result.broker_order_id, [])
+                if result.broker_order_id
+                else []
+            )
+            update: dict[str, Any] = {
+                "final_status": status,
+                "status_snapshots": [*result.status_snapshots, *snapshots],
+                "poll_count": result.poll_count + len(snapshots),
+                # Polling did conclude — that is how we learned the new status.
+                "max_polls_reached": False,
+                "applied_fills": [*result.applied_fills, *applied],
+            }
+            if resolution.fill_result is not None:
+                update["fill_reconciliations"] = [
+                    *result.fill_reconciliations,
+                    resolution.fill_result,
+                ]
+            updated = result.model_copy(update=update)
             corrected.append(updated)
             if run_id is not None:
                 save_audited_system_event(
@@ -3355,6 +3398,7 @@ class MaestroOrchestrator:
         cancel_unconfirmed: list[dict[str, Any]],
         resolved_statuses: dict[str, OrderStatus] | None = None,
         polled_orders: dict[str, BrokerOrderId] | None = None,
+        snapshots: dict[str, list[LiveOrderStatusSnapshot]] | None = None,
     ) -> None:
         """Cancel a working order and re-poll until the broker agrees it is gone.
 
@@ -3420,6 +3464,8 @@ class MaestroOrchestrator:
                 snapshot = status_service.poll_order_status(run_id, broker_order)
                 if polled_orders is not None:
                     polled_orders[result.order_id] = broker_order
+                if snapshots is not None:
+                    snapshots.setdefault(result.order_id, []).append(snapshot)
             except Exception as exc:
                 cancel_unconfirmed.append(
                     {

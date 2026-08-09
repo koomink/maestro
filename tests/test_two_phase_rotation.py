@@ -1698,3 +1698,140 @@ def test_dashboard_lifecycle_summary_shows_the_corrected_status(tmp_path, monkey
     # One row per order, carrying the status the broker actually ended on.
     assert len(buy_rows) == 1
     assert buy_rows[0]["status"] == "filled"
+
+
+def test_unconfirmed_cancel_stops_the_remaining_cohorts(tmp_path, monkeypatch):
+    """An order we could not confirm gone is still working at the broker.
+
+    The blocker it raises only gates the next run. Submitting another cohort in
+    this same approval sends more orders while unknown quantity may still fill.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.PARTIALLY_FILLED,
+            "buy_b": OrderStatus.FILLED,
+            "sell_k": OrderStatus.FILLED,
+            "buy_k": OrderStatus.FILLED,
+        },
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [
+            _sell("sell_a"),
+            _buy("buy_b"),
+            _intent("sell_k", "MOCK_ETF_A", OrderSide.SELL).model_copy(
+                update={"account_id": "second"}
+            ),
+            _intent("buy_k", "MOCK_ETF_B", OrderSide.BUY).model_copy(
+                update={"account_id": "second"}
+            ),
+        ],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:sell_k" not in calls, "a cohort ran while an order was still live"
+    halted = orchestrator.state_store.list_system_events_by_type("rotation_cohorts_halted")
+    assert halted, "the halt must be recorded, not just implied"
+
+
+def test_superseding_lifecycle_is_internally_consistent(tmp_path, monkeypatch):
+    """A record saying FILLED with no fills is contradictory audit data.
+
+    The dashboard shows only the newest lifecycle, so the corrected one has to
+    carry the polls and fills that justify the status it claims.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    status_client = _BrokerStatusClient(fills_after_cancel={"buy_b"})
+
+    def factory(config, state_store, audit_logger, **kwargs) -> LiveApprovalDependencies:
+        del config, kwargs
+        return LiveApprovalDependencies(
+            state_store=state_store,
+            audit_logger=audit_logger,
+            safety_service=_SafetyService(calls, None, set(), None, set()),
+            status_service=LiveOrderStatusService(state_store, audit_logger, status_client),
+            fill_reconciliation_service=PartialFillReconciliationService(
+                state_store, audit_logger
+            ),
+            workflow_service=None,
+            lifecycle_service=None,
+            cancel_service=_BrokerCancelService(status_client, calls),
+        )
+
+    monkeypatch.setattr(orchestrator_module, "build_live_approval_dependencies", factory)
+
+    lifecycles, _ = orchestrator._execute_live_approval_orders(
+        "run-1",
+        [_sell("sell_a"), _buy("buy_b")],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    buy = next(result for result in lifecycles if result.order_id == "buy_b")
+    assert buy.final_status == OrderStatus.FILLED
+    # The polls and the fill that produced that status have to be on the record.
+    assert buy.status_snapshots[-1].status == OrderStatus.FILLED
+    assert buy.poll_count == len(buy.status_snapshots)
+    assert buy.applied_fills, "a filled lifecycle with no applied fills is contradictory"
+    assert buy.fill_reconciliations
+    assert buy.max_polls_reached is False
+
+    persisted = [
+        row["payload"]
+        for row in orchestrator.state_store.list_system_events_by_type("live_order_lifecycle")
+        if row["payload"].get("order_id") == "buy_b"
+    ][0]
+    assert persisted["final_status"] == "filled"
+    assert persisted["applied_fills"]
+
+
+def test_unconfirmed_buy_cancel_also_stops_the_remaining_cohorts(tmp_path, monkeypatch):
+    """The buy phase has its own stop decision, and it needs the same rule.
+
+    Its sells all filled, so the abort path never runs; only the buy resolution
+    can halt what follows.
+    """
+    calls: list[str] = []
+    orchestrator = _orchestrator(tmp_path, buying_power=10_000.0, max_polls=3)
+    orchestrator.telegram_client = _TelegramClient()
+    _install_fakes(
+        monkeypatch,
+        calls,
+        {
+            "sell_a": OrderStatus.FILLED,
+            "buy_b": OrderStatus.OPEN,
+            "sell_k": OrderStatus.FILLED,
+            "buy_k": OrderStatus.FILLED,
+        },
+        cancel_confirms=False,
+    )
+
+    orchestrator._execute_live_approval_orders(
+        "run-1",
+        [
+            _sell("sell_a"),
+            _buy("buy_b"),
+            _intent("sell_k", "MOCK_ETF_A", OrderSide.SELL).model_copy(
+                update={"account_id": "second"}
+            ),
+            _intent("buy_k", "MOCK_ETF_B", OrderSide.BUY).model_copy(
+                update={"account_id": "second"}
+            ),
+        ],
+        "appr-1",
+        _approval_decision("run-1"),
+    )
+
+    assert "submit:buy_b" in calls
+    assert "submit:sell_k" not in calls, "a cohort ran while a buy was still live"
+    assert orchestrator.state_store.list_system_events_by_type("rotation_cohorts_halted")
