@@ -20,6 +20,9 @@ exactly-once 포기(at-least-once + 중복 카드 정리), 단계 3을 3a/3b로 
 개정 7차: 2026-08-09 Codex 적대적 리뷰 7차 반영 — head 검증·claim 삽입을
 조건부 트랜잭션으로 결합(TOCTOU 차단), child 생성의
 (source_request_id, phase) 유일성 + lock 경계 내 재검증
+개정 8차: 2026-08-09 Codex 적대적 리뷰 8차 반영 — 워크플로우 영속 식별자를
+전체 정규화 scope로 변경(해시는 표시용 토큰으로 격하), 유실 카드
+자동 정리 불가 불변식 + callback self-heal
 
 ## 배경과 목표
 
@@ -153,15 +156,27 @@ scope마다 호출됨). 따라서 워크플로우 키는 scope 전체를 포함�
 ```
 funding_scope = (contribution_group_id or "-", account_id or "-",
                  execution_sleeve or "-", currency)
-funding_workflow_id = funding:<scope_hash>:<month_key>
+funding_workflow_id = funding:<정규화된 funding_scope 전체>:<month_key>
 ```
 
-`scope_hash`는 funding_scope 정규화 튜플의 짧은 해시(예: sha1 앞 8자리)로,
-callback data 64바이트 제한 안에서 card_key로 쓸 수 있게 한다. 원본
-funding_scope 튜플은 `telegram_ui_card` 이벤트 payload에 그대로 기록해
-디버깅 시 역추적할 수 있게 한다. 이 필드들은 funding/budget 요청 payload에
-이미 모두 존재하므로 **비즈니스 로직 변경 없이 UI 계층에서 파생 가능**하다
-(접근 A 원칙 유지).
+**영속 식별자에 해시를 쓰지 않는다**: head/claim/lineage 등 정합성을
+결정하는 모든 system event는 `funding_workflow_id`를 **전체 정규화 scope
+문자열 그대로** 사용한다. 짧은 해시(예: sha1 앞 8자리)는 32비트 식별
+공간이라 서로 다른 scope가 같은 head/CAS를 공유하는 충돌이 가능하고,
+충돌하면 한 scope의 요청 생성이 다른 scope를 superseded 처리해 월간
+투자가 누락될 수 있다. system event payload에는 길이 제한이 없으므로
+전체 키를 쓰는 데 비용이 없다. 방어선으로 head/claim 처리 시 payload에
+저장된 원본 scope 튜플을 기대 scope와 비교해 불일치하면 거부한다.
+
+**callback data 64바이트 제한은 토큰 매핑으로 해결한다**: card_key가
+callback data에 들어가야 하는 경우(`ui:detail:...`)에는 워크플로우 식별을
+전체 키로 하지 않고, 카드 생성 시 발급하는 **짧은 불투명 토큰**(예: 8자
+무작위)을 쓴다. 토큰 → funding_workflow_id 매핑은 `telegram_ui_card`
+이벤트에 기록하며, 토큰 발급은 duplicate_key get-or-create로 충돌 없이
+1:1을 보장한다. 토큰은 표시·조회 전용이고 정합성 판단에는 쓰지 않는다.
+
+scope 필드들은 funding/budget 요청 payload에 이미 모두 존재하므로
+**비즈니스 로직 변경 없이 UI 계층에서 파생 가능**하다 (접근 A 원칙 유지).
 
 **액션 라우팅은 request_id에만 바인딩**: `funding_workflow_id`는 카드
 식별·집계 전용이며, 버튼 callback은 항상 구체적인 `request_id`를 담는다.
@@ -286,11 +301,22 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
      sendMessage 성공 후 결과(message_id)를 기록한다. 재개 시 intent도
      없는 채팅만 새로 발송하고, intent는 있으나 결과가 없는 **ambiguous
      채팅은 재발송한다** — 중복 카드가 생길 수 있음을 수용한다.
-   - **중복 카드는 안전하고, 정리된다**: 승인 callback은 approval_id 기반
-     멱등이므로(기존 pending envelope 소비는 1회) 중복 카드 중 어느 것을
-     눌러도 결과는 같다. 라이프사이클 매니저는 `approval:<approval_id>`
-     card_key로 같은 승인의 카드 메시지를 추적하므로, 중복이 감지되면 구
-     메시지를 "아래 새 카드로 대체되었어요"로 edit해 무력화한다.
+   - **중복 카드는 안전하지만, 유실 카드의 자동 정리는 불가능하다
+     (불변식)**: sendMessage 성공과 message_id 저장 사이에 중단되면 그
+     카드의 message_id는 영구 유실된다. Telegram은 봇에게 메시지 이력
+     조회 API를 제공하지 않으므로 lifecycle 매니저가 유실 카드를 찾아
+     edit할 방법은 원리적으로 없다. 따라서 정리 보장은 두 층으로 나눈다:
+     (a) **알려진 복사본 정리** — message_id가 기록된 모든 복사본을
+     lifecycle이 누적 추적하고(카드당 message_id 목록), 상태 변화 시 전부
+     갱신하며 중복 복사본은 "아래 새 카드로 대체되었어요"로 edit한다.
+     (b) **유실 복사본은 클릭 시 self-heal** — 모든 승인 callback 처리는
+     callback_query에 실려 오는 **그 메시지의 chat_id/message_id를 즉시
+     최종 상태로 edit**하고(기존 `_edit_callback_message` 패턴), 해당
+     message_id를 lifecycle 추적 목록에 등록한다. 승인 callback은
+     approval_id 기반 멱등이므로(pending envelope 소비는 1회) 유실
+     카드를 눌러도 결과는 같고, 누르는 순간 그 카드도 최신 상태로
+     회복된다. 클릭되지 않은 유실 카드는 오래된 표시로 남을 수 있음을
+     수용한다 (승인 만료 시간이 지나면 버튼도 무해하다).
    - resume 진입 조건: consumed이지만 완료 이벤트가 없는 package.
    이 변경은 funding 재생성 run만이 아니라 승인 dispatch 전체에 적용되며,
    접근 A 예외 범위에 포함된다.
@@ -365,9 +391,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    `card_key`는 카드 유형별 원천 ID로 정한다:
    승인 카드 = `approval:<approval_id>` (유일한 액션 카드),
    데일리 요약 카드 = `daily:<signal_run_id>` (읽기 전용 집계),
-   월간 자금 카드 = `funding:<scope_hash>:<YYYY-MM>` (funding_workflow_id;
-   scope_hash는 contribution_group_id·account_id·execution_sleeve·currency
-   정규화 튜플의 짧은 해시, 원본 튜플은 이벤트 payload에 기록),
+   월간 자금 카드 = funding_workflow_id
+   (`funding:<정규화 scope 전체>:<YYYY-MM>`; 이벤트 payload에는 전체 키,
+   callback data에는 발급 토큰만 — 토큰↔키 매핑은 `telegram_ui_card`에 기록),
    예외 카드 = `<유형>:<원천 event id>`.
 2. poll 루프 sweep에 `_sweep_lifecycle_cards()` 추가: 활성 카드의 원천 이벤트
    (승인 ack, 주문 상태, 정산 결과)를 조회해 단계 변화 시 re-render →
@@ -420,9 +446,12 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   - **dispatch crash 주입**: consumed 직후 / 각 그룹 pending 이벤트 저장
     전후 / 각 채팅 전송 전후에 중단 후 재개 — 기존 approval_id·envelope이
     재사용되고, intent 없는 채팅은 발송·ambiguous 채팅은 재발송(중복 허용)
-    되며, 중복 카드는 구 메시지 무력화 edit로 정리되고, 승인 callback은
-    어느 카드에서 눌러도 한 번만 처리되며, 전부 끝난 뒤에야 dispatch
-    완료가 기록된다
+    되며, message_id가 알려진 중복 복사본은 무력화 edit로 정리되고,
+    message_id가 유실된 복사본은 클릭 시 self-heal(그 메시지가 즉시 최종
+    상태로 edit되고 추적 목록에 등록)되며, 승인 callback은 어느 카드에서
+    눌러도 한 번만 처리되고, 전부 끝난 뒤에야 dispatch 완료가 기록된다
+  - **scope 불일치 방어**: head/claim 이벤트 payload의 원본 scope가 기대
+    scope와 다르면(식별자 오염 가정) 처리가 거부된다
   - **head 트랜잭션 crash 주입**: 요청 생성·superseded·head 전환의 원자
     커밋을 중단 지점별로 검증하고, 인위적으로 만든 orphan 요청/dangling
     head가 복구 sweep에서 수렴된다
@@ -479,9 +508,9 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
   동시 중복 callback은 claim에 의해 한 건만 처리되고, 중단된 워크플로우는
   복구 대상으로 잡혀 재개된다.
 - 승인 dispatch 중단(consumed 직후, 그룹 이벤트 전후, 채팅 전송 전후) 후
-  재개 시 approval이 중복 생성되지 않고, ambiguous 전송의 중복 카드는
-  정리되며 승인 callback은 멱등하고, 같은 scope/month의 병행 pending 요청
-  경쟁에서 head인 요청만 처리된다.
+  재개 시 approval이 중복 생성되지 않고, message_id가 알려진 중복 복사본은
+  정리되며 유실 복사본은 클릭 시 self-heal되고 승인 callback은 멱등하며,
+  같은 scope/month의 병행 pending 요청 경쟁에서 head인 요청만 처리된다.
 - claim-only 상태의 워크플로우가 복구 카드 [재개]로 정확히 한 번 재개되고,
   orphan 요청/dangling head가 sweep에서 수렴된다.
 - (단계 3a) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
