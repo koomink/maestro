@@ -76,7 +76,12 @@ from maestro.execution.order_builder import (
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.integrations.telegram.ui import catalog as ui_catalog
-from maestro.integrations.telegram.ui.cards import render_approval_card
+from maestro.integrations.telegram.ui.cards import (
+    approval_decision_text,
+    approval_markup,
+    approval_reminder_text,
+    render_approval_card,
+)
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
@@ -1358,11 +1363,11 @@ class TelegramOperatorCommandRouter:
     ) -> bool:
         parts = action.split(":", 2)
         if len(parts) != 3 or parts[1] not in {"a", "r"}:
-            self._answer(callback, "This approval request is no longer active.")
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
             return True
         envelope = self._pending_async_approval(parts[2])
         if envelope is None:
-            self._answer(callback, "This approval request is no longer active.")
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
             self._record("/approval", chat_id, user_id, username, "stale_callback")
             return True
         status = "approved" if parts[1] == "a" else "rejected"
@@ -1373,18 +1378,17 @@ class TelegramOperatorCommandRouter:
                 decided_by=f"telegram:{username or user_id}",
                 reason=f"Telegram button {status} callback.",
             )
-        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-            self._answer(callback, f"Approval failed: {exc}")
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            self._answer(callback, ui_catalog.CALLBACK_FAILED_TEXT)
             self._record("/approval", chat_id, user_id, username, "failed")
             return True
-        self._answer(callback, f"Approval {status}.")
+        self._answer(
+            callback,
+            ui_catalog.ANSWER_APPROVED if status == "approved" else ui_catalog.ANSWER_REJECTED,
+        )
         self._edit_callback_message(
             callback,
-            (
-                f"Approval {status}\n"
-                f"approval_id: {envelope.approval_id}\n"
-                f"orders: {summary.orders_created}"
-            ),
+            approval_decision_text(status, envelope.approval_id, summary.orders_created),
         )
         self._record("/approval", chat_id, user_id, username, status)
         return True
@@ -1497,8 +1501,8 @@ class TelegramOperatorCommandRouter:
                 for chat_id in self.config.approval.telegram_allowed_chat_ids:
                     self._send(
                         chat_id,
-                        f"Approval reminder ({reminder_seconds // 60}m)\n\n{envelope.message}",
-                        reply_markup=_async_approval_markup(envelope.approval_id),
+                        approval_reminder_text(reminder_seconds // 60, envelope.message),
+                        reply_markup=approval_markup(envelope.approval_id, expanded=False),
                     )
                 save_audited_system_event(
                     self.store,
@@ -4072,23 +4076,6 @@ def _workflow_recovery_markup(
                 }
             ],
             [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
-        ]
-    }
-
-
-def _async_approval_markup(approval_id: str) -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "Approve",
-                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}appr:a:{approval_id}",
-                },
-                {
-                    "text": "Reject",
-                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}appr:r:{approval_id}",
-                },
-            ]
         ]
     }
 

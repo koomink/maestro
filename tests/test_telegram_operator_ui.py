@@ -2352,7 +2352,7 @@ def test_async_approval_rejection_is_persisted_once(tmp_path):
     acknowledgements = store.list_system_events_by_type("telegram_approval_ack")
     assert len(acknowledgements) == 1
     assert acknowledgements[0]["payload"]["status"] == "rejected"
-    assert client.answered_callbacks[-1]["text"] == ("This approval request is no longer active.")
+    assert client.answered_callbacks[-1]["text"] == "이미 처리됐거나 만료된 요청이에요."
 
 
 def test_async_approval_reminders_are_sent_once(monkeypatch, tmp_path):
@@ -2387,7 +2387,16 @@ def test_async_approval_reminders_are_sent_once(monkeypatch, tmp_path):
 
     reminders = store.list_system_events_by_type("telegram_approval_reminder")
     assert sorted(row["payload"]["reminder_seconds"] for row in reminders) == [120, 300]
-    assert len([item for item in client.sent_messages if "Approval reminder" in item["text"]]) == 2
+    assert (
+        len(
+            [
+                item
+                for item in client.sent_messages
+                if "아직 응답을 기다리고 있어요" in item["text"]
+            ]
+        )
+        == 2
+    )
 
 
 def test_expired_contribution_order_is_recoverable_but_open_order_is_not(tmp_path):
@@ -3112,3 +3121,26 @@ def test_ui_detail_callback_for_stale_approval_answers_only(tmp_path):
     assert handled
     assert client.edited_messages == []
     assert client.answered_callbacks[-1]["text"] == "이미 처리됐거나 만료된 요청이에요."
+
+
+def test_approval_callback_edits_card_with_korean_result(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    handled = router.process_update(
+        callback_update(f"operator:appr:r:{envelope.approval_id}")
+    )
+
+    assert handled
+    assert client.answered_callbacks[-1]["text"] == "거절했어요."
+    assert client.edited_messages[-1]["text"].startswith("❌ 거절했어요")
