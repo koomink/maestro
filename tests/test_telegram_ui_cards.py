@@ -244,6 +244,13 @@ def test_decision_and_reminder_texts():
     assert catalog.STALE_CALLBACK_TEXT == "이미 처리됐거나 만료된 요청이에요."
 
 
+def test_reminder_text_stays_within_telegram_limit():
+    card_text = "가" * TELEGRAM_TEXT_LIMIT
+    reminder = approval_reminder_text(30, card_text)
+    assert telegram_text_length(reminder) <= TELEGRAM_TEXT_LIMIT
+    assert reminder.startswith("⏰ 아직 응답을 기다리고 있어요 (30분 경과)")
+
+
 def test_decision_text_does_not_claim_submission_when_nothing_was_submitted():
     text = approval_decision_text("approved", "appr_x", orders_submitted=0, orders_failed=0)
     assert text == "⚠️ 승인했지만 접수된 주문이 없어요. /history에서 확인해 주세요."

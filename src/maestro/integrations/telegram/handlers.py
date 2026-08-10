@@ -282,8 +282,12 @@ class TelegramOperatorCommandRouter:
         return True
 
     def poll_once(self, *, offset: int | None = None, timeout_seconds: int = 0) -> int | None:
-        self._sweep_pending_approvals()
-        self._sweep_recovery_notifications()
+        # sweep 실패가 update 폴링을 막으면 승인·거절 콜백을 영영 처리하지 못한다.
+        for sweep in (self._sweep_pending_approvals, self._sweep_recovery_notifications):
+            try:
+                sweep()
+            except Exception as exc:  # noqa: BLE001 - 폴링 루프를 막지 않는 것이 우선
+                self._record_update_failure(None, exc)
         response = self.client.get_updates(
             offset=offset,
             timeout_seconds=timeout_seconds,
@@ -1567,12 +1571,18 @@ class TelegramOperatorCommandRouter:
                 key = (approval_id, reminder_seconds)
                 if elapsed < reminder_seconds or key in reminders:
                     continue
-                for chat_id in self.config.approval.telegram_allowed_chat_ids:
-                    self._send(
-                        chat_id,
-                        approval_reminder_text(reminder_seconds // 60, envelope.message),
-                        reply_markup=approval_markup(envelope.approval_id, expanded=False),
-                    )
+                try:
+                    for chat_id in self.config.approval.telegram_allowed_chat_ids:
+                        self._send(
+                            chat_id,
+                            approval_reminder_text(reminder_seconds // 60, envelope.message),
+                            reply_markup=approval_markup(envelope.approval_id, expanded=False),
+                        )
+                except (RuntimeError, TimeoutError, ValueError) as exc:
+                    # 리마인더 하나가 실패해도 만료 처리·콜백 폴링까지 막지 않는다.
+                    # 완료로 기록하지 않으므로 다음 poll에서 다시 시도한다.
+                    self._record_update_failure(None, exc)
+                    continue
                 save_audited_system_event(
                     self.store,
                     self.audit,

@@ -2375,6 +2375,43 @@ def test_async_approval_reminders_are_sent_once(monkeypatch, tmp_path):
     )
 
 
+def test_reminder_send_failure_does_not_block_approval_callbacks(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    class SendFailingTelegramClient(FakeTelegramClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            raise RuntimeError("Telegram Bot API returned not ok for method: sendMessage")
+
+    envelope = _pending_approval_envelope(reminder_seconds=[120])
+    client = SendFailingTelegramClient(
+        [callback_update(f"operator:appr:r:{envelope.approval_id}")]
+    )
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        envelope.run_id,
+        "telegram_approval_pending",
+        envelope.model_dump(mode="json"),
+    )
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.utc_now",
+        lambda: envelope.created_at + timedelta(seconds=121),
+    )
+
+    router.poll_once(timeout_seconds=0)
+
+    # 리마인더 전송이 실패해도 승인/거절 콜백은 계속 처리되어야 한다.
+    assert client.answered_callbacks[-1]["text"] == "거절했어요."
+    # 실패한 리마인더는 전송 완료로 기록하지 않아 다음 poll에서 재시도된다.
+    assert store.list_system_events_by_type("telegram_approval_reminder") == []
+
+
 def test_expired_contribution_order_is_recoverable_but_open_order_is_not(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)

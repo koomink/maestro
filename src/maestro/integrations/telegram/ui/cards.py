@@ -239,7 +239,8 @@ def approval_decision_text(
 
 
 def approval_reminder_text(minutes: int, card_text: str) -> str:
-    return f"{catalog.REMINDER.format(minutes=minutes)}\n\n{card_text}"
+    # 카드 본문은 이미 한도까지 찰 수 있으므로 접두어를 붙인 뒤 다시 잘라낸다.
+    return _clamp(f"{catalog.REMINDER.format(minutes=minutes)}\n\n{card_text}")
 
 
 def _order_lines(orders: list[dict], *, expanded: bool) -> list[str]:
