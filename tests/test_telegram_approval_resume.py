@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 
 from maestro.approval.models import ApprovalRequest, PendingApprovalEnvelope
@@ -186,3 +187,42 @@ def test_terminal_approval_ids_collects_acked_approvals(tmp_path):
     _save_ack(store, approval_id="appr_1", status="approved")
 
     assert router._terminal_approval_ids() == {"appr_1"}
+
+
+def test_successful_resolution_records_completed_event(tmp_path):
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+
+    router._resolve_async_approval(
+        envelope,
+        status="approved",
+        decided_by="telegram:tester",
+        reason="test",
+    )
+
+    ack = _latest_payload(store, "telegram_approval_ack")
+    assert ack["schema_version"] == 2
+    completed = _latest_payload(store, "telegram_approval_resolution_completed")
+    assert completed["approval_id"] == "appr_1"
+    assert completed["status"] == "approved"
+    assert completed["attempt"] == 1
+    assert completed["duplicate_key"] == "telegram-approval-completed:appr_1"
+
+
+def test_failed_resolution_records_no_completed_event(tmp_path):
+    router, store = _router(tmp_path, resolve_error=ValueError("stale broker snapshot"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope,
+            status="approved",
+            decided_by="telegram:tester",
+            reason="test",
+        )
+
+    assert _latest_payload(store, "telegram_approval_ack")["schema_version"] == 2
+    assert (
+        store.list_system_events_by_type("telegram_approval_resolution_completed", limit=10)
+        == []
+    )

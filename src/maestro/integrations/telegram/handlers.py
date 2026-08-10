@@ -87,7 +87,7 @@ from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
 from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.orchestration.live_gates import LiveExecutionGateService
-from maestro.orchestration.orchestrator import MaestroOrchestrator
+from maestro.orchestration.orchestrator import MaestroOrchestrator, SignalApprovalSummary
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.state.events import (
@@ -1477,6 +1477,7 @@ class TelegramOperatorCommandRouter:
         status: str,
         decided_by: str,
         reason: str,
+        attempt: int = 1,
     ):
         decision = ApprovalDecision(
             approval_id=envelope.approval_id,
@@ -1502,18 +1503,11 @@ class TelegramOperatorCommandRouter:
                     "decided_by": decided_by,
                     "decided_at": decision.decided_at.isoformat(),
                     "duplicate_key": duplicate_key,
+                    "schema_version": 2,
                 },
             )
-        config = self.config
-        identity = self.config_identity
-        if self.approval_config_path is not None:
-            config, identity = load_config_with_identity(self.approval_config_path)
         try:
-            return MaestroOrchestrator(
-                config,
-                telegram_client=self.client,
-                config_identity=identity,
-            ).resolve_pending_signal_approval(envelope, decision)
+            summary = self._run_resolution(envelope, decision)
         except Exception as exc:
             save_audited_system_event(
                 self.store,
@@ -1528,6 +1522,51 @@ class TelegramOperatorCommandRouter:
                 },
             )
             raise
+        self._record_resolution_completed(envelope, decision, summary, attempt=attempt)
+        return summary
+
+    def _run_resolution(
+        self,
+        envelope: PendingApprovalEnvelope,
+        decision: ApprovalDecision,
+    ) -> SignalApprovalSummary:
+        config = self.config
+        identity = self.config_identity
+        if self.approval_config_path is not None:
+            config, identity = load_config_with_identity(self.approval_config_path)
+        return MaestroOrchestrator(
+            config,
+            telegram_client=self.client,
+            config_identity=identity,
+        ).resolve_pending_signal_approval(envelope, decision)
+
+    def _record_resolution_completed(
+        self,
+        envelope: PendingApprovalEnvelope,
+        decision: ApprovalDecision,
+        summary: SignalApprovalSummary,
+        *,
+        attempt: int,
+    ) -> None:
+        duplicate_key = f"telegram-approval-completed:{envelope.approval_id}"
+        if self.store.duplicate_key_exists(duplicate_key):
+            return
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            envelope.run_id,
+            "telegram_approval_resolution_completed",
+            {
+                "approval_id": envelope.approval_id,
+                "signal_run_id": envelope.signal_run_id,
+                "status": decision.status,
+                "orders_submitted": summary.orders_submitted,
+                "orders_failed": summary.orders_failed,
+                "resolved_at": utc_now().isoformat(),
+                "attempt": attempt,
+                "duplicate_key": duplicate_key,
+            },
+        )
 
     def _sweep_pending_approvals(self) -> None:
         acked = self._terminal_approval_ids()
