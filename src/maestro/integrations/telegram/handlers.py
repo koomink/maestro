@@ -1648,6 +1648,18 @@ class TelegramOperatorCommandRouter:
                 # 않는다 — 브로커 제출 직후·로컬 lifecycle 기록 전에 중단된 창까지
                 # fail-closed로 덮는다. 주문이 이미 나갔을 수 있으므로 브로커 대조
                 # 문구로 알린다.
+                #
+                # 이 확인은 TOCTOU다 — 다른 프로세스의 attempt가 ack와 save_approval
+                # 사이에 있으면 여기서 False로 보인다. 그래도 중복 주문은 나가지
+                # 않는다. 2차 방어선이 orchestrator 쪽에 있다:
+                # resolve_pending_signal_approval은 live_order_lock(프로세스 간
+                # flock, store.py:342) 안에서 save_approval(orchestrator.py:332)을
+                # 먼저 부르고, StateStore.save_approval(store.py:1139)은 중복
+                # approval_id에 ValueError를 던진다. 주문 제출
+                # (_execute_live_approval_orders, orchestrator.py:341)은 그 뒤에
+                # 있으므로, 뒤늦게 락을 잡은 시도는 아무것도 제출하지 못하고
+                # 실패한다. 그 실패는 resume_finished outcome="failed"로 남고,
+                # 다음 poll에는 approvals 행이 보여 이 분기로 들어온다.
                 self._notify_approval_needs_attention(envelope, partial=True)
                 continue
             # 최초 콜백(attempt 1)도 실제 집행 시도였으므로 예산에 함께 센다.

@@ -98,8 +98,11 @@ def _save_pending_envelope(
     order_count=1,
     signal_run_id=None,
     expires_in=timedelta(hours=1),
+    reminder_seconds=None,
+    created_ago=timedelta(0),
 ):
     now = datetime.now(UTC)
+    created_at = now - created_ago
     signal_run_id = signal_run_id or f"signal_{approval_id}"
     orders = [
         {
@@ -118,7 +121,7 @@ def _save_pending_envelope(
         request=ApprovalRequest(
             approval_id=approval_id,
             run_id=f"run_{approval_id}",
-            created_at=now,
+            created_at=created_at,
             expires_at=now + expires_in,
             channel="telegram",
             order_count=len(orders),
@@ -129,8 +132,8 @@ def _save_pending_envelope(
         message="카드 본문",
         source_strategy_ids=["tranquillo"],
         account_ids=["kis_ps"],
-        reminder_seconds=[],
-        created_at=now,
+        reminder_seconds=list(reminder_seconds or []),
+        created_at=created_at,
         expires_at=now + expires_in,
         duplicate_key=f"telegram-approval-pending:{approval_id}",
     )
@@ -543,11 +546,12 @@ def test_approval_that_entered_execution_is_not_auto_resumed(tmp_path):
     )
 
 
-def test_expired_approval_with_recorded_decision_is_owned_by_the_resume_path(tmp_path):
-    """만료 시각이 지났어도 결정이 기록됐으면 만료로 재판정하지 않는다.
+def test_expired_approval_with_recorded_decision_is_still_resumed(tmp_path):
+    """만료 시각이 지났어도 결정이 기록됐으면 재개 대상이다.
 
-    ack duplicate_key 때문에 만료 경로는 매 poll마다 ValueError로 조용히
-    실패하기만 했다. 결정이 있는 승인은 재개 경로가 단독으로 소유한다.
+    운영자는 만료 전에 결정했고 집행만 실패했다 — 만료를 이유로 재개를
+    포기하면 그 결정이 영원히 집행되지 않는다. 만료 재판정은 시도하지 않는다
+    (기록된 결정을 만료로 덮어쓰면 안 된다).
     """
     router, store = _router(
         tmp_path, resolve_error=ValueError("boom")
@@ -571,3 +575,52 @@ def test_expired_approval_with_recorded_decision_is_owned_by_the_resume_path(tmp
     }
     assert statuses == {"approved"}
     assert router.resolved_decisions[-1].status == "approved"
+
+
+def test_decided_approval_stops_receiving_reminders(tmp_path):
+    """결정이 기록된 승인은 재개 경로가 소유한다 — 리마인더를 더 보내지 않는다.
+
+    ack가 있는데도 리마인더가 계속 나가면 운영자는 이미 누른 버튼을 다시
+    누르라는 재촉을 받는다. 다시 눌러도 ack duplicate_key에 걸려 실패한다.
+    """
+    router, store = _router(tmp_path, resolve_error=ValueError("boom"))
+    envelope = _save_pending_envelope(
+        store,
+        approval_id="appr_1",
+        reminder_seconds=[600],
+        created_ago=timedelta(minutes=20),
+    )
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+    router.client.sent_messages.clear()
+
+    router._sweep_pending_approvals()  # 재개는 또 실패한다 — 승인은 미종결로 남는다
+
+    assert store.list_system_events_by_type("telegram_approval_reminder", limit=None) == []
+    assert router.client.sent_messages == []
+    # 미종결이라 다음 poll에서도 재개 대상이다 (조용해진 것이지 사라진 게 아니다)
+    assert store.list_system_events_by_type(
+        "telegram_approval_resolution_completed", limit=None
+    ) == []
+
+
+def test_undecided_approval_still_receives_its_reminder(tmp_path):
+    """결정이 없는 승인의 리마인더는 그대로 나간다 (재개 게이트의 부수 피해 방지)."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(
+        store,
+        approval_id="appr_1",
+        reminder_seconds=[600],
+        created_ago=timedelta(minutes=20),
+    )
+
+    router._sweep_pending_approvals()
+
+    reminders = store.list_system_events_by_type("telegram_approval_reminder", limit=None)
+    assert [row["payload"]["reminder_seconds"] for row in reminders] == [600]
+    assert any(
+        "아직 응답을 기다리고 있어요" in message["text"]
+        for message in router.client.sent_messages
+    )
