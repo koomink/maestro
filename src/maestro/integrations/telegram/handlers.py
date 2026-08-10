@@ -159,6 +159,10 @@ TELEGRAM_EMERGENCY_COMMANDS: tuple[tuple[str, str], ...] = (
     ("recovery", "복구 센터"),
 )
 
+#: 정합성 조회의 시간 경계. 승인 만료(config.approval.timeout_seconds)보다 훨씬
+#: 길게 잡아, 만료된 지 오래된 이벤트만 조회에서 제외한다.
+_CONSISTENCY_WINDOW_DAYS = 90
+
 
 class TelegramOperatorCommandRouter:
     def __init__(
@@ -1526,13 +1530,7 @@ class TelegramOperatorCommandRouter:
             raise
 
     def _sweep_pending_approvals(self) -> None:
-        acked = {
-            str(row["payload"].get("approval_id"))
-            for row in self.store.list_system_events_by_type(
-                "telegram_approval_ack",
-                limit=2000,
-            )
-        }
+        acked = self._terminal_approval_ids()
         # 전송 완료는 chat_id 단위로 추적한다. 일부 채팅만 실패했을 때 성공한
         # 채팅에 같은 리마인더를 다시 보내지 않기 위함.
         # chat_id가 없는 과거 이벤트는 전체 채팅 완료로 간주한다 (하위 호환).
@@ -3534,13 +3532,7 @@ class TelegramOperatorCommandRouter:
 
     def _approvals(self, chat_id: int) -> None:
         rows = build_approvals_table(self.store, limit=5)
-        acked = {
-            str(row["payload"].get("approval_id"))
-            for row in self.store.list_system_events_by_type(
-                "telegram_approval_ack",
-                limit=2000,
-            )
-        }
+        acked = self._terminal_approval_ids()
         pending = [
             PendingApprovalEnvelope.model_validate(row["payload"])
             for row in self.store.list_system_events_by_type(
@@ -4065,19 +4057,35 @@ class TelegramOperatorCommandRouter:
                 return payload
         return None
 
+    def _consistency_since(self) -> datetime:
+        return utc_now() - timedelta(days=_CONSISTENCY_WINDOW_DAYS)
+
+    def _terminal_approval_ids(self) -> set[str]:
+        """더 이상 처리하지 않을 승인 집합. 종결 판정은 여기 한 곳에서만 한다.
+
+        정합성 판정이므로 개수 창(limit=2000)을 쓰지 않는다 — 이벤트가 쌓이면
+        오래된 미완 승인이 조회 밖으로 밀려 조용히 사라진다. 대신 Task 0의
+        시간 경계를 쓴다 (인덱스를 타고, 성장에 무관하게 일정하다).
+        """
+        return {
+            str(row["payload"].get("approval_id"))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_ack",
+                limit=None,
+                since=self._consistency_since(),
+            )
+        }
+
     def _pending_async_approval(
         self,
         approval_id: str,
     ) -> PendingApprovalEnvelope | None:
-        for row in self.store.list_system_events_by_type(
-            "telegram_approval_ack",
-            limit=2000,
-        ):
-            if row["payload"].get("approval_id") == approval_id:
-                return None
+        if approval_id in self._terminal_approval_ids():
+            return None
         for row in self.store.list_system_events_by_type(
             "telegram_approval_pending",
-            limit=2000,
+            limit=None,
+            since=self._consistency_since(),
         ):
             if row["payload"].get("approval_id") == approval_id:
                 envelope = PendingApprovalEnvelope.model_validate(row["payload"])
