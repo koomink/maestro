@@ -5,7 +5,9 @@
 
 APPROVAL_TITLE = "📩 투자 주문을 진행할까요?"
 APPROVAL_DEADLINE = "⏰ {deadline}까지 응답해 주세요."
-APPROVAL_SUMMARY = "{strategy} 전략 · {market} {count}종목 · {sides} · 총 {total}"
+APPROVAL_SUMMARY = "{strategy} 전략 · {market} {count}종목 · {sides} · {accounts}총 {total}"
+APPROVAL_ACCOUNT_SCOPE = "계좌 {accounts} · "
+APPROVAL_MORE_ACCOUNTS = "{accounts} 외 {count}곳"
 APPROVAL_RISK_SUMMARY = "⚠️ 위험 점검에서 확인할 내용이 {count}건 있어요."
 APPROVAL_RISK_REASON = "- {reason}"
 APPROVAL_MORE_RISKS = "- 외 {count}건"

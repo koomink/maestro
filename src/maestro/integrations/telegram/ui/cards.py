@@ -15,6 +15,7 @@ from maestro.integrations.telegram.ui.format import (
 
 _MAX_COLLAPSED_ORDER_LINES = 6
 _MAX_COLLAPSED_RISK_LINES = 3
+_MAX_COLLAPSED_ACCOUNTS = 3
 _CALLBACK_PREFIX = "operator:"
 
 #: Telegram sendMessage/editMessageText 본문 한도 (UTF-16 코드 유닛).
@@ -105,6 +106,25 @@ def _collapsed_text(request: ApprovalRequest) -> str:
     return "\n".join(lines)
 
 
+def _account_scope(orders: list[dict]) -> str:
+    """어느 계좌에서 돈이 나가는지는 승인 결정 자체를 바꾸므로 요약줄에 남긴다.
+    주문별 계좌 줄은 그대로 펼친 뷰에만 둔다."""
+    accounts = sorted(
+        {
+            order["account_id"]
+            for order in orders
+            if isinstance(order.get("account_id"), str) and order["account_id"]
+        }
+    )
+    if not accounts:
+        return ""
+    shown = ", ".join(accounts[:_MAX_COLLAPSED_ACCOUNTS])
+    hidden = len(accounts) - _MAX_COLLAPSED_ACCOUNTS
+    if hidden > 0:
+        shown = catalog.APPROVAL_MORE_ACCOUNTS.format(accounts=shown, count=hidden)
+    return catalog.APPROVAL_ACCOUNT_SCOPE.format(accounts=shown)
+
+
 def _collapsed_risk_lines(violations: list[str]) -> list[str]:
     """승인 버튼이 붙는 첫 화면에도 위험 사유 원문을 남긴다 (건수 요약만으로는
     무엇이 걸렸는지 모른 채 승인하게 된다)."""
@@ -128,6 +148,7 @@ def _header_lines(request: ApprovalRequest) -> list[str]:
             market=_market_summary(request.proposed_orders),
             count=len(request.proposed_orders),
             sides=_side_summary(request.proposed_orders),
+            accounts=_account_scope(request.proposed_orders),
             total=_total_label(request),
         ),
         "",

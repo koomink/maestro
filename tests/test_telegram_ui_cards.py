@@ -105,7 +105,37 @@ def test_expanded_card_shows_account_id_per_order():
     collapsed = render_approval_card(
         base.model_copy(update={"proposed_orders": orders}), expanded=False
     )
-    assert "계좌" not in collapsed.text
+    assert "  계좌: " not in collapsed.text  # 주문별 계좌 줄은 펼친 뷰에만
+
+
+def test_collapsed_summary_shows_account_scope():
+    base = _request()
+    orders = [
+        dict(base.proposed_orders[0], account_id="kis_ps"),
+        dict(base.proposed_orders[1], account_id="kis_isa"),
+    ]
+    card = render_approval_card(base.model_copy(update={"proposed_orders": orders}), expanded=False)
+    assert "· 계좌 kis_isa, kis_ps ·" in card.text
+
+
+def test_collapsed_summary_shows_single_account():
+    base = _request()
+    orders = [dict(order, account_id="kis_ps") for order in base.proposed_orders]
+    card = render_approval_card(base.model_copy(update={"proposed_orders": orders}), expanded=False)
+    assert "· 계좌 kis_ps ·" in card.text
+
+
+def test_collapsed_summary_counts_accounts_beyond_three():
+    base = _request()
+    template = base.proposed_orders[0]
+    orders = [dict(template, account_id=f"kis_{index}") for index in range(5)]
+    card = render_approval_card(base.model_copy(update={"proposed_orders": orders}), expanded=False)
+    assert "· 계좌 kis_0, kis_1, kis_2 외 2곳 ·" in card.text
+
+
+def test_collapsed_summary_omits_account_scope_when_unknown():
+    card = render_approval_card(_request(), expanded=False)  # account_id 없는 주문
+    assert "계좌" not in card.text
 
 
 def test_collapsed_card_buttons():
