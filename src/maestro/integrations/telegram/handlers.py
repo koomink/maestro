@@ -1,5 +1,6 @@
 import os
 import subprocess
+from collections import defaultdict
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from math import isfinite
@@ -1568,7 +1569,105 @@ class TelegramOperatorCommandRouter:
             },
         )
 
+    def _notify_approval_needs_attention(
+        self,
+        envelope: PendingApprovalEnvelope,
+        *,
+        partial: bool,
+    ) -> None:
+        """partial=True면 브로커에 주문이 나갔을 수 있다는 뜻이다."""
+        duplicate_key = f"telegram-approval-attention:{envelope.approval_id}"
+        if self.store.duplicate_key_exists(duplicate_key):
+            return
+        text = (
+            ui_catalog.APPROVAL_NEEDS_RECONCILIATION
+            if partial
+            else ui_catalog.APPROVAL_NEEDS_ATTENTION
+        )
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            self._send(chat_id, text)
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            envelope.run_id,
+            "telegram_approval_needs_attention",
+            {
+                "approval_id": envelope.approval_id,
+                "partial_execution_possible": partial,
+                "duplicate_key": duplicate_key,
+            },
+        )
+
+    def _notify_legacy_unresolved_approvals(self) -> None:
+        """3a 이전 ack 중 완료 기록이 없는 건을 1회만 알린다. 자동 재집행은 하지 않는다.
+
+        approvals 행 유무는 침묵의 근거가 아니라 문구를 가르는 기준이다 — 행이
+        있는데 완료가 없으면 브로커 제출 중·직후에 중단된 가장 위험한 상태다.
+        """
+        completed = self._completed_legacy_approval_ids()
+        envelopes = {
+            str(row["payload"].get("approval_id")): row["payload"]
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_pending",
+                limit=None,
+                since=self._consistency_since(),
+            )
+        }
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_ack",
+            limit=None,
+            since=self._consistency_since(),
+        ):
+            ack = row["payload"]
+            if isinstance(ack.get("schema_version"), int):
+                continue  # 신규 스키마는 재개 경로가 처리한다
+            approval_id = str(ack.get("approval_id"))
+            payload = envelopes.get(approval_id)
+            if payload is None or approval_id in completed:
+                continue  # envelope 없음 또는 정상 종결
+            self._notify_approval_needs_attention(
+                PendingApprovalEnvelope.model_validate(payload),
+                partial=self.store.approval_exists(approval_id),
+            )
+
+    def _completed_legacy_approval_ids(self) -> set[str]:
+        """legacy 완료 판정. **signal_run_id만으로 판정하면 안 된다** — 하나의
+        signal run이 여러 승인 그룹으로 나뉘고(orchestrator의 `_approval_order_groups`)
+        그룹마다 별도 approval_id가 발급되므로, 한 그룹의 완료가 다른 그룹의
+        유실을 가린다.
+
+        신규 `signal_approval_completed`에는 approval_id가 있어 정확히 매칭된다.
+        approval_id가 없는 구 이벤트는 그 signal run의 승인 그룹이 하나뿐일 때만
+        완료로 인정하고, 둘 이상이면 **모호하므로 완료로 치지 않는다** — legacy는
+        자동 재집행하지 않고 알림만 내므로, 모호하면 알리는 쪽이 안전하다.
+        """
+        groups: dict[str, list[str]] = defaultdict(list)
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_pending",
+            limit=None,
+            since=self._consistency_since(),
+        ):
+            payload = row["payload"]
+            groups[str(payload.get("signal_run_id"))].append(str(payload.get("approval_id")))
+
+        completed: set[str] = set()
+        for row in self.store.list_system_events_by_type(
+            "signal_approval_completed",
+            limit=None,
+            since=self._consistency_since(),
+        ):
+            payload = row["payload"]
+            approval_id = payload.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                completed.add(approval_id)
+                continue
+            group = groups.get(str(payload.get("signal_run_id")), [])
+            if len(group) == 1:
+                completed.add(group[0])
+        return completed
+
     def _sweep_pending_approvals(self) -> None:
+        self._notify_legacy_unresolved_approvals()
         acked = self._terminal_approval_ids()
         # 전송 완료는 chat_id 단위로 추적한다. 일부 채팅만 실패했을 때 성공한
         # 채팅에 같은 리마인더를 다시 보내지 않기 위함.

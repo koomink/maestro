@@ -31,6 +31,17 @@ DECISION_APPROVED_NONE = "⚠️ 승인했지만 접수된 주문이 없어요. 
 DECISION_REJECTED = "❌ 거절했어요 — 이번 제안은 실행되지 않아요."
 REMINDER = "⏰ 아직 응답을 기다리고 있어요 ({minutes}분 경과)"
 
+APPROVAL_NEEDS_ATTENTION = (
+    "⚠️ 확인이 필요해요 — 승인은 접수됐지만 주문이 만들어지지 않았어요.\n"
+    "주문이 나가기 전에 중단된 상태예요.\n"
+    "/history에서 상태를 확인해 주세요."
+)
+APPROVAL_NEEDS_RECONCILIATION = (
+    "⚠️ 확인이 필요해요 — 승인 후 주문 처리가 끝나지 않았어요.\n"
+    "일부 주문이 이미 브로커로 나갔을 수 있어 자동으로 다시 시도하지 않아요.\n"
+    "증권사 앱에서 체결 내역을 확인해 주세요."
+)
+
 STALE_CALLBACK_TEXT = "이미 처리됐거나 만료된 요청이에요."
 CALLBACK_FAILED_TEXT = "처리하지 못했어요. 잠시 후 다시 시도해 주세요."
 ANSWER_APPROVED = "승인했어요."

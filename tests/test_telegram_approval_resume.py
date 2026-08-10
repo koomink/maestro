@@ -254,3 +254,129 @@ def test_failed_resolution_records_no_completed_event(tmp_path):
         store.list_system_events_by_type("telegram_approval_resolution_completed", limit=10)
         == []
     )
+
+
+def test_legacy_ack_with_resolution_failure_is_isolated(tmp_path):
+    """2026-08-07 형태: ack + resolution_failed, approvals 행 없음."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+    store.save_system_event(
+        "run_appr_legacy",
+        "telegram_approval_resolution_failed",
+        {"approval_id": "appr_legacy", "error_type": "ValueError"},
+    )
+
+    router._sweep_pending_approvals()
+
+    assert any("확인이 필요" in message["text"] for message in router.client.sent_messages)
+    assert len(store.list_system_events_by_type(
+        "telegram_approval_needs_attention", limit=None
+    )) == 1
+
+
+def test_legacy_ack_only_crash_is_isolated(tmp_path):
+    """ack 직후 프로세스 종료 / config 로드 실패: 후속 기록이 전혀 없다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+
+    router._sweep_pending_approvals()
+
+    assert any("확인이 필요" in message["text"] for message in router.client.sent_messages)
+
+
+def test_legacy_ack_with_approvals_row_but_no_completion_needs_reconciliation(tmp_path):
+    """가장 위험한 상태: 집행에 진입했으나 완료 기록이 없다.
+    주문이 이미 브로커로 나갔을 수 있으므로 침묵하면 안 된다."""
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+    store.save_approval(envelope.run_id, "appr_legacy", {"decision": {"status": "approved"}})
+
+    router._sweep_pending_approvals()
+
+    assert any("브로커" in message["text"] for message in router.client.sent_messages)
+    assert len(store.list_system_events_by_type(
+        "telegram_approval_needs_attention", limit=None
+    )) == 1
+
+
+def test_one_completed_group_does_not_hide_another_unresolved_group(tmp_path):
+    """한 signal run이 여러 승인 그룹으로 나뉜 경우(다중 계좌·다중 전략).
+    A 그룹이 완료됐다고 B 그룹의 유실이 가려지면 안 된다."""
+    router, store = _router(tmp_path)
+    signal_run_id = "signal_shared"
+    envelope_a = _save_pending_envelope(
+        store, approval_id="appr_a", signal_run_id=signal_run_id
+    )
+    _save_pending_envelope(store, approval_id="appr_b", signal_run_id=signal_run_id)
+    _save_ack(store, approval_id="appr_a", status="approved")
+    _save_ack(store, approval_id="appr_b", status="approved")
+    # A만 완료 — 구 이벤트라 approval_id가 없다
+    store.save_system_event(
+        envelope_a.run_id,
+        "signal_approval_completed",
+        {"signal_run_id": signal_run_id, "approval_status": "approved"},
+    )
+
+    router._sweep_pending_approvals()
+
+    # 그룹이 둘이라 어느 쪽 완료인지 모호하다 → 둘 다 알린다 (침묵보다 낫다)
+    notified = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_needs_attention", limit=None
+        )
+    }
+    assert notified == {"appr_a", "appr_b"}
+
+
+def test_completion_with_approval_id_matches_exactly(tmp_path):
+    """신규 완료 이벤트는 approval_id가 있어 그룹 추론이 필요 없다."""
+    router, store = _router(tmp_path)
+    signal_run_id = "signal_shared"
+    envelope_a = _save_pending_envelope(
+        store, approval_id="appr_a", signal_run_id=signal_run_id
+    )
+    _save_pending_envelope(store, approval_id="appr_b", signal_run_id=signal_run_id)
+    _save_ack(store, approval_id="appr_a", status="approved")
+    _save_ack(store, approval_id="appr_b", status="approved")
+    store.save_system_event(
+        envelope_a.run_id,
+        "signal_approval_completed",
+        {
+            "approval_id": "appr_a",
+            "signal_run_id": signal_run_id,
+            "approval_status": "approved",
+        },
+    )
+
+    router._sweep_pending_approvals()
+
+    notified = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_needs_attention", limit=None
+        )
+    }
+    assert notified == {"appr_b"}  # A는 완료가 증명됐다
+
+
+def test_legacy_ack_with_completion_evidence_is_not_isolated(tmp_path):
+    """완료 기록이 있으면 정상 종결이다 — 알리지 않는다."""
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+    store.save_approval(envelope.run_id, "appr_legacy", {"decision": {"status": "approved"}})
+    store.save_system_event(
+        envelope.run_id,
+        "signal_approval_completed",
+        {"signal_run_id": envelope.signal_run_id, "approval_status": "approved"},
+    )
+
+    router._sweep_pending_approvals()
+
+    assert store.list_system_events_by_type(
+        "telegram_approval_needs_attention", limit=None
+    ) == []
