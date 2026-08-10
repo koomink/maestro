@@ -4,6 +4,7 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1334,9 +1335,17 @@ class StateStore:
         self,
         event_type: str,
         limit: int | None = 10,
+        *,
+        since: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM system_events WHERE event_type = ? ORDER BY id DESC"
+        sql = "SELECT * FROM system_events WHERE event_type = ?"
         values: list[Any] = [event_type]
+        if since is not None:
+            # idx_system_events_type_created가 (event_type, created_at)이므로
+            # 시간 하한은 인덱스를 그대로 탄다.
+            sql += " AND created_at >= ?"
+            values.append(since.isoformat(sep=" "))
+        sql += " ORDER BY id DESC"
         if limit is not None:
             sql += " LIMIT ?"
             values.append(limit)
