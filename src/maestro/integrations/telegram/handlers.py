@@ -4105,15 +4105,29 @@ class TelegramOperatorCommandRouter:
         정합성 판정이므로 개수 창(limit=2000)을 쓰지 않는다 — 이벤트가 쌓이면
         오래된 미완 승인이 조회 밖으로 밀려 조용히 사라진다. 대신 Task 0의
         시간 경계를 쓴다 (인덱스를 타고, 성장에 무관하게 일정하다).
+
+        ack는 운영자 의사의 기록일 뿐 종결이 아니다 — 주문 집행까지 끝난
+        resolution_completed가 있어야 종결이다. 단 schema_version이 없는
+        ack는 3a 이전 기록이라 completed가 존재할 수 없으므로 종결로 본다
+        (없으면 이미 정상 완료된 과거 승인을 전부 재집행하게 된다).
         """
-        return {
+        completed = {
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
-                "telegram_approval_ack",
+                "telegram_approval_resolution_completed",
                 limit=None,
                 since=self._consistency_since(),
             )
         }
+        terminal = set(completed)
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_ack", limit=None, since=self._consistency_since()
+        ):
+            payload = row["payload"]
+            approval_id = str(payload.get("approval_id"))
+            if not isinstance(payload.get("schema_version"), int):
+                terminal.add(approval_id)
+        return terminal
 
     def _pending_async_approval(
         self,

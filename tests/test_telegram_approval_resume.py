@@ -209,6 +209,34 @@ def test_successful_resolution_records_completed_event(tmp_path):
     assert completed["duplicate_key"] == "telegram-approval-completed:appr_1"
 
 
+def test_acked_but_unresolved_approval_is_not_terminal(tmp_path):
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+
+    assert router._terminal_approval_ids() == set()
+    assert router._pending_async_approval("appr_1") is not None
+
+
+def test_legacy_ack_without_schema_version_stays_terminal(tmp_path):
+    # 3a 이전에 정상 완료된 승인이 재집행되면 안 된다.
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")  # schema_version 없음
+
+    assert router._terminal_approval_ids() == {"appr_legacy"}
+    assert router._pending_async_approval("appr_legacy") is None
+
+
+def test_completed_approval_is_terminal(tmp_path):
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+    _save_completed(store, approval_id="appr_1")
+
+    assert router._terminal_approval_ids() == {"appr_1"}
+
+
 def test_failed_resolution_records_no_completed_event(tmp_path):
     router, store = _router(tmp_path, resolve_error=ValueError("stale broker snapshot"))
     envelope = _save_pending_envelope(store, approval_id="appr_1")
