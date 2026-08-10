@@ -3,9 +3,12 @@ from datetime import UTC, datetime, timedelta
 from maestro.approval.models import ApprovalRequest
 from maestro.integrations.telegram.ui import catalog
 from maestro.integrations.telegram.ui.cards import (
+    TELEGRAM_TEXT_LIMIT,
     approval_decision_text,
+    approval_detail_pages,
     approval_reminder_text,
     render_approval_card,
+    telegram_text_length,
 )
 
 
@@ -162,6 +165,71 @@ def test_many_orders_are_truncated_in_collapsed_view():
     card = render_approval_card(request, expanded=False)
     assert card.text.count("•") == 7  # 6줄 + "외 3건" 줄
     assert "• 외 3건" in card.text
+
+
+def _bulk_request(order_count: int, *, risk_violations: list[str] | None = None):
+    base = _request()
+    template = base.proposed_orders[0]
+    orders = [
+        dict(template, symbol=f"{index:06d}", name=f"국내 상장 ETF 종목 {index}")
+        for index in range(order_count)
+    ]
+    return base.model_copy(
+        update={
+            "proposed_orders": orders,
+            "order_count": order_count,
+            "risk_violations": list(risk_violations or []),
+        }
+    )
+
+
+def test_expanded_card_stays_within_telegram_limit_and_paginates():
+    request = _bulk_request(120)
+    first = render_approval_card(request, expanded=True)
+
+    assert telegram_text_length(first.text) <= TELEGRAM_TEXT_LIMIT
+    assert first.page_count > 1
+    assert first.page == 0
+    next_button = [
+        button
+        for row in first.reply_markup["inline_keyboard"]
+        for button in row
+        if button["callback_data"].startswith("operator:ui:p:")
+    ]
+    assert next_button, "여러 쪽이면 페이지 이동 버튼이 있어야 한다"
+    for row in first.reply_markup["inline_keyboard"]:
+        for button in row:
+            assert len(button["callback_data"].encode()) <= 64
+
+    last = render_approval_card(request, expanded=True, page=first.page_count - 1)
+    assert telegram_text_length(last.text) <= TELEGRAM_TEXT_LIMIT
+    assert last.page == first.page_count - 1
+
+
+def test_expanded_pages_cover_every_order_and_risk_reason():
+    request = _bulk_request(120, risk_violations=[f"위반 사유 {index}" for index in range(20)])
+    pages = approval_detail_pages(request)
+
+    assert len(pages) > 1
+    joined = "\n".join(pages)
+    for index in range(120):
+        assert f"{index:06d}" in joined
+    for index in range(20):
+        assert f"위반 사유 {index}" in joined
+    for page in pages:
+        assert telegram_text_length(page) <= TELEGRAM_TEXT_LIMIT
+
+
+def test_page_out_of_range_clamps_to_last_page():
+    request = _bulk_request(120)
+    card = render_approval_card(request, expanded=True, page=999)
+    assert card.page == card.page_count - 1
+
+
+def test_collapsed_card_stays_within_telegram_limit():
+    request = _bulk_request(400, risk_violations=["아주 긴 위험 사유 " * 400])
+    card = render_approval_card(request, expanded=False)
+    assert telegram_text_length(card.text) <= TELEGRAM_TEXT_LIMIT
 
 
 def test_decision_and_reminder_texts():

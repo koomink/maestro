@@ -36,6 +36,12 @@ BUTTON_APPROVE = "✅ 승인"
 BUTTON_REJECT = "❌ 거절"
 BUTTON_DETAIL = "🔍 자세히"
 BUTTON_FOLD = "접기"
+BUTTON_PREV_PAGE = "◀ 이전"
+BUTTON_NEXT_PAGE = "다음 ▶"
+
+PAGE_INDICATOR = "({page}/{total}쪽)"
+RISK_DETAIL_HEADER = "⚠️ 위험 점검 원문"
+TRUNCATED_MARK = "…"
 
 MARKET_DOMESTIC = "국내 주식"
 MARKET_OVERSEAS = "해외 주식"

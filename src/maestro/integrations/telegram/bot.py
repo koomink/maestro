@@ -15,7 +15,7 @@ from maestro.execution.live_orders import (
     LiveOrderLifecycleNotification,
     LiveOrderNotificationClient,
 )
-from maestro.integrations.telegram.ui.cards import render_approval_card
+from maestro.integrations.telegram.ui.cards import approval_detail_pages, render_approval_card
 
 
 class TelegramBotClient(Protocol):
@@ -213,12 +213,19 @@ class TelegramApprovalService:
         self.poll_interval_seconds = poll_interval_seconds
 
     def request_decision(self, request: ApprovalRequest) -> tuple[ApprovalDecision, str]:
-        # sync 경로에는 ui:d callback을 처리할 라우터가 없어 자세히 버튼 없이
-        # 접힌 카드 텍스트만 사용한다.
-        message = render_approval_card(request, expanded=False).text
+        # sync 경로에는 ui:d/ui:p callback을 처리할 라우터가 없다. 승인 전에 숨겨진
+        # 주문·위험 사유가 남지 않도록 펼친 뷰 전체를 쪽별 메시지로 보내고,
+        # 승인/거절 버튼은 마지막 메시지에만 붙인다.
+        pages = approval_detail_pages(request)
         reply_markup = _approval_reply_markup(request.approval_id)
+        message = "\n\n".join(pages)
         for chat_id in self.chat_ids:
-            self._send_message(chat_id, message, reply_markup)
+            for index, page in enumerate(pages):
+                self._send_message(
+                    chat_id,
+                    page,
+                    reply_markup if index == len(pages) - 1 else None,
+                )
 
         offset = None
         while utc_now() < request.expires_at:
@@ -309,7 +316,7 @@ class TelegramApprovalService:
         self,
         chat_id: int,
         text: str,
-        reply_markup: Mapping[str, Any],
+        reply_markup: Mapping[str, Any] | None,
     ) -> Mapping[str, Any]:
         try:
             return self.client.send_message(chat_id, text, reply_markup=reply_markup)

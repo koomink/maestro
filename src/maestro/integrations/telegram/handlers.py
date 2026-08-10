@@ -150,6 +150,15 @@ TELEGRAM_UI_COMMANDS: tuple[tuple[str, str], ...] = (
     ("help", "도움말"),
 )
 
+# 메뉴(set_my_commands)에는 넣지 않지만 /help와 /system 버튼에서 항상 도달 가능해야 하는
+# 비상·복구 명령. 장애 중에도 운영자가 UI만으로 정지·복구할 수 있어야 한다.
+TELEGRAM_EMERGENCY_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("pause", "실행 일시중지"),
+    ("kill_switch", "긴급 정지"),
+    ("clear_halt", "정지 해제 (사전 점검 실행)"),
+    ("recovery", "복구 센터"),
+)
+
 
 class TelegramOperatorCommandRouter:
     def __init__(
@@ -383,6 +392,14 @@ class TelegramOperatorCommandRouter:
             self._edit_callback_message(callback, "Telegram command canceled.")
             self._record("/cancel", chat_id, user_id, username, "canceled")
             return True
+        if action.startswith("menu:"):
+            return self._process_menu_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
         if action.startswith("funding:"):
             return self._process_funding_callback(
                 callback,
@@ -1327,6 +1344,31 @@ class TelegramOperatorCommandRouter:
         self._record("/retry_order", chat_id, user_id, username, "approved")
         return True
 
+    def _process_menu_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        """시스템 상태 카드의 비상 제어 버튼 → 기존 확인 절차로 연결한다."""
+        target = action.removeprefix("menu:")
+        handlers = {
+            "pause": self._pause,
+            "kill_switch": self._kill_switch,
+            "clear_halt": self._clear_halt,
+            "recovery": self._recovery,
+        }
+        handler = handlers.get(target)
+        if handler is None:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            return True
+        self._answer(callback, "")
+        handler(chat_id)
+        self._record(f"/{target}", chat_id, user_id, username, "menu_opened")
+        return True
+
     def _process_ui_toggle(
         self,
         callback: Mapping[str, Any],
@@ -1335,16 +1377,27 @@ class TelegramOperatorCommandRouter:
         user_id: int,
         username: str | None,
     ) -> bool:
-        parts = action.split(":", 2)
-        if len(parts) != 3 or parts[1] not in {"d", "f"}:
+        parts = action.split(":")
+        kind = parts[1] if len(parts) > 1 else ""
+        page = 0
+        if kind in {"d", "f"} and len(parts) == 3:
+            approval_id = parts[2]
+        elif kind == "p" and len(parts) == 4 and parts[3].isdigit():
+            approval_id = parts[2]
+            page = int(parts[3])
+        else:
             self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
             return True
-        envelope = self._pending_async_approval(parts[2])
+        envelope = self._pending_async_approval(approval_id)
         if envelope is None:
             self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
             self._record("/approval", chat_id, user_id, username, "stale_callback")
             return True
-        card = render_approval_card(envelope.request, expanded=parts[1] == "d")
+        card = render_approval_card(
+            envelope.request,
+            expanded=kind in {"d", "p"},
+            page=page,
+        )
         message = callback.get("message")
         message_id = message.get("message_id") if isinstance(message, Mapping) else None
         if message_id is None:
@@ -2940,6 +2993,12 @@ class TelegramOperatorCommandRouter:
                         for command, description in TELEGRAM_UI_COMMANDS
                     ],
                     "",
+                    "⚠️ 비상 조치 (메뉴에는 없지만 언제든 입력할 수 있어요)",
+                    *[
+                        f"/{command} - {description}"
+                        for command, description in TELEGRAM_EMERGENCY_COMMANDS
+                    ],
+                    "",
                     "이런 알림이 올 수 있어요:",
                     "- 📩 투자 승인 요청 (버튼으로 승인/거절)",
                     "- ⏰ 승인 응답 리마인더",
@@ -3003,7 +3062,8 @@ class TelegramOperatorCommandRouter:
         ]
         for check in problem_checks[:5]:
             lines.append(f"{check['check']}: {check['status']} {check['message']}")
-        self._send(chat_id, "\n".join(lines))
+        # 메뉴에서 사라진 비상 제어를 시스템 상태 카드에서만 노출한다.
+        self._send(chat_id, "\n".join(lines), reply_markup=_emergency_menu_markup())
 
     def _signal(self, chat_id: int) -> None:
         signal = build_latest_signal_package_card(self.store)
@@ -4027,6 +4087,29 @@ def _user_identity(user: object) -> tuple[int | None, str | None]:
         user_id if isinstance(user_id, int) else None,
         username if isinstance(username, str) else None,
     )
+
+
+def _emergency_menu_markup() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "⏸ 일시중지",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}menu:pause",
+                },
+                {
+                    "text": "🛑 긴급정지",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}menu:kill_switch",
+                },
+            ],
+            [
+                {
+                    "text": "🛟 복구 센터",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}menu:recovery",
+                },
+            ],
+        ]
+    }
 
 
 def _confirmation_markup(action: str) -> dict[str, Any]:

@@ -16,52 +16,162 @@ from maestro.integrations.telegram.ui.format import (
 _MAX_COLLAPSED_ORDER_LINES = 6
 _CALLBACK_PREFIX = "operator:"
 
+#: Telegram sendMessage/editMessageText 본문 한도 (UTF-16 코드 유닛).
+TELEGRAM_TEXT_LIMIT = 4096
+#: 쪽 표시 줄을 위해 미리 떼어 두는 여유분.
+_PAGE_INDICATOR_BUDGET = 24
+
+
+def telegram_text_length(text: str) -> int:
+    """Telegram이 세는 길이 = UTF-16 코드 유닛 수 (BMP 밖 이모지는 2)."""
+    return len(text.encode("utf-16-le")) // 2
+
 
 @dataclass(frozen=True)
 class RenderedCard:
     text: str
     reply_markup: dict[str, Any]
+    page: int = 0
+    page_count: int = 1
 
 
-def render_approval_card(request: ApprovalRequest, *, expanded: bool) -> RenderedCard:
-    lines = [catalog.APPROVAL_TITLE, ""]
-    lines.append(
+def render_approval_card(
+    request: ApprovalRequest,
+    *,
+    expanded: bool,
+    page: int = 0,
+) -> RenderedCard:
+    if not expanded:
+        return RenderedCard(
+            text=_clamp(_collapsed_text(request)),
+            reply_markup=approval_markup(request.approval_id, expanded=False),
+        )
+    pages = approval_detail_pages(request)
+    index = max(0, min(page, len(pages) - 1))
+    return RenderedCard(
+        text=pages[index],
+        reply_markup=approval_markup(
+            request.approval_id,
+            expanded=True,
+            page=index,
+            page_count=len(pages),
+        ),
+        page=index,
+        page_count=len(pages),
+    )
+
+
+def approval_detail_pages(request: ApprovalRequest) -> list[str]:
+    """펼친 뷰 전체 내용을 Telegram 길이 한도 이하의 쪽들로 나눈다."""
+    header = _header_lines(request)
+    footer = _detail_footer_lines(request)
+    fixed = telegram_text_length("\n".join([*header, *footer])) + _PAGE_INDICATOR_BUDGET
+    capacity = max(TELEGRAM_TEXT_LIMIT - fixed, 1)
+
+    grouped: list[list[str]] = []
+    current: list[str] = []
+    current_length = 0
+    for block in _detail_blocks(request):
+        block = _clamp_block(block, capacity)
+        length = telegram_text_length("\n".join(block)) + 1
+        if current and current_length + length > capacity:
+            grouped.append(current)
+            current = []
+            current_length = 0
+        current.extend(block)
+        current_length += length
+    grouped.append(current)
+
+    total = len(grouped)
+    pages: list[str] = []
+    for index, body in enumerate(grouped, start=1):
+        lines = [*header, *body, *footer]
+        if total > 1:
+            lines.extend(["", catalog.PAGE_INDICATOR.format(page=index, total=total)])
+        pages.append(_clamp("\n".join(lines)))
+    return pages
+
+
+def _collapsed_text(request: ApprovalRequest) -> str:
+    lines = [*_header_lines(request)]
+    lines.extend(_order_lines(request.proposed_orders, expanded=False))
+    if request.risk_violations:
+        lines.append("")
+        lines.append(catalog.APPROVAL_RISK_SUMMARY.format(count=len(request.risk_violations)))
+    lines.append("")
+    lines.append(catalog.APPROVAL_DEADLINE.format(deadline=deadline_kr(request.expires_at)))
+    return "\n".join(lines)
+
+
+def _header_lines(request: ApprovalRequest) -> list[str]:
+    return [
+        catalog.APPROVAL_TITLE,
+        "",
         catalog.APPROVAL_SUMMARY.format(
             strategy=strategy_display_label(request.source_strategy_ids),
             market=_market_summary(request.proposed_orders),
             count=len(request.proposed_orders),
             sides=_side_summary(request.proposed_orders),
             total=_total_label(request),
-        )
-    )
-    lines.append("")
-    lines.extend(_order_lines(request.proposed_orders, expanded=expanded))
-    if request.risk_violations:
-        lines.append("")
-        if expanded:
-            lines.append("⚠️ 위험 점검 원문")
-            lines.extend(f"- {item}" for item in request.risk_violations)
+        ),
+        "",
+    ]
+
+
+def _detail_footer_lines(request: ApprovalRequest) -> list[str]:
+    return [
+        "",
+        catalog.APPROVAL_DEADLINE.format(deadline=deadline_kr(request.expires_at)),
+        "",
+        catalog.EXPANDED_HEADER,
+        f"- 승인 ID: {request.approval_id}",
+        f"- 실행 ID: {request.run_id}",
+        f"- 마감(ISO): {request.expires_at.isoformat()}",
+    ]
+
+
+def _detail_blocks(request: ApprovalRequest) -> list[list[str]]:
+    blocks = [_order_block(order) for order in request.proposed_orders]
+    for index, violation in enumerate(request.risk_violations):
+        if index == 0:
+            blocks.append(["", catalog.RISK_DETAIL_HEADER, f"- {violation}"])
         else:
-            lines.append(
-                catalog.APPROVAL_RISK_SUMMARY.format(count=len(request.risk_violations))
-            )
-    lines.append("")
-    lines.append(
-        catalog.APPROVAL_DEADLINE.format(deadline=deadline_kr(request.expires_at))
-    )
-    if expanded:
-        lines.append("")
-        lines.append(catalog.EXPANDED_HEADER)
-        lines.append(f"- 승인 ID: {request.approval_id}")
-        lines.append(f"- 실행 ID: {request.run_id}")
-        lines.append(f"- 마감(ISO): {request.expires_at.isoformat()}")
-    return RenderedCard(
-        text="\n".join(lines),
-        reply_markup=approval_markup(request.approval_id, expanded=expanded),
-    )
+            blocks.append([f"- {violation}"])
+    return blocks
 
 
-def approval_markup(approval_id: str, *, expanded: bool) -> dict[str, Any]:
+def _clamp(text: str) -> str:
+    return _clamp_text(text, TELEGRAM_TEXT_LIMIT)
+
+
+def _clamp_block(block: list[str], capacity: int) -> list[str]:
+    if telegram_text_length("\n".join(block)) + 1 <= capacity:
+        return block
+    return _clamp_text("\n".join(block), max(capacity - 1, 1)).split("\n")
+
+
+def _clamp_text(text: str, limit: int) -> str:
+    if telegram_text_length(text) <= limit:
+        return text
+    budget = limit - telegram_text_length(catalog.TRUNCATED_MARK)
+    kept: list[str] = []
+    used = 0
+    for char in text:
+        width = telegram_text_length(char)
+        if used + width > budget:
+            break
+        kept.append(char)
+        used += width
+    return "".join(kept) + catalog.TRUNCATED_MARK
+
+
+def approval_markup(
+    approval_id: str,
+    *,
+    expanded: bool,
+    page: int = 0,
+    page_count: int = 1,
+) -> dict[str, Any]:
     toggle = (
         {
             "text": catalog.BUTTON_FOLD,
@@ -73,6 +183,22 @@ def approval_markup(approval_id: str, *, expanded: bool) -> dict[str, Any]:
             "callback_data": f"{_CALLBACK_PREFIX}ui:d:{approval_id}",
         }
     )
+    navigation: list[dict[str, str]] = []
+    if expanded and page_count > 1:
+        if page > 0:
+            navigation.append(
+                {
+                    "text": catalog.BUTTON_PREV_PAGE,
+                    "callback_data": f"{_CALLBACK_PREFIX}ui:p:{approval_id}:{page - 1}",
+                }
+            )
+        if page < page_count - 1:
+            navigation.append(
+                {
+                    "text": catalog.BUTTON_NEXT_PAGE,
+                    "callback_data": f"{_CALLBACK_PREFIX}ui:p:{approval_id}:{page + 1}",
+                }
+            )
     return {
         "inline_keyboard": [
             [
@@ -85,6 +211,7 @@ def approval_markup(approval_id: str, *, expanded: bool) -> dict[str, Any]:
                     "callback_data": f"{_CALLBACK_PREFIX}appr:r:{approval_id}",
                 },
             ],
+            *([navigation] if navigation else []),
             [toggle],
         ]
     }
@@ -119,33 +246,44 @@ def _order_lines(orders: list[dict], *, expanded: bool) -> list[str]:
     lines: list[str] = []
     visible = orders if expanded else orders[:_MAX_COLLAPSED_ORDER_LINES]
     for order in visible:
-        name = str(order.get("name") or order.get("symbol") or "unknown")
-        quantity = _float_or_none(order.get("quantity"))
-        notional = _float_or_none(order.get("notional"))
-        currency = order.get("currency") if isinstance(order.get("currency"), str) else None
-        quantity_label = f" {quantity_kr(quantity)}" if quantity is not None else ""
-        amount = money_kr(notional, currency) if notional is not None else "-"
-        lines.append(f"• {_side_label(order)} {name}{quantity_label} — {amount}")
-        if expanded:
-            symbol = str(order.get("symbol") or "unknown")
-            broker_symbol = order.get("broker_symbol")
-            code = (
-                f"{symbol} (브로커: {broker_symbol})"
-                if isinstance(broker_symbol, str) and broker_symbol and broker_symbol != symbol
-                else symbol
-            )
-            lines.append(f"  코드: {code}")
-            price = _float_or_none(order.get("limit_price", order.get("price")))
-            if price is not None:
-                lines.append(f"  지정가: {money_full(price, currency)}")
-            if notional is not None:
-                lines.append(f"  금액: {money_full(notional, currency)}")
-            account_id = order.get("account_id")
-            if isinstance(account_id, str) and account_id:
-                lines.append(f"  계좌: {account_id}")
+        lines.extend(_order_block(order) if expanded else [_order_summary_line(order)])
     hidden = len(orders) - len(visible)
     if hidden > 0:
         lines.append(catalog.APPROVAL_MORE_ORDERS.format(count=hidden))
+    return lines
+
+
+def _order_summary_line(order: dict) -> str:
+    name = str(order.get("name") or order.get("symbol") or "unknown")
+    quantity = _float_or_none(order.get("quantity"))
+    notional = _float_or_none(order.get("notional"))
+    currency = order.get("currency") if isinstance(order.get("currency"), str) else None
+    quantity_label = f" {quantity_kr(quantity)}" if quantity is not None else ""
+    amount = money_kr(notional, currency) if notional is not None else "-"
+    return f"• {_side_label(order)} {name}{quantity_label} — {amount}"
+
+
+def _order_block(order: dict) -> list[str]:
+    """펼친 뷰의 주문 1건 블록 (쪽 나눌 때 쪼개지지 않는 최소 단위)."""
+    currency = order.get("currency") if isinstance(order.get("currency"), str) else None
+    notional = _float_or_none(order.get("notional"))
+    lines = [_order_summary_line(order)]
+    symbol = str(order.get("symbol") or "unknown")
+    broker_symbol = order.get("broker_symbol")
+    code = (
+        f"{symbol} (브로커: {broker_symbol})"
+        if isinstance(broker_symbol, str) and broker_symbol and broker_symbol != symbol
+        else symbol
+    )
+    lines.append(f"  코드: {code}")
+    price = _float_or_none(order.get("limit_price", order.get("price")))
+    if price is not None:
+        lines.append(f"  지정가: {money_full(price, currency)}")
+    if notional is not None:
+        lines.append(f"  금액: {money_full(notional, currency)}")
+    account_id = order.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        lines.append(f"  계좌: {account_id}")
     return lines
 
 

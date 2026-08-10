@@ -3123,6 +3123,48 @@ def test_approval_callback_edits_card_with_korean_result(tmp_path):
     assert client.edited_messages[-1]["text"].startswith("❌ 거절했어요")
 
 
+def test_ui_page_callback_moves_between_detail_pages(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    template = envelope.request.proposed_orders[0]
+    orders = [
+        dict(template, symbol=f"SYM{index:04d}", name=f"종목 {index}") for index in range(120)
+    ]
+    envelope = envelope.model_copy(
+        update={
+            "request": envelope.request.model_copy(
+                update={"proposed_orders": orders, "order_count": len(orders)}
+            )
+        }
+    )
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    assert router.process_update(callback_update(f"operator:ui:d:{envelope.approval_id}"))
+    first_page = client.edited_messages[-1]
+    next_button = [
+        button
+        for row in first_page["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button["callback_data"].startswith(f"operator:ui:p:{envelope.approval_id}:")
+    ]
+    assert next_button
+
+    assert router.process_update(
+        callback_update(next_button[-1]["callback_data"], update_id=3)
+    )
+    second_page = client.edited_messages[-1]
+    assert second_page["text"] != first_page["text"]
+    assert "2/" in second_page["text"]  # 쪽 표시
+
+
 def test_approval_callback_does_not_claim_submission_without_submitted_orders(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
@@ -3189,3 +3231,56 @@ def test_help_is_korean_and_lists_five_commands(tmp_path):
     assert "/today" in text and "/portfolio" in text and "/system" in text
     assert "/history" in text and "/help" in text
     assert "이런 알림이 올 수 있어요" in text
+
+
+def test_help_keeps_emergency_commands_discoverable(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/help"))
+    text = client.sent_messages[-1]["text"]
+    for command in ("/pause", "/kill_switch", "/clear_halt", "/recovery"):
+        assert command in text
+
+
+def test_system_card_exposes_emergency_buttons(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/system"))
+    markup = client.sent_messages[-1]["reply_markup"]
+    callbacks = {
+        button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+    assert "operator:menu:pause" in callbacks
+    assert "operator:menu:kill_switch" in callbacks
+    assert "operator:menu:recovery" in callbacks
+
+
+def test_system_pause_button_opens_confirmation(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(callback_update("operator:menu:pause"))
+    sent = client.sent_messages[-1]
+    assert "Confirm pause" in sent["text"]
+    assert sent["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == (
+        "operator:confirm:pause"
+    )

@@ -20,6 +20,7 @@ from maestro.integrations.telegram.bot import (
     TelegramLiveOrderNotificationClient,
 )
 from maestro.integrations.telegram.formatter import format_approval_request
+from maestro.integrations.telegram.ui.cards import TELEGRAM_TEXT_LIMIT, telegram_text_length
 from maestro.state.store import StateStore
 
 
@@ -302,6 +303,40 @@ def test_approval_formatter_shows_operator_profile_name():
     message = format_approval_request(request)
 
     assert "📁 Profile: kis_brokerage_us" in message
+
+
+def test_telegram_service_sends_every_order_and_risk_reason_before_buttons():
+    orders = [
+        {"symbol": f"MOCK_{index:03d}", "side": "buy", "notional": 100.0, "quantity": 1}
+        for index in range(40)
+    ]
+    request = approval_request().model_copy(
+        update={
+            "proposed_orders": orders,
+            "order_count": len(orders),
+            "risk_violations": [f"위반 사유 {index}" for index in range(10)],
+        }
+    )
+    client = FakeTelegramClient([callback_update(f"approve:{request.approval_id}")])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    _, message = service.request_decision(request)
+
+    sent_text = "\n".join(item["text"] for item in client.sent_messages)
+    for index in range(40):
+        assert f"MOCK_{index:03d}" in sent_text  # 승인 전에 모든 주문을 볼 수 있어야 한다
+    for index in range(10):
+        assert f"위반 사유 {index}" in sent_text  # 위험 사유 원문도 노출
+    for item in client.sent_messages:
+        assert telegram_text_length(item["text"]) <= TELEGRAM_TEXT_LIMIT
+    assert client.sent_messages[-1]["reply_markup"] is not None  # 버튼은 마지막 메시지에
+    assert all(item["reply_markup"] is None for item in client.sent_messages[:-1])
+    assert "MOCK_039" in message
 
 
 def test_telegram_service_receives_button_approval():
