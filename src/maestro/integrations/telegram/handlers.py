@@ -164,6 +164,14 @@ TELEGRAM_EMERGENCY_COMMANDS: tuple[tuple[str, str], ...] = (
 #: 길게 잡아, 만료된 지 오래된 이벤트만 조회에서 제외한다.
 _CONSISTENCY_WINDOW_DAYS = 90
 
+#: 자동 재개 횟수 상한. 넘으면 ⚠️ 알림으로 운영자에게 넘긴다.
+#: 최초 콜백(attempt 1)도 실제 집행 시도이므로 예산에 포함된다 — 자동 재개는
+#: attempt 2·3·4까지만 이어진다.
+_MAX_RESUME_ATTEMPT = 4
+#: claim 후 이 시간이 지나도록 종료 기록이 없으면 버려진 시도로 보고 회수한다.
+#: 운영자 봇 poll 간격(초 단위)과 resolution 소요(브로커 폴링 포함)를 고려한 값.
+_RESUME_LEASE_SECONDS = 900
+
 
 class TelegramOperatorCommandRouter:
     def __init__(
@@ -1488,25 +1496,29 @@ class TelegramOperatorCommandRouter:
             decided_by=decided_by,
             reason=reason,
         )
-        duplicate_key = f"telegram-approval-ack:{envelope.approval_id}"
-        with self.store.writer_lock("telegram_approval_callback_claim"):
-            if self.store.duplicate_key_exists(duplicate_key):
-                raise ValueError("Approval request was already decided")
-            save_audited_system_event(
-                self.store,
-                self.audit,
-                envelope.run_id,
-                "telegram_approval_ack",
-                {
-                    "approval_id": envelope.approval_id,
-                    "signal_run_id": envelope.signal_run_id,
-                    "status": status,
-                    "decided_by": decided_by,
-                    "decided_at": decision.decided_at.isoformat(),
-                    "duplicate_key": duplicate_key,
-                    "schema_version": 2,
-                },
-            )
+        if attempt == 1:
+            # ack는 운영자 의사를 처음 받아쓸 때만 기록한다. 재개(attempt > 1)는
+            # 이미 기록된 ack를 읽어서 오는 길이므로 다시 쓰면 duplicate_key
+            # 가드에 걸려 재개 자체가 불가능해진다.
+            duplicate_key = f"telegram-approval-ack:{envelope.approval_id}"
+            with self.store.writer_lock("telegram_approval_callback_claim"):
+                if self.store.duplicate_key_exists(duplicate_key):
+                    raise ValueError("Approval request was already decided")
+                save_audited_system_event(
+                    self.store,
+                    self.audit,
+                    envelope.run_id,
+                    "telegram_approval_ack",
+                    {
+                        "approval_id": envelope.approval_id,
+                        "signal_run_id": envelope.signal_run_id,
+                        "status": status,
+                        "decided_by": decided_by,
+                        "decided_at": decision.decided_at.isoformat(),
+                        "duplicate_key": duplicate_key,
+                        "schema_version": 2,
+                    },
+                )
         try:
             summary = self._run_resolution(envelope, decision)
         except Exception as exc:
@@ -1598,6 +1610,193 @@ class TelegramOperatorCommandRouter:
             },
         )
 
+    def _resume_unresolved_approvals(self) -> None:
+        """결정은 기록됐지만 집행이 끝나지 않은 승인을 기록된 결정으로 재개한다."""
+        self._reclaim_abandoned_resume_claims()
+        completed = {
+            str(row["payload"].get("approval_id"))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_resolution_completed",
+                limit=None,
+                since=self._consistency_since(),
+            )
+        }
+        envelopes = {
+            str(row["payload"].get("approval_id")): row["payload"]
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_pending",
+                limit=None,
+                since=self._consistency_since(),
+            )
+        }
+        for row in reversed(
+            self.store.list_system_events_by_type(
+                "telegram_approval_ack", limit=None, since=self._consistency_since()
+            )
+        ):
+            ack = row["payload"]
+            approval_id = str(ack.get("approval_id"))
+            if not isinstance(ack.get("schema_version"), int) or approval_id in completed:
+                continue
+            payload = envelopes.get(approval_id)
+            if payload is None:
+                continue
+            envelope = PendingApprovalEnvelope.model_validate(payload)
+            if self.store.approval_exists(approval_id):
+                # approvals 행은 resolve_pending_signal_approval이 브로커 호출보다
+                # 먼저 쓴다. 행이 있으면 집행에 진입했을 수 있으므로 자동 재개하지
+                # 않는다 — 브로커 제출 직후·로컬 lifecycle 기록 전에 중단된 창까지
+                # fail-closed로 덮는다. 주문이 이미 나갔을 수 있으므로 브로커 대조
+                # 문구로 알린다.
+                self._notify_approval_needs_attention(envelope, partial=True)
+                continue
+            # 최초 콜백(attempt 1)도 실제 집행 시도였으므로 예산에 함께 센다.
+            if self._executed_resume_attempts(approval_id) + 1 >= _MAX_RESUME_ATTEMPT:
+                # 반복 실패는 자동 재시도로 풀리지 않는다. 매 poll마다 조용히
+                # 실패를 쌓는 대신 운영자에게 넘긴다.
+                # abandoned(한 번도 실행되지 않은 시도)는 이 예산을 깎지 않는다.
+                self._notify_approval_needs_attention(envelope, partial=False)
+                continue
+            attempt = self._next_resume_attempt(approval_id)
+            if not self._claim_resume(envelope, attempt):
+                continue  # 같은 attempt가 in-flight다
+            outcome = "failed"
+            try:
+                self._resolve_async_approval(
+                    envelope,
+                    status=str(ack.get("status")),
+                    decided_by=str(ack.get("decided_by")),
+                    reason="Resumed from recorded approval decision.",
+                    attempt=attempt,
+                )
+                outcome = "completed"
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                self._record_update_failure(None, exc)
+            finally:
+                # 종료 기록이 있어야 다음 attempt 번호가 진행된다.
+                self._record_resume_finished(
+                    run_id=envelope.run_id,
+                    approval_id=approval_id,
+                    attempt=attempt,
+                    outcome=outcome,
+                )
+
+    def _reclaim_abandoned_resume_claims(self) -> None:
+        """프로세스가 claim 직후 죽으면 그 attempt는 영원히 종료되지 않는다.
+        lease가 지난 미완 claim을 abandoned로 종결해 재개가 이어지게 한다."""
+        finished = {
+            (str(row["payload"].get("approval_id")), int(row["payload"].get("attempt", 0)))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_resume_finished",
+                limit=None,
+                since=self._consistency_since(),
+            )
+        }
+        now = utc_now()
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_resume_claim",
+            limit=None,
+            since=self._consistency_since(),
+        ):
+            payload = row["payload"]
+            approval_id = str(payload.get("approval_id"))
+            attempt = int(payload.get("attempt", 0))
+            if (approval_id, attempt) in finished:
+                continue
+            claimed_at = payload.get("claimed_at")
+            if not claimed_at:
+                continue
+            age = (now - datetime.fromisoformat(str(claimed_at))).total_seconds()
+            if age < _RESUME_LEASE_SECONDS:
+                continue
+            self._record_resume_finished(
+                run_id=str(payload.get("run_id") or ""),
+                approval_id=approval_id,
+                attempt=attempt,
+                outcome="abandoned",
+            )
+
+    def _resume_finished_events(self, approval_id: str) -> list[dict[str, Any]]:
+        return [
+            row["payload"]
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_resume_finished",
+                limit=None,
+                since=self._consistency_since(),
+            )
+            if str(row["payload"].get("approval_id")) == approval_id
+        ]
+
+    def _next_resume_attempt(self, approval_id: str) -> int:
+        """종료 기록 기준으로 번호를 매긴다. in-flight attempt가 있으면 같은
+        번호가 다시 나오고, claim duplicate_key 충돌로 병행 진입이 막힌다.
+
+        abandoned도 번호는 증가시킨다 — 안 그러면 회수된 claim과 같은 번호가
+        다시 나와 duplicate_key 충돌로 영구 정지한다.
+        """
+        return len(self._resume_finished_events(approval_id)) + 2  # 최초 콜백이 attempt 1
+
+    def _executed_resume_attempts(self, approval_id: str) -> int:
+        """실제로 집행을 시도한 재개 횟수. 재시도 예산은 이 값으로만 판정한다 —
+        abandoned(한 번도 실행되지 않고 회수된 claim)는 세지 않는다."""
+        return sum(
+            1
+            for payload in self._resume_finished_events(approval_id)
+            if payload.get("outcome") in {"completed", "failed"}
+        )
+
+    def _claim_resume(self, envelope: PendingApprovalEnvelope, attempt: int) -> bool:
+        """approval당 단일 in-flight를 duplicate_key UNIQUE 제약으로 보장한다."""
+        duplicate_key = f"telegram-approval-resume:{envelope.approval_id}:a{attempt}"
+        with self.store.writer_lock("telegram_approval_resume_claim"):
+            if self.store.duplicate_key_exists(duplicate_key):
+                return False
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                envelope.run_id,
+                "telegram_approval_resume_claim",
+                {
+                    "approval_id": envelope.approval_id,
+                    "run_id": envelope.run_id,
+                    "attempt": attempt,
+                    "claimed_at": utc_now().isoformat(),
+                    "duplicate_key": duplicate_key,
+                },
+            )
+        return True
+
+    def _record_resume_finished(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+        attempt: int,
+        outcome: str,
+    ) -> None:
+        """성공·실패·abandoned 세 경로가 함께 쓰는 종료 기록.
+
+        lease 회수는 여러 poller가 동시에 같은 (approval, attempt)를 종결하려 할
+        수 있으므로 claim과 같은 writer_lock 안에서 확인 후 쓴다.
+        """
+        duplicate_key = f"telegram-approval-resume-finished:{approval_id}:a{attempt}"
+        with self.store.writer_lock("telegram_approval_resume_finished"):
+            if self.store.duplicate_key_exists(duplicate_key):
+                return
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                run_id or f"run_{approval_id}",
+                "telegram_approval_resume_finished",
+                {
+                    "approval_id": approval_id,
+                    "attempt": attempt,
+                    "outcome": outcome,
+                    "finished_at": utc_now().isoformat(),
+                    "duplicate_key": duplicate_key,
+                },
+            )
+
     def _notify_legacy_unresolved_approvals(self) -> None:
         """3a 이전 ack 중 완료 기록이 없는 건을 1회만 알린다. 자동 재집행은 하지 않는다.
 
@@ -1667,8 +1866,13 @@ class TelegramOperatorCommandRouter:
         return completed
 
     def _sweep_pending_approvals(self) -> None:
+        self._resume_unresolved_approvals()
         self._notify_legacy_unresolved_approvals()
         acked = self._terminal_approval_ids()
+        # 결정이 기록된 승인은 재개 경로가 단독으로 소유한다. 만료 재판정도
+        # 리마인더도 보내지 않는다 — ack duplicate_key 때문에 만료 재판정은
+        # 어차피 매 poll마다 ValueError로 조용히 실패하기만 했다.
+        decided = self._decided_approval_ids()
         # 전송 완료는 chat_id 단위로 추적한다. 일부 채팅만 실패했을 때 성공한
         # 채팅에 같은 리마인더를 다시 보내지 않기 위함.
         # chat_id가 없는 과거 이벤트는 전체 채팅 완료로 간주한다 (하위 호환).
@@ -1697,7 +1901,7 @@ class TelegramOperatorCommandRouter:
         ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id") or "")
-            if not approval_id or approval_id in acked:
+            if not approval_id or approval_id in acked or approval_id in decided:
                 continue
             envelope = PendingApprovalEnvelope.model_validate(payload)
             if now >= envelope.expires_at:
@@ -4227,6 +4431,21 @@ class TelegramOperatorCommandRouter:
             if not isinstance(payload.get("schema_version"), int):
                 terminal.add(approval_id)
         return terminal
+
+    def _decided_approval_ids(self) -> set[str]:
+        """운영자 결정이 기록된(3a 스키마 ack) 승인 집합.
+
+        종결(terminal)과는 다르다 — 결정만 있고 집행이 끝나지 않았을 수 있다.
+        이 승인들의 후속 처리는 재개 경로가 전담하므로, 만료 재판정처럼 결정을
+        다시 쓰려는 경로는 여기서 걸러야 한다.
+        """
+        return {
+            str(row["payload"].get("approval_id"))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_ack", limit=None, since=self._consistency_since()
+            )
+            if isinstance(row["payload"].get("schema_version"), int)
+        }
 
     def _pending_async_approval(
         self,

@@ -91,7 +91,14 @@ def _router(tmp_path, *, resolve_error=None):
     return router, store
 
 
-def _save_pending_envelope(store, *, approval_id, order_count=1, signal_run_id=None):
+def _save_pending_envelope(
+    store,
+    *,
+    approval_id,
+    order_count=1,
+    signal_run_id=None,
+    expires_in=timedelta(hours=1),
+):
     now = datetime.now(UTC)
     signal_run_id = signal_run_id or f"signal_{approval_id}"
     orders = [
@@ -112,7 +119,7 @@ def _save_pending_envelope(store, *, approval_id, order_count=1, signal_run_id=N
             approval_id=approval_id,
             run_id=f"run_{approval_id}",
             created_at=now,
-            expires_at=now + timedelta(hours=1),
+            expires_at=now + expires_in,
             channel="telegram",
             order_count=len(orders),
             estimated_notional=sum(order["notional"] for order in orders),
@@ -124,7 +131,7 @@ def _save_pending_envelope(store, *, approval_id, order_count=1, signal_run_id=N
         account_ids=["kis_ps"],
         reminder_seconds=[],
         created_at=now,
-        expires_at=now + timedelta(hours=1),
+        expires_at=now + expires_in,
         duplicate_key=f"telegram-approval-pending:{approval_id}",
     )
     store.save_system_event(
@@ -380,3 +387,187 @@ def test_legacy_ack_with_completion_evidence_is_not_isolated(tmp_path):
     assert store.list_system_events_by_type(
         "telegram_approval_needs_attention", limit=None
     ) == []
+
+
+def test_sweep_resumes_unresolved_approval_with_recorded_decision(tmp_path):
+    router, store = _router(tmp_path, resolve_error=ValueError("stale broker snapshot"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+
+    router._resolve_error = None  # 다음 시도는 성공한다
+    router._sweep_pending_approvals()
+
+    completed = _latest_payload(store, "telegram_approval_resolution_completed")
+    assert completed["approval_id"] == "appr_1"
+    assert completed["attempt"] == 2
+    # 운영자 재클릭 없이 기록된 결정을 그대로 썼다
+    assert router.resolved_decisions[-1].status == "approved"
+    assert router.resolved_decisions[-1].decided_by == "telegram:tester"
+
+
+def test_in_flight_attempt_blocks_a_second_entry(tmp_path):
+    """종료 기록이 없는 attempt가 있으면 다음 진입은 같은 번호를 계산해 거절된다."""
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+    _save_stale_resume_claim(store, approval_id="appr_1", attempt=2, age_seconds=10)
+
+    assert router._next_resume_attempt("appr_1") == 2
+    assert router._claim_resume(envelope, 2) is False
+
+    router._sweep_pending_approvals()
+    assert store.list_system_events_by_type(
+        "telegram_approval_resolution_completed", limit=None
+    ) == []
+
+
+def test_each_failed_attempt_records_a_finished_event(tmp_path):
+    router, store = _router(tmp_path, resolve_error=ValueError("boom"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+
+    router._sweep_pending_approvals()  # attempt 2 — 또 실패
+    router._sweep_pending_approvals()  # attempt 3
+
+    finished = store.list_system_events_by_type(
+        "telegram_approval_resume_finished", limit=None
+    )
+    assert sorted(row["payload"]["attempt"] for row in finished) == [2, 3]
+    assert {row["payload"]["outcome"] for row in finished} == {"failed"}
+
+
+def test_claim_abandoned_before_resolution_is_reclaimed(tmp_path):
+    """claim 직후 프로세스가 죽은 상황: lease 만료 후 재개가 이어져야 한다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+    _save_stale_resume_claim(store, approval_id="appr_1", attempt=2, age_seconds=1000)
+
+    router._sweep_pending_approvals()
+
+    outcomes = [
+        row["payload"]["outcome"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resume_finished", limit=None
+        )
+    ]
+    assert "abandoned" in outcomes
+    completed = _latest_payload(store, "telegram_approval_resolution_completed")
+    assert completed["attempt"] == 3
+
+
+def test_abandoned_attempts_do_not_consume_the_retry_budget(tmp_path):
+    """lease 회수만 반복되면 실제 집행은 한 번도 없었으므로 예산을 깎지 않는다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+    for attempt in range(2, 8):  # abandoned 6건 — _MAX_RESUME_ATTEMPT(4)를 넘는다
+        router._record_resume_finished(
+            run_id="run_appr_1", approval_id="appr_1", attempt=attempt, outcome="abandoned"
+        )
+
+    assert router._executed_resume_attempts("appr_1") == 0
+    router._sweep_pending_approvals()
+
+    # 예산이 남아 있으므로 실제 재개가 일어난다 (attention으로 빠지지 않는다)
+    assert _latest_payload(
+        store, "telegram_approval_resolution_completed"
+    )["approval_id"] == "appr_1"
+    assert store.list_system_events_by_type(
+        "telegram_approval_needs_attention", limit=None
+    ) == []
+
+
+def test_resume_survives_more_than_2000_intervening_events(tmp_path):
+    """정합성 판정이 조회 창 크기에 의존하지 않는다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+    for index in range(2100):
+        store.save_system_event(
+            "run_noise",
+            "telegram_approval_ack",
+            {"approval_id": f"appr_noise_{index}", "status": "approved", "schema_version": 2},
+        )
+
+    assert "appr_1" not in router._terminal_approval_ids()
+    router._sweep_pending_approvals()
+
+    assert _latest_payload(
+        store, "telegram_approval_resolution_completed"
+    )["approval_id"] == "appr_1"
+
+
+def test_repeated_resume_failures_stop_and_notify_operator(tmp_path):
+    router, store = _router(tmp_path, resolve_error=ValueError("boom"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+
+    for _ in range(6):
+        router._sweep_pending_approvals()
+
+    claims = store.list_system_events_by_type("telegram_approval_resume_claim", limit=20)
+    assert len(claims) == 3  # attempt 2,3,4 까지만 (_MAX_RESUME_ATTEMPT = 4)
+    assert any("확인이 필요" in message["text"] for message in router.client.sent_messages)
+    # 확인 필요 알림은 승인당 1회만 나간다
+    attention = store.list_system_events_by_type("telegram_approval_needs_attention", limit=10)
+    assert len(attention) == 1
+
+
+def test_approval_that_entered_execution_is_not_auto_resumed(tmp_path):
+    """approvals 행이 있으면 브로커 제출이 일어났을 수 있다 — fail-closed."""
+    router, store = _router(tmp_path, resolve_error=ValueError("broker timeout"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+    store.save_approval(envelope.run_id, "appr_1", {"decision": {"status": "approved"}})
+
+    router._sweep_pending_approvals()
+
+    assert store.list_system_events_by_type(
+        "telegram_approval_resume_claim", limit=None
+    ) == []
+    assert any(
+        "확인이 필요" in message["text"] for message in router.client.sent_messages
+    )
+
+
+def test_expired_approval_with_recorded_decision_is_owned_by_the_resume_path(tmp_path):
+    """만료 시각이 지났어도 결정이 기록됐으면 만료로 재판정하지 않는다.
+
+    ack duplicate_key 때문에 만료 경로는 매 poll마다 ValueError로 조용히
+    실패하기만 했다. 결정이 있는 승인은 재개 경로가 단독으로 소유한다.
+    """
+    router, store = _router(
+        tmp_path, resolve_error=ValueError("boom")
+    )
+    _save_pending_envelope(
+        store, approval_id="appr_1", expires_in=timedelta(seconds=-60)
+    )
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+
+    router._sweep_pending_approvals()
+
+    # 재개가 소유한다: attempt 2가 claim되고 실패로 종결된다
+    claims = store.list_system_events_by_type("telegram_approval_resume_claim", limit=None)
+    assert [row["payload"]["attempt"] for row in claims] == [2]
+    # 만료 재판정은 시도조차 하지 않는다
+    statuses = {
+        row["payload"].get("status")
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resolution_failed", limit=None
+        )
+    }
+    assert statuses == {"approved"}
+    assert router.resolved_decisions[-1].status == "approved"
