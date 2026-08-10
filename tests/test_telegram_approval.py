@@ -15,6 +15,7 @@ from maestro.core.enums import OrderSide, OrderStatus, RunMode
 from maestro.execution.base import OrderIntent
 from maestro.execution.live_orders import LiveOrderLifecycleNotification
 from maestro.integrations.telegram.bot import (
+    TelegramApprovalNotifier,
     TelegramApprovalService,
     TelegramBotAPIClient,
     TelegramLiveOrderNotificationClient,
@@ -775,3 +776,36 @@ def test_state_store_converts_approval_unique_conflict_to_value_error(
 
     with pytest.raises(ValueError, match="Approval decision already exists: appr_1"):
         store.save_approval("run_2", "appr_1", payload)
+
+
+def test_non_telegram_notifier_keeps_every_order_risk_and_account():
+    now = utc_now()
+    request = ApprovalRequest(
+        approval_id="appr_audit",
+        run_id="run_audit",
+        created_at=now,
+        expires_at=now + timedelta(seconds=30),
+        channel="console",
+        order_count=8,
+        estimated_notional=8000.0,
+        proposed_orders=[
+            {
+                "symbol": f"MOCK_ETF_{index}",
+                "side": "buy",
+                "notional": 1000.0,
+                "quantity": 1,
+                "account_id": f"kis_{index % 4}",
+            }
+            for index in range(8)
+        ],
+        risk_violations=["max_notional exceeded", "sector cap exceeded"],
+    )
+
+    message = TelegramApprovalNotifier().send_approval_request(request)
+
+    for index in range(8):
+        assert f"MOCK_ETF_{index}" in message
+    for index in range(4):
+        assert f"계좌: kis_{index}" in message
+    assert "max_notional exceeded" in message
+    assert "sector cap exceeded" in message

@@ -15,7 +15,7 @@ from maestro.execution.live_orders import (
     LiveOrderLifecycleNotification,
     LiveOrderNotificationClient,
 )
-from maestro.integrations.telegram.ui.cards import approval_detail_pages, render_approval_card
+from maestro.integrations.telegram.ui.cards import approval_detail_pages
 
 
 class TelegramBotClient(Protocol):
@@ -175,7 +175,9 @@ class TelegramApprovalNotifier:
     """No-network formatter used by non-Telegram approval providers."""
 
     def send_approval_request(self, request: ApprovalRequest) -> str:
-        return render_approval_card(request, expanded=False).text
+        # 이 경로에는 자세히 버튼도 길이 제한도 없다. 감사 기록에 남는 문구가
+        # 요약으로 줄어들지 않도록 펼친 뷰 전체를 이어 붙인다.
+        return "\n\n".join(approval_detail_pages(request))
 
 
 class TelegramLiveOrderNotificationClient(LiveOrderNotificationClient):
