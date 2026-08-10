@@ -126,8 +126,12 @@ Expected: FAIL — `TypeError: list_system_events_by_type() got an unexpected ke
         if since is not None:
             # idx_system_events_type_created가 (event_type, created_at)이므로
             # 시간 하한은 인덱스를 그대로 탄다.
+            # created_at은 SQLite DEFAULT CURRENT_TIMESTAMP가 쓰는
+            # "YYYY-MM-DD HH:MM:SS" 문자열이다 (마이크로초·오프셋 없음,
+            # list_system_events_in_range의 docstring 참조). 같은 포맷으로
+            # 맞추지 않으면 초 단위로 같은 행이 >= 비교에서 탈락한다.
             sql += " AND created_at >= ?"
-            values.append(since.isoformat(sep=" "))
+            values.append(since.strftime("%Y-%m-%d %H:%M:%S"))
         sql += " ORDER BY id DESC"
         if limit is not None:
             sql += " LIMIT ?"

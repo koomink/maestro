@@ -1343,8 +1343,10 @@ class StateStore:
         if since is not None:
             # idx_system_events_type_created가 (event_type, created_at)이므로
             # 시간 하한은 인덱스를 그대로 탄다.
+            # created_at is stored as YYYY-MM-DD HH:MM:SS (no microseconds)
+            # by SQLite DEFAULT CURRENT_TIMESTAMP, so format since the same way.
             sql += " AND created_at >= ?"
-            values.append(since.isoformat(sep=" "))
+            values.append(since.strftime("%Y-%m-%d %H:%M:%S"))
         sql += " ORDER BY id DESC"
         if limit is not None:
             sql += " LIMIT ?"

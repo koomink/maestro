@@ -23,3 +23,34 @@ def test_list_system_events_by_type_filters_by_since(tmp_path):
     )
 
     assert [row["payload"]["approval_id"] for row in rows] == ["new"]
+
+
+def test_list_system_events_by_type_includes_boundary_second(tmp_path):
+    """
+    Verify that a row whose created_at equals since (to the second) is included.
+    This tests the format boundary: created_at is stored as YYYY-MM-DD HH:MM:SS
+    (no microseconds), so since must be formatted the same way to match via >=.
+    """
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+
+    # Save the first event through the normal path to get real SQLite format
+    store.save_system_event("run_boundary", "telegram_approval_ack", {"approval_id": "boundary"})
+
+    # Fetch the row to get its exact created_at timestamp in SQLite format
+    rows = store.list_system_events_by_type("telegram_approval_ack", limit=None)
+    assert len(rows) == 1
+    created_at_str = rows[0]["created_at"]
+
+    # Parse it back to datetime (SQLite format: YYYY-MM-DD HH:MM:SS)
+    boundary_dt = datetime.strptime(created_at_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
+
+    # Query with since set to exactly the boundary second (no microseconds)
+    # The row should be included because created_at >= boundary_dt
+    result = store.list_system_events_by_type(
+        "telegram_approval_ack",
+        limit=None,
+        since=boundary_dt,
+    )
+
+    assert len(result) == 1
+    assert result[0]["payload"]["approval_id"] == "boundary"
