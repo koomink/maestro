@@ -75,6 +75,13 @@ from maestro.execution.order_builder import (
 )
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
+from maestro.integrations.telegram.ui import catalog as ui_catalog
+from maestro.integrations.telegram.ui.cards import (
+    approval_decision_text,
+    approval_markup,
+    approval_reminder_text,
+    render_approval_card,
+)
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
@@ -133,6 +140,23 @@ TELEGRAM_OPERATOR_COMMANDS: tuple[tuple[str, str], ...] = (
     ("recovery", "Show blocked workflows and safe recovery actions"),
     ("clear_halt", "Confirm recovery from a safety halt (runs preflight)"),
     ("kill_switch", "Confirm emergency live execution stop"),
+)
+
+TELEGRAM_UI_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("today", "오늘의 투자 현황"),
+    ("portfolio", "내 자산"),
+    ("system", "시스템 상태"),
+    ("history", "지난 기록"),
+    ("help", "도움말"),
+)
+
+# 메뉴(set_my_commands)에는 넣지 않지만 /help와 /system 버튼에서 항상 도달 가능해야 하는
+# 비상·복구 명령. 장애 중에도 운영자가 UI만으로 정지·복구할 수 있어야 한다.
+TELEGRAM_EMERGENCY_COMMANDS: tuple[tuple[str, str], ...] = (
+    ("pause", "실행 일시중지"),
+    ("kill_switch", "긴급 정지"),
+    ("clear_halt", "정지 해제 (사전 점검 실행)"),
+    ("recovery", "복구 센터"),
 )
 
 
@@ -232,6 +256,9 @@ class TelegramOperatorCommandRouter:
                 "status": self._status,
                 "health": self._health,
                 "signal": self._signal,
+                "today": self._signal,
+                "system": self._health,
+                "history": self._orders,
                 "account": self._account,
                 "portfolio": self._portfolio,
                 "apps": self._apps,
@@ -255,8 +282,12 @@ class TelegramOperatorCommandRouter:
         return True
 
     def poll_once(self, *, offset: int | None = None, timeout_seconds: int = 0) -> int | None:
-        self._sweep_pending_approvals()
-        self._sweep_recovery_notifications()
+        # sweep 실패가 update 폴링을 막으면 승인·거절 콜백을 영영 처리하지 못한다.
+        for sweep in (self._sweep_pending_approvals, self._sweep_recovery_notifications):
+            try:
+                sweep()
+            except Exception as exc:  # noqa: BLE001 - 폴링 루프를 막지 않는 것이 우선
+                self._record_update_failure(None, exc)
         response = self.client.get_updates(
             offset=offset,
             timeout_seconds=timeout_seconds,
@@ -365,6 +396,14 @@ class TelegramOperatorCommandRouter:
             self._edit_callback_message(callback, "Telegram command canceled.")
             self._record("/cancel", chat_id, user_id, username, "canceled")
             return True
+        if action.startswith("menu:"):
+            return self._process_menu_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
         if action.startswith("funding:"):
             return self._process_funding_callback(
                 callback,
@@ -421,6 +460,8 @@ class TelegramOperatorCommandRouter:
                 user_id,
                 username,
             )
+        if action.startswith("ui:"):
+            return self._process_ui_toggle(callback, action, chat_id, user_id, username)
         if action.startswith("appr:"):
             return self._process_async_approval_callback(
                 callback,
@@ -1307,6 +1348,79 @@ class TelegramOperatorCommandRouter:
         self._record("/retry_order", chat_id, user_id, username, "approved")
         return True
 
+    def _process_menu_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        """시스템 상태 카드의 비상 제어 버튼 → 기존 확인 절차로 연결한다."""
+        target = action.removeprefix("menu:")
+        handlers = {
+            "pause": self._pause,
+            "kill_switch": self._kill_switch,
+            "clear_halt": self._clear_halt,
+            "recovery": self._recovery,
+        }
+        handler = handlers.get(target)
+        if handler is None:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            return True
+        self._answer(callback, "")
+        handler(chat_id)
+        self._record(f"/{target}", chat_id, user_id, username, "menu_opened")
+        return True
+
+    def _process_ui_toggle(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        parts = action.split(":")
+        kind = parts[1] if len(parts) > 1 else ""
+        page = 0
+        if kind in {"d", "f"} and len(parts) == 3:
+            approval_id = parts[2]
+        elif kind == "p" and len(parts) == 4 and parts[3].isdigit():
+            approval_id = parts[2]
+            page = int(parts[3])
+        else:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            return True
+        envelope = self._pending_async_approval(approval_id)
+        if envelope is None:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            self._record("/approval", chat_id, user_id, username, "stale_callback")
+            return True
+        card = render_approval_card(
+            envelope.request,
+            expanded=kind in {"d", "p"},
+            page=page,
+        )
+        message = callback.get("message")
+        message_id = message.get("message_id") if isinstance(message, Mapping) else None
+        if message_id is None:
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
+            return True
+        try:
+            self.client.edit_message_text(
+                chat_id,
+                int(message_id),
+                card.text,
+                reply_markup=card.reply_markup,
+            )
+        except (RuntimeError, ValueError):
+            self._answer(callback, ui_catalog.CALLBACK_FAILED_TEXT)
+            return True
+        self._answer(callback, "")
+        self._record("/approval", chat_id, user_id, username, "ui_toggle")
+        return True
+
     def _process_async_approval_callback(
         self,
         callback: Mapping[str, Any],
@@ -1317,11 +1431,11 @@ class TelegramOperatorCommandRouter:
     ) -> bool:
         parts = action.split(":", 2)
         if len(parts) != 3 or parts[1] not in {"a", "r"}:
-            self._answer(callback, "This approval request is no longer active.")
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
             return True
         envelope = self._pending_async_approval(parts[2])
         if envelope is None:
-            self._answer(callback, "This approval request is no longer active.")
+            self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
             self._record("/approval", chat_id, user_id, username, "stale_callback")
             return True
         status = "approved" if parts[1] == "a" else "rejected"
@@ -1332,17 +1446,21 @@ class TelegramOperatorCommandRouter:
                 decided_by=f"telegram:{username or user_id}",
                 reason=f"Telegram button {status} callback.",
             )
-        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-            self._answer(callback, f"Approval failed: {exc}")
+        except (RuntimeError, TimeoutError, TypeError, ValueError):
+            self._answer(callback, ui_catalog.CALLBACK_FAILED_TEXT)
             self._record("/approval", chat_id, user_id, username, "failed")
             return True
-        self._answer(callback, f"Approval {status}.")
+        self._answer(
+            callback,
+            ui_catalog.ANSWER_APPROVED if status == "approved" else ui_catalog.ANSWER_REJECTED,
+        )
         self._edit_callback_message(
             callback,
-            (
-                f"Approval {status}\n"
-                f"approval_id: {envelope.approval_id}\n"
-                f"orders: {summary.orders_created}"
+            approval_decision_text(
+                status,
+                envelope.approval_id,
+                orders_submitted=summary.orders_submitted,
+                orders_failed=summary.orders_failed,
             ),
         )
         self._record("/approval", chat_id, user_id, username, status)
@@ -1415,16 +1533,25 @@ class TelegramOperatorCommandRouter:
                 limit=2000,
             )
         }
-        reminders = {
-            (
-                str(row["payload"].get("approval_id")),
-                int(row["payload"].get("reminder_seconds", 0)),
+        # 전송 완료는 chat_id 단위로 추적한다. 일부 채팅만 실패했을 때 성공한
+        # 채팅에 같은 리마인더를 다시 보내지 않기 위함.
+        # chat_id가 없는 과거 이벤트는 전체 채팅 완료로 간주한다 (하위 호환).
+        reminders: set[tuple[str, int]] = set()
+        chat_reminders: set[tuple[str, int, int]] = set()
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_reminder",
+            limit=5000,
+        ):
+            payload = row["payload"]
+            key = (
+                str(payload.get("approval_id")),
+                int(payload.get("reminder_seconds", 0)),
             )
-            for row in self.store.list_system_events_by_type(
-                "telegram_approval_reminder",
-                limit=5000,
-            )
-        }
+            chat_id = payload.get("chat_id")
+            if isinstance(chat_id, int):
+                chat_reminders.add((*key, chat_id))
+            else:
+                reminders.add(key)
         now = utc_now()
         for row in reversed(
             self.store.list_system_events_by_type(
@@ -1454,26 +1581,36 @@ class TelegramOperatorCommandRouter:
                 if elapsed < reminder_seconds or key in reminders:
                     continue
                 for chat_id in self.config.approval.telegram_allowed_chat_ids:
-                    self._send(
-                        chat_id,
-                        f"Approval reminder ({reminder_seconds // 60}m)\n\n{envelope.message}",
-                        reply_markup=_async_approval_markup(envelope.approval_id),
+                    if (*key, chat_id) in chat_reminders:
+                        continue
+                    try:
+                        self._send(
+                            chat_id,
+                            approval_reminder_text(reminder_seconds // 60, envelope.message),
+                            reply_markup=approval_markup(envelope.approval_id, expanded=False),
+                        )
+                    except (RuntimeError, TimeoutError, ValueError) as exc:
+                        # 리마인더 하나가 실패해도 만료 처리·콜백 폴링까지 막지 않는다.
+                        # 해당 채팅만 완료로 기록하지 않아 다음 poll에서 재시도한다.
+                        self._record_update_failure(None, exc)
+                        continue
+                    save_audited_system_event(
+                        self.store,
+                        self.audit,
+                        envelope.run_id,
+                        "telegram_approval_reminder",
+                        {
+                            "approval_id": envelope.approval_id,
+                            "reminder_seconds": reminder_seconds,
+                            "chat_id": chat_id,
+                            "sent_at": now.isoformat(),
+                            "duplicate_key": (
+                                "telegram-approval-reminder:"
+                                f"{envelope.approval_id}:{reminder_seconds}:{chat_id}"
+                            ),
+                        },
                     )
-                save_audited_system_event(
-                    self.store,
-                    self.audit,
-                    envelope.run_id,
-                    "telegram_approval_reminder",
-                    {
-                        "approval_id": envelope.approval_id,
-                        "reminder_seconds": reminder_seconds,
-                        "sent_at": now.isoformat(),
-                        "duplicate_key": (
-                            f"telegram-approval-reminder:{envelope.approval_id}:{reminder_seconds}"
-                        ),
-                    },
-                )
-                reminders.add(key)
+                    chat_reminders.add((*key, chat_id))
 
     def _sweep_recovery_notifications(self) -> None:
         safety = SafetyControlService(self.store, self.audit).current_state()
@@ -2873,11 +3010,22 @@ class TelegramOperatorCommandRouter:
             chat_id,
             "\n".join(
                 [
-                    "Maestro Telegram commands",
+                    "Maestro 명령어",
                     *[
                         f"/{command} - {description}"
-                        for command, description in TELEGRAM_OPERATOR_COMMANDS
+                        for command, description in TELEGRAM_UI_COMMANDS
                     ],
+                    "",
+                    "⚠️ 비상 조치 (메뉴에는 없지만 언제든 입력할 수 있어요)",
+                    *[
+                        f"/{command} - {description}"
+                        for command, description in TELEGRAM_EMERGENCY_COMMANDS
+                    ],
+                    "",
+                    "이런 알림이 올 수 있어요:",
+                    "- 📩 투자 승인 요청 (버튼으로 승인/거절)",
+                    "- ⏰ 승인 응답 리마인더",
+                    "- ⚠️ 확인이 필요한 상황 안내",
                 ]
             ),
         )
@@ -2937,7 +3085,8 @@ class TelegramOperatorCommandRouter:
         ]
         for check in problem_checks[:5]:
             lines.append(f"{check['check']}: {check['status']} {check['message']}")
-        self._send(chat_id, "\n".join(lines))
+        # 메뉴에서 사라진 비상 제어를 시스템 상태 카드에서만 노출한다.
+        self._send(chat_id, "\n".join(lines), reply_markup=_emergency_menu_markup())
 
     def _signal(self, chat_id: int) -> None:
         signal = build_latest_signal_package_card(self.store)
@@ -3963,6 +4112,29 @@ def _user_identity(user: object) -> tuple[int | None, str | None]:
     )
 
 
+def _emergency_menu_markup() -> dict[str, Any]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "⏸ 일시중지",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}menu:pause",
+                },
+                {
+                    "text": "🛑 긴급정지",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}menu:kill_switch",
+                },
+            ],
+            [
+                {
+                    "text": "🛟 복구 센터",
+                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}menu:recovery",
+                },
+            ],
+        ]
+    }
+
+
 def _confirmation_markup(action: str) -> dict[str, Any]:
     return {
         "inline_keyboard": [
@@ -4031,23 +4203,6 @@ def _workflow_recovery_markup(
                 }
             ],
             [{"text": "Cancel", "callback_data": f"{OPERATOR_CALLBACK_PREFIX}cancel"}],
-        ]
-    }
-
-
-def _async_approval_markup(approval_id: str) -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "Approve",
-                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}appr:a:{approval_id}",
-                },
-                {
-                    "text": "Reject",
-                    "callback_data": f"{OPERATOR_CALLBACK_PREFIX}appr:r:{approval_id}",
-                },
-            ]
         ]
     }
 
@@ -4595,29 +4750,12 @@ def _operator_time(value: object, config: MaestroConfig) -> str:
 
 
 def telegram_bot_commands(signal_config: MaestroConfig | None = None) -> list[dict[str, str]]:
-    commands = [
+    # 메뉴에는 UI 명령 5개만 노출한다. 기존 20개와 per-strategy 명령은
+    # 타이핑하면 여전히 동작한다 (signal_config 인자는 하위 호환용으로 유지).
+    return [
         {"command": command, "description": description}
-        for command, description in TELEGRAM_OPERATOR_COMMANDS
+        for command, description in TELEGRAM_UI_COMMANDS
     ]
-    if signal_config is None:
-        return commands
-    seen = {command["command"] for command in commands}
-    for strategy in signal_config.strategies:
-        if not strategy.enabled or not strategy.signal_enabled:
-            continue
-        display_name = _telegram_strategy_display_name(strategy.id)
-        for command, description in (
-            (_primary_signal_command(strategy.id), f"Generate {display_name} signal"),
-            (
-                _primary_rebalance_command(strategy.id),
-                f"Run {display_name} manual rebalance",
-            ),
-        ):
-            if command in seen:
-                continue
-            seen.add(command)
-            commands.append({"command": command, "description": description})
-    return commands
 
 
 def _strategy_id_for_signal_command(command: str, config: MaestroConfig) -> str | None:

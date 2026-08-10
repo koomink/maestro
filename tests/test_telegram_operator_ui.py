@@ -324,14 +324,17 @@ def test_telegram_rebalance_usage_lists_available_commands(tmp_path, monkeypatch
     assert "/rebalance_crescendo - Crescendo" in text
 
 
-def test_telegram_bot_commands_include_rebalance_commands(tmp_path):
+def test_telegram_bot_commands_hide_rebalance_and_signal_commands_from_menu(tmp_path):
+    # 메뉴에는 UI 명령 5개만 노출한다. per-strategy 명령은 타이핑하면 여전히
+    # 동작하지만 메뉴에는 등록하지 않는다.
     signal_config = load_config(_telegram_signal_config_path(tmp_path))
 
     commands = {item["command"] for item in telegram_bot_commands(signal_config)}
 
-    assert "rebalance_tranquillo" in commands
-    assert "rebalance_crescendo" in commands
-    assert "signal_tranquillo" in commands
+    assert "rebalance_tranquillo" not in commands
+    assert "rebalance_crescendo" not in commands
+    assert "signal_tranquillo" not in commands
+    assert commands == {"today", "portfolio", "system", "history", "help"}
 
 
 def test_telegram_operator_funding_complete_regenerates_signal_and_creates_approval(tmp_path):
@@ -1072,7 +1075,7 @@ def test_telegram_operator_read_commands_send_state_responses(tmp_path):
         assert router.process_update(message_update(command))
 
     sent_text = "\n\n".join(message["text"] for message in client.sent_messages)
-    assert "Maestro Telegram commands" in sent_text
+    assert "Maestro 명령어" in sent_text
     assert "Maestro status" in sent_text
     assert "maestro_cash:" not in sent_text
     assert "maestro_positions:" not in sent_text
@@ -2153,15 +2156,13 @@ def test_telegram_operator_poll_once_routes_updates(tmp_path):
     assert client.sent_messages[-1]["text"].startswith("Maestro status")
 
 
-def test_telegram_bot_commands_cover_operator_commands():
+def test_telegram_bot_commands_hide_legacy_operator_commands_from_menu():
     commands = telegram_bot_commands()
 
-    assert {"command": "status", "description": "Show Maestro status summary"} in commands
-    assert {"command": "health", "description": "Show health checks"} in commands
-    assert {
-        "command": "kill_switch",
-        "description": "Confirm emergency live execution stop",
-    } in commands
+    names = {item["command"] for item in commands}
+    assert "status" not in names
+    assert "health" not in names
+    assert "kill_switch" not in names
     assert all(not item["command"].startswith("/") for item in commands)
 
 
@@ -2241,39 +2242,14 @@ def test_telegram_operator_cli_passes_signal_config_to_router(tmp_path, monkeypa
     assert captured["timeout_seconds"] == 0
 
 
-def test_telegram_bot_commands_include_signal_generation_commands(tmp_path):
+def test_telegram_bot_commands_do_not_expose_signal_commands_in_menu(tmp_path):
+    # 메뉴는 signal_config와 무관하게 UI 명령 5개로 고정된다.
     signal_config = load_config(_telegram_signal_config_path(tmp_path))
 
     commands = telegram_bot_commands(signal_config)
 
-    assert {"command": "signal_tranquillo", "description": "Generate Tranquillo signal"} in commands
-    assert {"command": "signal_crescendo", "description": "Generate Crescendo signal"} in commands
-    assert {
-        "command": "signal_crescendo_us",
-        "description": "Generate Crescendo signal",
-    } not in commands
-
-
-def test_telegram_bot_commands_do_not_expose_legacy_signal_aliases(tmp_path):
-    config_path = _telegram_signal_config_path(tmp_path)
-    raw = yaml.safe_load(config_path.read_text())
-    raw["strategies"][0]["id"] = "ataraxia"
-    raw["strategies"][1]["id"] = "snowball_us"
-    config_path.write_text(yaml.safe_dump(raw))
-    signal_config = load_config(config_path)
-
-    commands = telegram_bot_commands(signal_config)
-
-    assert {"command": "signal_tranquillo", "description": "Generate Tranquillo signal"} in commands
-    assert {"command": "signal_crescendo", "description": "Generate Crescendo signal"} in commands
-    assert {
-        "command": "signal_ataraxia",
-        "description": "Generate Tranquillo signal",
-    } not in commands
-    assert {
-        "command": "signal_snowball_us",
-        "description": "Generate Crescendo signal",
-    } not in commands
+    assert commands == telegram_bot_commands()
+    assert all(not item["command"].startswith("signal_") for item in commands)
 
 
 def test_telegram_operator_cli_rejects_placeholder_chat_ids(tmp_path):
@@ -2352,7 +2328,7 @@ def test_async_approval_rejection_is_persisted_once(tmp_path):
     acknowledgements = store.list_system_events_by_type("telegram_approval_ack")
     assert len(acknowledgements) == 1
     assert acknowledgements[0]["payload"]["status"] == "rejected"
-    assert client.answered_callbacks[-1]["text"] == ("This approval request is no longer active.")
+    assert client.answered_callbacks[-1]["text"] == "이미 처리됐거나 만료된 요청이에요."
 
 
 def test_async_approval_reminders_are_sent_once(monkeypatch, tmp_path):
@@ -2387,7 +2363,94 @@ def test_async_approval_reminders_are_sent_once(monkeypatch, tmp_path):
 
     reminders = store.list_system_events_by_type("telegram_approval_reminder")
     assert sorted(row["payload"]["reminder_seconds"] for row in reminders) == [120, 300]
-    assert len([item for item in client.sent_messages if "Approval reminder" in item["text"]]) == 2
+    assert (
+        len(
+            [
+                item
+                for item in client.sent_messages
+                if "아직 응답을 기다리고 있어요" in item["text"]
+            ]
+        )
+        == 2
+    )
+
+
+def test_reminder_send_failure_does_not_block_approval_callbacks(monkeypatch, tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    class SendFailingTelegramClient(FakeTelegramClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            raise RuntimeError("Telegram Bot API returned not ok for method: sendMessage")
+
+    envelope = _pending_approval_envelope(reminder_seconds=[120])
+    client = SendFailingTelegramClient(
+        [callback_update(f"operator:appr:r:{envelope.approval_id}")]
+    )
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        envelope.run_id,
+        "telegram_approval_pending",
+        envelope.model_dump(mode="json"),
+    )
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.utc_now",
+        lambda: envelope.created_at + timedelta(seconds=121),
+    )
+
+    router.poll_once(timeout_seconds=0)
+
+    # 리마인더 전송이 실패해도 승인/거절 콜백은 계속 처리되어야 한다.
+    assert client.answered_callbacks[-1]["text"] == "거절했어요."
+    # 실패한 리마인더는 전송 완료로 기록하지 않아 다음 poll에서 재시도된다.
+    assert store.list_system_events_by_type("telegram_approval_reminder") == []
+
+
+def test_reminder_is_not_resent_to_chats_that_already_received_it(monkeypatch, tmp_path):
+    class SecondChatFailingClient(FakeTelegramClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            if chat_id == 200:
+                raise RuntimeError("Telegram Bot API returned not ok for method: sendMessage")
+            return super().send_message(chat_id, text, reply_markup=reply_markup)
+
+    config = load_config(_telegram_config_path(tmp_path))
+    config.approval.telegram_allowed_chat_ids = [100, 200]
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = SecondChatFailingClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    envelope = _pending_approval_envelope(reminder_seconds=[120])
+    store.save_system_event(
+        envelope.run_id,
+        "telegram_approval_pending",
+        envelope.model_dump(mode="json"),
+    )
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.utc_now",
+        lambda: envelope.created_at + timedelta(seconds=121),
+    )
+
+    router.poll_once(timeout_seconds=0)
+    router.poll_once(timeout_seconds=0)
+    router.poll_once(timeout_seconds=0)
+
+    delivered = [
+        item
+        for item in client.sent_messages
+        if item["chat_id"] == 100 and "아직 응답을 기다리고 있어요" in item["text"]
+    ]
+    assert len(delivered) == 1  # 성공한 채팅에는 한 번만 간다
 
 
 def test_expired_contribution_order_is_recoverable_but_open_order_is_not(tmp_path):
@@ -3059,3 +3122,243 @@ def _telegram_live_readonly_config_path(tmp_path) -> Path:
     config_path = tmp_path / "telegram_live_readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+def test_dispatch_uses_korean_approval_card():
+    from maestro.orchestration import orchestrator as orch
+
+    assert orch.render_approval_card is not None
+
+
+def test_ui_detail_callback_expands_approval_card(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    handled = router.process_update(
+        callback_update(f"operator:ui:d:{envelope.approval_id}")
+    )
+
+    assert handled
+    edited = client.edited_messages[-1]
+    assert envelope.approval_id in edited["text"]  # 펼친 뷰에는 ID 노출
+    assert "  계좌: paper" in edited["text"]  # 펼친 뷰에는 계좌 ID 노출
+    fold_row = edited["reply_markup"]["inline_keyboard"][1][0]
+    assert fold_row["callback_data"] == f"operator:ui:f:{envelope.approval_id}"
+
+    handled = router.process_update(
+        callback_update(f"operator:ui:f:{envelope.approval_id}", update_id=3)
+    )
+    assert handled
+    folded = client.edited_messages[-1]
+    assert envelope.approval_id not in folded["text"]  # 접힌 뷰에는 ID 숨김
+
+
+def test_ui_detail_callback_for_stale_approval_answers_only(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    handled = router.process_update(callback_update("operator:ui:d:appr_missing"))
+
+    assert handled
+    assert client.edited_messages == []
+    assert client.answered_callbacks[-1]["text"] == "이미 처리됐거나 만료된 요청이에요."
+
+
+def test_approval_callback_edits_card_with_korean_result(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    handled = router.process_update(
+        callback_update(f"operator:appr:r:{envelope.approval_id}")
+    )
+
+    assert handled
+    assert client.answered_callbacks[-1]["text"] == "거절했어요."
+    assert client.edited_messages[-1]["text"].startswith("❌ 거절했어요")
+
+
+def test_ui_page_callback_moves_between_detail_pages(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    template = envelope.request.proposed_orders[0]
+    orders = [
+        dict(template, symbol=f"SYM{index:04d}", name=f"종목 {index}") for index in range(120)
+    ]
+    envelope = envelope.model_copy(
+        update={
+            "request": envelope.request.model_copy(
+                update={"proposed_orders": orders, "order_count": len(orders)}
+            )
+        }
+    )
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    assert router.process_update(callback_update(f"operator:ui:d:{envelope.approval_id}"))
+    first_page = client.edited_messages[-1]
+    next_button = [
+        button
+        for row in first_page["reply_markup"]["inline_keyboard"]
+        for button in row
+        if button["callback_data"].startswith(f"operator:ui:p:{envelope.approval_id}:")
+    ]
+    assert next_button
+
+    assert router.process_update(
+        callback_update(next_button[-1]["callback_data"], update_id=3)
+    )
+    second_page = client.edited_messages[-1]
+    assert second_page["text"] != first_page["text"]
+    assert "2/" in second_page["text"]  # 쪽 표시
+
+
+def test_approval_callback_does_not_claim_submission_without_submitted_orders(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    handled = router.process_update(
+        callback_update(f"operator:appr:a:{envelope.approval_id}")
+    )
+
+    assert handled
+    edited = client.edited_messages[-1]["text"]
+    assert "접수했어요" not in edited  # 제출되지 않은 주문을 접수로 보고하지 않는다
+    assert edited.startswith("⚠️")
+
+
+def test_telegram_bot_commands_registers_only_five_korean_commands():
+    commands = telegram_bot_commands()
+    assert commands == [
+        {"command": "today", "description": "오늘의 투자 현황"},
+        {"command": "portfolio", "description": "내 자산"},
+        {"command": "system", "description": "시스템 상태"},
+        {"command": "history", "description": "지난 기록"},
+        {"command": "help", "description": "도움말"},
+    ]
+
+
+def test_new_command_aliases_route_to_existing_handlers(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/system"))
+    system_text = client.sent_messages[-1]["text"]
+    assert router.process_update(message_update("/health", update_id=5))
+    health_text = client.sent_messages[-1]["text"]
+    # 별칭은 기존 핸들러와 동일 형식 (타임스탬프가 달라질 수 있어 첫 줄만 비교)
+    assert system_text.splitlines()[0] == health_text.splitlines()[0]
+
+
+def test_help_is_korean_and_lists_five_commands(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/help"))
+    text = client.sent_messages[-1]["text"]
+    assert "/today" in text and "/portfolio" in text and "/system" in text
+    assert "/history" in text and "/help" in text
+    assert "이런 알림이 올 수 있어요" in text
+
+
+def test_help_keeps_emergency_commands_discoverable(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/help"))
+    text = client.sent_messages[-1]["text"]
+    for command in ("/pause", "/kill_switch", "/clear_halt", "/recovery"):
+        assert command in text
+
+
+def test_system_card_exposes_emergency_buttons(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(message_update("/system"))
+    markup = client.sent_messages[-1]["reply_markup"]
+    callbacks = {
+        button["callback_data"]
+        for row in markup["inline_keyboard"]
+        for button in row
+    }
+    assert "operator:menu:pause" in callbacks
+    assert "operator:menu:kill_switch" in callbacks
+    assert "operator:menu:recovery" in callbacks
+
+
+def test_system_pause_button_opens_confirmation(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+
+    assert router.process_update(callback_update("operator:menu:pause"))
+    sent = client.sent_messages[-1]
+    assert "Confirm pause" in sent["text"]
+    assert sent["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == (
+        "operator:confirm:pause"
+    )

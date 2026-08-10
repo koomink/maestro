@@ -58,7 +58,10 @@ def test_tranquillo_live_approval_reaches_telegram_approval_and_live_order_lifec
     summary = orchestrator.run_once()
 
     assert summary.orders_created == 2
-    assert any("Maestro Approval" in message["text"] for message in telegram_client.sent_messages)
+    assert any(
+        "📩 투자 주문을 진행할까요?" in message["text"]
+        for message in telegram_client.sent_messages
+    )
     assert len(live_client.requests) == 2
     assert {request.symbol for request in live_client.requests} == {
         "TIGER_NASDAQ100_LEVERAGE",

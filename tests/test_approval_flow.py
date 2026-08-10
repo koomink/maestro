@@ -18,7 +18,7 @@ def test_approval_required_approved_executes_orders(tmp_path):
     assert summary.cash == 5000000
     assert store.status()["counts"]["approvals"] == 1
     assert approvals[0]["payload"]["decision"]["status"] == "approved"
-    assert "🔔 Maestro Approval" in approvals[0]["payload"]["message"]
+    assert "📩 투자 주문을 진행할까요?" in approvals[0]["payload"]["message"]
 
 
 def test_approval_required_rejected_skips_execution(tmp_path):

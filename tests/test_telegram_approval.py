@@ -15,11 +15,13 @@ from maestro.core.enums import OrderSide, OrderStatus, RunMode
 from maestro.execution.base import OrderIntent
 from maestro.execution.live_orders import LiveOrderLifecycleNotification
 from maestro.integrations.telegram.bot import (
+    TelegramApprovalNotifier,
     TelegramApprovalService,
     TelegramBotAPIClient,
     TelegramLiveOrderNotificationClient,
 )
 from maestro.integrations.telegram.formatter import format_approval_request
+from maestro.integrations.telegram.ui.cards import TELEGRAM_TEXT_LIMIT, telegram_text_length
 from maestro.state.store import StateStore
 
 
@@ -197,13 +199,10 @@ def test_telegram_service_sends_request_and_receives_approval():
             ]
         ]
     }
-    assert "📋 Order Details" in message
-    assert "1. 🟢 BUY · unknown" in message
-    assert "종목: MOCK_ETF_A" in message
-    assert "금액: 600.00" in message
+    assert message.startswith("📩 투자 주문을 진행할까요?")
+    assert "MOCK_ETF_A" in message
     assert "approve appr_test" not in message
     assert "reject appr_test" not in message
-    assert "✅ Tap Approve to submit, or Reject to stop this proposal." in message
 
 
 def test_telegram_approval_message_shows_order_details_and_strategy_source():
@@ -295,8 +294,8 @@ def test_approval_manager_records_source_strategy_ids():
     assert message is not None
     assert request.source_strategy_ids == ["strategy_a", "strategy_b"]
     assert request.profile_name == "kis_brokerage_us"
-    assert "📁 Profile: kis_brokerage_us" in message
-    assert "🧠 Strategy: strategy_a, strategy_b" in message
+    assert message.startswith("📩 투자 주문을 진행할까요?")
+    assert "strategy_a, strategy_b 전략" in message
 
 
 def test_approval_formatter_shows_operator_profile_name():
@@ -305,6 +304,40 @@ def test_approval_formatter_shows_operator_profile_name():
     message = format_approval_request(request)
 
     assert "📁 Profile: kis_brokerage_us" in message
+
+
+def test_telegram_service_sends_every_order_and_risk_reason_before_buttons():
+    orders = [
+        {"symbol": f"MOCK_{index:03d}", "side": "buy", "notional": 100.0, "quantity": 1}
+        for index in range(40)
+    ]
+    request = approval_request().model_copy(
+        update={
+            "proposed_orders": orders,
+            "order_count": len(orders),
+            "risk_violations": [f"위반 사유 {index}" for index in range(10)],
+        }
+    )
+    client = FakeTelegramClient([callback_update(f"approve:{request.approval_id}")])
+    service = TelegramApprovalService(
+        client=client,
+        chat_ids=[100],
+        allowed_user_ids=[10],
+        poll_interval_seconds=0,
+    )
+
+    _, message = service.request_decision(request)
+
+    sent_text = "\n".join(item["text"] for item in client.sent_messages)
+    for index in range(40):
+        assert f"MOCK_{index:03d}" in sent_text  # 승인 전에 모든 주문을 볼 수 있어야 한다
+    for index in range(10):
+        assert f"위반 사유 {index}" in sent_text  # 위험 사유 원문도 노출
+    for item in client.sent_messages:
+        assert telegram_text_length(item["text"]) <= TELEGRAM_TEXT_LIMIT
+    assert client.sent_messages[-1]["reply_markup"] is not None  # 버튼은 마지막 메시지에
+    assert all(item["reply_markup"] is None for item in client.sent_messages[:-1])
+    assert "MOCK_039" in message
 
 
 def test_telegram_service_receives_button_approval():
@@ -743,3 +776,36 @@ def test_state_store_converts_approval_unique_conflict_to_value_error(
 
     with pytest.raises(ValueError, match="Approval decision already exists: appr_1"):
         store.save_approval("run_2", "appr_1", payload)
+
+
+def test_non_telegram_notifier_keeps_every_order_risk_and_account():
+    now = utc_now()
+    request = ApprovalRequest(
+        approval_id="appr_audit",
+        run_id="run_audit",
+        created_at=now,
+        expires_at=now + timedelta(seconds=30),
+        channel="console",
+        order_count=8,
+        estimated_notional=8000.0,
+        proposed_orders=[
+            {
+                "symbol": f"MOCK_ETF_{index}",
+                "side": "buy",
+                "notional": 1000.0,
+                "quantity": 1,
+                "account_id": f"kis_{index % 4}",
+            }
+            for index in range(8)
+        ],
+        risk_violations=["max_notional exceeded", "sector cap exceeded"],
+    )
+
+    message = TelegramApprovalNotifier().send_approval_request(request)
+
+    for index in range(8):
+        assert f"MOCK_ETF_{index}" in message
+    for index in range(4):
+        assert f"계좌: kis_{index}" in message
+    assert "max_notional exceeded" in message
+    assert "sector cap exceeded" in message

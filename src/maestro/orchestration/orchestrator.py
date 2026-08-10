@@ -94,7 +94,7 @@ from maestro.execution.rotation_cohort import (
 )
 from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.integrations.telegram.bot import TelegramBotAPIClient
-from maestro.integrations.telegram.formatter import format_approval_request
+from maestro.integrations.telegram.ui.cards import render_approval_card
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.ops.readonly_refresh import (
     latest_snapshot_for_account,
@@ -991,7 +991,8 @@ class MaestroOrchestrator:
             )
             if request is None:
                 raise ValueError("live_approval mode requires an approval request")
-            message = format_approval_request(request)
+            card = render_approval_card(request, expanded=False)
+            message = card.text
             envelope = PendingApprovalEnvelope(
                 approval_id=request.approval_id,
                 run_id=run_id,
@@ -1013,7 +1014,7 @@ class MaestroOrchestrator:
                 "telegram_approval_pending",
                 envelope.model_dump(mode="json"),
             )
-            markup = _async_approval_markup(request.approval_id)
+            markup = card.reply_markup
             for chat_id in self.config.approval.telegram_allowed_chat_ids:
                 client.send_message(chat_id, message, reply_markup=markup)
             pending_count += 1
@@ -4687,23 +4688,6 @@ def _profile_name(config_identity: ConfigIdentity | None) -> str | None:
     if config_identity is None:
         return None
     return Path(config_identity.path).stem
-
-
-def _async_approval_markup(approval_id: str) -> dict[str, Any]:
-    return {
-        "inline_keyboard": [
-            [
-                {
-                    "text": "Approve",
-                    "callback_data": f"operator:appr:a:{approval_id}",
-                },
-                {
-                    "text": "Reject",
-                    "callback_data": f"operator:appr:r:{approval_id}",
-                },
-            ]
-        ]
-    }
 
 
 def _parse_signal_ref_time(value: str) -> datetime:
