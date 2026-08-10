@@ -57,13 +57,16 @@ telegram_approval_resolution_failed  {"error_message": "Signal package stale bro
 | 파일 | 책임 | 변경 |
 |---|---|---|
 | `src/maestro/state/store.py` | `list_system_events_by_type`에 `since` 시간 경계 | 수정 (인자 1개 추가) |
-| `src/maestro/integrations/telegram/handlers.py` | ack에 schema_version, completed 기록, 종결 판정 단일화, sweep 재개·claim 회수·legacy 격리 | 수정 (메서드 9개 추가, 3곳 치환) |
+| `src/maestro/integrations/telegram/handlers.py` | ack에 schema_version, completed 기록, 종결 판정 단일화, sweep 재개·claim 회수·legacy 격리 | 수정 (메서드 10개 추가, 3곳 치환) |
 | `src/maestro/integrations/telegram/ui/catalog.py` | 확인 필요·브로커 대조 문구 | 수정 (상수 2개 추가) |
+| `src/maestro/orchestration/orchestrator.py` | `signal_approval_completed`에 approval_id 기록 | 수정 (payload 1줄) |
+| `src/maestro/cli.py` | 롤백 preflight 명령 | 수정 (명령 1개 추가) |
 | `tests/test_state_store.py` | `since` 필터 | 수정 (테스트 1건 추가) |
 | `tests/test_telegram_approval_resume.py` | 2단계 영속화·재개·claim 회수·legacy 격리·롤백 위험 상태 | **신규** |
+| `tests/test_cli_approval_preflight.py` | 롤백 preflight | **신규** |
 | `tests/test_telegram_operator_ui.py` | 기존 승인 콜백 회귀 | 수정 (판정 변경분) |
 
-`src/maestro/orchestration/orchestrator.py`는 **수정하지 않는다** — 필요한 `approval_exists`(`state/store.py:1146`)가 이미 있고, `save_approval`을 get-or-create로 바꿀 이유도 없다(자동 재개는 행이 없을 때만 일어난다).
+`save_approval`을 get-or-create로 바꾸지는 **않는다** — 자동 재개는 approvals 행이 없을 때만 일어나므로 불필요하고, "행 존재 = 집행 진입" 불변식을 약화시킨다.
 
 ---
 
@@ -251,8 +254,9 @@ def _router(tmp_path, *, resolve_error=None):
     return router, store
 
 
-def _save_pending_envelope(store, *, approval_id, order_count=1):
+def _save_pending_envelope(store, *, approval_id, order_count=1, signal_run_id=None):
     now = datetime.now(UTC)
+    signal_run_id = signal_run_id or f"signal_{approval_id}"
     orders = [
         {
             "order_id": f"ord_{approval_id}_{index}",
@@ -266,7 +270,7 @@ def _save_pending_envelope(store, *, approval_id, order_count=1):
     envelope = PendingApprovalEnvelope(
         approval_id=approval_id,
         run_id=f"run_{approval_id}",
-        signal_run_id=f"signal_{approval_id}",
+        signal_run_id=signal_run_id,
         request=ApprovalRequest(
             approval_id=approval_id,
             run_id=f"run_{approval_id}",
@@ -707,6 +711,67 @@ def test_legacy_ack_with_approvals_row_but_no_completion_needs_reconciliation(tm
     )) == 1
 
 
+def test_one_completed_group_does_not_hide_another_unresolved_group(tmp_path):
+    """한 signal run이 여러 승인 그룹으로 나뉜 경우(다중 계좌·다중 전략).
+    A 그룹이 완료됐다고 B 그룹의 유실이 가려지면 안 된다."""
+    router, store = _router(tmp_path)
+    signal_run_id = "signal_shared"
+    envelope_a = _save_pending_envelope(
+        store, approval_id="appr_a", signal_run_id=signal_run_id
+    )
+    _save_pending_envelope(store, approval_id="appr_b", signal_run_id=signal_run_id)
+    _save_ack(store, approval_id="appr_a", status="approved")
+    _save_ack(store, approval_id="appr_b", status="approved")
+    # A만 완료 — 구 이벤트라 approval_id가 없다
+    store.save_system_event(
+        envelope_a.run_id,
+        "signal_approval_completed",
+        {"signal_run_id": signal_run_id, "approval_status": "approved"},
+    )
+
+    router._sweep_pending_approvals()
+
+    # 그룹이 둘이라 어느 쪽 완료인지 모호하다 → 둘 다 알린다 (침묵보다 낫다)
+    notified = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_needs_attention", limit=None
+        )
+    }
+    assert notified == {"appr_a", "appr_b"}
+
+
+def test_completion_with_approval_id_matches_exactly(tmp_path):
+    """신규 완료 이벤트는 approval_id가 있어 그룹 추론이 필요 없다."""
+    router, store = _router(tmp_path)
+    signal_run_id = "signal_shared"
+    envelope_a = _save_pending_envelope(
+        store, approval_id="appr_a", signal_run_id=signal_run_id
+    )
+    _save_pending_envelope(store, approval_id="appr_b", signal_run_id=signal_run_id)
+    _save_ack(store, approval_id="appr_a", status="approved")
+    _save_ack(store, approval_id="appr_b", status="approved")
+    store.save_system_event(
+        envelope_a.run_id,
+        "signal_approval_completed",
+        {
+            "approval_id": "appr_a",
+            "signal_run_id": signal_run_id,
+            "approval_status": "approved",
+        },
+    )
+
+    router._sweep_pending_approvals()
+
+    notified = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_needs_attention", limit=None
+        )
+    }
+    assert notified == {"appr_b"}  # A는 완료가 증명됐다
+
+
 def test_legacy_ack_with_completion_evidence_is_not_isolated(tmp_path):
     """완료 기록이 있으면 정상 종결이다 — 알리지 않는다."""
     router, store = _router(tmp_path)
@@ -786,13 +851,7 @@ APPROVAL_NEEDS_RECONCILIATION = (
         approvals 행 유무는 침묵의 근거가 아니라 문구를 가르는 기준이다 — 행이
         있는데 완료가 없으면 브로커 제출 중·직후에 중단된 가장 위험한 상태다.
         """
-        completed_signal_runs = {
-            str(row["payload"].get("signal_run_id"))
-            for row in self.store.list_system_events_by_type(
-                "signal_approval_completed",
-                since=self._consistency_since(),
-            )
-        }
+        completed = self._completed_legacy_approval_ids()
         envelopes = {
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
@@ -809,15 +868,57 @@ APPROVAL_NEEDS_RECONCILIATION = (
                 continue  # 신규 스키마는 재개 경로가 처리한다
             approval_id = str(ack.get("approval_id"))
             payload = envelopes.get(approval_id)
-            if payload is None:
-                continue
-            envelope = PendingApprovalEnvelope.model_validate(payload)
-            if envelope.signal_run_id in completed_signal_runs:
-                continue  # 정상 종결
+            if payload is None or approval_id in completed:
+                continue  # envelope 없음 또는 정상 종결
             self._notify_approval_needs_attention(
-                envelope,
+                PendingApprovalEnvelope.model_validate(payload),
                 partial=self.store.approval_exists(approval_id),
             )
+
+    def _completed_legacy_approval_ids(self) -> set[str]:
+        """legacy 완료 판정. **signal_run_id만으로 판정하면 안 된다** — 하나의
+        signal run이 여러 승인 그룹으로 나뉘고(orchestrator의 `_approval_order_groups`)
+        그룹마다 별도 approval_id가 발급되므로, 한 그룹의 완료가 다른 그룹의
+        유실을 가린다.
+
+        신규 `signal_approval_completed`에는 approval_id가 있어 정확히 매칭된다.
+        approval_id가 없는 구 이벤트는 그 signal run의 승인 그룹이 하나뿐일 때만
+        완료로 인정하고, 둘 이상이면 **모호하므로 완료로 치지 않는다** — legacy는
+        자동 재집행하지 않고 알림만 내므로, 모호하면 알리는 쪽이 안전하다.
+        """
+        groups: dict[str, list[str]] = defaultdict(list)
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_pending",
+            since=self._consistency_since(),
+        ):
+            payload = row["payload"]
+            groups[str(payload.get("signal_run_id"))].append(str(payload.get("approval_id")))
+
+        completed: set[str] = set()
+        for row in self.store.list_system_events_by_type(
+            "signal_approval_completed",
+            since=self._consistency_since(),
+        ):
+            payload = row["payload"]
+            approval_id = payload.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                completed.add(approval_id)
+                continue
+            group = groups.get(str(payload.get("signal_run_id")), [])
+            if len(group) == 1:
+                completed.add(group[0])
+        return completed
+```
+
+`handlers.py`는 `collections.abc.Mapping`만 import하고 있으므로 `from collections import defaultdict`를 추가한다.
+
+**`signal_approval_completed`에 approval_id를 추가한다** (`orchestration/orchestrator.py:397` 부근, `resolve_pending_signal_approval`의 완료 이벤트 payload). 한 줄이지만 이후 모든 완료 판정이 signal_run_id 추론 없이 정확해진다:
+
+```python
+                {
+                    "approval_id": envelope.approval_id,   # 추가
+                    "signal_run_id": envelope.signal_run_id,
+                    ...
 ```
 
 `_sweep_pending_approvals` 시작부에서 `self._notify_legacy_unresolved_approvals()`를 호출한다.
@@ -1387,6 +1488,155 @@ git commit -m "test: pin rollback safety and legacy ack compatibility"
 
 ---
 
+### Task 8: 롤백 preflight를 CLI로 강제한다
+
+Task 7은 위험 상태를 **테스트로 고정**할 뿐, 운영 중 긴급 롤백을 막지 못한다. 장애 한복판에서 여러 줄짜리 python 스니펫을 정확히 실행하기를 기대하는 것은 현실적이지 않다 — 그 순간이야말로 실수가 나는 순간이다. 3a-1이 만든 위험은 3a-1이 닫는다.
+
+**범위는 3a-1이 도입한 불변식 하나로 한정한다**: `schema_version=2` ack가 있고 `telegram_approval_resolution_completed`가 없는 승인. funding/budget claim, dispatch 완료, legacy dual-write까지 검사하는 **전체 3a preflight는 3a-5**이며, 그 명령이 이 명령을 확장·흡수한다.
+
+**Files:**
+- Modify: `src/maestro/cli.py` (`clear-halt`가 쓰는 `_load_operator_config` / `_state_store` 패턴을 따른다, cli.py:1444)
+- Test: `tests/test_cli_approval_preflight.py` (신규)
+
+**Interfaces:**
+- Produces: `maestro approval-rollback-preflight --config <path> [--require-quiesce]`
+  - 미완 승인 0건 → `approval_rollback_preflight status=safe unresolved=0`, exit 0
+  - 1건 이상 → 각 approval_id를 출력하고 exit **1**
+  - `--require-quiesce`: `maestro-telegram-operator.service`가 active면 exit 1 (검사 자체가 무의미하므로)
+
+- [ ] **Step 1: 실패하는 테스트를 쓴다**
+
+```python
+def test_preflight_exits_zero_when_no_unresolved_approvals(tmp_path):
+    config_path = _telegram_config_path(tmp_path)
+    store = StateStore(load_config(config_path).state.sqlite_path, initial_cash=1000)
+    store.save_system_event("run_1", "telegram_approval_ack", {
+        "approval_id": "appr_1", "status": "approved", "schema_version": 2,
+    })
+    store.save_system_event("run_1", "telegram_approval_resolution_completed", {
+        "approval_id": "appr_1", "status": "approved",
+    })
+
+    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+    assert "status=safe" in result.stdout
+
+
+def test_preflight_exits_nonzero_and_names_unresolved_approvals(tmp_path):
+    config_path = _telegram_config_path(tmp_path)
+    store = StateStore(load_config(config_path).state.sqlite_path, initial_cash=1000)
+    store.save_system_event("run_1", "telegram_approval_ack", {
+        "approval_id": "appr_unresolved", "status": "approved", "schema_version": 2,
+    })
+
+    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "appr_unresolved" in result.stdout
+
+
+def test_preflight_ignores_legacy_acks(tmp_path):
+    """schema_version이 없는 ack는 구버전 의미론에서도 종결이라 롤백을 막지 않는다."""
+    config_path = _telegram_config_path(tmp_path)
+    store = StateStore(load_config(config_path).state.sqlite_path, initial_cash=1000)
+    store.save_system_event("run_1", "telegram_approval_ack", {
+        "approval_id": "appr_legacy", "status": "approved",
+    })
+
+    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 0
+```
+
+- [ ] **Step 2: 실패를 확인한다**
+
+Run: `.venv/bin/python -m pytest tests/test_cli_approval_preflight.py -q`
+Expected: FAIL — `No such command 'approval-rollback-preflight'` (exit_code 2)
+
+- [ ] **Step 3: 구현한다**
+
+`src/maestro/cli.py`:
+
+```python
+@app.command("approval-rollback-preflight")
+def approval_rollback_preflight(
+    config: Path | None = CONFIG_OPTION,
+    require_quiesce: bool = typer.Option(
+        False,
+        "--require-quiesce",
+        help="Fail if the telegram operator service is still running.",
+    ),
+) -> None:
+    """롤백 전 안전 검사 (읽기 전용). 미완 승인이 있으면 exit 1.
+
+    schema_version=2 ack가 있고 resolution_completed가 없는 승인은 구버전이
+    ack만 보고 종결로 오판하므로, 이 상태에서 롤백하면 주문이 유실된다.
+    """
+    if require_quiesce and _service_is_active("maestro-telegram-operator.service"):
+        typer.echo("approval_rollback_preflight status=fail reason=operator_still_running")
+        raise typer.Exit(1)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    acked = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type("telegram_approval_ack", limit=None)
+        if isinstance(row["payload"].get("schema_version"), int)
+    }
+    completed = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resolution_completed", limit=None
+        )
+    }
+    unresolved = sorted(acked - completed)
+    if not unresolved:
+        typer.echo("approval_rollback_preflight status=safe unresolved=0")
+        return
+    for approval_id in unresolved:
+        typer.echo(f"approval_rollback_preflight status=unsafe approval_id={approval_id}")
+    typer.echo(f"approval_rollback_preflight status=unsafe unresolved={len(unresolved)}")
+    raise typer.Exit(1)
+
+
+def _service_is_active(unit: str) -> bool:
+    result = subprocess.run(  # noqa: S603 - 고정 인자, 사용자 입력 없음
+        ["systemctl", "is-active", "--quiet", unit],
+        check=False,
+    )
+    return result.returncode == 0
+```
+
+`subprocess`는 `cli.py:4`에 이미 import되어 있다 (추가 import 불필요).
+
+`limit=None`을 쓰는 이유: 이 명령은 poll 루프가 아니라 **롤백 직전 1회** 실행되므로 전건 조회 비용이 문제되지 않고, 아무리 오래된 미완 승인도 놓치면 안 된다 (`_consistency_since` 창을 적용하지 않는다).
+
+- [ ] **Step 4: 통과를 확인한다**
+
+Run: `.venv/bin/python -m pytest tests/test_cli_approval_preflight.py -q`
+Expected: PASS
+
+- [ ] **Step 5: 배포 확인 절의 롤백 절차를 이 명령으로 바꾼다**
+
+아래 "롤백 절차"의 3단계 인라인 python 스니펫을 다음으로 대체한다:
+
+```bash
+.venv/bin/maestro approval-rollback-preflight \
+  --config /root/maestro-operator/symphony_approval.yaml \
+  --require-quiesce || echo "롤백 중단 — 미완 승인을 먼저 종결시킬 것"
+```
+
+- [ ] **Step 6: 커밋**
+
+```bash
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m ruff check src tests --output-format=concise
+git add -A
+git commit -m "feat: add a read-only rollback preflight for unresolved approvals"
+```
+
+---
+
 ## 검증
 
 - 각 태스크: 명시된 pytest 명령으로 RED 확인 → 구현 → GREEN 확인 → 커밋
@@ -1435,8 +1685,8 @@ git commit -m "test: pin rollback safety and legacy ack compatibility"
    # state store에 쓰는 유닛을 빠뜨리지 않았는지 전수 확인:
    systemctl list-units --all 'maestro-*' --no-pager | grep -v inactive
 
-3. 검사      아래 쿼리 결과가 none이어야 한다.
-             하나라도 있으면 롤백하지 않는다 — 해당 승인을 먼저 종결시킨다.
+3. 검사      아래 preflight가 exit 0이어야 한다 (Task 8).
+             exit 1이면 롤백하지 않는다 — 출력된 승인을 먼저 종결시킨다.
 
 4. 구버전 배포  3과 4 사이에 어떤 unit도 재시작하지 않는다.
 
@@ -1444,17 +1694,10 @@ git commit -m "test: pin rollback safety and legacy ack compatibility"
 ```
 
 ```bash
-.venv/bin/python -c "
-import sqlite3, json
-c = sqlite3.connect('/root/maestro-operator/var/symphony_state.db')
-def payloads(t):
-    return [json.loads(p) for (p,) in
-            c.execute('select payload from system_events where event_type=?', (t,))]
-acks_v2 = {p['approval_id'] for p in payloads('telegram_approval_ack')
-           if isinstance(p.get('schema_version'), int)}
-done = {p['approval_id'] for p in payloads('telegram_approval_resolution_completed')}
-print('rollback-unsafe approvals:', sorted(acks_v2 - done) or 'none')
-"
+.venv/bin/maestro approval-rollback-preflight \
+  --config /root/maestro-operator/symphony_approval.yaml \
+  --require-quiesce
+# exit 0 → 롤백 가능 / exit 1 → 중단 (미완 승인 approval_id가 출력된다)
 ```
 
 ## 채택하지 않는 리뷰 권고 (근거 기록)
@@ -1463,7 +1706,9 @@ Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 
 
 - **"주문 계층 멱등성(제출 intent·브로커 멱등 키)을 같은 배포에 포함"** — `approval_exists` fail-closed 조건이 중복 제출 경로를 이미 차단한다(행이 있으면 자동 재개하지 않는다). 제출 intent는 dispatch 계층 재설계와 함께 가야 하며 **3a-3** 범위다. 3a-1에 넣으면 계획이 두 배가 되고 검증 표면도 넓어진다.
 - **"quiesced backfill을 3a-1 선행 조건으로"** — legacy를 자동 실행하지 않으므로 backfill 중 경계 오염이 발생할 여지가 없다. quiesce 장벽은 자동 재집행을 켜는 시점(**3a-5**)에 필요하다.
-- **"DB compatibility marker로 구버전 시작 자체를 차단"** / **"writer가 검사하는 durable maintenance fence"** — **구현 불가능하다.** 구버전 코드에는 마커·fence를 검사하는 로직이 없고, 이미 배포된 코드에 소급 적용할 수 없다. 강제력은 위 5단계 절차와 문서로만 확보되며, CLI화는 3a-5다.
+- **"DB compatibility marker로 구버전 시작 자체를 차단"** / **"writer가 검사하는 durable maintenance fence"** — **구현 불가능하다.** 구버전 코드에는 마커·fence를 검사하는 로직이 없고, 이미 배포된 코드에 소급 적용할 수 없다. 강제력은 5단계 절차 + Task 8의 preflight로 확보한다.
+
+> **입장 변경 (4차 리뷰)**: 3차 리뷰에서는 "절차 순서로 TOCTOU가 제거되므로 CLI는 3a-5"라고 판단했으나, 재지적을 받아들여 **Task 8로 3a-1 범위에 넣었다.** 절차 문서는 장애 한복판에서 지켜지지 않으며, 어차피 쿼리를 제공할 바에는 exit code로 롤백을 막는 명령이 거의 같은 비용으로 훨씬 안전하다. 단 범위는 3a-1이 만든 불변식 하나로 한정하고, 전체 3a preflight는 3a-5에서 이 명령을 확장한다.
 - **"lease를 resolution 중 갱신하고 owner/token CAS로 회수"** (3차 리뷰) — 단일 프로세스 폴러에 과하다. `_sweep_pending_approvals`는 `poll_once` 안에서 순차 실행되므로, 같은 프로세스에서 resolution이 도는 동안 다른 sweep이 lease를 회수할 수 없다. "정상 resolution이 lease를 넘겨 회수당한다"는 시나리오는 프로세스가 둘일 때만 성립한다. 대신 실질적 위험(예산 소진)은 **abandoned를 재시도 예산에서 제외**하는 것으로 제거했다.
 - **"인덱스 프로젝션·부하 테스트·폴링 예산 도입"** (3차 리뷰) — 규모에 비해 과하다. 운영 DB의 승인 이벤트는 몇 달치가 6~16건이고 증가율은 거래일당 1건(연 250행) 수준이다. 성장 우려와 개수 창의 정합성 결함을 **시간 경계(Task 0)** 하나로 함께 해소했으며, 이는 기존 `(event_type, created_at)` 인덱스를 그대로 탄다. 이벤트 보존 정책·부하 테스트가 필요해지면 그때 별도로 다룬다.
 
