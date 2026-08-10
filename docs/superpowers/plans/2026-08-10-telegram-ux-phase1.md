@@ -1082,6 +1082,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 코드 머지 후 VPS 배포 시 확인할 것 (스펙 마이그레이션 표 기준):
 
-- systemd 구성 변경 없음. `set_my_commands`는 기존 기동 경로(cli.py:1046)에서 자동 호출됨 — 봇 재시작 후 Telegram 메뉴에 5개 한글 명령만 보이는지 확인.
+- systemd 구성 변경 없음. **`set_my_commands`는 봇 기동 시 자동 호출되지 않는다** — `telegram_bot_commands()`를 호출하는 곳은 `maestro telegram-set-commands` CLI(cli.py:1046-1050)뿐이다. 운영자 서비스 재시작과 **별도로** 아래를 실행해야 메뉴가 바뀐다:
+  ```bash
+  .venv/bin/maestro telegram-set-commands \
+    --config /root/maestro-operator/symphony_readonly.yaml \
+    --signal-config /root/maestro-operator/symphony_signal.yaml
+  ```
+  실행 후 `getMyCommands`로 5개 한글 명령만 남았는지 확인한다.
 - 실제 승인 요청 1건에서: 접힌 카드 수신 → 자세히 → 접기 → 승인/거절 → 한글 결과 edit 확인.
 - 기존 명령(`/status`, `/cash_drift` 등)을 타이핑하면 여전히 동작하는지 확인.
