@@ -1461,6 +1461,55 @@ def clear_halt(
     typer.echo(f"state={current.state.value} reason={current.reason}")
 
 
+def _service_is_active(unit: str) -> bool:
+    result = subprocess.run(  # noqa: S603 - fixed args, no user input
+        ["systemctl", "is-active", "--quiet", unit],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+@app.command("approval-rollback-preflight")
+def approval_rollback_preflight(
+    config: Path | None = CONFIG_OPTION,
+    require_quiesce: bool = typer.Option(
+        False,
+        "--require-quiesce",
+        help="Fail if the telegram operator service is still running.",
+    ),
+) -> None:
+    """Read-only rollback safety check. Exits 1 when an approval is unresolved.
+
+    An ack with schema_version=2 but no matching resolution_completed event is
+    exactly the state where old code (pre this feature) would read the ack
+    alone, seal the approval, and lose an approved order batch on rollback.
+    """
+    if require_quiesce and _service_is_active("maestro-telegram-operator.service"):
+        typer.echo("approval_rollback_preflight status=fail reason=operator_still_running")
+        raise typer.Exit(1)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    acked = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type("telegram_approval_ack", limit=None)
+        if isinstance(row["payload"].get("schema_version"), int)
+    }
+    completed = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resolution_completed", limit=None
+        )
+    }
+    unresolved = sorted(acked - completed)
+    if not unresolved:
+        typer.echo("approval_rollback_preflight status=safe unresolved=0")
+        return
+    for approval_id in unresolved:
+        typer.echo(f"approval_rollback_preflight status=unsafe approval_id={approval_id}")
+    typer.echo(f"approval_rollback_preflight status=unsafe unresolved={len(unresolved)}")
+    raise typer.Exit(1)
+
+
 @app.command("release-kill")
 def release_kill(
     config: Path | None = CONFIG_OPTION,
