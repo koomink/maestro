@@ -56,12 +56,110 @@ telegram_approval_resolution_failed  {"error_message": "Signal package stale bro
 
 | 파일 | 책임 | 변경 |
 |---|---|---|
-| `src/maestro/integrations/telegram/handlers.py` | ack에 schema_version, completed 기록, 종결 판정 단일화, sweep 재개·claim 회수·legacy 격리 | 수정 (메서드 7개 추가, 3곳 치환) |
-| `src/maestro/integrations/telegram/ui/catalog.py` | 확인 필요 문구 | 수정 (상수 1개 추가) |
-| `tests/test_telegram_approval_resume.py` | 2단계 영속화·재개·claim 회수·legacy 격리·롤백 안전성 | **신규** |
+| `src/maestro/state/store.py` | `list_system_events_by_type`에 `since` 시간 경계 | 수정 (인자 1개 추가) |
+| `src/maestro/integrations/telegram/handlers.py` | ack에 schema_version, completed 기록, 종결 판정 단일화, sweep 재개·claim 회수·legacy 격리 | 수정 (메서드 9개 추가, 3곳 치환) |
+| `src/maestro/integrations/telegram/ui/catalog.py` | 확인 필요·브로커 대조 문구 | 수정 (상수 2개 추가) |
+| `tests/test_state_store.py` | `since` 필터 | 수정 (테스트 1건 추가) |
+| `tests/test_telegram_approval_resume.py` | 2단계 영속화·재개·claim 회수·legacy 격리·롤백 위험 상태 | **신규** |
 | `tests/test_telegram_operator_ui.py` | 기존 승인 콜백 회귀 | 수정 (판정 변경분) |
 
-`src/maestro/state/store.py`와 `src/maestro/orchestration/orchestrator.py`는 **수정하지 않는다** — 필요한 것(`approval_exists`, `limit=None` 전건 조회)이 이미 있다.
+`src/maestro/orchestration/orchestrator.py`는 **수정하지 않는다** — 필요한 `approval_exists`(`state/store.py:1146`)가 이미 있고, `save_approval`을 get-or-create로 바꿀 이유도 없다(자동 재개는 행이 없을 때만 일어난다).
+
+---
+
+### Task 0: 정합성 조회에 시간 경계를 도입한다
+
+정합성 판정에 `limit=2000` 같은 **개수 창**을 쓰면 이벤트가 쌓일수록 오래된 미완 승인이 조회 밖으로 밀려 조용히 사라진다. 반대로 `limit=None` 전건 조회는 매 poll마다 전체 이력을 materialize·JSON 디코드하므로 시간이 지날수록 폴링이 무거워진다 (`poll_once`는 sweep을 `get_updates`보다 먼저 돌린다).
+
+**개수가 아니라 시간으로 경계를 긋는다.** 승인에는 만료가 있으므로 충분히 오래된 이벤트는 정의상 재개 대상이 될 수 없고, 기존 인덱스 `idx_system_events_type_created`가 `(event_type, created_at)`이라 시간 하한은 인덱스를 그대로 탄다.
+
+**Files:**
+- Modify: `src/maestro/state/store.py` (`list_system_events_by_type` 1333행)
+- Test: `tests/test_state_store.py`
+
+**Interfaces:**
+- Produces: `list_system_events_by_type(event_type, limit=10, *, since: datetime | None = None)` — 기존 호출부는 그대로 동작한다 (`since` 기본값 None).
+
+- [ ] **Step 1: 실패하는 테스트를 쓴다**
+
+```python
+def test_list_system_events_by_type_filters_by_since(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), initial_cash=1000)
+    store.save_system_event("run_1", "telegram_approval_ack", {"approval_id": "old"})
+    store.save_system_event("run_2", "telegram_approval_ack", {"approval_id": "new"})
+    # 첫 이벤트만 과거로 밀어 넣는다
+    with sqlite3.connect(str(tmp_path / "state.db")) as conn:
+        conn.execute(
+            "UPDATE system_events SET created_at = ? WHERE json_extract(payload, '$.approval_id') = 'old'",
+            ((datetime.now(UTC) - timedelta(days=200)).isoformat(sep=" "),),
+        )
+
+    rows = store.list_system_events_by_type(
+        "telegram_approval_ack",
+        limit=None,
+        since=datetime.now(UTC) - timedelta(days=90),
+    )
+
+    assert [row["payload"]["approval_id"] for row in rows] == ["new"]
+```
+
+- [ ] **Step 2: 실패를 확인한다**
+
+Run: `.venv/bin/python -m pytest tests/test_state_store.py -q -k "since"`
+Expected: FAIL — `TypeError: list_system_events_by_type() got an unexpected keyword argument 'since'`
+
+- [ ] **Step 3: 구현한다**
+
+```python
+    def list_system_events_by_type(
+        self,
+        event_type: str,
+        limit: int | None = 10,
+        *,
+        since: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM system_events WHERE event_type = ?"
+        values: list[Any] = [event_type]
+        if since is not None:
+            # idx_system_events_type_created가 (event_type, created_at)이므로
+            # 시간 하한은 인덱스를 그대로 탄다.
+            sql += " AND created_at >= ?"
+            values.append(since.isoformat(sep=" "))
+        sql += " ORDER BY id DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            values.append(limit)
+        ...  # 이하 기존 본문 그대로
+```
+
+- [ ] **Step 4: 통과를 확인한다**
+
+Run: `.venv/bin/python -m pytest tests/test_state_store.py -q`
+Expected: PASS (기존 호출부는 `since=None`이라 동작이 바뀌지 않는다)
+
+- [ ] **Step 5: handlers에 공용 헬퍼를 추가한다**
+
+`handlers.py` 모듈 상단:
+
+```python
+#: 정합성 조회의 시간 경계. 승인 만료(config.approval.timeout_seconds)보다 훨씬
+#: 길게 잡아, 만료된 지 오래된 이벤트만 조회에서 제외한다.
+_CONSISTENCY_WINDOW_DAYS = 90
+```
+
+```python
+    def _consistency_since(self) -> datetime:
+        return utc_now() - timedelta(days=_CONSISTENCY_WINDOW_DAYS)
+```
+
+이후 태스크의 모든 정합성 조회는 `limit=2000`도 `limit=None`도 아닌 `since=self._consistency_since()`를 쓴다. 화면 표시용 조회(`_approvals`의 최근 5건 등)는 기존 limit을 유지한다.
+
+- [ ] **Step 6: 커밋**
+
+```bash
+git add -A
+git commit -m "feat: allow time-bounded system event queries"
+```
 
 ---
 
@@ -264,20 +362,20 @@ Expected: FAIL — `AttributeError: 'TelegramOperatorCommandRouter' object has n
     def _terminal_approval_ids(self) -> set[str]:
         """더 이상 처리하지 않을 승인 집합. 종결 판정은 여기 한 곳에서만 한다.
 
-        정합성 판정이므로 조회 창을 두지 않는다 (limit=None). 기존 코드의
-        limit=2000은 이벤트가 쌓이면 오래된 미완 승인을 조회 밖으로 밀어내
-        재개 대상에서 조용히 사라지게 한다.
+        정합성 판정이므로 개수 창(limit=2000)을 쓰지 않는다 — 이벤트가 쌓이면
+        오래된 미완 승인이 조회 밖으로 밀려 조용히 사라진다. 대신 Task 0의
+        시간 경계를 쓴다 (인덱스를 타고, 성장에 무관하게 일정하다).
         """
         return {
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_ack",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
 ```
 
-`_pending_async_approval`의 첫 루프를 다음으로 바꾸고, 같은 메서드의 `telegram_approval_pending` 조회도 `limit=None`으로 바꾼다 (envelope을 못 찾으면 승인이 유실되므로 이것도 정합성 경로다):
+`_pending_async_approval`의 첫 루프를 다음으로 바꾸고, 같은 메서드의 `telegram_approval_pending` 조회도 `since=self._consistency_since()`로 바꾼다 (envelope을 못 찾으면 승인이 유실되므로 이것도 정합성 경로다):
 
 ```python
         if approval_id in self._terminal_approval_ids():
@@ -506,11 +604,13 @@ Expected: FAIL — `test_acked_but_unresolved_approval_is_not_terminal`에서 `{
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
         terminal = set(completed)
-        for row in self.store.list_system_events_by_type("telegram_approval_ack", limit=None):
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_ack", since=self._consistency_since()
+        ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
             if not isinstance(payload.get("schema_version"), int):
@@ -541,11 +641,22 @@ Task 3의 규칙은 legacy ack를 전부 종결로 분류한다. 그러면 3a �
 - Test: `tests/test_telegram_approval_resume.py`
 
 **Interfaces:**
-- Produces: `_notify_legacy_unresolved_approvals() -> None` (`_sweep_pending_approvals`에서 호출), `_notify_approval_needs_attention(envelope)` (Task 5의 재개 경로와 공유), `catalog.APPROVAL_NEEDS_ATTENTION`
+- Produces: `_notify_legacy_unresolved_approvals() -> None` (`_sweep_pending_approvals`에서 호출), `_notify_approval_needs_attention(envelope, *, partial: bool)` (Task 5의 재개 경로와 공유), `catalog.APPROVAL_NEEDS_ATTENTION` / `catalog.APPROVAL_NEEDS_RECONCILIATION`
 
-**판정 기준은 집행 증거다.** `resolution_failed` 유무로 판정하면 안 된다 — `_resolve_async_approval`은 ack를 먼저 저장하고 config를 재로드하므로, ack 직후 프로세스 종료나 config 로드 실패는 `resolution_failed` **없이 ack만** 남긴다. 그런 건이야말로 브로커 제출 전에 중단됐다는 강한 증거를 가진다.
+**판정 기준은 "완료 증거의 부재" 하나다.** 두 가지를 혼동하지 않는다:
 
-> legacy ack(`schema_version` 없음) 중 **approvals 행이 없고** 같은 `signal_run_id`의 `signal_approval_completed`도 없는 건을 격리 대상으로 본다.
+| 질문 | 술어 |
+|---|---|
+| 안전하게 자동 재개할 수 있는가? | approvals 행이 **없어야** 한다 (브로커 호출 이전) |
+| 운영자에게 알려야 하는가? | `signal_approval_completed`가 **없으면** 알린다 |
+
+`resolution_failed` 유무로 판정하면 안 된다 — `_resolve_async_approval`은 ack를 먼저 저장하고 config를 재로드하므로, ack 직후 프로세스 종료나 config 로드 실패는 `resolution_failed` **없이 ack만** 남긴다.
+
+**approvals 행이 있는데 완료 기록이 없는 건을 알림에서 빼면 안 된다.** 그 상태야말로 브로커 제출 중·직후에 중단된 가장 위험한 경우이며(주문이 이미 나갔을 수 있다), 자동 재개 금지의 근거일 뿐 침묵의 근거가 아니다. 이때는 **브로커 대조가 필요하다**는 별도 문구로 알린다.
+
+> legacy ack(`schema_version` 없음) 중 같은 `signal_run_id`의 `signal_approval_completed`가 없는 건을 전부 격리 대상으로 본다.
+> approvals 행이 **있으면** "부분 집행 가능 — 브로커 대조 필요"(`APPROVAL_NEEDS_RECONCILIATION`),
+> **없으면** "집행 전 중단"(`APPROVAL_NEEDS_ATTENTION`)으로 문구를 나눈다.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -580,7 +691,24 @@ def test_legacy_ack_only_crash_is_isolated(tmp_path):
     assert any("확인이 필요" in message["text"] for message in router.client.sent_messages)
 
 
-def test_legacy_ack_with_execution_evidence_is_not_isolated(tmp_path):
+def test_legacy_ack_with_approvals_row_but_no_completion_needs_reconciliation(tmp_path):
+    """가장 위험한 상태: 집행에 진입했으나 완료 기록이 없다.
+    주문이 이미 브로커로 나갔을 수 있으므로 침묵하면 안 된다."""
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+    store.save_approval(envelope.run_id, "appr_legacy", {"decision": {"status": "approved"}})
+
+    router._sweep_pending_approvals()
+
+    assert any("브로커" in message["text"] for message in router.client.sent_messages)
+    assert len(store.list_system_events_by_type(
+        "telegram_approval_needs_attention", limit=None
+    )) == 1
+
+
+def test_legacy_ack_with_completion_evidence_is_not_isolated(tmp_path):
+    """완료 기록이 있으면 정상 종결이다 — 알리지 않는다."""
     router, store = _router(tmp_path)
     envelope = _save_pending_envelope(store, approval_id="appr_legacy")
     _save_ack(store, approval_id="appr_legacy", status="approved")
@@ -609,59 +737,87 @@ Expected: FAIL — 알림이 나가지 않는다 (`telegram_approval_needs_atten
 
 ```python
 APPROVAL_NEEDS_ATTENTION = (
-    "⚠️ 확인이 필요해요 — 승인은 접수됐지만 주문 처리가 끝나지 않았어요.\n"
-    "일부 주문이 이미 나갔을 수 있어 자동으로 다시 시도하지 않아요.\n"
+    "⚠️ 확인이 필요해요 — 승인은 접수됐지만 주문이 만들어지지 않았어요.\n"
+    "주문이 나가기 전에 중단된 상태예요.\n"
     "/history에서 상태를 확인해 주세요."
+)
+APPROVAL_NEEDS_RECONCILIATION = (
+    "⚠️ 확인이 필요해요 — 승인 후 주문 처리가 끝나지 않았어요.\n"
+    "일부 주문이 이미 나갔을 수 있어 자동으로 다시 시도하지 않아요.\n"
+    "증권사 앱에서 체결 내역을 확인해 주세요."
 )
 ```
 
 `handlers.py`:
 
 ```python
-    def _notify_approval_needs_attention(self, envelope: PendingApprovalEnvelope) -> None:
+    def _notify_approval_needs_attention(
+        self,
+        envelope: PendingApprovalEnvelope,
+        *,
+        partial: bool,
+    ) -> None:
+        """partial=True면 브로커에 주문이 나갔을 수 있다는 뜻이다."""
         duplicate_key = f"telegram-approval-attention:{envelope.approval_id}"
         if self.store.duplicate_key_exists(duplicate_key):
             return
+        text = (
+            ui_catalog.APPROVAL_NEEDS_RECONCILIATION
+            if partial
+            else ui_catalog.APPROVAL_NEEDS_ATTENTION
+        )
         for chat_id in self.config.approval.telegram_allowed_chat_ids:
-            self._send(chat_id, ui_catalog.APPROVAL_NEEDS_ATTENTION)
+            self._send(chat_id, text)
         save_audited_system_event(
             self.store,
             self.audit,
             envelope.run_id,
             "telegram_approval_needs_attention",
-            {"approval_id": envelope.approval_id, "duplicate_key": duplicate_key},
+            {
+                "approval_id": envelope.approval_id,
+                "partial_execution_possible": partial,
+                "duplicate_key": duplicate_key,
+            },
         )
 
     def _notify_legacy_unresolved_approvals(self) -> None:
-        """3a 이전 ack 중 집행 증거가 없는 건을 1회만 알린다. 자동 재집행은 하지 않는다."""
+        """3a 이전 ack 중 완료 기록이 없는 건을 1회만 알린다. 자동 재집행은 하지 않는다.
+
+        approvals 행 유무는 침묵의 근거가 아니라 문구를 가르는 기준이다 — 행이
+        있는데 완료가 없으면 브로커 제출 중·직후에 중단된 가장 위험한 상태다.
+        """
         completed_signal_runs = {
             str(row["payload"].get("signal_run_id"))
             for row in self.store.list_system_events_by_type(
                 "signal_approval_completed",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
         envelopes = {
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
-        for row in self.store.list_system_events_by_type("telegram_approval_ack", limit=None):
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_ack",
+            since=self._consistency_since(),
+        ):
             ack = row["payload"]
             if isinstance(ack.get("schema_version"), int):
                 continue  # 신규 스키마는 재개 경로가 처리한다
             approval_id = str(ack.get("approval_id"))
-            if self.store.approval_exists(approval_id):
-                continue
             payload = envelopes.get(approval_id)
             if payload is None:
                 continue
             envelope = PendingApprovalEnvelope.model_validate(payload)
             if envelope.signal_run_id in completed_signal_runs:
-                continue
-            self._notify_approval_needs_attention(envelope)
+                continue  # 정상 종결
+            self._notify_approval_needs_attention(
+                envelope,
+                partial=self.store.approval_exists(approval_id),
+            )
 ```
 
 `_sweep_pending_approvals` 시작부에서 `self._notify_legacy_unresolved_approvals()`를 호출한다.
@@ -693,6 +849,8 @@ git commit -m "feat: surface legacy approvals that never completed execution"
 **동시성 설계**: attempt 번호는 **종료 기록(`resume_finished`) 개수**에서 나온다. in-flight attempt가 있으면 다음 poll이 같은 번호를 계산해 claim duplicate_key와 충돌하므로, 기존 UNIQUE 인덱스만으로 approval당 단일 in-flight가 보장된다. claim 개수로 번호를 매기면 attempt 2가 실행 중인데 다른 프로세스가 attempt 3을 계산해 병행 진입할 수 있다 — 그렇게 하지 않는다.
 
 **버려진 claim 회수**: claim 저장 직후·resolution 진입 전에 프로세스가 죽으면 finished도 approvals 행도 없다. 회수가 없으면 이후 모든 poll이 같은 attempt를 계산해 기존 claim과 충돌하고, 상한에도 attention 경로에도 닿지 못한 채 **영구 정지**한다. lease가 지난 미완 claim을 `outcome="abandoned"`로 종결시켜 회수한다.
+
+**abandoned는 재시도 예산을 깎지 않는다**: attempt *번호*는 abandoned를 포함한 모든 종료 기록에서 증가해야 한다(안 그러면 같은 번호가 다시 나와 duplicate_key 교착). 그러나 `_MAX_RESUME_ATTEMPT` 판정은 **실제로 집행을 시도한 횟수**(`outcome in {"completed", "failed"}`)만 센다. 그렇지 않으면 lease 회수가 반복될 때 한 번도 실행되지 않은 채 예산이 소진되어 운영자 알림으로 빠진다.
 
 - [ ] **Step 1: 실패하는 테스트를 쓴다**
 
@@ -768,6 +926,28 @@ def test_claim_abandoned_before_resolution_is_reclaimed(tmp_path):
     assert "abandoned" in outcomes
     completed = _latest_payload(store, "telegram_approval_resolution_completed")
     assert completed["attempt"] == 3
+
+
+def test_abandoned_attempts_do_not_consume_the_retry_budget(tmp_path):
+    """lease 회수만 반복되면 실제 집행은 한 번도 없었으므로 예산을 깎지 않는다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+    for attempt in range(2, 8):  # abandoned 6건 — _MAX_RESUME_ATTEMPT(4)를 넘는다
+        router._record_resume_finished(
+            run_id="run_appr_1", approval_id="appr_1", attempt=attempt, outcome="abandoned"
+        )
+
+    assert router._executed_resume_attempts("appr_1") == 0
+    router._sweep_pending_approvals()
+
+    # 예산이 남아 있으므로 실제 재개가 일어난다 (attention으로 빠지지 않는다)
+    assert _latest_payload(
+        store, "telegram_approval_resolution_completed"
+    )["approval_id"] == "appr_1"
+    assert store.list_system_events_by_type(
+        "telegram_approval_needs_attention", limit=None
+    ) == []
 
 
 def test_resume_survives_more_than_2000_intervening_events(tmp_path):
@@ -846,18 +1026,20 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
         envelopes = {
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
         for row in reversed(
-            self.store.list_system_events_by_type("telegram_approval_ack", limit=None)
+            self.store.list_system_events_by_type(
+                "telegram_approval_ack", since=self._consistency_since()
+            )
         ):
             ack = row["payload"]
             approval_id = str(ack.get("approval_id"))
@@ -872,14 +1054,16 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
                 # 먼저 쓴다(orchestrator.py:332). 행이 있으면 집행에 진입했을 수
                 # 있으므로 자동 재개하지 않는다 — 브로커 제출 직후·로컬 lifecycle
                 # 기록 전에 중단된 창까지 fail-closed로 덮는다. (재개는 3a-3)
-                self._notify_approval_needs_attention(envelope)
+                # 주문이 이미 나갔을 수 있으므로 브로커 대조 문구로 알린다.
+                self._notify_approval_needs_attention(envelope, partial=True)
                 continue
-            attempt = self._next_resume_attempt(approval_id)
-            if attempt > _MAX_RESUME_ATTEMPT:
+            if self._executed_resume_attempts(approval_id) >= _MAX_RESUME_ATTEMPT:
                 # 반복 실패는 자동 재시도로 풀리지 않는다. 매 poll마다 조용히
                 # 실패를 쌓는 대신 운영자에게 넘긴다 (스펙 3a 항목 7).
-                self._notify_approval_needs_attention(envelope)
+                # abandoned(한 번도 실행되지 않은 시도)는 이 예산을 깎지 않는다.
+                self._notify_approval_needs_attention(envelope, partial=False)
                 continue
+            attempt = self._next_resume_attempt(approval_id)
             if not self._claim_resume(envelope, attempt):
                 continue  # 같은 attempt가 in-flight다
             outcome = "failed"
@@ -910,13 +1094,13 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
             (str(row["payload"].get("approval_id")), int(row["payload"].get("attempt", 0)))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
-                limit=None,
+                since=self._consistency_since(),
             )
         }
         now = utc_now()
         for row in self.store.list_system_events_by_type(
             "telegram_approval_resume_claim",
-            limit=None,
+            since=self._consistency_since(),
         ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
@@ -960,18 +1144,33 @@ _RESUME_LEASE_SECONDS = 900
 보조 메서드 3개:
 
 ```python
-    def _next_resume_attempt(self, approval_id: str) -> int:
-        """종료 기록 기준으로 번호를 매긴다. in-flight attempt가 있으면 같은
-        번호가 다시 나오고, claim duplicate_key 충돌로 병행 진입이 막힌다."""
-        finished = [
-            row
+    def _resume_finished_events(self, approval_id: str) -> list[dict[str, Any]]:
+        return [
+            row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
-                limit=None,
+                since=self._consistency_since(),
             )
             if str(row["payload"].get("approval_id")) == approval_id
         ]
-        return len(finished) + 2  # 최초 콜백이 attempt 1이므로 첫 재개는 2
+
+    def _next_resume_attempt(self, approval_id: str) -> int:
+        """종료 기록 기준으로 번호를 매긴다. in-flight attempt가 있으면 같은
+        번호가 다시 나오고, claim duplicate_key 충돌로 병행 진입이 막힌다.
+
+        abandoned도 번호는 증가시킨다 — 안 그러면 회수된 claim과 같은 번호가
+        다시 나와 duplicate_key 충돌로 영구 정지한다.
+        """
+        return len(self._resume_finished_events(approval_id)) + 2  # 최초 콜백이 attempt 1
+
+    def _executed_resume_attempts(self, approval_id: str) -> int:
+        """실제로 집행을 시도한 횟수. 재시도 예산은 이 값으로만 판정한다 —
+        abandoned(한 번도 실행되지 않고 회수된 claim)는 세지 않는다."""
+        return sum(
+            1
+            for payload in self._resume_finished_events(approval_id)
+            if payload.get("outcome") in {"completed", "failed"}
+        )
 
     def _claim_resume(self, envelope: PendingApprovalEnvelope, attempt: int) -> bool:
         """approval당 단일 in-flight를 duplicate_key UNIQUE 제약으로 보장한다."""
@@ -1021,7 +1220,7 @@ _RESUME_LEASE_SECONDS = 900
         )
 ```
 
-`_notify_approval_needs_attention`과 `catalog.APPROVAL_NEEDS_ATTENTION`은 Task 4에서 이미 만들었으므로 그대로 재사용한다.
+`_notify_approval_needs_attention(envelope, *, partial)`과 문구 상수 2개(`APPROVAL_NEEDS_ATTENTION` / `APPROVAL_NEEDS_RECONCILIATION`)는 Task 4에서 이미 만들었으므로 그대로 재사용한다. 재개 경로에서는 approvals 행이 있으면 `partial=True`(브로커 대조 필요), 재시도 예산 소진이면 `partial=False`로 호출한다.
 
 - [ ] **Step 4: 통과를 확인한다**
 
@@ -1218,13 +1417,30 @@ git commit -m "test: pin rollback safety and legacy ack compatibility"
 
 읽기 전용 검사만으로는 부족하다 — 서비스가 돌고 있으면 검사 직후 새 v2 ack가 기록되고 롤백되는 TOCTOU 창이 남는다. **writer를 먼저 멈추면** 검사 이후 새 상태가 생길 수 없다. 스펙이 3a 롤백에 요구하는 quiesce 순서와 같다.
 
+**타이머만 멈추는 것으로는 장벽이 닫히지 않는다.** (a) 이미 실행 중인 서비스 인스턴스는 타이머를 멈춰도 계속 돈다. (b) operator를 **되살릴 수 있는 유닛**이 있다 — `deploy/systemd/maestro-run-once.service:14`의 `ExecStopPost=-/bin/systemctl start maestro-telegram-operator.service`가 그렇다(현재 VPS에는 미설치지만, 설치된 환경에서는 preflight 이후 operator를 되살려 TOCTOU 창을 다시 연다). 그래서 정지 대상을 열거하고, 배포 직전에 **실제 정지 상태를 확인**하는 단계를 둔다.
+
 ```
-1. quiesce   systemctl stop maestro-telegram-operator.service
-             systemctl stop maestro-symphony-signal-kr.timer maestro-symphony-signal-us.timer
-2. 검사      아래 쿼리 결과가 none이어야 한다.
+1. quiesce   # 타이머와 서비스를 모두 멈춘다 (타이머만 멈추면 실행 중 인스턴스가 남는다)
+   systemctl stop maestro-telegram-operator.service
+   systemctl stop maestro-symphony-signal-kr.timer  maestro-symphony-signal-kr.service
+   systemctl stop maestro-symphony-signal-us.timer  maestro-symphony-signal-us.service
+   systemctl stop maestro-symphony-rebalance-kr.service maestro-symphony-rebalance-us.service
+   systemctl stop maestro-run-once.timer maestro-run-once.service   # 설치돼 있으면 (operator를 되살린다)
+
+2. 장벽 확인  # 전부 inactive여야 한다. 하나라도 active면 1로 돌아간다.
+   systemctl is-active maestro-telegram-operator.service \
+     maestro-symphony-signal-kr.service maestro-symphony-signal-us.service \
+     maestro-symphony-rebalance-kr.service maestro-symphony-rebalance-us.service \
+     maestro-run-once.service ; echo "---"
+   # state store에 쓰는 유닛을 빠뜨리지 않았는지 전수 확인:
+   systemctl list-units --all 'maestro-*' --no-pager | grep -v inactive
+
+3. 검사      아래 쿼리 결과가 none이어야 한다.
              하나라도 있으면 롤백하지 않는다 — 해당 승인을 먼저 종결시킨다.
-3. 구버전 배포  2와 3 사이에 어떤 unit도 재시작하지 않는다.
-4. 재개      구버전 기동을 확인한 뒤에만 timer·service를 재시작한다.
+
+4. 구버전 배포  3과 4 사이에 어떤 unit도 재시작하지 않는다.
+
+5. 재개      구버전 기동을 확인한 뒤에만 timer·service를 재시작한다.
 ```
 
 ```bash
@@ -1247,7 +1463,9 @@ Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 
 
 - **"주문 계층 멱등성(제출 intent·브로커 멱등 키)을 같은 배포에 포함"** — `approval_exists` fail-closed 조건이 중복 제출 경로를 이미 차단한다(행이 있으면 자동 재개하지 않는다). 제출 intent는 dispatch 계층 재설계와 함께 가야 하며 **3a-3** 범위다. 3a-1에 넣으면 계획이 두 배가 되고 검증 표면도 넓어진다.
 - **"quiesced backfill을 3a-1 선행 조건으로"** — legacy를 자동 실행하지 않으므로 backfill 중 경계 오염이 발생할 여지가 없다. quiesce 장벽은 자동 재집행을 켜는 시점(**3a-5**)에 필요하다.
-- **"DB compatibility marker로 구버전 시작 자체를 차단"** — **구현 불가능하다.** 구버전 코드에는 마커를 검사하는 로직이 없고, 이미 배포된 코드에 소급 적용할 수 없다. 강제력은 위 4단계 절차와 문서로만 확보되며, CLI화는 3a-5다.
+- **"DB compatibility marker로 구버전 시작 자체를 차단"** / **"writer가 검사하는 durable maintenance fence"** — **구현 불가능하다.** 구버전 코드에는 마커·fence를 검사하는 로직이 없고, 이미 배포된 코드에 소급 적용할 수 없다. 강제력은 위 5단계 절차와 문서로만 확보되며, CLI화는 3a-5다.
+- **"lease를 resolution 중 갱신하고 owner/token CAS로 회수"** (3차 리뷰) — 단일 프로세스 폴러에 과하다. `_sweep_pending_approvals`는 `poll_once` 안에서 순차 실행되므로, 같은 프로세스에서 resolution이 도는 동안 다른 sweep이 lease를 회수할 수 없다. "정상 resolution이 lease를 넘겨 회수당한다"는 시나리오는 프로세스가 둘일 때만 성립한다. 대신 실질적 위험(예산 소진)은 **abandoned를 재시도 예산에서 제외**하는 것으로 제거했다.
+- **"인덱스 프로젝션·부하 테스트·폴링 예산 도입"** (3차 리뷰) — 규모에 비해 과하다. 운영 DB의 승인 이벤트는 몇 달치가 6~16건이고 증가율은 거래일당 1건(연 250행) 수준이다. 성장 우려와 개수 창의 정합성 결함을 **시간 경계(Task 0)** 하나로 함께 해소했으며, 이는 기존 `(event_type, created_at)` 인덱스를 그대로 탄다. 이벤트 보존 정책·부하 테스트가 필요해지면 그때 별도로 다룬다.
 
 ## 다음 단계
 
