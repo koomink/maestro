@@ -378,12 +378,15 @@ Expected: FAIL — `AttributeError: 'TelegramOperatorCommandRouter' object has n
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_ack",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
 ```
 
-`_pending_async_approval`의 첫 루프를 다음으로 바꾸고, 같은 메서드의 `telegram_approval_pending` 조회도 `since=self._consistency_since()`로 바꾼다 (envelope을 못 찾으면 승인이 유실되므로 이것도 정합성 경로다):
+`_pending_async_approval`의 첫 루프를 다음으로 바꾸고, 같은 메서드의 `telegram_approval_pending` 조회도 `limit=None, since=self._consistency_since()`로 바꾼다 (envelope을 못 찾으면 승인이 유실되므로 이것도 정합성 경로다):
+
+> **`limit=None`을 반드시 명시할 것.** `list_system_events_by_type(event_type, limit=10, *, since=None)`의 `limit` 기본값은 **10**이다. `since`만 넘기면 조용히 10건으로 잘려 정합성 판정이 깨진다 (Task 1 구현 중 발견).
 
 ```python
         if approval_id in self._terminal_approval_ids():
@@ -612,12 +615,13 @@ Expected: FAIL — `test_acked_but_unresolved_approval_is_not_terminal`에서 `{
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         terminal = set(completed)
         for row in self.store.list_system_events_by_type(
-            "telegram_approval_ack", since=self._consistency_since()
+            "telegram_approval_ack", limit=None, since=self._consistency_since()
         ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
@@ -860,11 +864,13 @@ APPROVAL_NEEDS_RECONCILIATION = (
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         for row in self.store.list_system_events_by_type(
             "telegram_approval_ack",
+            limit=None,
             since=self._consistency_since(),
         ):
             ack = row["payload"]
@@ -893,6 +899,7 @@ APPROVAL_NEEDS_RECONCILIATION = (
         groups: dict[str, list[str]] = defaultdict(list)
         for row in self.store.list_system_events_by_type(
             "telegram_approval_pending",
+            limit=None,
             since=self._consistency_since(),
         ):
             payload = row["payload"]
@@ -901,6 +908,7 @@ APPROVAL_NEEDS_RECONCILIATION = (
         completed: set[str] = set()
         for row in self.store.list_system_events_by_type(
             "signal_approval_completed",
+            limit=None,
             since=self._consistency_since(),
         ):
             payload = row["payload"]
@@ -1131,19 +1139,21 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         envelopes = {
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         for row in reversed(
             self.store.list_system_events_by_type(
-                "telegram_approval_ack", since=self._consistency_since()
+                "telegram_approval_ack", limit=None, since=self._consistency_since()
             )
         ):
             ack = row["payload"]
@@ -1199,12 +1209,14 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
             (str(row["payload"].get("approval_id")), int(row["payload"].get("attempt", 0)))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         now = utc_now()
         for row in self.store.list_system_events_by_type(
             "telegram_approval_resume_claim",
+            limit=None,
             since=self._consistency_since(),
         ):
             payload = row["payload"]
@@ -1254,7 +1266,8 @@ _RESUME_LEASE_SECONDS = 900
             row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
             if str(row["payload"].get("approval_id")) == approval_id
         ]
