@@ -1478,11 +1478,17 @@ def approval_rollback_preflight(
         help="Fail if the telegram operator service is still running.",
     ),
 ) -> None:
-    """Read-only rollback safety check. Exits 1 when an approval is unresolved.
+    """롤백 전 안전 검사. 미완 승인이 있으면 exit 1.
 
-    An ack with schema_version=2 but no matching resolution_completed event is
-    exactly the state where old code (pre this feature) would read the ack
-    alone, seal the approval, and lose an approved order batch on rollback.
+    schema_version=2 ack가 있고 resolution_completed가 없는 승인은 구버전이
+    ack만 보고 종결로 오판하므로, 이 상태에서 롤백하면 주문이 유실된다.
+
+    이 명령의 판정 로직 자체는 읽기 전용이며 승인 상태를 바꾸지 않는다.
+    다만 `_state_store` 생성은 다른 모든 CLI 명령과 동일하게 보류 중인
+    스키마 마이그레이션/백필(`StateStore._init_db`)을 적용할 수 있다 —
+    모두 additive-only(`CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE
+    ADD COLUMN`)이거나 멱등적인 백필이며, 롤백 대상인 구버전 코드도 기동
+    시 동일한 마이그레이션을 실행하므로 롤백 안전성에는 영향이 없다.
     """
     if require_quiesce and _service_is_active("maestro-telegram-operator.service"):
         typer.echo("approval_rollback_preflight status=fail reason=operator_still_running")

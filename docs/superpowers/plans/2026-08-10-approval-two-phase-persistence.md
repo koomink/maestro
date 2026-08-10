@@ -1717,6 +1717,8 @@ git commit -m "feat: add a read-only rollback preflight for unresolved approvals
 # exit 0 → 롤백 가능 / exit 1 → 중단 (미완 승인 approval_id가 출력된다)
 ```
 
+이 명령의 판정 로직은 읽기 전용이지만, 상태 저장소 연결 과정에서 다른 모든 CLI 명령과 마찬가지로 보류 중인 스키마 마이그레이션/백필이 적용될 수 있다(모두 additive-only·멱등적이며 구버전 코드도 기동 시 동일하게 실행하므로 롤백 안전성에는 영향이 없다).
+
 ## 채택하지 않는 리뷰 권고 (근거 기록)
 
 Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 이유:
