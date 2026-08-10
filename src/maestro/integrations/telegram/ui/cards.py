@@ -72,14 +72,15 @@ def approval_detail_pages(request: ApprovalRequest) -> list[str]:
     current: list[str] = []
     current_length = 0
     for block in _detail_blocks(request):
-        block = _clamp_block(block, capacity)
-        length = telegram_text_length("\n".join(block)) + 1
-        if current and current_length + length > capacity:
-            grouped.append(current)
-            current = []
-            current_length = 0
-        current.extend(block)
-        current_length += length
+        # 한 쪽보다 큰 블록도 버리지 않고 조각내어 다음 쪽으로 이어 붙인다.
+        for chunk in _split_block(block, capacity):
+            length = telegram_text_length("\n".join(chunk)) + 1
+            if current and current_length + length > capacity:
+                grouped.append(current)
+                current = []
+                current_length = 0
+            current.extend(chunk)
+            current_length += length
     grouped.append(current)
 
     total = len(grouped)
@@ -144,10 +145,45 @@ def _clamp(text: str) -> str:
     return _clamp_text(text, TELEGRAM_TEXT_LIMIT)
 
 
-def _clamp_block(block: list[str], capacity: int) -> list[str]:
+def _split_block(block: list[str], capacity: int) -> list[list[str]]:
+    """블록을 한 쪽 용량 이하 조각들로 나눈다 (내용 손실 없음)."""
     if telegram_text_length("\n".join(block)) + 1 <= capacity:
-        return block
-    return _clamp_text("\n".join(block), max(capacity - 1, 1)).split("\n")
+        return [block]
+    chunks: list[list[str]] = []
+    current: list[str] = []
+    current_length = 0
+    for line in block:
+        for piece in _split_line(line, max(capacity - 1, 1)):
+            length = telegram_text_length(piece) + 1
+            if current and current_length + length > capacity:
+                chunks.append(current)
+                current = []
+                current_length = 0
+            current.append(piece)
+            current_length += length
+    if current:
+        chunks.append(current)
+    return chunks or [[]]
+
+
+def _split_line(line: str, limit: int) -> list[str]:
+    """긴 한 줄을 UTF-16 안전하게(코드 포인트 단위로) 여러 줄로 나눈다."""
+    if telegram_text_length(line) <= limit:
+        return [line]
+    pieces: list[str] = []
+    current: list[str] = []
+    used = 0
+    for char in line:
+        width = telegram_text_length(char)
+        if used + width > limit:
+            pieces.append("".join(current))
+            current = []
+            used = 0
+        current.append(char)
+        used += width
+    if current:
+        pieces.append("".join(current))
+    return pieces
 
 
 def _clamp_text(text: str, limit: int) -> str:

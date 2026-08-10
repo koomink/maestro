@@ -220,6 +220,28 @@ def test_expanded_pages_cover_every_order_and_risk_reason():
         assert telegram_text_length(page) <= TELEGRAM_TEXT_LIMIT
 
 
+def test_oversized_single_block_is_split_across_pages_without_losing_text():
+    violation = "".join(f"[{index:05d}]" for index in range(2000))  # 한 쪽보다 훨씬 긴 사유 1건
+    long_name = "아주긴상품명" * 900
+    base = _request()
+    request = base.model_copy(
+        update={
+            "proposed_orders": [dict(base.proposed_orders[0], name=long_name)],
+            "order_count": 1,
+            "risk_violations": [violation],
+        }
+    )
+
+    pages = approval_detail_pages(request)
+    joined = "".join(pages)
+    for page in pages:
+        assert telegram_text_length(page) <= TELEGRAM_TEXT_LIMIT
+    # 쪽 경계에서 문자열이 나뉠 수는 있어도 잘려 사라지면 안 된다.
+    assert catalog.TRUNCATED_MARK not in joined
+    assert joined.count("[") == 2000  # 위험 사유의 모든 조각이 남아 있다
+    assert sum(page.count("아주긴") for page in pages) >= 899  # 긴 상품명도 보존
+
+
 def test_page_out_of_range_clamps_to_last_page():
     request = _bulk_request(120)
     card = render_approval_card(request, expanded=True, page=999)

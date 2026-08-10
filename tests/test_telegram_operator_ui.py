@@ -2412,6 +2412,47 @@ def test_reminder_send_failure_does_not_block_approval_callbacks(monkeypatch, tm
     assert store.list_system_events_by_type("telegram_approval_reminder") == []
 
 
+def test_reminder_is_not_resent_to_chats_that_already_received_it(monkeypatch, tmp_path):
+    class SecondChatFailingClient(FakeTelegramClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            if chat_id == 200:
+                raise RuntimeError("Telegram Bot API returned not ok for method: sendMessage")
+            return super().send_message(chat_id, text, reply_markup=reply_markup)
+
+    config = load_config(_telegram_config_path(tmp_path))
+    config.approval.telegram_allowed_chat_ids = [100, 200]
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = SecondChatFailingClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=audit,
+        client=client,
+    )
+    envelope = _pending_approval_envelope(reminder_seconds=[120])
+    store.save_system_event(
+        envelope.run_id,
+        "telegram_approval_pending",
+        envelope.model_dump(mode="json"),
+    )
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.utc_now",
+        lambda: envelope.created_at + timedelta(seconds=121),
+    )
+
+    router.poll_once(timeout_seconds=0)
+    router.poll_once(timeout_seconds=0)
+    router.poll_once(timeout_seconds=0)
+
+    delivered = [
+        item
+        for item in client.sent_messages
+        if item["chat_id"] == 100 and "아직 응답을 기다리고 있어요" in item["text"]
+    ]
+    assert len(delivered) == 1  # 성공한 채팅에는 한 번만 간다
+
+
 def test_expired_contribution_order_is_recoverable_but_open_order_is_not(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)

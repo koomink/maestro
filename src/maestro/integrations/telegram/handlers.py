@@ -1533,16 +1533,25 @@ class TelegramOperatorCommandRouter:
                 limit=2000,
             )
         }
-        reminders = {
-            (
-                str(row["payload"].get("approval_id")),
-                int(row["payload"].get("reminder_seconds", 0)),
+        # 전송 완료는 chat_id 단위로 추적한다. 일부 채팅만 실패했을 때 성공한
+        # 채팅에 같은 리마인더를 다시 보내지 않기 위함.
+        # chat_id가 없는 과거 이벤트는 전체 채팅 완료로 간주한다 (하위 호환).
+        reminders: set[tuple[str, int]] = set()
+        chat_reminders: set[tuple[str, int, int]] = set()
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_reminder",
+            limit=5000,
+        ):
+            payload = row["payload"]
+            key = (
+                str(payload.get("approval_id")),
+                int(payload.get("reminder_seconds", 0)),
             )
-            for row in self.store.list_system_events_by_type(
-                "telegram_approval_reminder",
-                limit=5000,
-            )
-        }
+            chat_id = payload.get("chat_id")
+            if isinstance(chat_id, int):
+                chat_reminders.add((*key, chat_id))
+            else:
+                reminders.add(key)
         now = utc_now()
         for row in reversed(
             self.store.list_system_events_by_type(
@@ -1571,33 +1580,37 @@ class TelegramOperatorCommandRouter:
                 key = (approval_id, reminder_seconds)
                 if elapsed < reminder_seconds or key in reminders:
                     continue
-                try:
-                    for chat_id in self.config.approval.telegram_allowed_chat_ids:
+                for chat_id in self.config.approval.telegram_allowed_chat_ids:
+                    if (*key, chat_id) in chat_reminders:
+                        continue
+                    try:
                         self._send(
                             chat_id,
                             approval_reminder_text(reminder_seconds // 60, envelope.message),
                             reply_markup=approval_markup(envelope.approval_id, expanded=False),
                         )
-                except (RuntimeError, TimeoutError, ValueError) as exc:
-                    # 리마인더 하나가 실패해도 만료 처리·콜백 폴링까지 막지 않는다.
-                    # 완료로 기록하지 않으므로 다음 poll에서 다시 시도한다.
-                    self._record_update_failure(None, exc)
-                    continue
-                save_audited_system_event(
-                    self.store,
-                    self.audit,
-                    envelope.run_id,
-                    "telegram_approval_reminder",
-                    {
-                        "approval_id": envelope.approval_id,
-                        "reminder_seconds": reminder_seconds,
-                        "sent_at": now.isoformat(),
-                        "duplicate_key": (
-                            f"telegram-approval-reminder:{envelope.approval_id}:{reminder_seconds}"
-                        ),
-                    },
-                )
-                reminders.add(key)
+                    except (RuntimeError, TimeoutError, ValueError) as exc:
+                        # 리마인더 하나가 실패해도 만료 처리·콜백 폴링까지 막지 않는다.
+                        # 해당 채팅만 완료로 기록하지 않아 다음 poll에서 재시도한다.
+                        self._record_update_failure(None, exc)
+                        continue
+                    save_audited_system_event(
+                        self.store,
+                        self.audit,
+                        envelope.run_id,
+                        "telegram_approval_reminder",
+                        {
+                            "approval_id": envelope.approval_id,
+                            "reminder_seconds": reminder_seconds,
+                            "chat_id": chat_id,
+                            "sent_at": now.isoformat(),
+                            "duplicate_key": (
+                                "telegram-approval-reminder:"
+                                f"{envelope.approval_id}:{reminder_seconds}:{chat_id}"
+                            ),
+                        },
+                    )
+                    chat_reminders.add((*key, chat_id))
 
     def _sweep_recovery_notifications(self) -> None:
         safety = SafetyControlService(self.store, self.audit).current_state()
