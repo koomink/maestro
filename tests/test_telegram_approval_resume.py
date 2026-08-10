@@ -247,6 +247,48 @@ def test_completed_approval_is_terminal(tmp_path):
     assert router._terminal_approval_ids() == {"appr_1"}
 
 
+def test_old_handler_semantics_still_settle_completed_approvals(tmp_path):
+    """구버전은 ack만 보고 종결 판정한다. 새 코드가 남긴 ack에도
+    status/decided_by가 그대로 있으므로 구버전이 재실행하지 않는다."""
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    router._resolve_async_approval(
+        envelope, status="approved", decided_by="telegram:tester", reason="test"
+    )
+
+    legacy_acked = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type("telegram_approval_ack", limit=None)
+    }
+    assert legacy_acked == {"appr_1"}  # 구버전 판정 로직과 동일한 식
+
+
+def test_mixed_legacy_and_new_events_are_classified_independently(tmp_path):
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+    _save_pending_envelope(store, approval_id="appr_new")
+    _save_ack(store, approval_id="appr_new", status="approved", schema_version=2)
+
+    assert router._terminal_approval_ids() == {"appr_legacy"}
+
+
+def test_v2_ack_without_completed_is_rollback_unsafe(tmp_path):
+    """이 상태에서 구버전으로 롤백하면 승인된 주문이 유실된다.
+    배포 확인 절의 롤백 절차가 quiesce 아래에서 검사해야 하는 상태다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="approved", schema_version=2)
+
+    # 구버전 판정식(ack만 조회)은 종결로 본다 = 롤백 시 유실
+    legacy_terminal = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type("telegram_approval_ack", limit=None)
+    }
+    assert legacy_terminal == {"appr_1"}
+    assert router._terminal_approval_ids() == set()  # 신버전은 미완으로 본다
+
+
 def test_failed_resolution_records_no_completed_event(tmp_path):
     router, store = _router(tmp_path, resolve_error=ValueError("stale broker snapshot"))
     envelope = _save_pending_envelope(store, approval_id="appr_1")

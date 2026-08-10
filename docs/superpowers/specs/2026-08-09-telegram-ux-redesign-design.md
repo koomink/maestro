@@ -411,6 +411,35 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
      사용한다.
    - 라이프사이클 카드는 ack만으로 완료를 표시하지 않고
      `resolution_completed` 후에만 ✅/종결 상태로 렌더한다.
+
+   **구현 메모 (3a-1, 2026-08-10)**: 종결 판정은 `telegram_approval_ack.schema_version`
+   으로 신·구를 구분한다 — schema_version이 없는 ack(3a 이전)는 그 자체로 종결,
+   `schema_version >= 2`인 ack는 `telegram_approval_resolution_completed`가 있어야
+   종결이다. 별도의 cutoff 마커·DB 마이그레이션 없이 배포된다.
+
+   자동 재개는 **approvals 행이 없는 승인**으로 한정한다 — `save_approval`은
+   모든 브로커 호출에 선행하므로(orchestrator.py:332) 행이 없으면 부작용이
+   없음이 증명된다. `live_order_lifecycle` 기록 유무로 판정하면 안 된다:
+   브로커 제출이 먼저이고 기록이 나중이라(execution/live_order_lifecycle.py:76,
+   :401) 그 사이 중단되면 중복 주문을 낸다. 행이 있는 상태의 재개(주문 단위
+   멱등성)는 3a-3 범위이며, 그전까지는 ⚠️ 알림으로 운영자에게 라우팅한다.
+
+   3a 이전 legacy ack는 자동 재집행하지 않되, 집행 증거(approvals 행 +
+   `signal_approval_completed`)가 없는 건은 일회성 격리 통보를 보낸다.
+
+   **롤백은 조건부로만 안전하다**: 완료된 승인은 롤백해도 재집행되지 않지만,
+   `schema_version=2` ack가 있고 `resolution_completed`가 없는 상태에서 롤백하면
+   구버전이 ack만 보고 종결 처리해 승인된 주문이 유실된다. 롤백 절차는
+   quiesce 아래에서 이를 검사하는 5단계다: (1) **quiesce** — 타이머뿐 아니라
+   이미 실행 중인 서비스 인스턴스까지 모두 정지한다(타이머만 멈추면 실행
+   중인 인스턴스가 writer로 계속 남는다), (2) **장벽 확인** — writer를
+   되살릴 수 있는 유닛(`maestro-run-once` 포함)까지 정지 대상을 빠짐없이
+   열거하고 `systemctl is-active`로 전부 inactive임을 확인한다, (3) **검사**
+   — 위 위험 상태(및 다른 3a 미완 상태)가 하나도 없는지 확인한다. 이 검사는
+   다음 태스크가 `maestro approval-rollback-preflight` CLI로 제공하며,
+   인라인 쿼리가 아니다, (4) **구버전 배포** — 검사와 배포 사이 어떤 unit도
+   재시작하지 않는다, (5) **재개** — 구버전 기동을 확인한 뒤에만 타이머·
+   서비스를 재개한다. (3)에서 위험 상태가 하나라도 발견되면 롤백하지 않는다.
 8. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
    duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
 
