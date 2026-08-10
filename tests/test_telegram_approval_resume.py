@@ -44,8 +44,8 @@ class FakeTelegramClient:
         self.sent_messages.append({"chat_id": chat_id, "text": text})
         return {"result": {"message_id": len(self.sent_messages)}}
 
-    def get_updates(self, offset=None, timeout=0):
-        return []
+    def get_updates(self, *, offset=None, timeout_seconds=0, allowed_updates=None):
+        return {"ok": True, "result": []}
 
     def answer_callback_query(self, callback_query_id, text=""):
         return {"ok": True}
@@ -604,6 +604,48 @@ def test_decided_approval_stops_receiving_reminders(tmp_path):
     assert store.list_system_events_by_type(
         "telegram_approval_resolution_completed", limit=None
     ) == []
+
+
+def test_stale_snapshot_failure_is_recovered_on_next_poll(tmp_path):
+    """2026-08-07 운영 사고: 승인 ack 직후 stale snapshot으로 집행 실패.
+    구 코드에서는 재클릭도 거절돼 승인이 영구 유실됐다."""
+    router, store = _router(
+        tmp_path,
+        resolve_error=ValueError(
+            "Signal package stale broker snapshot: "
+            "account_id=toss_brokerage age_seconds=1025 max_age_seconds=900"
+        ),
+    )
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:u1wHK0B", reason="button"
+        )
+
+    # 실패 직후: 승인은 종결이 아니며 재개 대상이다
+    assert router._terminal_approval_ids() == set()
+    assert _latest_payload(store, "telegram_approval_resolution_failed")["approval_id"] == "appr_1"
+
+    # 스냅샷이 갱신되면 다음 poll에서 자동 재개된다
+    router._resolve_error = None
+    router.poll_once()
+
+    assert router._terminal_approval_ids() == {"appr_1"}
+    completed = _latest_payload(store, "telegram_approval_resolution_completed")
+    assert completed["status"] == "approved"
+    assert completed["attempt"] == 2
+
+    # poll_once는 sweep 실패를 삼키고 telegram_command(status=error)로만 남긴다
+    # (Task 4). 통과가 "재개 성공" 때문인지 "예외가 조용히 삼켜졌지만 우연히
+    # 이전 상태가 조건을 만족했기 때문"인지 구분하려면 이 부정 조건도 함께
+    # 확인해야 한다.
+    swallowed_failures = [
+        row
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+        if row["payload"].get("status") == "error"
+    ]
+    assert swallowed_failures == []
 
 
 def test_undecided_approval_still_receives_its_reminder(tmp_path):
