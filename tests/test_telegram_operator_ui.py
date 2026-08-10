@@ -3072,6 +3072,7 @@ def test_ui_detail_callback_expands_approval_card(tmp_path):
     assert handled
     edited = client.edited_messages[-1]
     assert envelope.approval_id in edited["text"]  # 펼친 뷰에는 ID 노출
+    assert "  계좌: paper" in edited["text"]  # 펼친 뷰에는 계좌 ID 노출
     fold_row = edited["reply_markup"]["inline_keyboard"][1][0]
     assert fold_row["callback_data"] == f"operator:ui:f:{envelope.approval_id}"
 
@@ -3120,6 +3121,30 @@ def test_approval_callback_edits_card_with_korean_result(tmp_path):
     assert handled
     assert client.answered_callbacks[-1]["text"] == "거절했어요."
     assert client.edited_messages[-1]["text"].startswith("❌ 거절했어요")
+
+
+def test_approval_callback_does_not_claim_submission_without_submitted_orders(tmp_path):
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    audit = AuditLogger(config.audit.jsonl_path)
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config, store=store, audit=audit, client=client
+    )
+    envelope = _pending_approval_envelope()
+    store.save_signal_package(envelope.signal_run_id, {"orders_preview": envelope.orders})
+    store.save_system_event(
+        new_run_id(), "telegram_approval_pending", envelope.model_dump(mode="json")
+    )
+
+    handled = router.process_update(
+        callback_update(f"operator:appr:a:{envelope.approval_id}")
+    )
+
+    assert handled
+    edited = client.edited_messages[-1]["text"]
+    assert "접수했어요" not in edited  # 제출되지 않은 주문을 접수로 보고하지 않는다
+    assert edited.startswith("⚠️")
 
 
 def test_telegram_bot_commands_registers_only_five_korean_commands():

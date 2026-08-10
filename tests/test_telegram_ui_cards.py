@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from maestro.approval.models import ApprovalRequest
 from maestro.integrations.telegram.ui import catalog
@@ -10,7 +10,7 @@ from maestro.integrations.telegram.ui.cards import (
 
 
 def _request() -> ApprovalRequest:
-    expires = datetime(2026, 8, 10, 14, 30, tzinfo=timezone.utc)  # KST 밤 11시 30분
+    expires = datetime(2026, 8, 10, 14, 30, tzinfo=UTC)  # KST 밤 11시 30분
     return ApprovalRequest(
         approval_id="appr_0123456789abcdef0123456789abcdef",
         run_id="run_0123456789abcdef0123456789abcdef",
@@ -53,13 +53,56 @@ def test_collapsed_card_snapshot():
     assert card.text == (
         "📩 투자 주문을 진행할까요?\n"
         "\n"
-        "Tranquillo 전략 · 국내 주식 2종목 · 총 124만원\n"
+        "Tranquillo 전략 · 국내 주식 2종목 · 매수 2건 · 총 124만원\n"
         "\n"
-        "• KODEX 200 10주 — 71.2만원\n"
-        "• TIGER 미국S&P500 28주 — 52.8만원\n"
+        "• 🟢 매수 KODEX 200 10주 — 71.2만원\n"
+        "• 🟢 매수 TIGER 미국S&P500 28주 — 52.8만원\n"
         "\n"
         "⏰ 밤 11시 30분까지 응답해 주세요."
     )
+
+
+def test_sell_orders_show_sell_direction():
+    base = _request()
+    sells = [dict(order, side="sell") for order in base.proposed_orders]
+    card = render_approval_card(base.model_copy(update={"proposed_orders": sells}), expanded=False)
+    assert "매도 2건" in card.text
+    assert "• 🔴 매도 KODEX 200 10주 — 71.2만원" in card.text
+    assert "매수" not in card.text
+
+
+def test_mixed_direction_summary_lists_both_counts():
+    base = _request()
+    mixed = [base.proposed_orders[0], dict(base.proposed_orders[1], side="sell")]
+    card = render_approval_card(base.model_copy(update={"proposed_orders": mixed}), expanded=False)
+    assert "매수 1건 · 매도 1건" in card.text
+    assert "• 🟢 매수 KODEX 200" in card.text
+    assert "• 🔴 매도 TIGER 미국S&P500" in card.text
+
+
+def test_unknown_direction_is_flagged_instead_of_assumed_buy():
+    base = _request()
+    unknown = [{k: v for k, v in base.proposed_orders[0].items() if k != "side"}]
+    card = render_approval_card(
+        base.model_copy(update={"proposed_orders": unknown}), expanded=False
+    )
+    assert "• ⚠️ 방향 미상 KODEX 200 10주 — 71.2만원" in card.text
+    assert "매수" not in card.text
+
+
+def test_expanded_card_shows_account_id_per_order():
+    base = _request()
+    orders = [
+        dict(base.proposed_orders[0], account_id="kis_ps"),
+        dict(base.proposed_orders[1], account_id="kis_isa"),
+    ]
+    card = render_approval_card(base.model_copy(update={"proposed_orders": orders}), expanded=True)
+    assert "  계좌: kis_ps" in card.text
+    assert "  계좌: kis_isa" in card.text
+    collapsed = render_approval_card(
+        base.model_copy(update={"proposed_orders": orders}), expanded=False
+    )
+    assert "계좌" not in collapsed.text
 
 
 def test_collapsed_card_buttons():
@@ -122,12 +165,27 @@ def test_many_orders_are_truncated_in_collapsed_view():
 
 
 def test_decision_and_reminder_texts():
-    assert approval_decision_text("approved", "appr_x", 2) == (
-        "✅ 승인 완료 — 주문 2건을 접수했어요."
-    )
-    assert approval_decision_text("rejected", "appr_x", 0) == (
-        "❌ 거절했어요 — 이번 제안은 실행되지 않아요."
-    )
+    assert approval_decision_text(
+        "approved", "appr_x", orders_submitted=2, orders_failed=0
+    ) == ("✅ 승인 완료 — 주문 2건을 접수했어요.")
+    assert approval_decision_text(
+        "rejected", "appr_x", orders_submitted=0, orders_failed=0
+    ) == ("❌ 거절했어요 — 이번 제안은 실행되지 않아요.")
     reminder = approval_reminder_text(30, "카드 본문")
     assert reminder == "⏰ 아직 응답을 기다리고 있어요 (30분 경과)\n\n카드 본문"
     assert catalog.STALE_CALLBACK_TEXT == "이미 처리됐거나 만료된 요청이에요."
+
+
+def test_decision_text_does_not_claim_submission_when_nothing_was_submitted():
+    text = approval_decision_text("approved", "appr_x", orders_submitted=0, orders_failed=0)
+    assert text == "⚠️ 승인했지만 접수된 주문이 없어요. /history에서 확인해 주세요."
+
+
+def test_decision_text_reports_partial_failure():
+    text = approval_decision_text("approved", "appr_x", orders_submitted=1, orders_failed=2)
+    assert text == "⚠️ 승인 완료 — 주문 1건 접수, 2건은 실패했어요. /history에서 확인해 주세요."
+
+
+def test_decision_text_reports_total_failure():
+    text = approval_decision_text("approved", "appr_x", orders_submitted=0, orders_failed=2)
+    assert text == "⚠️ 승인했지만 주문 2건이 모두 실패했어요. /history에서 확인해 주세요."

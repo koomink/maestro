@@ -1399,7 +1399,12 @@ class TelegramOperatorCommandRouter:
         )
         self._edit_callback_message(
             callback,
-            approval_decision_text(status, envelope.approval_id, summary.orders_created),
+            approval_decision_text(
+                status,
+                envelope.approval_id,
+                orders_submitted=summary.orders_submitted,
+                orders_failed=summary.orders_failed,
+            ),
         )
         self._record("/approval", chat_id, user_id, username, status)
         return True

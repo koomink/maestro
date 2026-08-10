@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 from maestro.integrations.telegram.ui.format import (
@@ -40,16 +40,16 @@ def test_quantity_kr():
 
 def test_deadline_kr_buckets():
     # 23:30 KST = 14:30 UTC
-    dt = datetime(2026, 8, 10, 14, 30, tzinfo=timezone.utc)
+    dt = datetime(2026, 8, 10, 14, 30, tzinfo=UTC)
     assert deadline_kr(dt) == "밤 11시 30분"
     # 09:10 KST
-    dt2 = datetime(2026, 8, 10, 0, 10, tzinfo=timezone.utc)
+    dt2 = datetime(2026, 8, 10, 0, 10, tzinfo=UTC)
     assert deadline_kr(dt2) == "오전 9시 10분"
     # 분이 0이면 생략, 15:00 KST → 오후 3시
-    dt3 = datetime(2026, 8, 10, 6, 0, tzinfo=timezone.utc)
+    dt3 = datetime(2026, 8, 10, 6, 0, tzinfo=UTC)
     assert deadline_kr(dt3) == "오후 3시"
 
 
 def test_deadline_kr_respects_explicit_tz():
-    dt = datetime(2026, 8, 10, 14, 30, tzinfo=timezone.utc)
+    dt = datetime(2026, 8, 10, 14, 30, tzinfo=UTC)
     assert deadline_kr(dt, tz=ZoneInfo("UTC")) == "오후 2시 30분"

@@ -30,6 +30,7 @@ def render_approval_card(request: ApprovalRequest, *, expanded: bool) -> Rendere
             strategy=strategy_display_label(request.source_strategy_ids),
             market=_market_summary(request.proposed_orders),
             count=len(request.proposed_orders),
+            sides=_side_summary(request.proposed_orders),
             total=_total_label(request),
         )
     )
@@ -89,10 +90,25 @@ def approval_markup(approval_id: str, *, expanded: bool) -> dict[str, Any]:
     }
 
 
-def approval_decision_text(status: str, approval_id: str, orders_created: int) -> str:
-    if status == "approved":
-        return catalog.DECISION_APPROVED.format(count=orders_created)
-    return catalog.DECISION_REJECTED
+def approval_decision_text(
+    status: str,
+    approval_id: str,
+    *,
+    orders_submitted: int,
+    orders_failed: int,
+) -> str:
+    """승인 결과 문구. 실제로 브로커에 접수된 주문 수만 성공으로 보고한다."""
+    if status != "approved":
+        return catalog.DECISION_REJECTED
+    if orders_submitted and orders_failed:
+        return catalog.DECISION_APPROVED_PARTIAL.format(
+            submitted=orders_submitted, failed=orders_failed
+        )
+    if orders_submitted:
+        return catalog.DECISION_APPROVED.format(count=orders_submitted)
+    if orders_failed:
+        return catalog.DECISION_APPROVED_ALL_FAILED.format(failed=orders_failed)
+    return catalog.DECISION_APPROVED_NONE
 
 
 def approval_reminder_text(minutes: int, card_text: str) -> str:
@@ -109,7 +125,7 @@ def _order_lines(orders: list[dict], *, expanded: bool) -> list[str]:
         currency = order.get("currency") if isinstance(order.get("currency"), str) else None
         quantity_label = f" {quantity_kr(quantity)}" if quantity is not None else ""
         amount = money_kr(notional, currency) if notional is not None else "-"
-        lines.append(f"• {name}{quantity_label} — {amount}")
+        lines.append(f"• {_side_label(order)} {name}{quantity_label} — {amount}")
         if expanded:
             symbol = str(order.get("symbol") or "unknown")
             broker_symbol = order.get("broker_symbol")
@@ -124,10 +140,36 @@ def _order_lines(orders: list[dict], *, expanded: bool) -> list[str]:
                 lines.append(f"  지정가: {money_full(price, currency)}")
             if notional is not None:
                 lines.append(f"  금액: {money_full(notional, currency)}")
+            account_id = order.get("account_id")
+            if isinstance(account_id, str) and account_id:
+                lines.append(f"  계좌: {account_id}")
     hidden = len(orders) - len(visible)
     if hidden > 0:
         lines.append(catalog.APPROVAL_MORE_ORDERS.format(count=hidden))
     return lines
+
+
+def _side_label(order: dict) -> str:
+    side = str(order.get("side") or "").lower()
+    if side == "buy":
+        return catalog.SIDE_BUY
+    if side == "sell":
+        return catalog.SIDE_SELL
+    return catalog.SIDE_UNKNOWN
+
+
+def _side_summary(orders: list[dict]) -> str:
+    counts = {catalog.SIDE_BUY: 0, catalog.SIDE_SELL: 0, catalog.SIDE_UNKNOWN: 0}
+    for order in orders:
+        counts[_side_label(order)] += 1
+    templates = (
+        (catalog.SIDE_BUY, catalog.SIDE_SUMMARY_BUY),
+        (catalog.SIDE_SELL, catalog.SIDE_SUMMARY_SELL),
+        (catalog.SIDE_UNKNOWN, catalog.SIDE_SUMMARY_UNKNOWN),
+    )
+    return " · ".join(
+        template.format(count=counts[label]) for label, template in templates if counts[label]
+    )
 
 
 def _market_summary(orders: list[dict]) -> str:
