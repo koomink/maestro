@@ -14,6 +14,7 @@ from maestro.integrations.telegram.ui.format import (
 )
 
 _MAX_COLLAPSED_ORDER_LINES = 6
+_MAX_COLLAPSED_RISK_LINES = 3
 _CALLBACK_PREFIX = "operator:"
 
 #: Telegram sendMessage/editMessageText 본문 한도 (UTF-16 코드 유닛).
@@ -98,10 +99,24 @@ def _collapsed_text(request: ApprovalRequest) -> str:
     lines.extend(_order_lines(request.proposed_orders, expanded=False))
     if request.risk_violations:
         lines.append("")
-        lines.append(catalog.APPROVAL_RISK_SUMMARY.format(count=len(request.risk_violations)))
+        lines.extend(_collapsed_risk_lines(request.risk_violations))
     lines.append("")
     lines.append(catalog.APPROVAL_DEADLINE.format(deadline=deadline_kr(request.expires_at)))
     return "\n".join(lines)
+
+
+def _collapsed_risk_lines(violations: list[str]) -> list[str]:
+    """승인 버튼이 붙는 첫 화면에도 위험 사유 원문을 남긴다 (건수 요약만으로는
+    무엇이 걸렸는지 모른 채 승인하게 된다)."""
+    lines = [catalog.APPROVAL_RISK_SUMMARY.format(count=len(violations))]
+    lines.extend(
+        catalog.APPROVAL_RISK_REASON.format(reason=violation)
+        for violation in violations[:_MAX_COLLAPSED_RISK_LINES]
+    )
+    hidden = len(violations) - _MAX_COLLAPSED_RISK_LINES
+    if hidden > 0:
+        lines.append(catalog.APPROVAL_MORE_RISKS.format(count=hidden))
+    return lines
 
 
 def _header_lines(request: ApprovalRequest) -> list[str]:

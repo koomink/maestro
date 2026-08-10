@@ -147,13 +147,28 @@ def test_collapsed_card_hides_identifiers():
     assert "run_" not in card.text
 
 
-def test_risk_violations_summarized_in_collapsed_view():
-    request = _request().model_copy(update={"risk_violations": ["max_notional exceeded"]})
+def test_risk_violation_reasons_are_visible_before_approving():
+    request = _request().model_copy(
+        update={"risk_violations": ["max_notional exceeded", "sector cap exceeded"]}
+    )
     collapsed = render_approval_card(request, expanded=False)
-    assert "⚠️ 위험 점검에서 확인할 내용이 1건 있어요." in collapsed.text
-    assert "max_notional" not in collapsed.text
+    # 승인 버튼이 붙는 첫 화면에서 위험 사유 원문을 확인할 수 있어야 한다.
+    assert "⚠️ 위험 점검에서 확인할 내용이 2건 있어요." in collapsed.text
+    assert "- max_notional exceeded" in collapsed.text
+    assert "- sector cap exceeded" in collapsed.text
     expanded = render_approval_card(request, expanded=True)
     assert "max_notional exceeded" in expanded.text
+
+
+def test_collapsed_view_lists_first_risk_reasons_and_counts_the_rest():
+    request = _request().model_copy(
+        update={"risk_violations": [f"위반 사유 {index}" for index in range(5)]}
+    )
+    collapsed = render_approval_card(request, expanded=False)
+    for index in range(3):
+        assert f"- 위반 사유 {index}" in collapsed.text
+    assert "- 위반 사유 3" not in collapsed.text
+    assert "- 외 2건" in collapsed.text
 
 
 def test_many_orders_are_truncated_in_collapsed_view():
