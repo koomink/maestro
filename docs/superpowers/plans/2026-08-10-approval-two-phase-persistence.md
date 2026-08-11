@@ -1661,21 +1661,43 @@ git commit -m "feat: add a read-only rollback preflight for unresolved approvals
 
 ## 배포 확인 (3a-1 승인 조건)
 
-- 배포 직후 legacy 격리 알림이 몇 건 나갈 수 있다. 운영 DB의 기존 ack 6건 중 집행 증거가 없는 건(2026-08-07 사고 포함)이 대상이며, **자동 재집행은 일어나지 않는다**. 배포 전에 대상 건수를 미리 확인한다:
+- 배포 직후 legacy 격리 알림이 몇 건 나간다. 운영 DB의 기존 legacy ack 중 **집행 완료 증거가 없는 건**이 대상이며, **자동 재집행은 일어나지 않는다**. 배포 전에 대상 건수를 미리 확인한다.
+
+  판정식은 구현(`_notify_legacy_unresolved_approvals` / `_completed_legacy_approval_ids`)과 반드시 같아야 한다: **pending envelope이 있고 + 완료 증거가 없으면** 알린다. `approvals` 행 유무는 알릴지 말지를 정하지 않고 **문구만 가른다** (행이 있으면 `APPROVAL_NEEDS_RECONCILIATION`, 없으면 `APPROVAL_NEEDS_ATTENTION`). 완료 증거는 `signal_approval_completed`이며, approval_id가 있으면 정확히 매칭하고 없는 구 이벤트는 그 signal run의 승인 그룹이 하나뿐일 때만 완료로 인정한다.
+
   ```bash
   .venv/bin/python -c "
   import sqlite3, json
+  from collections import defaultdict
   c = sqlite3.connect('/root/maestro-operator/var/symphony_state.db')
   def payloads(t):
       return [json.loads(p) for (p,) in
               c.execute('select payload from system_events where event_type=?', (t,))]
   acks = [p for p in payloads('telegram_approval_ack')
           if not isinstance(p.get('schema_version'), int)]
+  envelopes = {p['approval_id']: p for p in payloads('telegram_approval_pending')}
+  groups = defaultdict(list)
+  for p in envelopes.values():
+      groups[str(p.get('signal_run_id'))].append(p['approval_id'])
+  completed = set()
+  for p in payloads('signal_approval_completed'):
+      if isinstance(p.get('approval_id'), str) and p['approval_id']:
+          completed.add(p['approval_id']); continue
+      group = groups.get(str(p.get('signal_run_id')), [])
+      if len(group) == 1:
+          completed.add(group[0])   # 그룹이 둘 이상이면 모호 → 완료로 치지 않는다
   approvals = {r[0] for r in c.execute('select approval_id from approvals')}
-  print('legacy ack:', len(acks), '/ 격리 예상:',
-        sorted(p['approval_id'] for p in acks if p['approval_id'] not in approvals))
+  alerts = [p['approval_id'] for p in acks
+            if p['approval_id'] in envelopes and p['approval_id'] not in completed]
+  print('legacy ack:', len(acks), '/ 격리 예상:', len(alerts))
+  for a in sorted(alerts):
+      print('  ', a, 'RECONCILIATION' if a in approvals else 'ATTENTION')
   "
   ```
+
+  **운영 DB 실측 결과: 2건이 나간다.** (이전 판정식 "approvals 행이 없는 legacy ack"는 1건으로 과소 예측했다.)
+  - `2026-08-07` 사고 건 — approvals 행 없음 → `APPROVAL_NEEDS_ATTENTION`. 승인은 접수됐으나 stale broker snapshot으로 집행 전에 중단됐다.
+  - `appr_37cd3742` (2026-07-28) — approvals 행 있음 → `APPROVAL_NEEDS_RECONCILIATION`. **본 브랜치가 새로 발견한 두 번째 유실이다.** QQQ 5주가 실제로 브로커에서 체결된 뒤 `AttributionValidationError`가 resolution을 중단시켰고, 그래서 완료 기록이 없다. 아무도 눈치채지 못한 상태였으며, 주문이 이미 나갔으므로 운영자는 증권사 체결 내역과 대조해야 한다.
 - `systemctl restart maestro-telegram-operator.service` 후 로그에 `telegram_operator status=ok`가 이어지는지 확인.
 - 다음 실제 승인 1건에서 `telegram_approval_ack`(schema_version=2)와 `telegram_approval_resolution_completed`가 **둘 다** 기록되는지 DB로 확인.
 - 명령 메뉴는 이 단계에서 바뀌지 않으므로 `telegram-set-commands` 재실행은 불필요하다.
@@ -1735,5 +1757,15 @@ Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 
 
 - **3a-2**: `StateStore.save_system_events_atomic` (다중 이벤트 + duplicate_key + precondition 원자 커밋)
 - **3a-3**: 승인 dispatch idempotent resume (`dispatch_group_id` get-or-create, 채팅별 전송 intent) — 본 계획이 운영자에게 넘긴 "부분 집행된 승인"의 자동 처리도 여기서 다룬다
+
+### 최종 수정 웨이브에서 의도적으로 넣지 않은 것 (3a-3 이월)
+
+두 리뷰가 지적했고 타당하지만, 이번 배포 범위에 넣지 않기로 한 항목이다. 잊히지 않도록 여기 기록한다.
+
+1. **주문 단위 제출 intent 영속화 (3a-3).** 지금은 `approvals` 행이 있으면 무조건 자동 재개하지 않고 알림으로만 넘긴다. 그중에는 **브로커 제출이 한 번도 일어나지 않은** 상태(행은 썼지만 `_execute_live_approval_orders` 전에 중단)도 섞여 있고, 그건 원래 안전하게 재개할 수 있다. 하지만 현재 설계는 그 둘을 구분할 근거를 남기지 않는다 — 주문마다 제출 intent를 먼저 기록해야 구분이 가능하고, 그건 dispatch 계층 재설계와 함께 가야 하므로 **3a-3 범위**다.
+   적대적 리뷰가 옳다: 현재 설계는 **중복 제출에 대해 fail-closed일 뿐, 그 상태를 스스로 복구하지는 못한다.** 이번 웨이브가 보장하는 것은 복구가 아니라 **그 상태가 반드시 운영자에게 드러난다**는 것이다(F1/F2/F4). 알림이 한 채팅의 실패로 사라지지 않고, 완료된 재개가 조용히 지나가지 않으며, envelope이 없는 ack도 묻히지 않는다.
+
+2. **재개 시도 간 backoff·간격.** 지금은 간격이 없다. poll 주기상 자동 재개 예산 3회(attempt 2·3·4)가 **약 33초 안에 전부 소진된다.** 게다가 재개 경로는 브로커 스냅샷을 **다시 채택하지 않는다** — 2026-08-07을 일으킨 stale snapshot 실패는 시간이 지나도 저절로 낫지 않으므로, 이 실패 유형에 대해 자동 재개는 **단조적으로 회복 불가능**하다. 즉 세 번의 재시도는 스냅샷이 이미 유효한 경우(검증 실패·config 로드 실패·ack 직후 프로세스 종료)에만 값을 낸다.
+   **이 계획의 전달 가치를 과장하지 말 것**: 3a-1이 실제로 없앤 것은 "ack가 곧 종결"이라는 오판이며, stale snapshot 자체의 자동 복구가 아니다. 그 유형은 예산 소진 후 ⚠️ 알림으로 운영자에게 간다. backoff와 스냅샷 재채택은 **3a-3**에서 함께 다룬다.
 - **3a-4**: funding/budget workflow head·CAS·attempt claim·lineage·수렴 sweep
 - **3a-5**: 업그레이드 backfill + 롤백 preflight CLI + 운영 문서
