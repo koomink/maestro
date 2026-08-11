@@ -29,6 +29,7 @@ DECISION_APPROVED_ALL_FAILED = (
 )
 DECISION_APPROVED_NONE = "⚠️ 승인했지만 접수된 주문이 없어요. /history에서 확인해 주세요."
 DECISION_REJECTED = "❌ 거절했어요 — 이번 제안은 실행되지 않아요."
+DECISION_EXPIRED = "⏳ 응답 시간이 지나 이번 제안은 실행되지 않았어요."
 REMINDER = "⏰ 아직 응답을 기다리고 있어요 ({minutes}분 경과)"
 
 APPROVAL_NEEDS_ATTENTION = (

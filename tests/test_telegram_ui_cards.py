@@ -331,3 +331,11 @@ def test_decision_text_reports_partial_failure():
 def test_decision_text_reports_total_failure():
     text = approval_decision_text("approved", "appr_x", orders_submitted=0, orders_failed=2)
     assert text == "⚠️ 승인했지만 주문 2건이 모두 실패했어요. /history에서 확인해 주세요."
+
+
+def test_decision_text_for_expired_does_not_claim_the_operator_rejected():
+    """G3: 만료된 승인이 재개되면 운영자는 보지도 못한 제안을 "거절했어요"라는
+    통지로 받는다. 실행되지 않았다는 사실은 같지만 원인이 사실과 다르다."""
+    text = approval_decision_text("expired", "appr_x", orders_submitted=0, orders_failed=0)
+    assert text == catalog.DECISION_EXPIRED
+    assert "거절" not in text
