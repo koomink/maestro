@@ -1767,5 +1767,11 @@ Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 
 
 2. **재개 시도 간 backoff·간격.** 지금은 간격이 없다. poll 주기상 자동 재개 예산 3회(attempt 2·3·4)가 **약 33초 안에 전부 소진된다.** 게다가 재개 경로는 브로커 스냅샷을 **다시 채택하지 않는다** — 2026-08-07을 일으킨 stale snapshot 실패는 시간이 지나도 저절로 낫지 않으므로, 이 실패 유형에 대해 자동 재개는 **단조적으로 회복 불가능**하다. 즉 세 번의 재시도는 스냅샷이 이미 유효한 경우(검증 실패·config 로드 실패·ack 직후 프로세스 종료)에만 값을 낸다.
    **이 계획의 전달 가치를 과장하지 말 것**: 3a-1이 실제로 없앤 것은 "ack가 곧 종결"이라는 오판이며, stale snapshot 자체의 자동 복구가 아니다. 그 유형은 예산 소진 후 ⚠️ 알림으로 운영자에게 간다. backoff와 스냅샷 재채택은 **3a-3**에서 함께 다룬다.
+
+3. **2차 수정 웨이브(G1~G3)에서 기록만 하고 고치지 않은 것.** 넷 다 지적이 타당하지만, 실주문 코드에 지금 손댈 값어치보다 위험이 크다고 판단해 **3a-3으로 이월**한다.
+   - **`_record_resolution_completed`의 새 raise 지점.** F5가 check-then-write를 `writer_lock` 안으로 옮기면서, **주문이 브로커에 도달한 뒤에** `TimeoutError`가 날 수 있는 지점이 하나 생겼다. 착지는 fail-closed다 — `approvals` 행이 이미 있으므로 다음 sweep이 ⚠️ 알림으로 운영자에게 넘긴다. 순이득이지만 hot path의 새 raise 지점이라는 사실은 남는다.
+   - **리마인더 dedup 스캔의 `save_audited_system_event`가 자기 `try` 밖에 있다.** dedup이 빗나가면 `IntegrityError`가 sweep을 뚫고 나간다(F2와 같은 유형). 현재 이벤트 볼륨에서는 도달 불가.
+   - **영구 전송 불가 채팅의 이벤트 증식.** 그런 채팅 하나가 미완 승인 하나당 poll(약 30초)마다 `telegram_command` error 이벤트를 한 건씩 쓴다. backoff도 상한도 없다.
+   - **`str(ack.get("approval_id"))`가 손상된 ack에서 문자열 `"None"`을 만든다.** `telegram-approval-attention:None:<chat>` 같은 키가 생긴다.
 - **3a-4**: funding/budget workflow head·CAS·attempt claim·lineage·수렴 sweep
 - **3a-5**: 업그레이드 backfill + 롤백 preflight CLI + 운영 문서

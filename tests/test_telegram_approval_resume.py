@@ -888,3 +888,91 @@ def test_record_resolution_completed_checks_and_writes_under_the_writer_lock(tmp
     )
 
     assert observed == [True]
+
+
+def test_resume_notice_is_retried_for_the_chat_that_failed(tmp_path):
+    """G1: 완료 통지가 재개 루프에서만 나가면 전송 실패 한 번으로 영원히 사라진다.
+
+    승인은 그 순간 이미 종결(resolution_completed)이라 다음 sweep이 다시 보지
+    않는다. F2의 채팅별 재시도는 legacy 알림에만 살아 있고 완료 통지에는 죽어
+    있다 — 실주문이 나갔는데 운영자는 끝내 아무 말도 듣지 못한다.
+    """
+    router, store = _router(
+        tmp_path,
+        chat_ids=(100, 200),
+        resolve_error=ValueError("stale broker snapshot"),
+        failing_chat_ids=(100,),
+    )
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+    router._resolve_error = None
+    router.client.sent_messages.clear()
+
+    router._sweep_pending_approvals()
+
+    assert _latest_payload(store, "telegram_approval_resolution_completed")["attempt"] == 2
+    # 200만 받았다. 100은 전송이 실패했으므로 자기 키가 기록되지 않았다.
+    submitted = [
+        message["chat_id"]
+        for message in router.client.sent_messages
+        if "승인 완료" in message["text"]
+    ]
+    assert submitted == [200]
+
+    router.client.failing_chat_ids = set()
+    router._sweep_pending_approvals()
+    router._sweep_pending_approvals()
+
+    # 100만 뒤늦게 받고, 200은 중복 수신하지 않는다.
+    submitted = [
+        message["chat_id"]
+        for message in router.client.sent_messages
+        if "승인 완료" in message["text"]
+    ]
+    assert submitted == [200, 100]
+
+
+def test_malformed_old_envelope_does_not_block_a_newer_resume(tmp_path):
+    """G2: 재개 루프는 오래된 것부터 돌고 envelope 검증에 격리가 없다.
+
+    F3가 시간 창을 없앤 뒤로는 과거 envelope 전부가 매 poll마다 검증된다 —
+    필수 필드가 빠진 옛 행 하나가 sweep 전체를 매번 중단시켜 그 뒤의 모든
+    승인을 영구히 굶긴다.
+    """
+    router, store = _router(tmp_path)
+    store.save_system_event(
+        "run_appr_bad", "telegram_approval_pending", {"approval_id": "appr_bad"}
+    )
+    _save_ack(store, approval_id="appr_bad", status="approved", schema_version=2)
+    _save_pending_envelope(store, approval_id="appr_good")
+    _save_ack(store, approval_id="appr_good", status="approved", schema_version=2)
+
+    router._sweep_pending_approvals()
+
+    resumed = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resolution_completed", limit=None
+        )
+    }
+    assert resumed == {"appr_good"}
+    quarantined = store.list_system_events_by_type(
+        "telegram_approval_resume_quarantined", limit=None
+    )
+    assert [row["payload"]["approval_id"] for row in quarantined] == ["appr_bad"]
+    assert any("확인이 필요" in message["text"] for message in router.client.sent_messages)
+
+    router._sweep_pending_approvals()
+
+    # 격리 기록은 poll마다 쌓이지 않는다.
+    assert (
+        len(
+            store.list_system_events_by_type(
+                "telegram_approval_resume_quarantined", limit=None
+            )
+        )
+        == 1
+    )

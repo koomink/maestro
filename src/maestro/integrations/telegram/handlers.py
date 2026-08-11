@@ -1643,36 +1643,55 @@ class TelegramOperatorCommandRouter:
             extra={"partial_execution_possible": partial},
         )
 
-    def _notify_resume_completed(
-        self,
-        envelope: PendingApprovalEnvelope,
-        *,
-        status: str,
-        summary: SignalApprovalSummary,
-    ) -> None:
-        """자동 재개가 끝났음을 대화형 경로와 같은 문구로 알린다.
+    def _deliver_resume_completion_notices(self) -> None:
+        """재개 완료 통지를 telegram_approval_resolution_completed를 outbox로 삼아 보낸다.
 
         재개 성공은 실제 브로커 주문을 뜻한다. 운영자가 마지막으로 본 메시지는
         "처리하지 못했어요"이므로, 알리지 않으면 같은 주문을 증권사 앱에서 손으로
         다시 낼 수 있다.
+
+        재개 루프 안에서 한 번만 보내면 그 통지는 내구적이지 않다 — 전송이 실패한
+        순간 승인은 이미 종결(resolution_completed)이라 다음 sweep이 다시 보지
+        않기 때문이다. 게다가 실패는 크래시가 아니라 _notify_operator_chats가
+        의도적으로 삼키는 정상 경로(텔레그램 장애, allowed_chat_ids 중 하나가
+        잘못됨)다. 그래서 통지 여부를 내구 기록에서 매 sweep 다시 판정하고,
+        자기 채팅별 키가 없는 채팅에만 재시도한다.
+
+        attempt == 1(대화형 콜백)은 제외한다 — 방금 버튼을 누른 운영자가 그 자리에서
+        같은 문구를 응답으로 받는다.
         """
-        self._notify_operator_chats(
-            run_id=envelope.run_id,
-            approval_id=envelope.approval_id,
-            event_type="telegram_approval_resume_notice",
-            key_prefix="telegram-approval-resume-notice",
-            text=approval_decision_text(
-                status,
-                envelope.approval_id,
-                orders_submitted=summary.orders_submitted,
-                orders_failed=summary.orders_failed,
-            ),
-            extra={
-                "status": status,
-                "orders_submitted": summary.orders_submitted,
-                "orders_failed": summary.orders_failed,
-            },
-        )
+        for row in self.store.list_system_events_by_type(
+            "telegram_approval_resolution_completed",
+            limit=None,
+        ):
+            payload = row["payload"]
+            # 한 건의 손상된 payload가 나머지 통지를 막으면 안 된다.
+            try:
+                if int(payload.get("attempt") or 1) < 2:
+                    continue
+                approval_id = str(payload.get("approval_id"))
+                status = str(payload.get("status"))
+                orders_submitted = int(payload.get("orders_submitted") or 0)
+                orders_failed = int(payload.get("orders_failed") or 0)
+                self._notify_operator_chats(
+                    run_id=str(row.get("run_id") or ""),
+                    approval_id=approval_id,
+                    event_type="telegram_approval_resume_notice",
+                    key_prefix="telegram-approval-resume-notice",
+                    text=approval_decision_text(
+                        status,
+                        approval_id,
+                        orders_submitted=orders_submitted,
+                        orders_failed=orders_failed,
+                    ),
+                    extra={
+                        "status": status,
+                        "orders_submitted": orders_submitted,
+                        "orders_failed": orders_failed,
+                    },
+                )
+            except Exception as exc:
+                self._record_update_failure(None, exc)
 
     def _resume_unresolved_approvals(self) -> None:
         """결정은 기록됐지만 집행이 끝나지 않은 승인을 기록된 결정으로 재개한다."""
@@ -1698,77 +1717,124 @@ class TelegramOperatorCommandRouter:
             approval_id = str(ack.get("approval_id"))
             if not isinstance(ack.get("schema_version"), int) or approval_id in completed:
                 continue
-            payload = envelopes.get(approval_id)
-            if payload is None:
-                # envelope이 없으면 재개할 재료가 없다. 조용히 건너뛰면 이 승인은
-                # 영원히 미완으로 남아 롤백 preflight를 계속 막는다 — 운영자에게
-                # 넘긴다. 주문이 나갔는지는 approvals 행으로만 짐작할 수 있다.
-                self._notify_approval_needs_attention(
-                    approval_id,
-                    str(row.get("run_id") or ""),
-                    partial=self.store.approval_exists(approval_id),
-                )
-                continue
-            envelope = PendingApprovalEnvelope.model_validate(payload)
-            if self.store.approval_exists(approval_id):
-                # approvals 행은 resolve_pending_signal_approval이 브로커 호출보다
-                # 먼저 쓴다. 행이 있으면 집행에 진입했을 수 있으므로 자동 재개하지
-                # 않는다 — 브로커 제출 직후·로컬 lifecycle 기록 전에 중단된 창까지
-                # fail-closed로 덮는다. 주문이 이미 나갔을 수 있으므로 브로커 대조
-                # 문구로 알린다.
-                #
-                # 이 확인은 TOCTOU다 — 다른 프로세스의 attempt가 ack와 save_approval
-                # 사이에 있으면 여기서 False로 보인다. 그래도 중복 주문은 나가지
-                # 않는다. 2차 방어선이 orchestrator 쪽에 있다:
-                # resolve_pending_signal_approval은 live_order_lock(프로세스 간
-                # flock, store.py:342) 안에서 save_approval(orchestrator.py:332)을
-                # 먼저 부르고, StateStore.save_approval(store.py:1139)은 중복
-                # approval_id에 ValueError를 던진다. 주문 제출
-                # (_execute_live_approval_orders, orchestrator.py:341)은 그 뒤에
-                # 있으므로, 뒤늦게 락을 잡은 시도는 아무것도 제출하지 못하고
-                # 실패한다. 그 실패는 resume_finished outcome="failed"로 남고,
-                # 다음 poll에는 approvals 행이 보여 이 분기로 들어온다.
-                self._notify_approval_needs_attention(
-                    envelope.approval_id, envelope.run_id, partial=True
-                )
-                continue
-            # 최초 콜백(attempt 1)도 실제 집행 시도였으므로 예산에 함께 센다.
-            if self._executed_resume_attempts(approval_id) + 1 >= _MAX_RESUME_ATTEMPT:
-                # 반복 실패는 자동 재시도로 풀리지 않는다. 매 poll마다 조용히
-                # 실패를 쌓는 대신 운영자에게 넘긴다.
-                # abandoned(한 번도 실행되지 않은 시도)는 이 예산을 깎지 않는다.
-                self._notify_approval_needs_attention(
-                    envelope.approval_id, envelope.run_id, partial=False
-                )
-                continue
-            attempt = self._next_resume_attempt(approval_id)
-            if not self._claim_resume(envelope, attempt):
-                continue  # 같은 attempt가 in-flight다
-            status = str(ack.get("status"))
-            outcome = "failed"
-            summary = None
+            run_id = str(row.get("run_id") or "")
+            # 승인 하나의 실패가 그 뒤의 모든 승인을 굶기면 안 된다. 이 루프는
+            # 오래된 것부터 돌고, 시간 창을 없앤 뒤로는 과거 envelope 전부가 매
+            # poll마다 다시 검증된다 — system_events.payload에는 스키마 제약이
+            # 없으므로 필드가 빠진 옛 행 하나가 영구 정지를 만들 수 있다.
             try:
-                summary = self._resolve_async_approval(
-                    envelope,
-                    status=status,
-                    decided_by=str(ack.get("decided_by")),
-                    reason="Resumed from recorded approval decision.",
-                    attempt=attempt,
-                )
-                outcome = "completed"
-            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-                self._record_update_failure(None, exc)
-            finally:
-                # 종료 기록이 있어야 다음 attempt 번호가 진행된다.
-                self._record_resume_finished(
-                    run_id=envelope.run_id,
-                    approval_id=approval_id,
-                    attempt=attempt,
-                    outcome=outcome,
-                )
-            if summary is not None:
-                # 종료 기록 뒤에 보낸다 — 알림 결과가 outcome 판정을 바꾸면 안 된다.
-                self._notify_resume_completed(envelope, status=status, summary=summary)
+                self._resume_one_approval(ack, envelopes.get(approval_id), run_id)
+            except Exception as exc:
+                self._quarantine_approval(approval_id, run_id, exc)
+        self._deliver_resume_completion_notices()
+
+    def _resume_one_approval(
+        self,
+        ack: Mapping[str, Any],
+        payload: Mapping[str, Any] | None,
+        run_id: str,
+    ) -> None:
+        """승인 한 건의 재개. 호출자가 예외를 격리하므로 여기서는 그대로 던진다."""
+        approval_id = str(ack.get("approval_id"))
+        if payload is None:
+            # envelope이 없으면 재개할 재료가 없다. 조용히 건너뛰면 이 승인은
+            # 영원히 미완으로 남아 롤백 preflight를 계속 막는다 — 운영자에게
+            # 넘긴다. 주문이 나갔는지는 approvals 행으로만 짐작할 수 있다.
+            self._notify_approval_needs_attention(
+                approval_id,
+                run_id,
+                partial=self.store.approval_exists(approval_id),
+            )
+            return
+        envelope = PendingApprovalEnvelope.model_validate(payload)
+        if self.store.approval_exists(approval_id):
+            # approvals 행은 resolve_pending_signal_approval이 브로커 호출보다
+            # 먼저 쓴다. 행이 있으면 집행에 진입했을 수 있으므로 자동 재개하지
+            # 않는다 — 브로커 제출 직후·로컬 lifecycle 기록 전에 중단된 창까지
+            # fail-closed로 덮는다. 주문이 이미 나갔을 수 있으므로 브로커 대조
+            # 문구로 알린다.
+            #
+            # 이 확인은 TOCTOU다 — 다른 프로세스의 attempt가 ack와 save_approval
+            # 사이에 있으면 여기서 False로 보인다. 그래도 중복 주문은 나가지
+            # 않는다. 2차 방어선이 orchestrator 쪽에 있다:
+            # resolve_pending_signal_approval은 live_order_lock(프로세스 간
+            # flock, store.py:342) 안에서 save_approval(orchestrator.py:332)을
+            # 먼저 부르고, StateStore.save_approval(store.py:1139)은 중복
+            # approval_id에 ValueError를 던진다. 주문 제출
+            # (_execute_live_approval_orders, orchestrator.py:341)은 그 뒤에
+            # 있으므로, 뒤늦게 락을 잡은 시도는 아무것도 제출하지 못하고
+            # 실패한다. 그 실패는 resume_finished outcome="failed"로 남고,
+            # 다음 poll에는 approvals 행이 보여 이 분기로 들어온다.
+            self._notify_approval_needs_attention(
+                envelope.approval_id, envelope.run_id, partial=True
+            )
+            return
+        # 최초 콜백(attempt 1)도 실제 집행 시도였으므로 예산에 함께 센다.
+        if self._executed_resume_attempts(approval_id) + 1 >= _MAX_RESUME_ATTEMPT:
+            # 반복 실패는 자동 재시도로 풀리지 않는다. 매 poll마다 조용히
+            # 실패를 쌓는 대신 운영자에게 넘긴다.
+            # abandoned(한 번도 실행되지 않은 시도)는 이 예산을 깎지 않는다.
+            self._notify_approval_needs_attention(
+                envelope.approval_id, envelope.run_id, partial=False
+            )
+            return
+        attempt = self._next_resume_attempt(approval_id)
+        if not self._claim_resume(envelope, attempt):
+            return  # 같은 attempt가 in-flight다
+        outcome = "failed"
+        try:
+            self._resolve_async_approval(
+                envelope,
+                status=str(ack.get("status")),
+                decided_by=str(ack.get("decided_by")),
+                reason="Resumed from recorded approval decision.",
+                attempt=attempt,
+            )
+            outcome = "completed"
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            self._record_update_failure(None, exc)
+        finally:
+            # 종료 기록이 있어야 다음 attempt 번호가 진행된다.
+            self._record_resume_finished(
+                run_id=envelope.run_id,
+                approval_id=approval_id,
+                attempt=attempt,
+                outcome=outcome,
+            )
+        # 완료 통지는 여기서 보내지 않는다. resolution_completed를 outbox로 삼는
+        # _deliver_resume_completion_notices가 sweep 끝에서 보낸다 — 전송 실패가
+        # 통지를 영영 잃어버리지 않게 하기 위함이다.
+
+    def _quarantine_approval(self, approval_id: str, run_id: str, exc: Exception) -> None:
+        """재개할 수 없는 승인을 내구 기록으로 격리하고 운영자에게 넘긴다.
+
+        조용히 건너뛰면 같은 행이 매 poll마다 같은 예외를 내고, 아무도 모르는 채
+        그 승인이 롤백 preflight를 영구히 막는다. 기록은 approval당 1회이며,
+        재개 자체를 막지는 않는다 — 원인이 일시적이었다면 다음 poll에 그대로
+        재개된다.
+        """
+        try:
+            duplicate_key = f"telegram-approval-quarantine:{approval_id}"
+            with self.store.writer_lock("telegram_approval_resume_quarantined"):
+                if not self.store.duplicate_key_exists(duplicate_key):
+                    save_audited_system_event(
+                        self.store,
+                        self.audit,
+                        run_id or f"run_{approval_id}",
+                        "telegram_approval_resume_quarantined",
+                        {
+                            "approval_id": approval_id,
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc),
+                            "duplicate_key": duplicate_key,
+                        },
+                    )
+            self._notify_approval_needs_attention(
+                approval_id, run_id, partial=self.store.approval_exists(approval_id)
+            )
+        # 격리 자체가 sweep을 멈추면 격리의 존재 이유가 사라진다.
+        except Exception as quarantine_exc:
+            self._record_update_failure(None, quarantine_exc)
 
     def _reclaim_abandoned_resume_claims(self) -> None:
         """프로세스가 claim 직후 죽으면 그 attempt는 영원히 종료되지 않는다.
