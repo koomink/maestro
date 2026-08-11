@@ -160,10 +160,6 @@ TELEGRAM_EMERGENCY_COMMANDS: tuple[tuple[str, str], ...] = (
     ("recovery", "복구 센터"),
 )
 
-#: 정합성 조회의 시간 경계. 승인 만료(config.approval.timeout_seconds)보다 훨씬
-#: 길게 잡아, 만료된 지 오래된 이벤트만 조회에서 제외한다.
-_CONSISTENCY_WINDOW_DAYS = 90
-
 #: 자동 재개 횟수 상한. 넘으면 ⚠️ 알림으로 운영자에게 넘긴다.
 #: 최초 콜백(attempt 1)도 실제 집행 시도이므로 예산에 포함된다 — 자동 재개는
 #: attempt 2·3·4까지만 이어진다.
@@ -1562,51 +1558,119 @@ class TelegramOperatorCommandRouter:
         attempt: int,
     ) -> None:
         duplicate_key = f"telegram-approval-completed:{envelope.approval_id}"
-        if self.store.duplicate_key_exists(duplicate_key):
-            return
-        save_audited_system_event(
-            self.store,
-            self.audit,
-            envelope.run_id,
-            "telegram_approval_resolution_completed",
-            {
-                "approval_id": envelope.approval_id,
-                "signal_run_id": envelope.signal_run_id,
-                "status": decision.status,
-                "orders_submitted": summary.orders_submitted,
-                "orders_failed": summary.orders_failed,
-                "resolved_at": utc_now().isoformat(),
-                "attempt": attempt,
-                "duplicate_key": duplicate_key,
-            },
-        )
+        # 형제 기록(_claim_resume·_record_resume_finished)과 같은 규약으로 쓴다.
+        # 락 밖에서 확인하면 경합 시 IntegrityError가 **주문이 나간 뒤에** 터진다.
+        with self.store.writer_lock("telegram_approval_resolution_completed"):
+            if self.store.duplicate_key_exists(duplicate_key):
+                return
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                envelope.run_id,
+                "telegram_approval_resolution_completed",
+                {
+                    "approval_id": envelope.approval_id,
+                    "signal_run_id": envelope.signal_run_id,
+                    "status": decision.status,
+                    "orders_submitted": summary.orders_submitted,
+                    "orders_failed": summary.orders_failed,
+                    "resolved_at": utc_now().isoformat(),
+                    "attempt": attempt,
+                    "duplicate_key": duplicate_key,
+                },
+            )
+
+    def _notify_operator_chats(
+        self,
+        *,
+        run_id: str,
+        approval_id: str,
+        event_type: str,
+        key_prefix: str,
+        text: str,
+        extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        """운영자 채팅에 승인 관련 알림을 채팅 단위로 1회씩 보낸다.
+
+        전송·기록을 채팅마다 독립적으로 처리한다. 한 채팅이 영구히 전송 불가여도
+        (a) 나머지 채팅은 알림을 받고, (b) 호출한 sweep이 중단되지 않는다. 재개
+        루프는 오래된 승인부터 도는데, 여기서 예외가 새어 나가면 그 뒤의 모든
+        승인이 매 poll마다 조용히 재개되지 못한다.
+
+        성공한 채팅은 자기 duplicate_key를 남기므로 재시도 때 다시 받지 않는다.
+        리마인더 sweep이 쓰는 규약과 같다.
+        """
+        for chat_id in self.config.approval.telegram_allowed_chat_ids:
+            duplicate_key = f"{key_prefix}:{approval_id}:{chat_id}"
+            try:
+                if self.store.duplicate_key_exists(duplicate_key):
+                    continue
+                self._send(int(chat_id), text)
+                save_audited_system_event(
+                    self.store,
+                    self.audit,
+                    run_id or f"run_{approval_id}",
+                    event_type,
+                    {
+                        "approval_id": approval_id,
+                        "chat_id": int(chat_id),
+                        **(dict(extra) if extra else {}),
+                        "duplicate_key": duplicate_key,
+                    },
+                )
+            # 채팅 하나의 실패가 나머지 채팅과 상위 sweep을 멈추면 안 된다.
+            except Exception as exc:
+                self._record_update_failure(None, exc)
 
     def _notify_approval_needs_attention(
         self,
-        envelope: PendingApprovalEnvelope,
+        approval_id: str,
+        run_id: str,
         *,
         partial: bool,
     ) -> None:
         """partial=True면 브로커에 주문이 나갔을 수 있다는 뜻이다."""
-        duplicate_key = f"telegram-approval-attention:{envelope.approval_id}"
-        if self.store.duplicate_key_exists(duplicate_key):
-            return
-        text = (
-            ui_catalog.APPROVAL_NEEDS_RECONCILIATION
-            if partial
-            else ui_catalog.APPROVAL_NEEDS_ATTENTION
+        self._notify_operator_chats(
+            run_id=run_id,
+            approval_id=approval_id,
+            event_type="telegram_approval_needs_attention",
+            key_prefix="telegram-approval-attention",
+            text=(
+                ui_catalog.APPROVAL_NEEDS_RECONCILIATION
+                if partial
+                else ui_catalog.APPROVAL_NEEDS_ATTENTION
+            ),
+            extra={"partial_execution_possible": partial},
         )
-        for chat_id in self.config.approval.telegram_allowed_chat_ids:
-            self._send(chat_id, text)
-        save_audited_system_event(
-            self.store,
-            self.audit,
-            envelope.run_id,
-            "telegram_approval_needs_attention",
-            {
-                "approval_id": envelope.approval_id,
-                "partial_execution_possible": partial,
-                "duplicate_key": duplicate_key,
+
+    def _notify_resume_completed(
+        self,
+        envelope: PendingApprovalEnvelope,
+        *,
+        status: str,
+        summary: SignalApprovalSummary,
+    ) -> None:
+        """자동 재개가 끝났음을 대화형 경로와 같은 문구로 알린다.
+
+        재개 성공은 실제 브로커 주문을 뜻한다. 운영자가 마지막으로 본 메시지는
+        "처리하지 못했어요"이므로, 알리지 않으면 같은 주문을 증권사 앱에서 손으로
+        다시 낼 수 있다.
+        """
+        self._notify_operator_chats(
+            run_id=envelope.run_id,
+            approval_id=envelope.approval_id,
+            event_type="telegram_approval_resume_notice",
+            key_prefix="telegram-approval-resume-notice",
+            text=approval_decision_text(
+                status,
+                envelope.approval_id,
+                orders_submitted=summary.orders_submitted,
+                orders_failed=summary.orders_failed,
+            ),
+            extra={
+                "status": status,
+                "orders_submitted": summary.orders_submitted,
+                "orders_failed": summary.orders_failed,
             },
         )
 
@@ -1618,7 +1682,6 @@ class TelegramOperatorCommandRouter:
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
                 limit=None,
-                since=self._consistency_since(),
             )
         }
         envelopes = {
@@ -1626,13 +1689,10 @@ class TelegramOperatorCommandRouter:
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
                 limit=None,
-                since=self._consistency_since(),
             )
         }
         for row in reversed(
-            self.store.list_system_events_by_type(
-                "telegram_approval_ack", limit=None, since=self._consistency_since()
-            )
+            self.store.list_system_events_by_type("telegram_approval_ack", limit=None)
         ):
             ack = row["payload"]
             approval_id = str(ack.get("approval_id"))
@@ -1640,6 +1700,14 @@ class TelegramOperatorCommandRouter:
                 continue
             payload = envelopes.get(approval_id)
             if payload is None:
+                # envelope이 없으면 재개할 재료가 없다. 조용히 건너뛰면 이 승인은
+                # 영원히 미완으로 남아 롤백 preflight를 계속 막는다 — 운영자에게
+                # 넘긴다. 주문이 나갔는지는 approvals 행으로만 짐작할 수 있다.
+                self._notify_approval_needs_attention(
+                    approval_id,
+                    str(row.get("run_id") or ""),
+                    partial=self.store.approval_exists(approval_id),
+                )
                 continue
             envelope = PendingApprovalEnvelope.model_validate(payload)
             if self.store.approval_exists(approval_id):
@@ -1660,23 +1728,29 @@ class TelegramOperatorCommandRouter:
                 # 있으므로, 뒤늦게 락을 잡은 시도는 아무것도 제출하지 못하고
                 # 실패한다. 그 실패는 resume_finished outcome="failed"로 남고,
                 # 다음 poll에는 approvals 행이 보여 이 분기로 들어온다.
-                self._notify_approval_needs_attention(envelope, partial=True)
+                self._notify_approval_needs_attention(
+                    envelope.approval_id, envelope.run_id, partial=True
+                )
                 continue
             # 최초 콜백(attempt 1)도 실제 집행 시도였으므로 예산에 함께 센다.
             if self._executed_resume_attempts(approval_id) + 1 >= _MAX_RESUME_ATTEMPT:
                 # 반복 실패는 자동 재시도로 풀리지 않는다. 매 poll마다 조용히
                 # 실패를 쌓는 대신 운영자에게 넘긴다.
                 # abandoned(한 번도 실행되지 않은 시도)는 이 예산을 깎지 않는다.
-                self._notify_approval_needs_attention(envelope, partial=False)
+                self._notify_approval_needs_attention(
+                    envelope.approval_id, envelope.run_id, partial=False
+                )
                 continue
             attempt = self._next_resume_attempt(approval_id)
             if not self._claim_resume(envelope, attempt):
                 continue  # 같은 attempt가 in-flight다
+            status = str(ack.get("status"))
             outcome = "failed"
+            summary = None
             try:
-                self._resolve_async_approval(
+                summary = self._resolve_async_approval(
                     envelope,
-                    status=str(ack.get("status")),
+                    status=status,
                     decided_by=str(ack.get("decided_by")),
                     reason="Resumed from recorded approval decision.",
                     attempt=attempt,
@@ -1692,6 +1766,9 @@ class TelegramOperatorCommandRouter:
                     attempt=attempt,
                     outcome=outcome,
                 )
+            if summary is not None:
+                # 종료 기록 뒤에 보낸다 — 알림 결과가 outcome 판정을 바꾸면 안 된다.
+                self._notify_resume_completed(envelope, status=status, summary=summary)
 
     def _reclaim_abandoned_resume_claims(self) -> None:
         """프로세스가 claim 직후 죽으면 그 attempt는 영원히 종료되지 않는다.
@@ -1701,14 +1778,12 @@ class TelegramOperatorCommandRouter:
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
                 limit=None,
-                since=self._consistency_since(),
             )
         }
         now = utc_now()
         for row in self.store.list_system_events_by_type(
             "telegram_approval_resume_claim",
             limit=None,
-            since=self._consistency_since(),
         ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
@@ -1734,7 +1809,6 @@ class TelegramOperatorCommandRouter:
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
                 limit=None,
-                since=self._consistency_since(),
             )
             if str(row["payload"].get("approval_id")) == approval_id
         ]
@@ -1821,13 +1895,11 @@ class TelegramOperatorCommandRouter:
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
                 limit=None,
-                since=self._consistency_since(),
             )
         }
         for row in self.store.list_system_events_by_type(
             "telegram_approval_ack",
             limit=None,
-            since=self._consistency_since(),
         ):
             ack = row["payload"]
             if isinstance(ack.get("schema_version"), int):
@@ -1836,8 +1908,10 @@ class TelegramOperatorCommandRouter:
             payload = envelopes.get(approval_id)
             if payload is None or approval_id in completed:
                 continue  # envelope 없음 또는 정상 종결
+            envelope = PendingApprovalEnvelope.model_validate(payload)
             self._notify_approval_needs_attention(
-                PendingApprovalEnvelope.model_validate(payload),
+                envelope.approval_id,
+                envelope.run_id,
                 partial=self.store.approval_exists(approval_id),
             )
 
@@ -1856,7 +1930,6 @@ class TelegramOperatorCommandRouter:
         for row in self.store.list_system_events_by_type(
             "telegram_approval_pending",
             limit=None,
-            since=self._consistency_since(),
         ):
             payload = row["payload"]
             groups[str(payload.get("signal_run_id"))].append(str(payload.get("approval_id")))
@@ -1865,7 +1938,6 @@ class TelegramOperatorCommandRouter:
         for row in self.store.list_system_events_by_type(
             "signal_approval_completed",
             limit=None,
-            since=self._consistency_since(),
         ):
             payload = row["payload"]
             approval_id = payload.get("approval_id")
@@ -1906,9 +1978,11 @@ class TelegramOperatorCommandRouter:
                 reminders.add(key)
         now = utc_now()
         for row in reversed(
+            # 창을 두지 않는다 — 결정이 한 번도 없던 승인이 창 밖으로 밀리면
+            # 영원히 만료되지 않고 리마인더도 멈춘다.
             self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                limit=2000,
+                limit=None,
             )
         ):
             payload = row["payload"]
@@ -4411,15 +4485,14 @@ class TelegramOperatorCommandRouter:
                 return payload
         return None
 
-    def _consistency_since(self) -> datetime:
-        return utc_now() - timedelta(days=_CONSISTENCY_WINDOW_DAYS)
-
     def _terminal_approval_ids(self) -> set[str]:
         """더 이상 처리하지 않을 승인 집합. 종결 판정은 여기 한 곳에서만 한다.
 
-        정합성 판정이므로 개수 창(limit=2000)을 쓰지 않는다 — 이벤트가 쌓이면
-        오래된 미완 승인이 조회 밖으로 밀려 조용히 사라진다. 대신 Task 0의
-        시간 경계를 쓴다 (인덱스를 타고, 성장에 무관하게 일정하다).
+        정합성 판정이므로 **어떤 창도 쓰지 않는다** — 개수 창(limit)이든 시간
+        창(since)이든, 오래된 미완 승인이 조회 밖으로 밀리면 조용히 사라진다.
+        긴 장애 뒤에 도달 가능한 상태이고, 승인 하나를 잃는 쪽이 작은 테이블을
+        전수 조회하는 비용보다 훨씬 나쁘다. 승인 ack는 연 250행 규모로만
+        늘고 idx_system_events_type_created가 event_type 필터를 덮는다.
 
         ack는 운영자 의사의 기록일 뿐 종결이 아니다 — 주문 집행까지 끝난
         resolution_completed가 있어야 종결이다. 단 schema_version이 없는
@@ -4431,12 +4504,11 @@ class TelegramOperatorCommandRouter:
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
                 limit=None,
-                since=self._consistency_since(),
             )
         }
         terminal = set(completed)
         for row in self.store.list_system_events_by_type(
-            "telegram_approval_ack", limit=None, since=self._consistency_since()
+            "telegram_approval_ack", limit=None
         ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
@@ -4454,7 +4526,7 @@ class TelegramOperatorCommandRouter:
         return {
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
-                "telegram_approval_ack", limit=None, since=self._consistency_since()
+                "telegram_approval_ack", limit=None
             )
             if isinstance(row["payload"].get("schema_version"), int)
         }
@@ -4468,7 +4540,6 @@ class TelegramOperatorCommandRouter:
         for row in self.store.list_system_events_by_type(
             "telegram_approval_pending",
             limit=None,
-            since=self._consistency_since(),
         ):
             if row["payload"].get("approval_id") == approval_id:
                 envelope = PendingApprovalEnvelope.model_validate(row["payload"])

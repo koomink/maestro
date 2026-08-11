@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from maestro.orchestration.orchestrator import SignalApprovalSummary
 from maestro.state.store import StateStore
 
 
-def _telegram_config_path(tmp_path) -> Path:
+def _telegram_config_path(tmp_path, *, chat_ids=(100,)) -> Path:
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["execution"]["market_session"] = {
         "required": False,
@@ -28,7 +29,7 @@ def _telegram_config_path(tmp_path) -> Path:
         "enabled": True,
         "provider": "telegram",
         "require_approval": True,
-        "telegram_allowed_chat_ids": [100],
+        "telegram_allowed_chat_ids": list(chat_ids),
         "whitelisted_user_ids": [100],
     }
     config_path = tmp_path / "telegram_operator.yaml"
@@ -36,11 +37,22 @@ def _telegram_config_path(tmp_path) -> Path:
     return config_path
 
 
+def _backdate_all_events(store, *, days: int) -> None:
+    """모든 system_events를 과거로 옮긴다. 정합성 판정이 시간 창에 의존하는지
+    확인하기 위한 장치다."""
+    moved = (datetime.now(UTC) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE system_events SET created_at = ?", (moved,))
+
+
 class FakeTelegramClient:
-    def __init__(self) -> None:
+    def __init__(self, *, failing_chat_ids=()) -> None:
         self.sent_messages: list[dict] = []
+        self.failing_chat_ids = set(failing_chat_ids)
 
     def send_message(self, chat_id, text, reply_markup=None):
+        if chat_id in self.failing_chat_ids:
+            raise RuntimeError(f"telegram send failed for chat {chat_id}")
         self.sent_messages.append({"chat_id": chat_id, "text": text})
         return {"result": {"message_id": len(self.sent_messages)}}
 
@@ -78,14 +90,14 @@ class _StubRouter(TelegramOperatorCommandRouter):
         )
 
 
-def _router(tmp_path, *, resolve_error=None):
-    config = load_config(_telegram_config_path(tmp_path))
+def _router(tmp_path, *, resolve_error=None, chat_ids=(100,), failing_chat_ids=()):
+    config = load_config(_telegram_config_path(tmp_path, chat_ids=chat_ids))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
     router = _StubRouter(
         config=config,
         store=store,
         audit=AuditLogger(config.audit.jsonl_path),
-        client=FakeTelegramClient(),
+        client=FakeTelegramClient(failing_chat_ids=failing_chat_ids),
         resolve_error=resolve_error,
     )
     return router, store
@@ -708,3 +720,171 @@ def test_undecided_approval_still_receives_its_reminder(tmp_path):
         "아직 응답을 기다리고 있어요" in message["text"]
         for message in router.client.sent_messages
     )
+
+
+def test_successful_resume_tells_the_operator_the_decision_result(tmp_path):
+    """F1: 자동 재개가 성공하면 실제 주문이 나간다. 운영자의 마지막 메시지는
+    "잠시 후 다시 시도해 주세요"였으므로, 알리지 않으면 증권사 앱에서 같은 주문을
+    손으로 다시 낼 수 있다 — 이 브랜치가 막으려는 바로 그 피해다."""
+    router, store = _router(tmp_path, resolve_error=ValueError("stale broker snapshot"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+    router._resolve_error = None
+    router.client.sent_messages.clear()
+
+    router._sweep_pending_approvals()
+
+    assert _latest_payload(store, "telegram_approval_resolution_completed")["attempt"] == 2
+    decision_messages = [
+        message for message in router.client.sent_messages if "승인 완료" in message["text"]
+    ]
+    assert [message["chat_id"] for message in decision_messages] == [100]
+    assert "1건" in decision_messages[0]["text"]
+
+
+def test_resume_completion_notice_is_sent_only_once_per_chat(tmp_path):
+    """F1: 같은 승인의 완료 통지가 poll마다 반복되면 안 된다."""
+    router, store = _router(tmp_path, resolve_error=ValueError("boom"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="approved", decided_by="telegram:tester", reason="test"
+        )
+    router._resolve_error = None
+    router._sweep_pending_approvals()
+    router.client.sent_messages.clear()
+
+    router._sweep_pending_approvals()
+    router._sweep_pending_approvals()
+
+    assert router.client.sent_messages == []
+
+
+def test_rejected_resume_reports_the_rejection_not_a_submission(tmp_path):
+    """F1: 거절 결정의 재개도 알리되, 주문이 나간 것처럼 보이면 안 된다."""
+    router, store = _router(tmp_path, resolve_error=ValueError("boom"))
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    with pytest.raises(ValueError):
+        router._resolve_async_approval(
+            envelope, status="rejected", decided_by="telegram:tester", reason="test"
+        )
+    router._resolve_error = None
+    router.client.sent_messages.clear()
+
+    router._sweep_pending_approvals()
+
+    assert any("거절했어요" in message["text"] for message in router.client.sent_messages)
+    assert not any("승인 완료" in message["text"] for message in router.client.sent_messages)
+
+
+def test_one_unnotifiable_chat_does_not_block_a_newer_approval(tmp_path):
+    """F2: 알림 실패가 sweep 전체를 중단시키면, 그 뒤의 모든 승인이 매 poll마다
+    조용히 재개되지 못한다. 재개 루프는 오래된 것부터 돈다."""
+    router, store = _router(tmp_path, failing_chat_ids=(100,))
+    blocked = _save_pending_envelope(store, approval_id="appr_blocked")
+    _save_ack(store, approval_id="appr_blocked", status="approved", schema_version=2)
+    # approvals 행이 있으면 자동 재개 대신 알림 경로로 간다 (fail-closed)
+    store.save_approval(blocked.run_id, "appr_blocked", {"decision": {"status": "approved"}})
+    _save_pending_envelope(store, approval_id="appr_newer")
+    _save_ack(store, approval_id="appr_newer", status="approved", schema_version=2)
+
+    router._sweep_pending_approvals()
+
+    resumed = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resolution_completed", limit=None
+        )
+    }
+    assert resumed == {"appr_newer"}
+
+
+def test_notify_failure_records_the_error_and_retries_only_that_chat(tmp_path):
+    """F2: 성공한 채팅은 다시 알리지 않고, 실패한 채팅만 다음 poll에서 재시도한다."""
+    router, store = _router(tmp_path, chat_ids=(100, 200), failing_chat_ids=(100,))
+    _save_pending_envelope(store, approval_id="appr_legacy")
+    _save_ack(store, approval_id="appr_legacy", status="approved")
+
+    router._sweep_pending_approvals()
+
+    assert [message["chat_id"] for message in router.client.sent_messages] == [200]
+    assert any(
+        row["payload"].get("status") == "error"
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+    )
+
+    router.client.failing_chat_ids = set()
+    router._sweep_pending_approvals()
+
+    # 200은 이미 받았으므로 다시 받지 않는다. 100만 뒤늦게 받는다.
+    assert [message["chat_id"] for message in router.client.sent_messages] == [200, 100]
+
+
+def test_unresolved_ack_older_than_the_consistency_window_is_still_resumed(tmp_path):
+    """F3: 긴 장애 뒤 90일이 지난 미완 승인이 재개 루프에서 사라지면 안 된다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_old")
+    _save_ack(store, approval_id="appr_old", status="approved", schema_version=2)
+    _backdate_all_events(store, days=200)
+
+    assert router._terminal_approval_ids() == set()
+    router._sweep_pending_approvals()
+
+    completed = _latest_payload(store, "telegram_approval_resolution_completed")
+    assert completed["approval_id"] == "appr_old"
+
+
+def test_never_decided_approval_pushed_out_of_the_scan_window_still_expires(tmp_path):
+    """F3: 만료·리마인더 스캔의 개수 창(limit=2000) 밖으로 밀린 승인은 영원히
+    만료되지 않는다 — 결정도 없고 종결도 없는 채로 남는다."""
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_old", expires_in=timedelta(seconds=-60))
+    for index in range(2100):
+        # approval_id가 없는 이벤트는 스캔 초반에 걸러지므로 순수한 잡음이다
+        store.save_system_event("run_noise", "telegram_approval_pending", {"noise": index})
+
+    router._sweep_pending_approvals()
+
+    assert {decision.status for decision in router.resolved_decisions} == {"expired"}
+
+
+def test_v2_ack_with_missing_pending_envelope_is_surfaced(tmp_path):
+    """F4: envelope이 사라진 v2 ack는 재개도 알림도 없이 영원히 묻히고,
+    롤백 preflight를 영구히 막는다."""
+    router, store = _router(tmp_path)
+    _save_ack(store, approval_id="appr_orphan", status="approved", schema_version=2)
+
+    router._sweep_pending_approvals()
+
+    assert any("확인이 필요" in message["text"] for message in router.client.sent_messages)
+    notified = {
+        row["payload"]["approval_id"]
+        for row in store.list_system_events_by_type(
+            "telegram_approval_needs_attention", limit=None
+        )
+    }
+    assert notified == {"appr_orphan"}
+
+
+def test_record_resolution_completed_checks_and_writes_under_the_writer_lock(tmp_path):
+    """F5: 형제 기록들과 달리 락 밖에서 check-then-write 하면, 경합 시
+    IntegrityError가 **주문이 나간 뒤에** 터진다."""
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    observed: list[bool] = []
+    original = store.duplicate_key_exists
+
+    def _spy(duplicate_key):
+        if duplicate_key.startswith("telegram-approval-completed:"):
+            observed.append(getattr(store._lock_depths, "writer", 0) > 0)
+        return original(duplicate_key)
+
+    store.duplicate_key_exists = _spy
+    router._resolve_async_approval(
+        envelope, status="approved", decided_by="telegram:tester", reason="test"
+    )
+
+    assert observed == [True]
