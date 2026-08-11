@@ -397,6 +397,7 @@ class MaestroOrchestrator:
                 envelope.run_id,
                 "signal_approval_completed",
                 {
+                    "approval_id": envelope.approval_id,
                     "signal_run_id": envelope.signal_run_id,
                     "orders_created": len(orders),
                     "orders_planned": len(envelope.orders),

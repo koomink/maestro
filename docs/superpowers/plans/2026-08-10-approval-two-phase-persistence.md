@@ -126,8 +126,12 @@ Expected: FAIL — `TypeError: list_system_events_by_type() got an unexpected ke
         if since is not None:
             # idx_system_events_type_created가 (event_type, created_at)이므로
             # 시간 하한은 인덱스를 그대로 탄다.
+            # created_at은 SQLite DEFAULT CURRENT_TIMESTAMP가 쓰는
+            # "YYYY-MM-DD HH:MM:SS" 문자열이다 (마이크로초·오프셋 없음,
+            # list_system_events_in_range의 docstring 참조). 같은 포맷으로
+            # 맞추지 않으면 초 단위로 같은 행이 >= 비교에서 탈락한다.
             sql += " AND created_at >= ?"
-            values.append(since.isoformat(sep=" "))
+            values.append(since.strftime("%Y-%m-%d %H:%M:%S"))
         sql += " ORDER BY id DESC"
         if limit is not None:
             sql += " LIMIT ?"
@@ -374,12 +378,15 @@ Expected: FAIL — `AttributeError: 'TelegramOperatorCommandRouter' object has n
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_ack",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
 ```
 
-`_pending_async_approval`의 첫 루프를 다음으로 바꾸고, 같은 메서드의 `telegram_approval_pending` 조회도 `since=self._consistency_since()`로 바꾼다 (envelope을 못 찾으면 승인이 유실되므로 이것도 정합성 경로다):
+`_pending_async_approval`의 첫 루프를 다음으로 바꾸고, 같은 메서드의 `telegram_approval_pending` 조회도 `limit=None, since=self._consistency_since()`로 바꾼다 (envelope을 못 찾으면 승인이 유실되므로 이것도 정합성 경로다):
+
+> **`limit=None`을 반드시 명시할 것.** `list_system_events_by_type(event_type, limit=10, *, since=None)`의 `limit` 기본값은 **10**이다. `since`만 넘기면 조용히 10건으로 잘려 정합성 판정이 깨진다 (Task 1 구현 중 발견).
 
 ```python
         if approval_id in self._terminal_approval_ids():
@@ -608,12 +615,13 @@ Expected: FAIL — `test_acked_but_unresolved_approval_is_not_terminal`에서 `{
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         terminal = set(completed)
         for row in self.store.list_system_events_by_type(
-            "telegram_approval_ack", since=self._consistency_since()
+            "telegram_approval_ack", limit=None, since=self._consistency_since()
         ):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
@@ -856,11 +864,13 @@ APPROVAL_NEEDS_RECONCILIATION = (
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         for row in self.store.list_system_events_by_type(
             "telegram_approval_ack",
+            limit=None,
             since=self._consistency_since(),
         ):
             ack = row["payload"]
@@ -889,6 +899,7 @@ APPROVAL_NEEDS_RECONCILIATION = (
         groups: dict[str, list[str]] = defaultdict(list)
         for row in self.store.list_system_events_by_type(
             "telegram_approval_pending",
+            limit=None,
             since=self._consistency_since(),
         ):
             payload = row["payload"]
@@ -897,6 +908,7 @@ APPROVAL_NEEDS_RECONCILIATION = (
         completed: set[str] = set()
         for row in self.store.list_system_events_by_type(
             "signal_approval_completed",
+            limit=None,
             since=self._consistency_since(),
         ):
             payload = row["payload"]
@@ -1127,19 +1139,21 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
             str(row["payload"].get("approval_id"))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resolution_completed",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         envelopes = {
             str(row["payload"].get("approval_id")): row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_pending",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         for row in reversed(
             self.store.list_system_events_by_type(
-                "telegram_approval_ack", since=self._consistency_since()
+                "telegram_approval_ack", limit=None, since=self._consistency_since()
             )
         ):
             ack = row["payload"]
@@ -1195,12 +1209,14 @@ Expected: FAIL — completed 이벤트 없음 / `telegram_approval_resume_claim`
             (str(row["payload"].get("approval_id")), int(row["payload"].get("attempt", 0)))
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
         }
         now = utc_now()
         for row in self.store.list_system_events_by_type(
             "telegram_approval_resume_claim",
+            limit=None,
             since=self._consistency_since(),
         ):
             payload = row["payload"]
@@ -1250,7 +1266,8 @@ _RESUME_LEASE_SECONDS = 900
             row["payload"]
             for row in self.store.list_system_events_by_type(
                 "telegram_approval_resume_finished",
-                since=self._consistency_since(),
+                limit=None,
+            since=self._consistency_since(),
             )
             if str(row["payload"].get("approval_id")) == approval_id
         ]
@@ -1644,21 +1661,43 @@ git commit -m "feat: add a read-only rollback preflight for unresolved approvals
 
 ## 배포 확인 (3a-1 승인 조건)
 
-- 배포 직후 legacy 격리 알림이 몇 건 나갈 수 있다. 운영 DB의 기존 ack 6건 중 집행 증거가 없는 건(2026-08-07 사고 포함)이 대상이며, **자동 재집행은 일어나지 않는다**. 배포 전에 대상 건수를 미리 확인한다:
+- 배포 직후 legacy 격리 알림이 몇 건 나간다. 운영 DB의 기존 legacy ack 중 **집행 완료 증거가 없는 건**이 대상이며, **자동 재집행은 일어나지 않는다**. 배포 전에 대상 건수를 미리 확인한다.
+
+  판정식은 구현(`_notify_legacy_unresolved_approvals` / `_completed_legacy_approval_ids`)과 반드시 같아야 한다: **pending envelope이 있고 + 완료 증거가 없으면** 알린다. `approvals` 행 유무는 알릴지 말지를 정하지 않고 **문구만 가른다** (행이 있으면 `APPROVAL_NEEDS_RECONCILIATION`, 없으면 `APPROVAL_NEEDS_ATTENTION`). 완료 증거는 `signal_approval_completed`이며, approval_id가 있으면 정확히 매칭하고 없는 구 이벤트는 그 signal run의 승인 그룹이 하나뿐일 때만 완료로 인정한다.
+
   ```bash
   .venv/bin/python -c "
   import sqlite3, json
+  from collections import defaultdict
   c = sqlite3.connect('/root/maestro-operator/var/symphony_state.db')
   def payloads(t):
       return [json.loads(p) for (p,) in
               c.execute('select payload from system_events where event_type=?', (t,))]
   acks = [p for p in payloads('telegram_approval_ack')
           if not isinstance(p.get('schema_version'), int)]
+  envelopes = {p['approval_id']: p for p in payloads('telegram_approval_pending')}
+  groups = defaultdict(list)
+  for p in envelopes.values():
+      groups[str(p.get('signal_run_id'))].append(p['approval_id'])
+  completed = set()
+  for p in payloads('signal_approval_completed'):
+      if isinstance(p.get('approval_id'), str) and p['approval_id']:
+          completed.add(p['approval_id']); continue
+      group = groups.get(str(p.get('signal_run_id')), [])
+      if len(group) == 1:
+          completed.add(group[0])   # 그룹이 둘 이상이면 모호 → 완료로 치지 않는다
   approvals = {r[0] for r in c.execute('select approval_id from approvals')}
-  print('legacy ack:', len(acks), '/ 격리 예상:',
-        sorted(p['approval_id'] for p in acks if p['approval_id'] not in approvals))
+  alerts = [p['approval_id'] for p in acks
+            if p['approval_id'] in envelopes and p['approval_id'] not in completed]
+  print('legacy ack:', len(acks), '/ 격리 예상:', len(alerts))
+  for a in sorted(alerts):
+      print('  ', a, 'RECONCILIATION' if a in approvals else 'ATTENTION')
   "
   ```
+
+  **운영 DB 실측 결과: 2건이 나간다.** (이전 판정식 "approvals 행이 없는 legacy ack"는 1건으로 과소 예측했다.)
+  - `2026-08-07` 사고 건 — approvals 행 없음 → `APPROVAL_NEEDS_ATTENTION`. 승인은 접수됐으나 stale broker snapshot으로 집행 전에 중단됐다.
+  - `appr_37cd3742` (2026-07-28) — approvals 행 있음 → `APPROVAL_NEEDS_RECONCILIATION`. **본 브랜치가 새로 발견한 두 번째 유실이다.** QQQ 5주가 실제로 브로커에서 체결된 뒤 `AttributionValidationError`가 resolution을 중단시켰고, 그래서 완료 기록이 없다. 아무도 눈치채지 못한 상태였으며, 주문이 이미 나갔으므로 운영자는 증권사 체결 내역과 대조해야 한다.
 - `systemctl restart maestro-telegram-operator.service` 후 로그에 `telegram_operator status=ok`가 이어지는지 확인.
 - 다음 실제 승인 1건에서 `telegram_approval_ack`(schema_version=2)와 `telegram_approval_resolution_completed`가 **둘 다** 기록되는지 DB로 확인.
 - 명령 메뉴는 이 단계에서 바뀌지 않으므로 `telegram-set-commands` 재실행은 불필요하다.
@@ -1700,6 +1739,8 @@ git commit -m "feat: add a read-only rollback preflight for unresolved approvals
 # exit 0 → 롤백 가능 / exit 1 → 중단 (미완 승인 approval_id가 출력된다)
 ```
 
+이 명령의 판정 로직은 읽기 전용이지만, 상태 저장소 연결 과정에서 다른 모든 CLI 명령과 마찬가지로 보류 중인 스키마 마이그레이션/백필이 적용될 수 있다(모두 additive-only·멱등적이며 구버전 코드도 기동 시 동일하게 실행하므로 롤백 안전성에는 영향이 없다).
+
 ## 채택하지 않는 리뷰 권고 (근거 기록)
 
 Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 이유:
@@ -1716,5 +1757,25 @@ Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 
 
 - **3a-2**: `StateStore.save_system_events_atomic` (다중 이벤트 + duplicate_key + precondition 원자 커밋)
 - **3a-3**: 승인 dispatch idempotent resume (`dispatch_group_id` get-or-create, 채팅별 전송 intent) — 본 계획이 운영자에게 넘긴 "부분 집행된 승인"의 자동 처리도 여기서 다룬다
+
+### 최종 수정 웨이브에서 의도적으로 넣지 않은 것 (3a-3 이월)
+
+두 리뷰가 지적했고 타당하지만, 이번 배포 범위에 넣지 않기로 한 항목이다. 잊히지 않도록 여기 기록한다.
+
+1. **주문 단위 제출 intent 영속화 (3a-3).** 지금은 `approvals` 행이 있으면 무조건 자동 재개하지 않고 알림으로만 넘긴다. 그중에는 **브로커 제출이 한 번도 일어나지 않은** 상태(행은 썼지만 `_execute_live_approval_orders` 전에 중단)도 섞여 있고, 그건 원래 안전하게 재개할 수 있다. 하지만 현재 설계는 그 둘을 구분할 근거를 남기지 않는다 — 주문마다 제출 intent를 먼저 기록해야 구분이 가능하고, 그건 dispatch 계층 재설계와 함께 가야 하므로 **3a-3 범위**다.
+   적대적 리뷰가 옳다: 현재 설계는 **중복 제출에 대해 fail-closed일 뿐, 그 상태를 스스로 복구하지는 못한다.** 이번 웨이브가 보장하는 것은 복구가 아니라 **그 상태가 반드시 운영자에게 드러난다**는 것이다(F1/F2/F4). 알림이 한 채팅의 실패로 사라지지 않고, 완료된 재개가 조용히 지나가지 않으며, envelope이 없는 ack도 묻히지 않는다.
+
+2. **재개 시도 간 backoff·간격.** 지금은 간격이 없다. poll 주기상 자동 재개 예산 3회(attempt 2·3·4)가 **약 33초 안에 전부 소진된다.** 게다가 재개 경로는 브로커 스냅샷을 **다시 채택하지 않는다** — 2026-08-07을 일으킨 stale snapshot 실패는 시간이 지나도 저절로 낫지 않으므로, 이 실패 유형에 대해 자동 재개는 **단조적으로 회복 불가능**하다. 즉 세 번의 재시도는 스냅샷이 이미 유효한 경우(검증 실패·config 로드 실패·ack 직후 프로세스 종료)에만 값을 낸다.
+   **이 계획의 전달 가치를 과장하지 말 것**: 3a-1이 실제로 없앤 것은 "ack가 곧 종결"이라는 오판이며, stale snapshot 자체의 자동 복구가 아니다. 그 유형은 예산 소진 후 ⚠️ 알림으로 운영자에게 간다. backoff와 스냅샷 재채택은 **3a-3**에서 함께 다룬다.
+
+3. **2차 수정 웨이브(G1~G3)에서 기록만 하고 고치지 않은 것.** 넷 다 지적이 타당하지만, 실주문 코드에 지금 손댈 값어치보다 위험이 크다고 판단해 **3a-3으로 이월**한다.
+   - **`_record_resolution_completed`의 새 raise 지점.** F5가 check-then-write를 `writer_lock` 안으로 옮기면서, **주문이 브로커에 도달한 뒤에** `TimeoutError`가 날 수 있는 지점이 하나 생겼다. 착지는 fail-closed다 — `approvals` 행이 이미 있으므로 다음 sweep이 ⚠️ 알림으로 운영자에게 넘긴다. 순이득이지만 hot path의 새 raise 지점이라는 사실은 남는다.
+   - **리마인더 dedup 스캔의 `save_audited_system_event`가 자기 `try` 밖에 있다.** dedup이 빗나가면 `IntegrityError`가 sweep을 뚫고 나간다(F2와 같은 유형). 현재 이벤트 볼륨에서는 도달 불가.
+   - **영구 전송 불가 채팅의 이벤트 증식.** 그런 채팅 하나가 미완 승인 하나당 poll(약 30초)마다 `telegram_command` error 이벤트를 한 건씩 쓴다. backoff도 상한도 없다.
+   - **`str(ack.get("approval_id"))`가 손상된 ack에서 문자열 `"None"`을 만든다.** `telegram-approval-attention:None:<chat>` 같은 키가 생긴다.
+
+4. **아웃박스에 포기 조건이 없다 (G1이 만든 것, 사용자 결정으로 이월).** `_deliver_resume_completion_notices`는 채팅별 키가 없는 `attempt > 1` 완료 건을 **매 poll 무제한으로 재시도**한다. 영구 도달 불가 채팅이 하나 있으면 비용이 "미완 승인 하나당"이 아니라 **"과거에 재개된 모든 승인 하나당, 약 30초마다, 영원히"**로 커지고, 그 집합은 줄어들지 않는다 — 위 3번의 이벤트 증식을 G1이 확대한 셈이다.
+   **승인을 잃거나 주문을 중복시키지는 않는다** — 비용은 실패한 전송 시도와 `telegram_command` error 이벤트, 즉 운영 소음이다. 배포 시점 운영 DB의 대상 건수는 **0건**(`attempt > 1` 완료 이력 없음)이고 재개가 일어날 때마다 천천히 늘어난다.
+   해법은 아웃박스 행에 **나이 또는 시도 상한**을 두고(예: N회 sweep 후 포기) attention 경로로 떨어뜨리는 것이다. 3a-3에서 3번 항목과 함께 다룬다.
 - **3a-4**: funding/budget workflow head·CAS·attempt claim·lineage·수렴 sweep
 - **3a-5**: 업그레이드 backfill + 롤백 preflight CLI + 운영 문서

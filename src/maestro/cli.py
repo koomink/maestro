@@ -1461,6 +1461,61 @@ def clear_halt(
     typer.echo(f"state={current.state.value} reason={current.reason}")
 
 
+def _service_is_active(unit: str) -> bool:
+    result = subprocess.run(  # noqa: S603 - fixed args, no user input
+        ["systemctl", "is-active", "--quiet", unit],
+        check=False,
+    )
+    return result.returncode == 0
+
+
+@app.command("approval-rollback-preflight")
+def approval_rollback_preflight(
+    config: Path | None = CONFIG_OPTION,
+    require_quiesce: bool = typer.Option(
+        False,
+        "--require-quiesce",
+        help="Fail if the telegram operator service is still running.",
+    ),
+) -> None:
+    """롤백 전 안전 검사. 미완 승인이 있으면 exit 1.
+
+    schema_version=2 ack가 있고 resolution_completed가 없는 승인은 구버전이
+    ack만 보고 종결로 오판하므로, 이 상태에서 롤백하면 주문이 유실된다.
+
+    이 명령의 판정 로직 자체는 읽기 전용이며 승인 상태를 바꾸지 않는다.
+    다만 `_state_store` 생성은 다른 모든 CLI 명령과 동일하게 보류 중인
+    스키마 마이그레이션/백필(`StateStore._init_db`)을 적용할 수 있다 —
+    모두 additive-only(`CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE
+    ADD COLUMN`)이거나 멱등적인 백필이며, 롤백 대상인 구버전 코드도 기동
+    시 동일한 마이그레이션을 실행하므로 롤백 안전성에는 영향이 없다.
+    """
+    if require_quiesce and _service_is_active("maestro-telegram-operator.service"):
+        typer.echo("approval_rollback_preflight status=fail reason=operator_still_running")
+        raise typer.Exit(1)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    acked = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type("telegram_approval_ack", limit=None)
+        if isinstance(row["payload"].get("schema_version"), int)
+    }
+    completed = {
+        str(row["payload"].get("approval_id"))
+        for row in store.list_system_events_by_type(
+            "telegram_approval_resolution_completed", limit=None
+        )
+    }
+    unresolved = sorted(acked - completed)
+    if not unresolved:
+        typer.echo("approval_rollback_preflight status=safe unresolved=0")
+        return
+    for approval_id in unresolved:
+        typer.echo(f"approval_rollback_preflight status=unsafe approval_id={approval_id}")
+    typer.echo(f"approval_rollback_preflight status=unsafe unresolved={len(unresolved)}")
+    raise typer.Exit(1)
+
+
 @app.command("release-kill")
 def release_kill(
     config: Path | None = CONFIG_OPTION,

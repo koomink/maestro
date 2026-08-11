@@ -297,6 +297,10 @@ def approval_decision_text(
     orders_failed: int,
 ) -> str:
     """승인 결과 문구. 실제로 브로커에 접수된 주문 수만 성공으로 보고한다."""
+    if status == "expired":
+        # 만료를 거절로 뭉뚱그리면, 보지도 못한 제안을 운영자가 직접 거절했다고
+        # 알리게 된다. 실행되지 않은 것은 같지만 원인이 사실과 다르다.
+        return catalog.DECISION_EXPIRED
     if status != "approved":
         return catalog.DECISION_REJECTED
     if orders_submitted and orders_failed:
