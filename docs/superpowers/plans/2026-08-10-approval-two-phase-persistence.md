@@ -1773,5 +1773,9 @@ Codex 적대적 리뷰 1·2차에서 나왔으나 반영하지 않은 항목과 
    - **리마인더 dedup 스캔의 `save_audited_system_event`가 자기 `try` 밖에 있다.** dedup이 빗나가면 `IntegrityError`가 sweep을 뚫고 나간다(F2와 같은 유형). 현재 이벤트 볼륨에서는 도달 불가.
    - **영구 전송 불가 채팅의 이벤트 증식.** 그런 채팅 하나가 미완 승인 하나당 poll(약 30초)마다 `telegram_command` error 이벤트를 한 건씩 쓴다. backoff도 상한도 없다.
    - **`str(ack.get("approval_id"))`가 손상된 ack에서 문자열 `"None"`을 만든다.** `telegram-approval-attention:None:<chat>` 같은 키가 생긴다.
+
+4. **아웃박스에 포기 조건이 없다 (G1이 만든 것, 사용자 결정으로 이월).** `_deliver_resume_completion_notices`는 채팅별 키가 없는 `attempt > 1` 완료 건을 **매 poll 무제한으로 재시도**한다. 영구 도달 불가 채팅이 하나 있으면 비용이 "미완 승인 하나당"이 아니라 **"과거에 재개된 모든 승인 하나당, 약 30초마다, 영원히"**로 커지고, 그 집합은 줄어들지 않는다 — 위 3번의 이벤트 증식을 G1이 확대한 셈이다.
+   **승인을 잃거나 주문을 중복시키지는 않는다** — 비용은 실패한 전송 시도와 `telegram_command` error 이벤트, 즉 운영 소음이다. 배포 시점 운영 DB의 대상 건수는 **0건**(`attempt > 1` 완료 이력 없음)이고 재개가 일어날 때마다 천천히 늘어난다.
+   해법은 아웃박스 행에 **나이 또는 시도 상한**을 두고(예: N회 sweep 후 포기) attention 경로로 떨어뜨리는 것이다. 3a-3에서 3번 항목과 함께 다룬다.
 - **3a-4**: funding/budget workflow head·CAS·attempt claim·lineage·수렴 sweep
 - **3a-5**: 업그레이드 backfill + 롤백 preflight CLI + 운영 문서
