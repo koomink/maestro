@@ -1,3 +1,5 @@
+import sqlite3
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import yaml
@@ -119,3 +121,23 @@ def test_preflight_require_quiesce_proceeds_when_operator_service_is_inactive(
 
     assert result.exit_code == 0
     assert "status=safe" in result.stdout
+
+
+def test_preflight_applies_no_time_window(tmp_path):
+    """F7: 시간 창을 적용하면 오래된 미완 승인을 잃는 롤백이 조용히 통과한다.
+    preflight가 막아야 하는 것이 바로 그 상태다."""
+    config_path = _telegram_config_path(tmp_path)
+    store = StateStore(load_config(config_path).state.sqlite_path, initial_cash=1000)
+    store.save_system_event(
+        "run_1",
+        "telegram_approval_ack",
+        {"approval_id": "appr_ancient", "status": "approved", "schema_version": 2},
+    )
+    backdated = (datetime.now(UTC) - timedelta(days=400)).strftime("%Y-%m-%d %H:%M:%S")
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("UPDATE system_events SET created_at = ?", (backdated,))
+
+    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "appr_ancient" in result.stdout
