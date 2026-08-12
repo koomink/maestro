@@ -281,33 +281,55 @@ class StateStore:
             )
 
     @contextmanager
-    def writer_lock(
+    def _file_lock(
         self,
-        owner: str,
+        lock_path: Path,
         *,
-        timeout_seconds: float = 10.0,
+        owner: str,
+        timeout_seconds: float,
+        depth_attr: str | None,
+        busy_message: str,
     ) -> Any:
-        del owner
-        if getattr(self._lock_depths, "writer", 0) > 0:
+        if depth_attr is not None and getattr(self._lock_depths, depth_attr, 0) > 0:
             yield
             return
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout_seconds
-        with self.lock_path.open("a+", encoding="utf-8") as lock_file:
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
             while True:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError as exc:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(f"State writer lock is busy: {self.lock_path}") from exc
+                        raise TimeoutError(busy_message) from exc
                     time.sleep(0.1)
-            self._lock_depths.writer = getattr(self._lock_depths, "writer", 0) + 1
+            if depth_attr is not None:
+                depth = getattr(self._lock_depths, depth_attr, 0)
+                setattr(self._lock_depths, depth_attr, depth + 1)
             try:
                 yield
             finally:
-                self._lock_depths.writer -= 1
+                if depth_attr is not None:
+                    depth = getattr(self._lock_depths, depth_attr)
+                    setattr(self._lock_depths, depth_attr, depth - 1)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def writer_lock(
+        self,
+        owner: str,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> Any:
+        with self._file_lock(
+            self.lock_path,
+            owner=owner,
+            timeout_seconds=timeout_seconds,
+            depth_attr="writer",
+            busy_message=f"State writer lock is busy: {self.lock_path}",
+        ):
+            yield
 
     @contextmanager
     def account_refresh_lock(
@@ -321,22 +343,14 @@ class StateStore:
             for character in account_id
         )
         lock_path = self.path.with_suffix(self.path.suffix + f".refresh-{safe_account_id}.lock")
-        deadline = time.monotonic() + timeout_seconds
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            while True:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Account refresh is already running: {account_id}"
-                        ) from exc
-                    time.sleep(0.1)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with self._file_lock(
+            lock_path,
+            owner=f"account_refresh:{account_id}",
+            timeout_seconds=timeout_seconds,
+            depth_attr=None,
+            busy_message=f"Account refresh is already running: {account_id}",
+        ):
+            yield
 
     @contextmanager
     def live_order_lock(
@@ -345,29 +359,14 @@ class StateStore:
         *,
         timeout_seconds: float = 30.0,
     ) -> Any:
-        del owner
-        if getattr(self._lock_depths, "live_order", 0) > 0:
+        with self._file_lock(
+            self.live_order_lock_path,
+            owner=owner,
+            timeout_seconds=timeout_seconds,
+            depth_attr="live_order",
+            busy_message=f"Live order lock is busy: {self.live_order_lock_path}",
+        ):
             yield
-            return
-        self.live_order_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + timeout_seconds
-        with self.live_order_lock_path.open("a+", encoding="utf-8") as lock_file:
-            while True:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Live order lock is busy: {self.live_order_lock_path}"
-                        ) from exc
-                    time.sleep(0.1)
-            self._lock_depths.live_order = getattr(self._lock_depths, "live_order", 0) + 1
-            try:
-                yield
-            finally:
-                self._lock_depths.live_order -= 1
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def validate_config_identity(self, identity: ConfigIdentity) -> None:
         payload = identity.model_dump()

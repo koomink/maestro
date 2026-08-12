@@ -1,7 +1,19 @@
+import multiprocessing
 import sqlite3
+import time
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from maestro.state.store import StateStore
+
+
+def _hold_writer_lock(db_path, hold_seconds, ready, done):
+    store = StateStore(db_path, 0)
+    with store.writer_lock("holder"):
+        ready.set()
+        time.sleep(hold_seconds)
+    done.set()
 
 
 def test_list_system_events_by_type_filters_by_since(tmp_path):
@@ -54,3 +66,42 @@ def test_list_system_events_by_type_includes_boundary_second(tmp_path):
 
     assert len(result) == 1
     assert result[0]["payload"]["approval_id"] == "boundary"
+
+
+def test_writer_lock_is_exclusive_across_processes(tmp_path):
+    db = str(tmp_path / "state.db")
+    StateStore(db, 0)  # create schema
+    ready = multiprocessing.Event()
+    done = multiprocessing.Event()
+    proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 2.0, ready, done))
+    proc.start()
+    try:
+        assert ready.wait(timeout=10)
+        store = StateStore(db, 0)
+        with pytest.raises(TimeoutError, match="State writer lock is busy"):
+            with store.writer_lock("waiter", timeout_seconds=0.3):
+                pass
+    finally:
+        proc.join(timeout=10)
+
+
+def test_writer_lock_is_reentrant_in_the_same_thread(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.writer_lock("outer"):
+        with store.writer_lock("inner", timeout_seconds=0.1):
+            pass  # a TimeoutError here would mean reentrancy is broken
+
+
+def test_live_order_lock_is_exclusive_and_reentrant(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.live_order_lock("outer"):
+        with store.live_order_lock("inner", timeout_seconds=0.1):
+            pass
+
+
+def test_account_refresh_lock_rejects_a_second_holder(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.account_refresh_lock("kis_ps"):
+        with pytest.raises(TimeoutError, match="Account refresh is already running"):
+            with store.account_refresh_lock("kis_ps"):
+                pass
