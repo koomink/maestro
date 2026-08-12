@@ -19,6 +19,14 @@ def _hold_writer_lock(db_path, hold_seconds, ready, done):
     done.set()
 
 
+def _hold_live_order_lock(db_path, hold_seconds, ready, done):
+    store = StateStore(db_path, 0)
+    with store.live_order_lock("live_order_holder"):
+        ready.set()
+        time.sleep(hold_seconds)
+    done.set()
+
+
 class _DiagnosticWriteFailingFile:
     """Wraps a real lock file, making write()/truncate() raise OSError from a
     given 1-based call count onward, without touching the flock itself.
@@ -302,3 +310,41 @@ def test_clear_lock_holder_failure_preserves_the_original_exception(tmp_path, mo
     # The lock must still be released cleanly despite the diagnostic-clear failure.
     with store.writer_lock("victim_again"):
         pass
+
+
+def test_writer_timeout_message_names_the_live_order_holder_and_the_waiter(tmp_path):
+    """Hypothesis A vs B: when the writer lock times out, show who holds the
+    live_order_lock too, so a single alert can tell a lock-order inversion
+    (holder blocked on live_order_lock) from a merely long writer critical
+    section."""
+    db = str(tmp_path / "state.db")
+    StateStore(db, 0)
+    writer_ready = multiprocessing.Event()
+    writer_done = multiprocessing.Event()
+    writer_proc = multiprocessing.Process(
+        target=_hold_writer_lock, args=(db, 3.0, writer_ready, writer_done)
+    )
+    live_ready = multiprocessing.Event()
+    live_done = multiprocessing.Event()
+    live_proc = multiprocessing.Process(
+        target=_hold_live_order_lock, args=(db, 3.0, live_ready, live_done)
+    )
+    writer_proc.start()
+    live_proc.start()
+    try:
+        assert writer_ready.wait(timeout=10)
+        assert live_ready.wait(timeout=10)
+        store = StateStore(db, 0)
+        with pytest.raises(TimeoutError) as exc_info:
+            with store.writer_lock("victim", timeout_seconds=0.3):
+                pass
+        message = str(exc_info.value)
+        assert "State writer lock is busy" in message  # existing prefix preserved
+        assert "waiter victim" in message  # who was denied
+        assert str(writer_proc.pid) in message  # the writer lock's holder
+        assert "live_order_lock" in message
+        assert str(live_proc.pid) in message  # the other lock's holder
+        assert "waited" in message
+    finally:
+        writer_proc.join(timeout=10)
+        live_proc.join(timeout=10)

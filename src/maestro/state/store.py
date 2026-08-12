@@ -291,6 +291,7 @@ class StateStore:
         timeout_seconds: float,
         depth_attr: str | None,
         busy_message: str,
+        other_lock: tuple[str, Path] | None = None,
     ) -> Any:
         if depth_attr is not None and getattr(self._lock_depths, depth_attr, 0) > 0:
             yield
@@ -306,7 +307,9 @@ class StateStore:
                 except BlockingIOError as exc:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
-                            f"{busy_message} ({self._describe_lock_holder(lock_path)}, "
+                            f"{busy_message} (waiter {owner}, "
+                            f"{self._describe_lock_holder(lock_path)}"
+                            f"{self._describe_other_lock(other_lock)}, "
                             f"waited {time.monotonic() - started:.1f}s)"
                         ) from exc
                     time.sleep(0.1)
@@ -370,6 +373,19 @@ class StateStore:
             f"since {holder.get('acquired_at', 'unknown')}"
         )
 
+    @classmethod
+    def _describe_other_lock(cls, other_lock: tuple[str, Path] | None) -> str:
+        """Describe the paired lock's holder, e.g. for hypothesis A vs B:
+
+        was the writer-lock holder itself blocked on the live-order lock
+        (an inversion), or just holding the writer lock a long time? Returns
+        "" when there is no meaningful other lock (account_refresh_lock).
+        """
+        if other_lock is None:
+            return ""
+        label, lock_path = other_lock
+        return f", {label} {cls._describe_lock_holder(lock_path)}"
+
     @staticmethod
     def read_lock_holder(lock_path: Path) -> dict[str, Any] | None:
         """Read without taking the lock. Diagnostic only — every failure absorbs to None.
@@ -407,6 +423,7 @@ class StateStore:
             timeout_seconds=timeout_seconds,
             depth_attr="writer",
             busy_message=f"State writer lock is busy: {self.lock_path}",
+            other_lock=("live_order_lock", self.live_order_lock_path),
         ):
             yield
 
@@ -444,6 +461,7 @@ class StateStore:
             timeout_seconds=timeout_seconds,
             depth_attr="live_order",
             busy_message=f"Live order lock is busy: {self.live_order_lock_path}",
+            other_lock=("writer_lock", self.lock_path),
         ):
             yield
 
