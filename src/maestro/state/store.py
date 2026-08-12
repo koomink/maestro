@@ -917,8 +917,27 @@ class StateStore:
         inside the same transaction as the inserts, which is the whole point:
         reading the workflow head and then writing a claim in a separate
         statement leaves a window for another run to replace the head in
-        between.  A batch whose own keys are all present is a replay and is
-        reported as such before anything else is consulted.
+        between.  This is why the transaction is opened with ``BEGIN
+        IMMEDIATE`` before the very first ``SELECT``: the default sqlite3
+        behavior only opens a transaction implicitly before the first write,
+        which would let every check run in autocommit mode and release before
+        the insert loop even starts — a window a manual recovery script, a
+        different-version process, or the sqlite3 CLI could write into, since
+        ``writer_lock`` is only an advisory lock that other tools have no
+        reason to know about.  Holding the write lock from the first
+        statement closes that window; a non-cooperative writer contending for
+        it waits up to the connection's ``busy_timeout`` and then raises
+        ``sqlite3.OperationalError``, which is the correct loud failure here.
+        A batch whose own keys are all present is a replay and is reported as
+        such before anything else is consulted.
+
+        Do not call this method while already holding an open write
+        transaction on another connection against the same database — the
+        ``BEGIN IMMEDIATE`` above would then block against that other
+        transaction until ``busy_timeout`` expires, including a self-deadlock
+        if it's the same logical caller.  ``writer_lock`` is re-entrant within
+        a thread, but that re-entrancy only covers the advisory file lock; it
+        does not extend to a second, already-open SQLite transaction.
 
         Preconditions are checked next, before this batch's own keys are
         checked for a partial overlap with what is already on record.  A
@@ -936,6 +955,17 @@ class StateStore:
         keys = [item["duplicate_key"] for item in prepared]
         with self.writer_lock("save_system_events_atomic"):
             with self._connect() as conn:
+                # Manual transaction control: take the write lock (BEGIN
+                # IMMEDIATE) before the first SELECT so every check below and
+                # the insert loop run inside one held lock. isolation_level
+                # must be set to None first -- otherwise pysqlite's own
+                # autobegin would try to open a second, nested transaction of
+                # its own ahead of the first INSERT/UPDATE/DELETE, which
+                # raises. ``with self._connect() as conn:`` still commits on
+                # a clean return and rolls back on any exception, including
+                # an early return on a conflict path below.
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
                 existing = {
                     str(row[0])
                     for row in conn.execute(

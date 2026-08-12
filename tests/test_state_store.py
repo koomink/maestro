@@ -832,6 +832,94 @@ def test_atomic_events_missing_precondition_keys_are_sorted_and_deduplicated(tmp
     assert result["conflicting_keys"] == ("aaa", "bbb", "zzz")
 
 
+def test_atomic_events_precondition_window_is_closed_to_an_outside_writer(tmp_path, monkeypatch):
+    """A second, independent sqlite3 connection that skips the advisory writer_lock
+    must not be able to write a forbidden key in the window between this method's
+    precondition checks and its own INSERT.
+
+    The hook fires the instant the store's connection is about to run its first
+    INSERT -- i.e. strictly after every check has already run. Before the fix,
+    the store's own SELECT-only checks run in autocommit mode and no lock is
+    held yet at that point, so the outside writer's INSERT can land right there,
+    undetected. After the fix, ``BEGIN IMMEDIATE`` is issued before the first
+    check, so the write lock has already been held since the very start of the
+    method, and the outside writer must be blocked out.
+    """
+    db_path = tmp_path / "s.db"
+    store = StateStore(str(db_path))
+
+    hook_fired = {"value": False}
+    racer_landed = {"value": False}
+    racer_error = {"value": None}
+
+    original_connect = StateStore._connect
+
+    def traced_connect(self):
+        conn = original_connect(self)
+
+        def trace(sql: str) -> None:
+            if hook_fired["value"]:
+                return
+            if not sql.strip().upper().startswith("INSERT INTO SYSTEM_EVENTS"):
+                return
+            hook_fired["value"] = True
+            racer = sqlite3.connect(str(db_path), timeout=0.5)
+            try:
+                racer.execute(
+                    "INSERT INTO system_events (run_id, event_type, payload, duplicate_key) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("racer-run", "racer_forbidden_write", "{}", "forbid:1"),
+                )
+                racer.commit()
+                racer_landed["value"] = True
+            except sqlite3.OperationalError as exc:
+                racer_error["value"] = exc
+            finally:
+                racer.close()
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    monkeypatch.setattr(StateStore, "_connect", traced_connect)
+
+    result = store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}],
+        forbid_duplicate_keys=["forbid:1"],
+    )
+
+    assert hook_fired["value"] is True, "the race hook never fired -- test is not exercising it"
+    assert racer_landed["value"] is False, (
+        "an outside connection wrote a forbidden key inside the CAS window: "
+        f"racer_error={racer_error['value']!r}"
+    )
+    assert isinstance(racer_error["value"], sqlite3.OperationalError)
+    assert result["committed"] is True
+    assert store.duplicate_key_exists("req:1")
+    assert not store.duplicate_key_exists("forbid:1")
+
+
+def test_atomic_events_conflict_path_leaves_no_dangling_transaction(tmp_path):
+    """An early return on a conflict path (already_committed here) must still
+    leave the database writable afterward -- i.e. it must not leave the
+    BEGIN IMMEDIATE transaction open/dangling on the connection.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-1", events)
+    assert result["conflict"] == "already_committed"
+    # A follow-up write must succeed promptly -- if the prior call left its
+    # BEGIN IMMEDIATE transaction dangling, this would hang until busy_timeout
+    # (10s) and then raise sqlite3.OperationalError.
+    other = store.save_system_events_atomic(
+        "run-2",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:2"}}],
+    )
+    assert other["committed"] is True
+    assert store.duplicate_key_exists("req:2")
+
+
 def test_only_one_process_wins_the_head_transition(tmp_path):
     db = str(tmp_path / "s.db")
     store = StateStore(db)
