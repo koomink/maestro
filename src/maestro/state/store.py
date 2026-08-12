@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -887,6 +888,64 @@ class StateStore:
                     "created": True,
                     "run_id": run_id,
                 }
+
+    def save_system_events_atomic(
+        self,
+        run_id: str,
+        events: Sequence[Mapping[str, Any]],
+    ) -> dict[str, Any]:
+        """Commit several system events in one transaction, or none of them.
+
+        A state transition that spans more than one event — a new request, the
+        previous one superseded, the workflow head that points at the new one —
+        only means anything as a set.  Writing them separately permits a crash
+        that leaves a request nothing points to, or a head pointing at nothing.
+
+        Every event must carry a ``duplicate_key``.  The keys are what make a
+        retry safe: if all of them are already on record this call is a replay
+        of a batch that already landed, and it returns without writing.
+        """
+        prepared = _prepare_atomic_system_events(events)
+        keys = [item["duplicate_key"] for item in prepared]
+        with self.writer_lock("save_system_events_atomic"):
+            with self._connect() as conn:
+                existing = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT duplicate_key FROM system_events "
+                        f"WHERE duplicate_key IN ({','.join('?' * len(keys))})",
+                        keys,
+                    ).fetchall()
+                }
+                if len(existing) == len(keys):
+                    return {
+                        "committed": False,
+                        "conflict": "already_committed",
+                        "conflicting_keys": tuple(sorted(existing)),
+                    }
+                if existing:
+                    # Half of this transition is already on record.  Committing
+                    # the rest would finish a transition nobody asked for, so
+                    # refuse rather than guess which half is authoritative.
+                    raise ValueError(
+                        "atomic system events conflict with an existing partial "
+                        f"record: {sorted(existing)}"
+                    )
+                for item in prepared:
+                    conn.execute(
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key, "
+                        "broker_order_id, order_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            item["event_type"],
+                            json.dumps(item["payload"], default=str),
+                            item["duplicate_key"],
+                            item["broker_order_id"],
+                            item["order_id"],
+                        ),
+                    )
+                return {"committed": True, "conflict": None, "conflicting_keys": ()}
 
     def upsert_cash_suspense(
         self,
@@ -1949,6 +2008,32 @@ class StateStore:
 def _system_event_duplicate_key(payload: dict[str, Any]) -> str | None:
     value = payload.get("duplicate_key")
     return str(value) if value else None
+
+
+def _prepare_atomic_system_events(
+    events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not events:
+        raise ValueError("at least one system event is required")
+    prepared: list[dict[str, Any]] = []
+    for event in events:
+        payload = dict(event["payload"])
+        duplicate_key = _system_event_duplicate_key(payload)
+        if not duplicate_key:
+            raise ValueError("every atomic system event needs a duplicate key")
+        prepared.append(
+            {
+                "event_type": str(event["event_type"]),
+                "payload": payload,
+                "duplicate_key": duplicate_key,
+                "broker_order_id": _system_event_broker_order_id(payload),
+                "order_id": _system_event_order_id(payload),
+            }
+        )
+    keys = [item["duplicate_key"] for item in prepared]
+    if len(set(keys)) != len(keys):
+        raise ValueError("atomic system event duplicate keys must be unique")
+    return prepared
 
 
 def _system_event_broker_order_id(payload: dict[str, Any]) -> str | None:
