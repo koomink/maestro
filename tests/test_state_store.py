@@ -773,6 +773,31 @@ def test_atomic_events_forbid_precondition_wins_over_a_partial_overlap(tmp_path)
     assert not store.duplicate_key_exists("req:2")
 
 
+def test_atomic_events_still_raise_when_a_precondition_misses_the_collision(tmp_path):
+    """Declaring some precondition does not blanket-excuse every overlap.
+
+    Only the key the caller named is treated as an expected race signal.  An
+    overlap on a key no precondition covers is still an unexplained collision
+    and must raise, even though the declared preconditions all pass.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}}],
+    )
+    with pytest.raises(ValueError, match="partial"):
+        store.save_system_events_atomic(
+            "run-2",
+            [
+                {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:2"}},
+            ],
+            require_duplicate_keys=["head:wf:v1"],
+            forbid_duplicate_keys=["head:wf:v9"],
+        )
+    assert not store.duplicate_key_exists("req:2")
+
+
 def test_atomic_events_replay_wins_over_a_failing_precondition(tmp_path):
     """A batch that already landed reports success, not a lost race.
 
