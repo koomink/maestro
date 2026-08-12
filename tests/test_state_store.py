@@ -671,3 +671,71 @@ def test_atomic_events_normalize_malformed_events_to_value_error(tmp_path):
         store.save_system_events_atomic(
             "run-1", [{"event_type": "a", "payload": None}]
         )
+
+
+def test_atomic_events_require_an_existing_key(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    result = store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["head:wf:v1"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_missing"
+    assert result["conflicting_keys"] == ("head:wf:v1",)
+    assert not store.duplicate_key_exists("claim:1")
+
+
+def test_atomic_events_commit_when_the_required_key_is_present(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}}],
+    )
+    result = store.save_system_events_atomic(
+        "run-2",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["head:wf:v1"],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    assert result["committed"] is True
+    assert store.duplicate_key_exists("claim:1")
+
+
+def test_atomic_events_refuse_when_a_forbidden_key_appeared(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}},
+        ],
+    )
+    result = store.save_system_events_atomic(
+        "run-2",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["head:wf:v1"],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_present"
+    assert result["conflicting_keys"] == ("head:wf:v2",)
+    assert not store.duplicate_key_exists("claim:1")
+
+
+def test_atomic_events_replay_wins_over_a_failing_precondition(tmp_path):
+    """A batch that already landed reports success, not a lost race.
+
+    The head this batch wrote is exactly what its own forbid-precondition
+    names, so evaluating preconditions first would misreport the replay.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}}]
+    first = store.save_system_events_atomic(
+        "run-1", events, forbid_duplicate_keys=["head:wf:v2"]
+    )
+    assert first["committed"] is True
+    second = store.save_system_events_atomic(
+        "run-1", events, forbid_duplicate_keys=["head:wf:v2"]
+    )
+    assert second["conflict"] == "already_committed"

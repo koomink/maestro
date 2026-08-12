@@ -893,6 +893,9 @@ class StateStore:
         self,
         run_id: str,
         events: Sequence[Mapping[str, Any]],
+        *,
+        require_duplicate_keys: Sequence[str] = (),
+        forbid_duplicate_keys: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Commit several system events in one transaction, or none of them.
 
@@ -909,6 +912,13 @@ class StateStore:
         ``head:wf:v2``, ...) — reusing a stable ``head:wf`` key across
         transitions makes every transition after the first look like a
         conflicting partial overlap with the one before it.
+
+        ``require_duplicate_keys`` and ``forbid_duplicate_keys`` are evaluated
+        inside the same transaction as the inserts, which is the whole point:
+        reading the workflow head and then writing a claim in a separate
+        statement leaves a window for another run to replace the head in
+        between.  A batch whose own keys are all present is a replay and is
+        reported as such before the preconditions are consulted.
         """
         prepared = _prepare_atomic_system_events(events)
         keys = [item["duplicate_key"] for item in prepared]
@@ -936,6 +946,39 @@ class StateStore:
                         "atomic system events conflict with an existing partial "
                         f"record: {sorted(existing)}"
                     )
+                required = [str(key) for key in require_duplicate_keys]
+                if required:
+                    present = {
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT duplicate_key FROM system_events "
+                            f"WHERE duplicate_key IN ({','.join('?' * len(required))})",
+                            required,
+                        ).fetchall()
+                    }
+                    missing = [key for key in required if key not in present]
+                    if missing:
+                        return {
+                            "committed": False,
+                            "conflict": "precondition_missing",
+                            "conflicting_keys": tuple(missing),
+                        }
+                forbidden = [str(key) for key in forbid_duplicate_keys]
+                if forbidden:
+                    blocking = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT duplicate_key FROM system_events "
+                            f"WHERE duplicate_key IN ({','.join('?' * len(forbidden))})",
+                            forbidden,
+                        ).fetchall()
+                    ]
+                    if blocking:
+                        return {
+                            "committed": False,
+                            "conflict": "precondition_present",
+                            "conflicting_keys": tuple(sorted(blocking)),
+                        }
                 for item in prepared:
                     conn.execute(
                         "INSERT INTO system_events "
