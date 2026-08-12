@@ -903,7 +903,12 @@ class StateStore:
 
         Every event must carry a ``duplicate_key``.  The keys are what make a
         retry safe: if all of them are already on record this call is a replay
-        of a batch that already landed, and it returns without writing.
+        of a batch that already landed, and it returns without writing.  The
+        key identifies this transition, not the event's role in one: a head
+        write needs a fresh key each time it moves (``head:wf:v1``, then
+        ``head:wf:v2``, ...) — reusing a stable ``head:wf`` key across
+        transitions makes every transition after the first look like a
+        conflicting partial overlap with the one before it.
         """
         prepared = _prepare_atomic_system_events(events)
         keys = [item["duplicate_key"] for item in prepared]
@@ -2017,13 +2022,20 @@ def _prepare_atomic_system_events(
         raise ValueError("at least one system event is required")
     prepared: list[dict[str, Any]] = []
     for event in events:
-        payload = dict(event["payload"])
+        try:
+            event_type = str(event["event_type"])
+            payload = dict(event["payload"])
+        except (KeyError, TypeError) as exc:
+            # A caller that separates "bad batch" from "infrastructure
+            # failure" with `except ValueError` should not see a malformed
+            # event escape as a KeyError/TypeError instead.
+            raise ValueError(f"malformed atomic system event: {exc!r}") from exc
         duplicate_key = _system_event_duplicate_key(payload)
         if not duplicate_key:
             raise ValueError("every atomic system event needs a duplicate key")
         prepared.append(
             {
-                "event_type": str(event["event_type"]),
+                "event_type": event_type,
                 "payload": payload,
                 "duplicate_key": duplicate_key,
                 "broker_order_id": _system_event_broker_order_id(payload),

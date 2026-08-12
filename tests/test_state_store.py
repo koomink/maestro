@@ -558,6 +558,7 @@ def test_atomic_events_commit_together(tmp_path):
     )
     assert result["committed"] is True
     assert result["conflict"] is None
+    assert result["conflicting_keys"] == ()
     assert store.duplicate_key_exists("req:1")
     assert store.duplicate_key_exists("head:wf:v1")
 
@@ -572,6 +573,7 @@ def test_atomic_events_replay_is_an_idempotent_no_op(tmp_path):
     result = store.save_system_events_atomic("run-1", events)
     assert result["committed"] is False
     assert result["conflict"] == "already_committed"
+    assert result["conflicting_keys"] == ("head:wf:v1", "req:1")
     assert len(store.list_system_events_by_type("funding_request", limit=None)) == 1
 
 
@@ -644,3 +646,28 @@ def test_atomic_events_carry_broker_and_order_ids(tmp_path):
             ("intent:o-1",),
         ).fetchone()
     assert row == ("b-1", "o-1")
+
+
+def test_atomic_events_leave_nothing_behind_when_one_event_fails(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    unserializable = {"duplicate_key": "req:2"}
+    unserializable["self"] = unserializable
+    with pytest.raises(ValueError):
+        store.save_system_events_atomic(
+            "run-1",
+            [
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+                {"event_type": "funding_workflow_head", "payload": unserializable},
+            ],
+        )
+    assert not store.duplicate_key_exists("req:1")
+
+
+def test_atomic_events_normalize_malformed_events_to_value_error(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    with pytest.raises(ValueError):
+        store.save_system_events_atomic("run-1", [{"event_type": "a"}])
+    with pytest.raises(ValueError):
+        store.save_system_events_atomic(
+            "run-1", [{"event_type": "a", "payload": None}]
+        )

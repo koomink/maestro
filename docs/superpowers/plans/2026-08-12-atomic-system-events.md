@@ -592,41 +592,25 @@ def test_only_one_process_wins_the_head_transition(tmp_path):
         assert store.duplicate_key_exists(f"req:{attempt}") is (attempt == winning_attempt)
 
 
-def test_a_failing_insert_rolls_the_whole_batch_back(tmp_path, monkeypatch):
-    store = StateStore(str(tmp_path / "s.db"))
-    original = sqlite3.Connection.execute
-    calls = {"n": 0}
-
-    def failing_execute(self, sql, *args, **kwargs):
-        if sql.startswith("INSERT INTO system_events"):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise sqlite3.OperationalError("disk I/O error")
-        return original(self, sql, *args, **kwargs)
-
-    monkeypatch.setattr(sqlite3.Connection, "execute", failing_execute)
-    with pytest.raises(sqlite3.OperationalError):
-        store.save_system_events_atomic(
-            "run-1",
-            [
-                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
-                {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
-            ],
-        )
-    monkeypatch.undo()
-    assert not store.duplicate_key_exists("req:1")
-    assert not store.duplicate_key_exists("head:wf:v1")
 ```
+
+> **개정 (2026-08-12, Task 1 리뷰 반영).** 원래 이 태스크에는
+> `sqlite3.Connection.execute`를 monkeypatch해 두 번째 INSERT를 실패시키는
+> 롤백 테스트가 있었다. **Task 1의 수정 라운드로 옮겼다** — Task 2가 이 위에
+> CAS를 얹기 전에 원자성이 고정돼 있어야 하고, 전역 클래스 메서드 패치보다
+> 직렬화 불가 payload로 두 번째 이벤트를 실패시키는 편이 견고하다. 여기
+> 남는 것은 **프로세스 간 경쟁** 증명뿐이다.
 
 - [ ] **Step 2: 실패를 확인한다**
 
 경쟁 테스트는 구현이 이미 있으므로 통과할 수 있다. 그럴 경우 **비공허성을
 mutation으로 확인한다**: `save_system_events_atomic`에서 `forbid` 평가
-블록을 잠시 제거하고 두 테스트를 돌린다.
+블록을 잠시 제거하고 테스트를 돌린다.
 
-Run: `.venv/bin/python -m pytest tests/test_state_store.py -k "one_process_wins or rolls_the_whole_batch" -q`
-Expected(mutation 상태): FAIL — 승자가 둘 이상이거나 롤백되지 않은 행이 남는다.
-그 다음 mutation을 되돌리고 다시 돌려 PASS를 확인한다.
+Run: `.venv/bin/python -m pytest tests/test_state_store.py -k one_process_wins -q`
+Expected(mutation 상태): FAIL — 승자가 둘 이상 나온다.
+그 다음 mutation을 되돌리고 다시 돌려 PASS를 확인한다. 두 결과를 모두
+보고한다 — mutation에서 실패하지 않는 테스트는 원하는 테스트가 아니다.
 
 - [ ] **Step 3: 전체 스위트와 린트**
 
