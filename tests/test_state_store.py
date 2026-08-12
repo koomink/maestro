@@ -1,4 +1,5 @@
 import multiprocessing
+import os
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
@@ -105,3 +106,41 @@ def test_account_refresh_lock_rejects_a_second_holder(tmp_path):
         with pytest.raises(TimeoutError, match="Account refresh is already running"):
             with store.account_refresh_lock("kis_ps"):
                 pass
+
+
+def test_lock_file_records_the_holder_while_held(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.writer_lock("approve_signal"):
+        holder = store.read_lock_holder(store.writer_lock_path)
+        assert holder is not None
+        assert holder["owner"] == "approve_signal"
+        assert holder["pid"] == os.getpid()
+        assert holder["acquired_at"]  # ISO 문자열
+
+
+def test_lock_file_is_cleared_after_release(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.writer_lock("approve_signal"):
+        pass
+    assert store.read_lock_holder(store.writer_lock_path) is None
+
+
+def test_reentrant_acquisition_keeps_the_outer_holder(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.writer_lock("outer"):
+        with store.writer_lock("inner"):
+            holder = store.read_lock_holder(store.writer_lock_path)
+            assert holder["owner"] == "outer"
+
+
+def test_read_lock_holder_tolerates_a_corrupt_file(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    store.writer_lock_path.write_text("깨진 내용 not json", encoding="utf-8")
+    assert store.read_lock_holder(store.writer_lock_path) is None
+
+
+def test_live_order_lock_records_its_own_holder(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with store.live_order_lock("resolve_pending_signal_approval"):
+        holder = store.read_lock_holder(store.live_order_lock_path)
+        assert holder["owner"] == "resolve_pending_signal_approval"

@@ -1,10 +1,11 @@
 import fcntl
 import json
+import os
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ class StateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self.writer_lock_path = self.lock_path
         self.live_order_lock_path = self.path.with_suffix(self.path.suffix + ".live.lock")
         self._lock_depths = threading.local()
         self.initial_cash = float(initial_cash or 0.0)
@@ -304,6 +306,7 @@ class StateStore:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(busy_message) from exc
                     time.sleep(0.1)
+            self._write_lock_holder(lock_file, owner)
             if depth_attr is not None:
                 depth = getattr(self._lock_depths, depth_attr, 0)
                 setattr(self._lock_depths, depth_attr, depth + 1)
@@ -313,7 +316,43 @@ class StateStore:
                 if depth_attr is not None:
                     depth = getattr(self._lock_depths, depth_attr)
                     setattr(self._lock_depths, depth_attr, depth - 1)
+                self._clear_lock_holder(lock_file)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _write_lock_holder(lock_file: Any, owner: str) -> None:
+        """Called only while the exclusive flock is held — no write race."""
+        record = {
+            "owner": owner,
+            "pid": os.getpid(),
+            "acquired_at": datetime.now(UTC).isoformat(),
+        }
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.write(json.dumps(record, ensure_ascii=False))
+        lock_file.flush()
+
+    @staticmethod
+    def _clear_lock_holder(lock_file: Any) -> None:
+        """Clear before release so the next waiter doesn't see a stale holder."""
+        lock_file.seek(0)
+        lock_file.truncate()
+        lock_file.flush()
+
+    @staticmethod
+    def read_lock_holder(lock_path: Path) -> dict[str, Any] | None:
+        """Read without taking the lock. Diagnostic only — every failure absorbs to None."""
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+        return record if isinstance(record, dict) else None
 
     @contextmanager
     def writer_lock(
