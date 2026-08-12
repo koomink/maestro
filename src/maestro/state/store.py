@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -887,6 +888,180 @@ class StateStore:
                     "created": True,
                     "run_id": run_id,
                 }
+
+    def save_system_events_atomic(
+        self,
+        run_id: str,
+        events: Sequence[Mapping[str, Any]],
+        *,
+        require_duplicate_keys: Sequence[str] = (),
+        forbid_duplicate_keys: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Commit several system events in one transaction, or none of them.
+
+        A state transition that spans more than one event — a new request, the
+        previous one superseded, the workflow head that points at the new one —
+        only means anything as a set.  Writing them separately permits a crash
+        that leaves a request nothing points to, or a head pointing at nothing.
+
+        Every event must carry a ``duplicate_key``.  The keys are what make a
+        retry safe: if all of them are already on record this call is a replay
+        of a batch that already landed, and it returns without writing.  The
+        key identifies this transition, not the event's role in one: a head
+        write needs a fresh key each time it moves (``head:wf:v1``, then
+        ``head:wf:v2``, ...) — reusing a stable ``head:wf`` key across
+        transitions makes every transition after the first look like a
+        conflicting partial overlap with the one before it.
+
+        ``require_duplicate_keys`` and ``forbid_duplicate_keys`` are evaluated
+        inside the same transaction as the inserts, which is the whole point:
+        reading the workflow head and then writing a claim in a separate
+        statement leaves a window for another run to replace the head in
+        between.  This is why the transaction is opened with ``BEGIN
+        IMMEDIATE`` before the very first ``SELECT``: the default sqlite3
+        behavior only opens a transaction implicitly before the first write,
+        which would let every check run in autocommit mode and release before
+        the insert loop even starts — a window a manual recovery script, a
+        different-version process, or the sqlite3 CLI could write into, since
+        ``writer_lock`` is only an advisory lock that other tools have no
+        reason to know about.  Holding the write lock from the first
+        statement closes that window; a non-cooperative writer contending for
+        it waits up to the connection's ``busy_timeout`` and then raises
+        ``sqlite3.OperationalError``, which is the correct loud failure here.
+        A batch whose own keys are all present is a replay and is reported as
+        such before anything else is consulted.
+
+        Do not call this method while already holding an open write
+        transaction on another connection against the same database — the
+        ``BEGIN IMMEDIATE`` above would then block against that other
+        transaction until ``busy_timeout`` expires, including a self-deadlock
+        if it's the same logical caller.  ``writer_lock`` is re-entrant within
+        a thread, but that re-entrancy only covers the advisory file lock; it
+        does not extend to a second, already-open SQLite transaction.
+
+        A replay is verified by content, not just by key: every one of a
+        batch's ``duplicate_key``s existing is not proof this exact batch
+        landed, since ``duplicate_key`` is one global namespace shared with
+        other write paths (``save_system_event``, ``_insert``, and several
+        bespoke methods).  Each key's stored ``event_type`` and payload are
+        therefore compared against what's being submitted now (excluding the
+        stored ``run_id``, since a legitimate retry after a crash may carry a
+        different one).  Stored payloads round-tripped through
+        ``json.dumps(..., default=str)`` are compared as parsed structures,
+        never as raw text, and the submitted payload is round-tripped the
+        same way before comparing, so a datetime stored as a string still
+        matches itself.  If every key matches, this is a genuine replay.  If
+        any key's stored content differs, this is an unexplained collision
+        and raises, in the same spirit as the partial-overlap refusal below —
+        which also means a payload with a nondeterministic field (a fresh
+        timestamp, a random id) will fail hard on retry instead of silently
+        "succeeding": a key that doesn't identify its content isn't a usable
+        idempotency key.
+
+        Preconditions are checked next, before this batch's own keys are
+        checked for a partial overlap with what is already on record.  A
+        declared precondition is the caller stating what "someone else got
+        here first" looks like for this transition — when a race is lost, the
+        losing batch's own key set legitimately overlaps the winner's (e.g.
+        both raced to write the same CAS target key), and that overlap must
+        be reported as ``precondition_present``/``precondition_missing``, not
+        raised as an unexplained collision.  Only once preconditions clear
+        does an own-key partial overlap fall back to the hard ``ValueError``:
+        for a caller that declared no preconditions, that overlap really is
+        an unexplained key collision.
+        """
+        prepared = _prepare_atomic_system_events(events)
+        keys = [item["duplicate_key"] for item in prepared]
+        with self.writer_lock("save_system_events_atomic"):
+            with self._connect() as conn:
+                # Manual transaction control: take the write lock (BEGIN
+                # IMMEDIATE) before the first SELECT so every check below and
+                # the insert loop run inside one held lock. isolation_level
+                # must be set to None first -- otherwise pysqlite's own
+                # autobegin would try to open a second, nested transaction of
+                # its own ahead of the first INSERT/UPDATE/DELETE, which
+                # raises. ``with self._connect() as conn:`` still commits on
+                # a clean return and rolls back on any exception, including
+                # an early return on a conflict path below.
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                existing = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT duplicate_key FROM system_events "
+                        f"WHERE duplicate_key IN ({','.join('?' * len(keys))})",
+                        keys,
+                    ).fetchall()
+                }
+                if len(existing) == len(keys):
+                    mismatched = _find_replay_content_mismatches(conn, prepared)
+                    if mismatched:
+                        raise ValueError(
+                            "atomic system events conflict with an existing record "
+                            f"with different content: {sorted(mismatched)}"
+                        )
+                    return {
+                        "committed": False,
+                        "conflict": "already_committed",
+                        "conflicting_keys": tuple(sorted(existing)),
+                    }
+                required = [str(key) for key in require_duplicate_keys]
+                if required:
+                    present = {
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT duplicate_key FROM system_events "
+                            f"WHERE duplicate_key IN ({','.join('?' * len(required))})",
+                            required,
+                        ).fetchall()
+                    }
+                    missing = [key for key in required if key not in present]
+                    if missing:
+                        return {
+                            "committed": False,
+                            "conflict": "precondition_missing",
+                            "conflicting_keys": tuple(sorted(set(missing))),
+                        }
+                forbidden = [str(key) for key in forbid_duplicate_keys]
+                if forbidden:
+                    blocking = [
+                        str(row[0])
+                        for row in conn.execute(
+                            "SELECT duplicate_key FROM system_events "
+                            f"WHERE duplicate_key IN ({','.join('?' * len(forbidden))})",
+                            forbidden,
+                        ).fetchall()
+                    ]
+                    if blocking:
+                        return {
+                            "committed": False,
+                            "conflict": "precondition_present",
+                            "conflicting_keys": tuple(sorted(blocking)),
+                        }
+                if existing:
+                    # Half of this transition is already on record, and no
+                    # declared precondition explains it.  Committing the rest
+                    # would finish a transition nobody asked for, so refuse
+                    # rather than guess which half is authoritative.
+                    raise ValueError(
+                        "atomic system events conflict with an existing partial "
+                        f"record: {sorted(existing)}"
+                    )
+                for item in prepared:
+                    conn.execute(
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key, "
+                        "broker_order_id, order_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            item["event_type"],
+                            json.dumps(item["payload"], default=str),
+                            item["duplicate_key"],
+                            item["broker_order_id"],
+                            item["order_id"],
+                        ),
+                    )
+                return {"committed": True, "conflict": None, "conflicting_keys": ()}
 
     def upsert_cash_suspense(
         self,
@@ -1949,6 +2124,76 @@ class StateStore:
 def _system_event_duplicate_key(payload: dict[str, Any]) -> str | None:
     value = payload.get("duplicate_key")
     return str(value) if value else None
+
+
+def _prepare_atomic_system_events(
+    events: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if not events:
+        raise ValueError("at least one system event is required")
+    prepared: list[dict[str, Any]] = []
+    for event in events:
+        try:
+            event_type = str(event["event_type"])
+            payload = dict(event["payload"])
+        except (KeyError, TypeError) as exc:
+            # A caller that separates "bad batch" from "infrastructure
+            # failure" with `except ValueError` should not see a malformed
+            # event escape as a KeyError/TypeError instead.
+            raise ValueError(f"malformed atomic system event: {exc!r}") from exc
+        duplicate_key = _system_event_duplicate_key(payload)
+        if not duplicate_key:
+            raise ValueError("every atomic system event needs a duplicate key")
+        prepared.append(
+            {
+                "event_type": event_type,
+                "payload": payload,
+                "duplicate_key": duplicate_key,
+                "broker_order_id": _system_event_broker_order_id(payload),
+                "order_id": _system_event_order_id(payload),
+            }
+        )
+    keys = [item["duplicate_key"] for item in prepared]
+    if len(set(keys)) != len(keys):
+        raise ValueError("atomic system event duplicate keys must be unique")
+    return prepared
+
+
+def _find_replay_content_mismatches(
+    conn: sqlite3.Connection, prepared: list[dict[str, Any]]
+) -> list[str]:
+    """Which of ``prepared``'s keys are on record under different content.
+
+    Called only once every one of ``prepared``'s keys is already present, to
+    decide whether this is a genuine replay of the same batch or an
+    unrelated write that happens to share a key.  ``run_id`` is deliberately
+    excluded: it is not part of what a key identifies.  Payloads are compared
+    as parsed structures after round-tripping the submitted side through the
+    same ``json.dumps(..., default=str)`` the stored side went through, so a
+    value JSON can't represent natively (e.g. a ``datetime``) still compares
+    equal to its own stored, stringified form.
+    """
+    keys = [item["duplicate_key"] for item in prepared]
+    stored_by_key = {
+        str(row[0]): (str(row[1]), row[2])
+        for row in conn.execute(
+            "SELECT duplicate_key, event_type, payload FROM system_events "
+            f"WHERE duplicate_key IN ({','.join('?' * len(keys))})",
+            keys,
+        ).fetchall()
+    }
+    mismatched = []
+    for item in prepared:
+        stored = stored_by_key.get(item["duplicate_key"])
+        if stored is None:
+            continue
+        stored_event_type, stored_payload_raw = stored
+        submitted_payload = json.loads(json.dumps(item["payload"], default=str))
+        if stored_event_type != item["event_type"] or json.loads(
+            stored_payload_raw
+        ) != submitted_payload:
+            mismatched.append(item["duplicate_key"])
+    return mismatched
 
 
 def _system_event_broker_order_id(payload: dict[str, Any]) -> str | None:

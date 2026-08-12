@@ -21,6 +21,29 @@ def _hold_writer_lock(db_path, hold_seconds, ready, done):
     done.set()
 
 
+def _race_workflow_head(db_path, attempt, ready, results):
+    from maestro.state.store import StateStore
+
+    store = StateStore(db_path)
+    ready.wait(5.0)
+    outcome = store.save_system_events_atomic(
+        f"run-{attempt}",
+        [
+            {
+                "event_type": "funding_workflow_head",
+                "payload": {"duplicate_key": "head:wf:v2", "attempt": attempt},
+            },
+            {
+                "event_type": "funding_request",
+                "payload": {"duplicate_key": f"req:{attempt}"},
+            },
+        ],
+        require_duplicate_keys=["head:wf:v1"],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    results.append((attempt, outcome["committed"], outcome["conflict"]))
+
+
 def _hold_live_order_lock(db_path, hold_seconds, ready, done):
     store = StateStore(db_path, 0)
     with store.live_order_lock("live_order_holder"):
@@ -545,3 +568,445 @@ def test_lock_file_is_cleared_after_the_guarded_body_raises(tmp_path):
         with store.writer_lock("approve_signal"):
             raise ValueError("boom")
     assert store.read_lock_holder(store.writer_lock_path) is None
+
+
+def test_atomic_events_commit_together(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    result = store.save_system_events_atomic(
+        "run-1",
+        [
+            {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+        ],
+    )
+    assert result["committed"] is True
+    assert result["conflict"] is None
+    assert result["conflicting_keys"] == ()
+    assert store.duplicate_key_exists("req:1")
+    assert store.duplicate_key_exists("head:wf:v1")
+
+
+def test_atomic_events_replay_is_an_idempotent_no_op(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [
+        {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+        {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+    ]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-1", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+    assert result["conflicting_keys"] == ("head:wf:v1", "req:1")
+    assert len(store.list_system_events_by_type("funding_request", limit=None)) == 1
+
+
+def test_atomic_events_reject_a_partial_overlap(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}],
+    )
+    with pytest.raises(ValueError, match="partial"):
+        store.save_system_events_atomic(
+            "run-2",
+            [
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+                {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+            ],
+        )
+    assert not store.duplicate_key_exists("head:wf:v1")
+
+
+def test_atomic_events_require_a_duplicate_key_on_every_event(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    with pytest.raises(ValueError, match="duplicate key"):
+        store.save_system_events_atomic(
+            "run-1",
+            [
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+                {"event_type": "funding_workflow_head", "payload": {}},
+            ],
+        )
+    assert not store.duplicate_key_exists("req:1")
+
+
+def test_atomic_events_reject_duplicate_keys_within_one_batch(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    with pytest.raises(ValueError, match="unique"):
+        store.save_system_events_atomic(
+            "run-1",
+            [
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+            ],
+        )
+
+
+def test_atomic_events_reject_an_empty_batch(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    with pytest.raises(ValueError, match="at least one"):
+        store.save_system_events_atomic("run-1", [])
+
+
+def test_atomic_events_carry_broker_and_order_ids(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [
+            {
+                "event_type": "live_order_submit_intent",
+                "payload": {
+                    "duplicate_key": "intent:o-1",
+                    "order_id": "o-1",
+                    "result": {"broker_order": {"broker_order_id": "b-1"}},
+                },
+            }
+        ],
+    )
+    with sqlite3.connect(str(tmp_path / "s.db")) as conn:
+        row = conn.execute(
+            "SELECT broker_order_id, order_id FROM system_events WHERE duplicate_key = ?",
+            ("intent:o-1",),
+        ).fetchone()
+    assert row == ("b-1", "o-1")
+
+
+def test_atomic_events_leave_nothing_behind_when_one_event_fails(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    unserializable = {"duplicate_key": "req:2"}
+    unserializable["self"] = unserializable
+    with pytest.raises(ValueError):
+        store.save_system_events_atomic(
+            "run-1",
+            [
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+                {"event_type": "funding_workflow_head", "payload": unserializable},
+            ],
+        )
+    assert not store.duplicate_key_exists("req:1")
+
+
+def test_atomic_events_normalize_malformed_events_to_value_error(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    with pytest.raises(ValueError):
+        store.save_system_events_atomic("run-1", [{"event_type": "a"}])
+    with pytest.raises(ValueError):
+        store.save_system_events_atomic(
+            "run-1", [{"event_type": "a", "payload": None}]
+        )
+
+
+def test_atomic_events_require_an_existing_key(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    result = store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["head:wf:v1"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_missing"
+    assert result["conflicting_keys"] == ("head:wf:v1",)
+    assert not store.duplicate_key_exists("claim:1")
+
+
+def test_atomic_events_commit_when_the_required_key_is_present(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}}],
+    )
+    result = store.save_system_events_atomic(
+        "run-2",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["head:wf:v1"],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    assert result["committed"] is True
+    assert store.duplicate_key_exists("claim:1")
+
+
+def test_atomic_events_refuse_when_a_forbidden_key_appeared(tmp_path):
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}},
+        ],
+    )
+    result = store.save_system_events_atomic(
+        "run-2",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["head:wf:v1"],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_present"
+    assert result["conflicting_keys"] == ("head:wf:v2",)
+    assert not store.duplicate_key_exists("claim:1")
+
+
+def test_atomic_events_forbid_precondition_wins_over_a_partial_overlap(tmp_path):
+    """Pins the reordering: a forbid-precondition that covers the batch's own
+    overlapping key must report precondition_present, not raise. Preconditions
+    are checked before an own-key partial overlap falls back to the hard
+    ValueError -- a losing CAS race legitimately reuses the winner's target
+    key, and a declared precondition is how the caller says that overlap is
+    expected, not an unexplained collision.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}}],
+    )
+    result = store.save_system_events_atomic(
+        "run-2",
+        [
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}},
+            {"event_type": "funding_request", "payload": {"duplicate_key": "req:2"}},
+        ],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_present"
+    assert result["conflicting_keys"] == ("head:wf:v2",)
+    assert not store.duplicate_key_exists("req:2")
+
+
+def test_atomic_events_still_raise_when_a_precondition_misses_the_collision(tmp_path):
+    """Declaring some precondition does not blanket-excuse every overlap.
+
+    Only the key the caller named is treated as an expected race signal.  An
+    overlap on a key no precondition covers is still an unexplained collision
+    and must raise, even though the declared preconditions all pass.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}}],
+    )
+    with pytest.raises(ValueError, match="partial"):
+        store.save_system_events_atomic(
+            "run-2",
+            [
+                {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:2"}},
+            ],
+            require_duplicate_keys=["head:wf:v1"],
+            forbid_duplicate_keys=["head:wf:v9"],
+        )
+    assert not store.duplicate_key_exists("req:2")
+
+
+def test_atomic_events_replay_wins_over_a_failing_precondition(tmp_path):
+    """A batch that already landed reports success, not a lost race.
+
+    The head this batch wrote is exactly what its own forbid-precondition
+    names, so evaluating preconditions first would misreport the replay.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}}]
+    first = store.save_system_events_atomic(
+        "run-1", events, forbid_duplicate_keys=["head:wf:v2"]
+    )
+    assert first["committed"] is True
+    second = store.save_system_events_atomic(
+        "run-1", events, forbid_duplicate_keys=["head:wf:v2"]
+    )
+    assert second["conflict"] == "already_committed"
+
+
+def test_atomic_events_missing_precondition_keys_are_sorted_and_deduplicated(tmp_path):
+    """conflicting_keys must be normalized the same way on every branch of the
+    contract: already_committed and precondition_present both return
+    tuple(sorted(...)); precondition_missing must match, not leak caller
+    order or caller-supplied duplicates."""
+    store = StateStore(str(tmp_path / "s.db"))
+    result = store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["zzz", "aaa", "aaa", "bbb", "bbb"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_missing"
+    assert result["conflicting_keys"] == ("aaa", "bbb", "zzz")
+
+
+def test_atomic_events_precondition_window_is_closed_to_an_outside_writer(tmp_path, monkeypatch):
+    """A second, independent sqlite3 connection that skips the advisory writer_lock
+    must not be able to write a forbidden key in the window between this method's
+    precondition checks and its own INSERT.
+
+    The hook fires the instant the store's connection is about to run its first
+    INSERT -- i.e. strictly after every check has already run. Before the fix,
+    the store's own SELECT-only checks run in autocommit mode and no lock is
+    held yet at that point, so the outside writer's INSERT can land right there,
+    undetected. After the fix, ``BEGIN IMMEDIATE`` is issued before the first
+    check, so the write lock has already been held since the very start of the
+    method, and the outside writer must be blocked out.
+    """
+    db_path = tmp_path / "s.db"
+    store = StateStore(str(db_path))
+
+    hook_fired = {"value": False}
+    racer_landed = {"value": False}
+    racer_error = {"value": None}
+
+    original_connect = StateStore._connect
+
+    def traced_connect(self):
+        conn = original_connect(self)
+
+        def trace(sql: str) -> None:
+            if hook_fired["value"]:
+                return
+            if not sql.strip().upper().startswith("INSERT INTO SYSTEM_EVENTS"):
+                return
+            hook_fired["value"] = True
+            racer = sqlite3.connect(str(db_path), timeout=0.5)
+            try:
+                racer.execute(
+                    "INSERT INTO system_events (run_id, event_type, payload, duplicate_key) "
+                    "VALUES (?, ?, ?, ?)",
+                    ("racer-run", "racer_forbidden_write", "{}", "forbid:1"),
+                )
+                racer.commit()
+                racer_landed["value"] = True
+            except sqlite3.OperationalError as exc:
+                racer_error["value"] = exc
+            finally:
+                racer.close()
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    monkeypatch.setattr(StateStore, "_connect", traced_connect)
+
+    result = store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}],
+        forbid_duplicate_keys=["forbid:1"],
+    )
+
+    assert hook_fired["value"] is True, "the race hook never fired -- test is not exercising it"
+    assert racer_landed["value"] is False, (
+        "an outside connection wrote a forbidden key inside the CAS window: "
+        f"racer_error={racer_error['value']!r}"
+    )
+    assert isinstance(racer_error["value"], sqlite3.OperationalError)
+    assert result["committed"] is True
+    assert store.duplicate_key_exists("req:1")
+    assert not store.duplicate_key_exists("forbid:1")
+
+
+def test_atomic_events_conflict_path_leaves_no_dangling_transaction(tmp_path):
+    """An early return on a conflict path (already_committed here) must still
+    leave the database writable afterward -- i.e. it must not leave the
+    BEGIN IMMEDIATE transaction open/dangling on the connection.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-1", events)
+    assert result["conflict"] == "already_committed"
+    # A follow-up write must succeed promptly -- if the prior call left its
+    # BEGIN IMMEDIATE transaction dangling, this would hang until busy_timeout
+    # (10s) and then raise sqlite3.OperationalError.
+    other = store.save_system_events_atomic(
+        "run-2",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:2"}}],
+    )
+    assert other["committed"] is True
+    assert store.duplicate_key_exists("req:2")
+
+
+def test_atomic_events_replay_detects_a_key_reused_with_different_content(tmp_path):
+    """All of a batch's keys existing is not proof the batch itself landed --
+    other code paths write into the same duplicate_key namespace. If the stored
+    content under a key differs from what's being submitted now, this is an
+    unexplained collision and must raise, not be reported as a replay.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1", "amount": 100}}],
+    )
+    with pytest.raises(ValueError, match="content"):
+        store.save_system_events_atomic(
+            "run-2",
+            [
+                {
+                    "event_type": "funding_request",
+                    "payload": {"duplicate_key": "req:1", "amount": 999},
+                }
+            ],
+        )
+    # Nothing about the stored record must have changed.
+    stored = store.list_system_events_by_type("funding_request", limit=None)
+    assert len(stored) == 1
+    assert stored[0]["payload"]["amount"] == 100
+
+
+def test_atomic_events_replay_ignores_run_id(tmp_path):
+    """A legitimate retry after a crash may carry a different run id than the
+    original attempt. The run id must never be part of the replay comparison.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-2", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
+def test_atomic_events_replay_normalizes_payload_before_comparing(tmp_path):
+    """Stored payloads went through ``json.dumps(payload, default=str)``, which
+    stringifies values JSON cannot represent natively (e.g. datetimes). A
+    retried payload carrying the same datetime value as a real ``datetime``
+    object (not yet stringified) must still compare equal to what's stored --
+    comparing raw, un-normalized structures would falsely flag this as a
+    content mismatch.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        {
+            "event_type": "funding_request",
+            "payload": {"duplicate_key": "req:1", "observed_at": moment},
+        }
+    ]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-1", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
+def test_only_one_process_wins_the_head_transition(tmp_path):
+    db = str(tmp_path / "s.db")
+    store = StateStore(db)
+    store.save_system_events_atomic(
+        "run-0",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}}],
+    )
+    ready = multiprocessing.Event()
+    with multiprocessing.Manager() as manager:
+        results = manager.list()
+        procs = [
+            multiprocessing.Process(target=_race_workflow_head, args=(db, n, ready, results))
+            for n in (1, 2, 3)
+        ]
+        for proc in procs:
+            proc.start()
+        ready.set()
+        for proc in procs:
+            proc.join(30.0)
+            assert proc.exitcode == 0
+        outcomes = list(results)
+
+    winners = [item for item in outcomes if item[1] is True]
+    assert len(winners) == 1
+    assert {item[2] for item in outcomes if item[1] is False} == {"precondition_present"}
+    # The loser's request event must not exist: its batch was all-or-nothing.
+    winning_attempt = winners[0][0]
+    for attempt in (1, 2, 3):
+        assert store.duplicate_key_exists(f"req:{attempt}") is (attempt == winning_attempt)
