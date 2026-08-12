@@ -1,7 +1,8 @@
-# 집행 경합 제거와 미체결 잔존 처리 설계
+# 집행 중단 진단 — 락 계측
 
 작성: 2026-08-12
-상태: 승인됨 (사용자 확인 완료)
+개정: 2026-08-12 4차 (Codex 적대적 리뷰 4회 반영 — 원인을 미확정으로 낮추고 범위를 관측으로 축소)
+상태: 확정 (계획 승인됨)
 
 ## 배경 — 2026-08-11 리밸런싱 절반 중단
 
@@ -15,76 +16,104 @@
 | SPY 6주 매수 | **제출 안 됨** |
 | BIL 15주 매수 | **제출 안 됨** |
 
-실패 사유: `TimeoutError: State writer lock is busy`. 결과적으로 USD $11,576이 미배치로 남았다.
+실패: `TimeoutError: State writer lock is busy`. USD **$11,576 미배치**, 미체결 SSO가 다음 런의 `pending_broker_orders` 게이트를 막는 상태.
 
-### 원인
+## 원인 — **미확정.** 두 가설이 같은 타임라인을 만든다
 
-상태 저장소(SQLite)에 쓰려면 파일 락(`writer_lock`)을 잡아야 하고, **10초 안에 못 잡으면 예외**다. 신호 런은 매도 체결을 기다리며 30초마다 주문 상태를 기록하는 중이었고, 그 4분간 **서로 다른 12개 run이 같은 DB에 쓰고 있었다.**
-
-핵심은 `maestro-resume-order-tracking`이다. 이 유닛은 2분마다 돌며 **신호 런과 정확히 같은 일**(미체결 주문 폴링 → `live_order_status`·`fill_reconciliation` 기록)을 한다. 신호 런은 집행 내내 `live_order_lock`을 잡고 있지만, `resume-order-tracking`은 **그것을 확인하지 않는다.** 두 컴포넌트가 같은 주문을 두고 서로를 모른 채 경쟁한다.
-
-`resume-order-tracking`의 정의는 "폴링 창이 **닫힌** 채 방치된 주문을 대신 추적"이다. 신호 런이 추적 중일 때 끼어드는 것은 그 정의에 어긋난다.
-
-### 배포와 무관함 (측정으로 확인)
-
-2026-08-11 06:22Z에 배포한 승인 2단계 영속화(3a-1)를 의심했으나, 운영자 poll이 정상 상태에서 `writer_lock`을 잡는 횟수를 측정한 결과 **0회/poll**(poll당 20ms)이었다. 3a-1은 경합을 늘리지 않았다. 다만 3a-1이 이 실패를 정확히 탐지해 ⚠️ 알림을 보냈다 — 구 코드였다면 승인이 조용히 종결 처리됐을 것이다.
-
-### 2차 피해 경로
-
-미체결 주문이 남으면 다음 런이 막힌다:
+사고 당시 이벤트:
 
 ```
-집행 중단 → 미체결 주문 잔존
-→ live gate의 _pending_broker_order_issues가 pending_broker_orders 반환 (live_gates.py:586)
-→ orchestrator.py:2091이 safety.halt() 호출
-→ 시스템 정지, 수동 clear-halt 필요
+13:47:31Z  신호 런: live_order_status + fill_reconciliation   (정상, 30초 주기)
+13:48:01Z  resume-order-tracking: live_order_status 기록
+13:48:11Z  신호 런: 다음 주기 쓰기 → writer 대기 시작으로 추정 (writer 한도 10초)
+13:48:21Z  신호 런: TimeoutError
+13:48:21Z  resume: fill_reconciliation + live_order_tracking_resume 기록
+13:48:24Z  ⚠️ 운영자 알림 (3a-1이 탐지)
 ```
 
-즉 한 번의 경합이 **다음 날 런까지 멈춘다.**
+`live_order_tracking_resume`은 `cli.py:2569`가 기록하는 `resume-order-tracking` 전용 이벤트다.
 
-## 설계
+### 가설 A — 락 순서 역전에 의한 교착
 
-### 1. 경합 제거 — 집행 중에는 중복 폴러가 물러난다
+두 락을 **반대 순서로** 잡는 경로가 공존한다.
 
-`resume-order-tracking`은 시작 시 `live_order_lock`을 **0초 타임아웃**으로 시도한다. 이미 잡혀 있으면 이번 회차를 건너뛰고 그 사실을 기록한 뒤 정상 종료한다(실패가 아니다).
+| 경로 | 획득 순서 |
+|---|---|
+| 승인 집행 `resolve_pending_signal_approval` (`orchestrator.py:304`) → 집행 중 이벤트 기록 | `live` → `writer` |
+| 체결 대조 `PartialFillReconciliationService.reconcile_latest` (`live_order_fills.py:35-36`) | **`writer` → `live`** |
 
-- 기존 락을 읽기만 하므로 새 동기화 원시가 필요 없다
-- 신호 런이 집행 중이면 그 런이 자기 주문을 추적하므로 안전망이 쉴 수 있다
-- 건너뛴 회차는 2분 뒤 다시 온다 — 집행이 끝나면 자연히 재개된다
+`maestro-resume-order-tracking`(2분 주기)은 후자를 호출한다. resume이 `writer`를 쥐고 `live`를 기다리는 동안 신호 런이 `writer`를 기다려 10초 만에 희생됐다는 설명이다.
 
-`live_order_lock`은 `store.py:342`에 있고 `live_order_safety.py:47`, `orchestrator.py:304`가 이미 쓴다.
+### 가설 B — 제3의 장기 writer 보유자
 
-### 2. 차단은 유지하되 출구를 보이게
+`approve_signal`(`orchestrator.py:289`)은 `writer_lock`을 쥔 채 `_execute_live_approval_orders`까지 내려가고, 체결 폴링은 **30초 × 최대 20회 = 최대 10분**이다(`config/execution.py:258-259`). 교착이 없어도 그동안 다른 프로세스의 `writer` 획득은 10초 뒤 실패한다. 제3의 writer가 양쪽을 막고 있다가 13:48:21에 풀렸다면, 신호 런은 만료되고 resume은 경쟁에서 이긴 것으로 같은 타임라인이 나온다.
 
-`pending_broker_orders` 차단 **자체는 옳다.** 미체결 주문이 있으면 포지션 인식이 불확실하고, 그 위에 새 주문을 얹으면 이중 매매가 된다. 제거하지 않는다.
+### 왜 가릴 수 없는가
 
-문제는 차단이 **무엇 때문인지, 무엇을 하면 풀리는지 알려주지 않는다**는 것이다. halt 알림에 다음을 포함한다:
+13:48:01의 `live_order_status`는 `poll_order_status`가 **별도의 writer 임계구역**에서 저장한 뒤 반환된 것이다. 그 뒤에야 `resume()`이 `reconcile_latest`를 호출한다. 따라서 그 기록은 **"resume이 13:48:01부터 20초간 writer를 보유했다"를 뜻하지 않는다.**
 
-- 막고 있는 미체결 주문의 **종목·방향·수량·제출 시각**
-- 해소 방법: 체결을 기다리거나 취소하면 풀린다는 안내
-- 정지 해제는 기존 `/clear_halt`(단계 1에서 추가된 확인 버튼 흐름)로 가능하다는 안내
+근본 이유는 **`writer_lock`과 `live_order_lock`이 `owner` 인자를 받고 즉시 버린다**는 것이다(`store.py:290`, `:348`의 `del owner`). 락 파일에 보유자·PID·획득 시각이 남지 않아, 타임아웃 예외는 누가 잡고 있었는지 말해주지 않는다.
 
-문구는 전부 한글이며 `ui/catalog.py`에만 둔다(단계 1 규칙).
+> **개정 이력에서 내가 틀린 것들 (기록)**
+> - 1차: "쓰기가 몰려 경합했다" — 혼잡으로 진단했다. 틀렸다.
+> - 1차: 대책을 "`resume-order-tracking`이 물러난다"로 잡았다. 호출자 하나만 막고, `live_order_lock`이 전역(`store.py:26`)이라 **무관한 주문의 추적까지 멈춘다.** 폐기했다.
+> - 2차: "집행 경로는 live→writer이므로 그것을 정본으로" — `approve_signal`은 **writer를 쥔 채** `submit_approved_order`(`live_order_safety.py:47`)에서 live를 잡는다. 근거가 무너졌다.
+> - 2차: `cli.py:486/1259/1659`를 `PartialFillReconciliationService` 호출자로 인용했다. 다른 대조 서비스였다.
+> - 2차: 두 락 모두 10초라고 썼다. **`live_order_lock`은 30초**(`store.py:346`)다.
+> - 3차: 위 타임라인으로 가설 A를 "확정"이라고 썼다. **과했다** — 위의 이유로 증명이 아니다.
 
-### 3. 취소 진입점
+> **1·2차 개정에서 내가 틀린 것들 (기록)**
+> - 1차: "쓰기가 몰려 경합했다" — 교착이 아니라 혼잡으로 진단했다. 틀렸다.
+> - 1차: 대책을 "`resume-order-tracking`이 물러난다"로 잡았다. 호출자 하나만 막고, `live_order_lock`이 전역(`store.py:26`)이라 **무관한 주문의 추적까지 멈춘다.** 폐기했다.
+> - 2차: "집행 경로는 live→writer이므로 그것을 정본으로" — `approve_signal`(`orchestrator.py:289`)은 **writer를 쥔 채** `submit_approved_order`(`live_order_safety.py:47`)에서 live를 잡는다. 근거가 무너졌다.
+> - 2차: `cli.py:486/1259/1659`를 `PartialFillReconciliationService` 호출자로 인용했다. 다른 대조 서비스였다.
+> - 2차: 두 락 모두 10초라고 썼다. **`live_order_lock`은 30초**(`store.py:346`)다.
+> - 2차: "한 프로세스 안은 재진입이라 안전" — 재진입 카운터는 **thread-local**이라 다른 스레드에는 적용되지 않는다.
 
-`cancel_order`는 이미 구현돼 있다 — `execution/live_order_cancellation.py:25`, Toss(`brokers/toss/live_order_client.py:232`)와 KIS(`brokers/kis/overseas_live_order.py:109`) 클라이언트 모두. **호출할 경로만 없다.**
 
-텔레그램에서 미체결 주문을 취소할 수 있게 진입점을 만든다. 실제 취소이므로 단계 1의 확인 버튼 패턴(`operator:confirm:*`)을 그대로 쓴다 — 한 번 더 눌러야 실행된다.
+## 범위 — 관측만 한다
 
-## 범위에서 뺀 것
+원인이 두 가설 사이에서 갈리고, 각 가설이 요구하는 구조 수정이 서로 다르며 **둘 다 실거래 집행 경로를 건드린다.** 증명 없이 고르면 틀린 쪽을 고칠 위험이 크다. 따라서 이번 범위는 관측뿐이다.
 
-- **주문별 재개(중단 지점부터 이어서 집행)** — 이 시스템의 전략은 목표 비중 기반이므로, 중단 시점에 계산된 수량(PDBC 366주)은 시세가 움직인 뒤에는 더 이상 정답이 아니다. 낡은 답을 재제출하는 것보다 다음 런이 현재 포지션·현재 가격으로 재계산하는 것이 옳다. 주문 단위 멱등 재개는 **3a-3**에서 다룬다.
-- **`writer_lock` 타임아웃 상향** — 증상 완화다. 1번이 원인을 없앤다.
-- **halt 자동 해제** — 사람이 확인하고 푸는 현재 모델을 유지한다.
+### 락 계측
+
+`writer_lock`(`store.py:283`)·`account_refresh_lock`(`:313`)·`live_order_lock`(`:342`)은 구조가 동일하다. 공통 헬퍼로 뽑고 계측을 넣는다.
+
+- **획득 시**: flock을 얻은 직후 락 파일에 **보유자·PID·획득 시각**을 기록한다. 배타 flock을 쥔 상태이므로 쓰기 경쟁이 없다.
+- **해제 시**: 기록을 지운 뒤 unlock한다. 다음 대기자가 낡은 기록을 오해하지 않게 한다.
+- **타임아웃 시**: 락 파일을 읽어 **그 시점 보유자**를 `TimeoutError` 메시지에 담는다. 비었거나 깨졌으면 `unknown`으로 두고 예외 타입·동작은 그대로다.
+- **`del owner`를 제거한다.** 세 함수 모두 호출자가 문자열 리터럴을 넘기므로 인자 변경은 없다.
+- **재진입 경로**(`_lock_depths` > 0)는 파일을 건드리지 않는다. 바깥 획득의 기록이 유지된다.
+- 계측은 **system event를 쓰지 않는다.** 이벤트 기록이 writer 락을 요구하므로 락 원시 안에서 호출하면 재귀한다.
+
+진단용으로 현재 보유자를 조회하는 헬퍼를 `StateStore`에 노출한다.
+
+## 이 범위에 넣지 않는 것
+
+- **락 순서 뒤집기·순서 규칙 선언·위반 검출** — 원인이 미확정이다. 게다가 "writer 보유 중 live 요구는 위반"이라고 선언하면서 `approve_signal`의 위반 경로를 이월하는 것은 자기모순이고, 기존 테스트(`tests/test_signal_approval_handoff.py:289-321`)가 armed live `approve_signal`을 실행하므로 CI 엄격 모드는 그것부터 깨뜨린다.
+- **`approve_signal`의 장시간 writer 보유 해소** — 고치려면 writer 임계구역을 쪼개야 하고, 그러면 현재 그 락이 보장하는 **승인 단일 소비 원자성**(`approval_consumed` 조회 ~ `mark_signal_package_consumed`)을 CAS로 재설계해야 한다. 관측이 가설 B를 지목하면 그때 별도 스펙으로.
+- **2부: 당일 재계산·재승인 복구** — 목표 비중 전략이므로 낡은 수량을 재제출하지 않고 최신 상태로 재계산해 새 승인을 요청한다. **세대 펜싱 필수**: 중단 건별 `recovery_group_id`와 단조 증가 generation을 영속화하고 활성 generation 하나만 원자적으로 claim한다. 현재 주문 멱등 키가 `signal_run_id`·`order_intent_id`에 묶여 있어, 재계산이 새 run을 만들면 두 복구 승인이 다른 키를 얻어 **각각 집행될 수 있다.**
+- **3부: 취소 종결 상태 머신** — 스냅샷에서의 부재는 terminal 증거가 아니다(KIS 개별 조회는 미발견 시 `UNKNOWN`). 종결 증거는 명시적 CANCELED/FILLED/REJECTED와 누적 체결 대조로 제한한다. 브로커 취소 API에 idempotency key가 없으므로 같은 로컬 키의 재POST는 안전한 재시도가 아니다. `_is_duplicate_cancel`의 일괄 거부도 함께 재설계한다. `pending_broker_orders` 차단 자체는 유지한다.
+
+## 관측 후 결정
+
+| 관측 결과 | 다음 조치 |
+|---|---|
+| 타임아웃 시 보유자가 `fill_reconciliation` 계열 | 가설 A — 획득 순서를 통일한다 |
+| 보유자가 `approve_signal`/`run_once` 등 장기 보유자 | 가설 B — writer 임계구역 분할 + 승인 단일소비 CAS 재설계 |
+| 둘 다 관측 | 순서 통일을 먼저, 임계구역은 그다음 |
 
 ## 검증
 
-- **경합**: 한 프로세스가 `live_order_lock`을 잡은 상태에서 `resume-order-tracking`이 실행되면 폴링·쓰기 없이 건너뛰고, 락이 풀리면 다시 동작하는 것을 테스트로 고정한다.
-- **차단 가시화**: 미체결 주문이 있는 상태에서 발생한 halt 알림이 그 주문을 지목하는지 확인한다.
-- **취소**: 확인 버튼 없이는 취소가 실행되지 않고, 확인 후에는 브로커 취소가 호출되는 것을 테스트로 고정한다.
-- **회귀**: 전체 스위트(`pytest tests/ -q`)와 `ruff check src tests`.
+- **계측 동작**: 락 보유 중 파일에 보유자·PID·획득 시각이 기록되고 해제 후 지워진다. 다른 프로세스가 짧은 타임아웃으로 요구하면 예외 메시지에 보유자와 PID가 담긴다.
+- **견고성**: 락 파일이 비었거나 깨졌을 때 `unknown`으로 처리되고 예외 타입·동작이 그대로다. 재진입 획득이 바깥 기록을 덮어쓰지 않는다.
+- **회귀**: 전체 스위트(`pytest tests/ -q`, 기준선 **1298 passed / 9 skipped**)와 `ruff check src tests`.
+- **최종 성공 기준**: 다음 경합에서 `TimeoutError` 메시지가 보유자를 지목하는 것. 그때까지 원인은 미확정으로 남는다.
+
+## 단독 배포의 안전성
+
+이 범위는 **동작을 바꾸지 않는다** — 락 파일에 기록을 남기고, 타임아웃 메시지를 자세히 만들 뿐이다. 새로 던지는 예외가 없고 획득 순서도 그대로이므로 배포 후 상태가 지금보다 나빠지지 않는다.
 
 ## 우선순위
 
-이 작업이 3a 계열보다 **앞선다.** 근거: 실제로 리밸런싱을 절반에서 중단시켰고, 다음 런까지 막는 2차 피해가 있으며, 원인과 해법이 모두 확정돼 있다. 3a-2(원자 커밋 API)와 3a-3(주문 단위 재개)은 이 작업 뒤로 미룬다.
+3a 계열보다 앞선다. 원인을 모르는 채로는 2·3부도, 3a-2/3a-3도 같은 락 위에서 같은 위험을 안고 돌기 때문이다.

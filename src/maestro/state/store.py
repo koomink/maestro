@@ -1,10 +1,11 @@
 import fcntl
 import json
+import os
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ class StateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self.writer_lock_path = self.lock_path
         self.live_order_lock_path = self.path.with_suffix(self.path.suffix + ".live.lock")
         self._lock_depths = threading.local()
         self.initial_cash = float(initial_cash or 0.0)
@@ -281,33 +283,149 @@ class StateStore:
             )
 
     @contextmanager
-    def writer_lock(
+    def _file_lock(
         self,
-        owner: str,
+        lock_path: Path,
         *,
-        timeout_seconds: float = 10.0,
+        owner: str,
+        timeout_seconds: float,
+        depth_attr: str | None,
+        busy_message: str,
+        other_lock: tuple[str, Path] | None = None,
     ) -> Any:
-        del owner
-        if getattr(self._lock_depths, "writer", 0) > 0:
+        if depth_attr is not None and getattr(self._lock_depths, depth_attr, 0) > 0:
             yield
             return
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout_seconds
-        with self.lock_path.open("a+", encoding="utf-8") as lock_file:
+        started = time.monotonic()
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
             while True:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError as exc:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(f"State writer lock is busy: {self.lock_path}") from exc
+                        raise TimeoutError(
+                            f"{busy_message} (waiter {owner}, "
+                            f"{self._describe_lock_holder(lock_path)}"
+                            f"{self._describe_other_lock(other_lock)}, "
+                            f"waited {time.monotonic() - started:.1f}s)"
+                        ) from exc
                     time.sleep(0.1)
-            self._lock_depths.writer = getattr(self._lock_depths, "writer", 0) + 1
+            self._write_lock_holder(lock_file, owner)
+            if depth_attr is not None:
+                depth = getattr(self._lock_depths, depth_attr, 0)
+                setattr(self._lock_depths, depth_attr, depth + 1)
             try:
                 yield
             finally:
-                self._lock_depths.writer -= 1
+                if depth_attr is not None:
+                    depth = getattr(self._lock_depths, depth_attr)
+                    setattr(self._lock_depths, depth_attr, depth - 1)
+                self._clear_lock_holder(lock_file)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _write_lock_holder(lock_file: Any, owner: str) -> None:
+        """Called only while the exclusive flock is held — no write race.
+
+        This is a diagnostic write. A failure here (e.g. ENOSPC) must never
+        prevent the caller from acquiring the lock or change what exception
+        acquisition raises, so every exception is swallowed.
+        """
+        try:
+            record = {
+                "owner": owner,
+                "pid": os.getpid(),
+                "acquired_at": datetime.now(UTC).isoformat(),
+            }
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(json.dumps(record, ensure_ascii=False))
+            lock_file.flush()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _clear_lock_holder(lock_file: Any) -> None:
+        """Clear before release so the next waiter doesn't see a stale holder.
+
+        This runs in the ``finally`` of the guarded block, so a failure here
+        must never replace or mask whatever exception (if any) is already
+        propagating out of the caller's business logic.
+        """
+        try:
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.flush()
+        except Exception:
+            pass
+
+    @classmethod
+    def _describe_lock_holder(cls, lock_path: Path) -> str:
+        holder = cls.read_lock_holder(lock_path)
+        if not holder:
+            return "holder unknown"
+        return (
+            f"holder {holder.get('owner', 'unknown')} "
+            f"pid={holder.get('pid', 'unknown')} "
+            f"since {holder.get('acquired_at', 'unknown')}"
+        )
+
+    @classmethod
+    def _describe_other_lock(cls, other_lock: tuple[str, Path] | None) -> str:
+        """Describe the paired lock's holder, e.g. for hypothesis A vs B:
+
+        was the writer-lock holder itself blocked on the live-order lock
+        (an inversion), or just holding the writer lock a long time? Returns
+        "" when there is no meaningful other lock (account_refresh_lock).
+        """
+        if other_lock is None:
+            return ""
+        label, lock_path = other_lock
+        return f", {label} {cls._describe_lock_holder(lock_path)}"
+
+    @staticmethod
+    def read_lock_holder(lock_path: Path) -> dict[str, Any] | None:
+        """Read without taking the lock. Diagnostic only — every failure absorbs to None.
+
+        Reads with no lock held, so this can observe a file mid-truncate: a
+        multi-byte UTF-8 character can be cut in half, which raises
+        ``UnicodeDecodeError`` (a ``ValueError`` subclass) rather than
+        ``OSError``. Catching ``(OSError, ValueError)`` around both the read
+        and the JSON parse absorbs that alongside ``json.JSONDecodeError``
+        (also a ``ValueError`` subclass), so no content-shaped failure can
+        escape as an exception.
+        """
+        try:
+            raw = lock_path.read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return None
+        if not raw:
+            return None
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            return None
+        return record if isinstance(record, dict) else None
+
+    @contextmanager
+    def writer_lock(
+        self,
+        owner: str,
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> Any:
+        with self._file_lock(
+            self.lock_path,
+            owner=owner,
+            timeout_seconds=timeout_seconds,
+            depth_attr="writer",
+            busy_message=f"State writer lock is busy: {self.lock_path}",
+            other_lock=("live_order_lock", self.live_order_lock_path),
+        ):
+            yield
 
     @contextmanager
     def account_refresh_lock(
@@ -321,22 +439,14 @@ class StateStore:
             for character in account_id
         )
         lock_path = self.path.with_suffix(self.path.suffix + f".refresh-{safe_account_id}.lock")
-        deadline = time.monotonic() + timeout_seconds
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            while True:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Account refresh is already running: {account_id}"
-                        ) from exc
-                    time.sleep(0.1)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        with self._file_lock(
+            lock_path,
+            owner=f"account_refresh:{account_id}",
+            timeout_seconds=timeout_seconds,
+            depth_attr=None,
+            busy_message=f"Account refresh is already running: {account_id}",
+        ):
+            yield
 
     @contextmanager
     def live_order_lock(
@@ -345,29 +455,15 @@ class StateStore:
         *,
         timeout_seconds: float = 30.0,
     ) -> Any:
-        del owner
-        if getattr(self._lock_depths, "live_order", 0) > 0:
+        with self._file_lock(
+            self.live_order_lock_path,
+            owner=owner,
+            timeout_seconds=timeout_seconds,
+            depth_attr="live_order",
+            busy_message=f"Live order lock is busy: {self.live_order_lock_path}",
+            other_lock=("writer_lock", self.lock_path),
+        ):
             yield
-            return
-        self.live_order_lock_path.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + timeout_seconds
-        with self.live_order_lock_path.open("a+", encoding="utf-8") as lock_file:
-            while True:
-                try:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError as exc:
-                    if time.monotonic() >= deadline:
-                        raise TimeoutError(
-                            f"Live order lock is busy: {self.live_order_lock_path}"
-                        ) from exc
-                    time.sleep(0.1)
-            self._lock_depths.live_order = getattr(self._lock_depths, "live_order", 0) + 1
-            try:
-                yield
-            finally:
-                self._lock_depths.live_order -= 1
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def validate_config_identity(self, identity: ConfigIdentity) -> None:
         payload = identity.model_dump()
