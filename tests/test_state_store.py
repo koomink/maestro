@@ -29,34 +29,6 @@ def _hold_live_order_lock(db_path, hold_seconds, ready, done):
     done.set()
 
 
-def _hold_writer_then_block_on_live_order(db_path, ready, go, done):
-    """Half of a genuine cycle: holds the writer lock, then blocks on live_order."""
-    store = StateStore(db_path, 0)
-    with store.writer_lock("cycle_writer_holder"):
-        ready.set()
-        go.wait(timeout=10)
-        try:
-            with store.live_order_lock("cycle_writer_holder", timeout_seconds=6.0):
-                pass
-        except TimeoutError:
-            pass
-    done.set()
-
-
-def _hold_live_order_then_block_on_writer(db_path, ready, go, done):
-    """The other half: holds live_order, then blocks on the writer lock."""
-    store = StateStore(db_path, 0)
-    with store.live_order_lock("cycle_live_holder"):
-        ready.set()
-        go.wait(timeout=10)
-        try:
-            with store.writer_lock("cycle_live_holder", timeout_seconds=6.0):
-                pass
-        except TimeoutError:
-            pass
-    done.set()
-
-
 def _fail_diagnostic_record_io(
     monkeypatch,
     store,
@@ -472,50 +444,11 @@ def test_writer_timeout_message_names_the_live_order_holder_and_the_waiter(tmp_p
         live_proc.join(timeout=10)
 
 
-def test_timeout_message_reports_a_genuine_wait_for_cycle(tmp_path):
-    """M1 (i): X holds the writer lock and blocks on live_order while Y holds
-    live_order and blocks on the writer lock -- a real lock-order inversion
-    (hypothesis A). The timeout message must name it as a cycle."""
-    db = str(tmp_path / "state.db")
-    StateStore(db, 0)
-    writer_ready, live_ready = multiprocessing.Event(), multiprocessing.Event()
-    writer_done, live_done = multiprocessing.Event(), multiprocessing.Event()
-    go = multiprocessing.Event()
-    writer_proc = multiprocessing.Process(
-        target=_hold_writer_then_block_on_live_order,
-        args=(db, writer_ready, go, writer_done),
-    )
-    live_proc = multiprocessing.Process(
-        target=_hold_live_order_then_block_on_writer,
-        args=(db, live_ready, go, live_done),
-    )
-    writer_proc.start()
-    live_proc.start()
-    try:
-        assert writer_ready.wait(timeout=10)
-        assert live_ready.wait(timeout=10)
-        go.set()
-        time.sleep(0.5)  # let both processes register their wait-for edges
-        store = StateStore(db, 0)
-        with pytest.raises(TimeoutError) as exc_info:
-            with store.writer_lock("victim", timeout_seconds=0.5):
-                pass
-        message = str(exc_info.value)
-        assert "State writer lock is busy" in message  # existing prefix preserved
-        # The live_order_lock holder is itself waiting for the writer lock.
-        assert "WAIT-FOR CYCLE" in message
-        assert str(live_proc.pid) in message
-        assert str(writer_proc.pid) in message
-    finally:
-        go.set()
-        writer_proc.join(timeout=15)
-        live_proc.join(timeout=15)
-
-
-def test_timeout_message_does_not_claim_a_cycle_for_independent_holders(tmp_path):
-    """M1 (ii): two independent holders, neither waiting on the other, must not
-    be reported as a cycle -- otherwise the diagnostic cannot separate
-    hypothesis A from a merely long critical section."""
+def test_timeout_message_names_both_holders_without_a_cycle_claim(tmp_path):
+    """Two independent holders -- neither waiting on the other -- must never be
+    described with any cycle wording. Cross-process wait-for inference was
+    removed entirely: the message states facts (both holders, hold/wait time,
+    host pressure) and leaves interpretation to a human."""
     db = str(tmp_path / "state.db")
     StateStore(db, 0)
     writer_ready, writer_done = multiprocessing.Event(), multiprocessing.Event()
@@ -537,12 +470,38 @@ def test_timeout_message_does_not_claim_a_cycle_for_independent_holders(tmp_path
                 pass
         message = str(exc_info.value)
         assert "State writer lock is busy" in message
-        assert "WAIT-FOR CYCLE" not in message
-        assert "no wait-for cycle" in message
+        assert "cycle" not in message.lower()
+        assert str(writer_proc.pid) in message  # the writer lock's holder
         assert str(live_proc.pid) in message  # the other lock's holder is still named
     finally:
         writer_proc.join(timeout=15)
         live_proc.join(timeout=15)
+
+
+def test_timeout_message_for_fill_reconciliation_pattern_makes_no_cycle_claim(tmp_path):
+    """fill_reconciliation legitimately holds the writer lock while waiting on the
+    live-order lock -- a one-directional wait, not a deadlock. Mirrored here as
+    the writer lock held by another process while this process already holds
+    the live-order lock and is waiting on the writer lock: exactly the pattern
+    the removed cycle detector used to mislabel as WAIT-FOR CYCLE."""
+    db = str(tmp_path / "state.db")
+    StateStore(db, 0)
+    ready, done = multiprocessing.Event(), multiprocessing.Event()
+    proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 2.0, ready, done))
+    proc.start()
+    try:
+        assert ready.wait(timeout=10)
+        store = StateStore(db, 0)
+        with store.live_order_lock("victim"):
+            with pytest.raises(TimeoutError) as exc_info:
+                with store.writer_lock("victim", timeout_seconds=0.3):
+                    pass
+        message = str(exc_info.value)
+        assert "State writer lock is busy" in message  # existing prefix preserved
+        assert str(proc.pid) in message  # the writer lock's actual holder
+        assert "cycle" not in message.lower()
+    finally:
+        proc.join(timeout=10)
 
 
 def test_timeout_message_carries_hold_and_pressure_signals(tmp_path):
@@ -566,96 +525,6 @@ def test_timeout_message_carries_hold_and_pressure_signals(tmp_path):
         assert "mem_avail=" in message
     finally:
         proc.join(timeout=10)
-
-
-def test_waiter_record_is_removed_once_the_lock_is_acquired(tmp_path):
-    """A wait-for edge must not survive acquisition, or every slow-but-healthy
-    acquisition would later read as a cycle."""
-    store = StateStore(str(tmp_path / "state.db"), 0)
-    ready, release = threading.Event(), threading.Event()
-
-    def hold():
-        with store.writer_lock("holder"):
-            ready.set()
-            release.wait(timeout=5)
-
-    thread = threading.Thread(target=hold)
-    thread.start()
-    try:
-        assert ready.wait(timeout=5)
-        waiter_path = store.waiter_record_path(store.writer_lock_path, os.getpid())
-
-        def wait_for_the_lock():
-            with store.writer_lock("waiter", timeout_seconds=3.0):
-                pass
-
-        waiter_thread = threading.Thread(target=wait_for_the_lock)
-        waiter_thread.start()
-        time.sleep(0.4)
-        assert waiter_path.exists()  # registered while blocking
-        record = store.read_waiter_record(store.writer_lock_path, os.getpid())
-        assert record is not None
-        assert record["owner"] == "waiter"
-        release.set()
-        waiter_thread.join(timeout=5)
-        assert not waiter_path.exists()  # deregistered on acquire
-    finally:
-        release.set()
-        thread.join(timeout=5)
-
-
-def test_waiter_record_of_a_dead_process_is_ignored(tmp_path):
-    """A SIGKILLed waiter leaves its file behind; a stale edge must not be
-    reported as a live cycle."""
-    store = StateStore(str(tmp_path / "state.db"), 0)
-    dead_pid = 2**22 - 1  # above every plausible pid_max, so certainly not running
-    path = store.waiter_record_path(store.writer_lock_path, dead_pid)
-    path.write_text(
-        json.dumps({"owner": "ghost", "pid": dead_pid, "since": "2026-08-12T00:00:00+00:00"}),
-        encoding="utf-8",
-    )
-    assert store.read_waiter_record(store.writer_lock_path, dead_pid) is None
-
-
-def test_waiter_record_failures_never_affect_the_lock(tmp_path, monkeypatch):
-    """Waiter bookkeeping is best-effort: a write/unlink fault must not change
-    acquisition, release, or the exception raised."""
-    store = StateStore(str(tmp_path / "state.db"), 0)
-    real_os_open, real_unlink = os.open, os.unlink
-
-    def fake_os_open(path, *args, **kwargs):
-        if ".waiter." in str(path):
-            raise OSError(28, "No space left on device")
-        return real_os_open(path, *args, **kwargs)
-
-    def fake_unlink(path, *args, **kwargs):
-        if ".waiter." in str(path):
-            raise OSError(5, "I/O error")
-        return real_unlink(path, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", fake_os_open)
-    monkeypatch.setattr(os, "unlink", fake_unlink)
-    ready, release = threading.Event(), threading.Event()
-
-    def hold():
-        with store.writer_lock("holder"):
-            ready.set()
-            release.wait(timeout=5)
-
-    thread = threading.Thread(target=hold)
-    thread.start()
-    try:
-        assert ready.wait(timeout=5)
-        # Timing out must still raise TimeoutError, not the injected OSError.
-        with pytest.raises(TimeoutError, match="State writer lock is busy"):
-            with store.writer_lock("victim", timeout_seconds=0.4):
-                pass
-    finally:
-        release.set()
-        thread.join(timeout=5)
-    # And an uncontended acquisition must still work.
-    with store.writer_lock("after"):
-        pass
 
 
 def test_account_refresh_lock_records_its_holder(tmp_path):
