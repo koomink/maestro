@@ -4,6 +4,7 @@ import os
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,49 @@ def _hold_writer_lock(db_path, hold_seconds, ready, done):
         ready.set()
         time.sleep(hold_seconds)
     done.set()
+
+
+class _DiagnosticWriteFailingFile:
+    """Wraps a real lock file, making write()/truncate() raise OSError from a
+    given 1-based call count onward, without touching the flock itself.
+
+    Used to simulate a full disk (ENOSPC) hitting only the lock-holder
+    diagnostic write/clear helpers -- not the flock acquire/release path.
+    """
+
+    def __init__(self, real, *, fail_write_from_call=None, fail_truncate_from_call=None):
+        self._real = real
+        self._fail_write_from_call = fail_write_from_call
+        self._fail_truncate_from_call = fail_truncate_from_call
+        self._write_calls = 0
+        self._truncate_calls = 0
+
+    def write(self, data):
+        self._write_calls += 1
+        if (
+            self._fail_write_from_call is not None
+            and self._write_calls >= self._fail_write_from_call
+        ):
+            raise OSError(28, "No space left on device")
+        return self._real.write(data)
+
+    def truncate(self, *args):
+        self._truncate_calls += 1
+        if (
+            self._fail_truncate_from_call is not None
+            and self._truncate_calls >= self._fail_truncate_from_call
+        ):
+            raise OSError(28, "No space left on device")
+        return self._real.truncate(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self._real.__exit__(exc_type, exc, tb)
 
 
 def test_list_system_events_by_type_filters_by_since(tmp_path):
@@ -208,3 +252,53 @@ def test_read_lock_holder_tolerates_truncated_multibyte_utf8(tmp_path):
     truncated = payload[: non_ascii_index + 1]
     store.writer_lock_path.write_bytes(truncated)
     assert store.read_lock_holder(store.writer_lock_path) is None
+
+
+def test_write_lock_holder_failure_does_not_prevent_lock_acquisition_or_release(
+    tmp_path, monkeypatch
+):
+    """A disk fault during the diagnostic write must never affect the flock itself."""
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    real_open = Path.open
+
+    def fake_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        if self == store.writer_lock_path:
+            return _DiagnosticWriteFailingFile(handle, fail_write_from_call=1)
+        return handle
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    with store.writer_lock("victim"):
+        pass  # must not raise even though the diagnostic write fails
+
+    # The flock must be released cleanly and the depth counter balanced --
+    # reacquiring proves both (a leaked flock or a stuck depth would hang or
+    # skip acquisition here).
+    with store.writer_lock("victim_again"):
+        pass
+
+
+def test_clear_lock_holder_failure_preserves_the_original_exception(tmp_path, monkeypatch):
+    """A disk fault while clearing the holder record must not mask the caller's error."""
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    real_open = Path.open
+
+    def fake_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        if self == store.writer_lock_path:
+            # Call 1 is the acquire-time _write_lock_holder truncate; call 2
+            # onward is the release-time _clear_lock_holder truncate -- only
+            # the latter should fail, isolating this test to _clear_lock_holder.
+            return _DiagnosticWriteFailingFile(handle, fail_truncate_from_call=2)
+        return handle
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    with pytest.raises(RuntimeError, match="^original business error$"):
+        with store.writer_lock("victim"):
+            raise RuntimeError("original business error")
+
+    # The lock must still be released cleanly despite the diagnostic-clear failure.
+    with store.writer_lock("victim_again"):
+        pass

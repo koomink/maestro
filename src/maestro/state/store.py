@@ -325,23 +325,39 @@ class StateStore:
 
     @staticmethod
     def _write_lock_holder(lock_file: Any, owner: str) -> None:
-        """Called only while the exclusive flock is held — no write race."""
-        record = {
-            "owner": owner,
-            "pid": os.getpid(),
-            "acquired_at": datetime.now(UTC).isoformat(),
-        }
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.write(json.dumps(record, ensure_ascii=False))
-        lock_file.flush()
+        """Called only while the exclusive flock is held — no write race.
+
+        This is a diagnostic write. A failure here (e.g. ENOSPC) must never
+        prevent the caller from acquiring the lock or change what exception
+        acquisition raises, so every exception is swallowed.
+        """
+        try:
+            record = {
+                "owner": owner,
+                "pid": os.getpid(),
+                "acquired_at": datetime.now(UTC).isoformat(),
+            }
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(json.dumps(record, ensure_ascii=False))
+            lock_file.flush()
+        except Exception:
+            pass
 
     @staticmethod
     def _clear_lock_holder(lock_file: Any) -> None:
-        """Clear before release so the next waiter doesn't see a stale holder."""
-        lock_file.seek(0)
-        lock_file.truncate()
-        lock_file.flush()
+        """Clear before release so the next waiter doesn't see a stale holder.
+
+        This runs in the ``finally`` of the guarded block, so a failure here
+        must never replace or mask whatever exception (if any) is already
+        propagating out of the caller's business logic.
+        """
+        try:
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.flush()
+        except Exception:
+            pass
 
     @classmethod
     def _describe_lock_holder(cls, lock_path: Path) -> str:
