@@ -981,6 +981,77 @@ def test_atomic_events_replay_normalizes_payload_before_comparing(tmp_path):
     assert result["conflict"] == "already_committed"
 
 
+def test_atomic_events_refuse_replay_when_keys_were_committed_individually(tmp_path):
+    """All of a batch's keys existing, with matching content, is still not
+    proof this batch was ever committed as one atomic transition.
+
+    ``duplicate_key`` is one global namespace shared with
+    ``save_system_event`` (and other bespoke write paths). If the same
+    content this batch would write already exists because it was written by
+    two separate ``save_system_event`` calls, under two different run ids,
+    in two separate transactions, the content comparison alone cannot tell
+    that apart from a genuine replay -- but no atomic batch ever committed
+    these rows together. This must raise, not report ``already_committed``.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_event("run-a", "funding_request", {"duplicate_key": "req:1"})
+    store.save_system_event(
+        "run-b", "funding_workflow_head", {"duplicate_key": "head:wf:v1"}
+    )
+    with pytest.raises(ValueError, match="atomic batch"):
+        store.save_system_events_atomic(
+            "run-c",
+            [
+                {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+                {
+                    "event_type": "funding_workflow_head",
+                    "payload": {"duplicate_key": "head:wf:v1"},
+                },
+            ],
+        )
+
+
+def test_atomic_events_genuine_replay_still_reports_already_committed(tmp_path):
+    """The provenance check must not turn a real replay into a false refusal."""
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [
+        {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}},
+        {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}},
+    ]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-2", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
+def test_atomic_events_replay_with_events_reordered_still_reports_already_committed(
+    tmp_path,
+):
+    """The batch identity must not depend on the order the caller lists events
+    in -- only on the batch's own content."""
+    store = StateStore(str(tmp_path / "s.db"))
+    event_a = {"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}
+    event_b = {
+        "event_type": "funding_workflow_head",
+        "payload": {"duplicate_key": "head:wf:v1"},
+    }
+    store.save_system_events_atomic("run-1", [event_a, event_b])
+    result = store.save_system_events_atomic("run-2", [event_b, event_a])
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
+def test_atomic_events_single_event_batch_replay_reports_already_committed(tmp_path):
+    """A single-event batch must behave consistently with a multi-event one:
+    a genuine replay still reports ``already_committed``."""
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-2", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
 def test_only_one_process_wins_the_head_transition(tmp_path):
     db = str(tmp_path / "s.db")
     store = StateStore(db)
