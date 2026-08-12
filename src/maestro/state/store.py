@@ -299,7 +299,10 @@ class StateStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout_seconds
         started = time.monotonic()
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
+        # Not a ``with`` block: closing this file must never raise into the
+        # caller nor replace a propagating exception (see _close_lock_file).
+        lock_file = lock_path.open("a+", encoding="utf-8")
+        try:
             while True:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -307,10 +310,13 @@ class StateStore:
                 except BlockingIOError as exc:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
-                            f"{busy_message} (waiter {owner}, "
-                            f"{self._describe_lock_holder(lock_path)}"
-                            f"{self._describe_other_lock(other_lock)}, "
-                            f"waited {time.monotonic() - started:.1f}s)"
+                            self._busy_diagnostics(
+                                busy_message,
+                                lock_path=lock_path,
+                                owner=owner,
+                                other_lock=other_lock,
+                                waited_seconds=time.monotonic() - started,
+                            )
                         ) from exc
                     time.sleep(0.1)
             self._write_lock_holder(lock_file, owner)
@@ -325,14 +331,34 @@ class StateStore:
                     setattr(self._lock_depths, depth_attr, depth - 1)
                 self._clear_lock_holder(lock_file)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._close_lock_file(lock_file)
 
     @staticmethod
-    def _write_lock_holder(lock_file: Any, owner: str) -> None:
+    def _write_all(fd: int, payload: bytes) -> None:
+        """Unbuffered write of the whole payload; ``os.write`` may write partially."""
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                break
+            view = view[written:]
+
+    @classmethod
+    def _write_lock_holder(cls, lock_file: Any, owner: str) -> None:
         """Called only while the exclusive flock is held — no write race.
 
         This is a diagnostic write. A failure here (e.g. ENOSPC) must never
         prevent the caller from acquiring the lock or change what exception
         acquisition raises, so every exception is swallowed.
+
+        The record is written with unbuffered file-descriptor calls
+        (``os.ftruncate``/``os.write``) rather than through the buffered text
+        stream: a buffered write that fails at ``flush()`` leaves the buffer
+        dirty, and the later ``close()`` — which happens after flock release,
+        outside this guard — would flush again and raise ``OSError`` at the
+        caller. With no Python-level buffer involved, every I/O error surfaces
+        here, where it is swallowed.
         """
         try:
             record = {
@@ -340,10 +366,10 @@ class StateStore:
                 "pid": os.getpid(),
                 "acquired_at": datetime.now(UTC).isoformat(),
             }
-            lock_file.seek(0)
-            lock_file.truncate()
-            lock_file.write(json.dumps(record, ensure_ascii=False))
-            lock_file.flush()
+            fd = lock_file.fileno()
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            cls._write_all(fd, json.dumps(record, ensure_ascii=False).encode("utf-8"))
         except Exception:
             pass
 
@@ -353,14 +379,50 @@ class StateStore:
 
         This runs in the ``finally`` of the guarded block, so a failure here
         must never replace or mask whatever exception (if any) is already
-        propagating out of the caller's business logic.
+        propagating out of the caller's business logic. Unbuffered for the same
+        reason as _write_lock_holder.
         """
         try:
-            lock_file.seek(0)
-            lock_file.truncate()
-            lock_file.flush()
+            os.ftruncate(lock_file.fileno(), 0)
         except Exception:
             pass
+
+    @staticmethod
+    def _close_lock_file(lock_file: Any) -> None:
+        """Close the lock file so that the close can never disturb the outcome.
+
+        The flock is already released by the time this runs. A ``with`` block
+        here would let a close-time error (a dirty buffer flushed at close, or
+        EIO on close) escape from outside every guard — replacing a propagating
+        trading exception with an ``OSError`` that no caller catches.
+        """
+        try:
+            lock_file.close()
+        except Exception:
+            pass
+
+    @classmethod
+    def _busy_diagnostics(
+        cls,
+        busy_message: str,
+        *,
+        lock_path: Path,
+        owner: str,
+        other_lock: tuple[str, Path] | None,
+        waited_seconds: float,
+    ) -> str:
+        """Build the timeout message. Prefixes are fixed; everything after is diagnostic.
+
+        Every component is independently failure-isolated, so a missing or
+        unreadable record only shrinks the message.
+        """
+        return (
+            f"{busy_message} (waiter {owner} pid={os.getpid()}, "
+            f"{cls._describe_lock_holder(lock_path)}"
+            f"{cls._describe_other_lock(other_lock)}, "
+            f"waited {waited_seconds:.1f}s"
+            f"{cls._describe_host_pressure()})"
+        )
 
     @classmethod
     def _describe_lock_holder(cls, lock_path: Path) -> str:
@@ -371,7 +433,45 @@ class StateStore:
             f"holder {holder.get('owner', 'unknown')} "
             f"pid={holder.get('pid', 'unknown')} "
             f"since {holder.get('acquired_at', 'unknown')}"
+            f"{cls._describe_hold_age(holder.get('acquired_at'))}"
         )
+
+    @staticmethod
+    def _describe_hold_age(acquired_at: Any) -> str:
+        """How long the holder has held it — read against the waiter's own wait,
+        this separates "one process is doing long work" (hypothesis B: a long
+        hold, a short wait behind it) from "the whole box is slow" (hypothesis C:
+        waits piling up against a hold that is not unusually long)."""
+        try:
+            started = datetime.fromisoformat(str(acquired_at))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            return f" held {(datetime.now(UTC) - started).total_seconds():.1f}s"
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _describe_host_pressure() -> str:
+        """Cheap /proc-only pressure read for hypothesis C. No subprocesses, and
+        every read is isolated: an unreadable field just drops out."""
+        parts: list[str] = []
+        try:
+            fields = Path("/proc/loadavg").read_text(encoding="utf-8").split()
+            parts.append(f"load1={float(fields[0]):.2f}")
+            if len(fields) >= 4 and "/" in fields[3]:
+                parts.append(f"runnable={fields[3]}")
+        except Exception:
+            pass
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    parts.append(f"mem_avail={float(line.split()[1]) / 1024:.1f}MB")
+                    break
+        except Exception:
+            pass
+        if not parts:
+            return ""
+        return ", host " + " ".join(parts)
 
     @classmethod
     def _describe_other_lock(cls, other_lock: tuple[str, Path] | None) -> str:
