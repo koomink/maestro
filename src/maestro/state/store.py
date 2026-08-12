@@ -341,16 +341,25 @@ class StateStore:
 
     @staticmethod
     def read_lock_holder(lock_path: Path) -> dict[str, Any] | None:
-        """Read without taking the lock. Diagnostic only — every failure absorbs to None."""
+        """Read without taking the lock. Diagnostic only — every failure absorbs to None.
+
+        Reads with no lock held, so this can observe a file mid-truncate: a
+        multi-byte UTF-8 character can be cut in half, which raises
+        ``UnicodeDecodeError`` (a ``ValueError`` subclass) rather than
+        ``OSError``. Catching ``(OSError, ValueError)`` around both the read
+        and the JSON parse absorbs that alongside ``json.JSONDecodeError``
+        (also a ``ValueError`` subclass), so no content-shaped failure can
+        escape as an exception.
+        """
         try:
             raw = lock_path.read_text(encoding="utf-8").strip()
-        except OSError:
+        except (OSError, ValueError):
             return None
         if not raw:
             return None
         try:
             record = json.loads(raw)
-        except json.JSONDecodeError:
+        except ValueError:
             return None
         return record if isinstance(record, dict) else None
 

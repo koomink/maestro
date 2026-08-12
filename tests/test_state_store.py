@@ -1,3 +1,4 @@
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -144,3 +145,15 @@ def test_live_order_lock_records_its_own_holder(tmp_path):
     with store.live_order_lock("resolve_pending_signal_approval"):
         holder = store.read_lock_holder(store.live_order_lock_path)
         assert holder["owner"] == "resolve_pending_signal_approval"
+
+
+def test_read_lock_holder_tolerates_truncated_multibyte_utf8(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    record = {"owner": "보유자", "pid": 123, "acquired_at": "2026-08-12T00:00:00+00:00"}
+    payload = json.dumps(record, ensure_ascii=False).encode("utf-8")
+    # Cut one byte into the first multi-byte character so the tail is an
+    # incomplete UTF-8 sequence -- the mid-truncate race the brief describes.
+    non_ascii_index = next(i for i, byte in enumerate(payload) if byte >= 0x80)
+    truncated = payload[: non_ascii_index + 1]
+    store.writer_lock_path.write_bytes(truncated)
+    assert store.read_lock_holder(store.writer_lock_path) is None
