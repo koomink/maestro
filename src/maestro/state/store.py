@@ -1,4 +1,5 @@
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -162,6 +163,14 @@ class StateStore:
             order_id_column_is_new = "order_id" not in system_event_columns
             if order_id_column_is_new:
                 conn.execute("ALTER TABLE system_events ADD COLUMN order_id TEXT")
+            if "batch_fingerprint" not in system_event_columns:
+                # Rows written by save_system_events_atomic carry a stable
+                # hash of the batch they were committed as part of (see that
+                # method's docstring). Existing rows -- written before this
+                # column existed, or by any path other than that method --
+                # come back NULL, which is exactly the "no batch provenance"
+                # signal the replay check below relies on.
+                conn.execute("ALTER TABLE system_events ADD COLUMN batch_fingerprint TEXT")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_system_events_type_created "
                 "ON system_events(event_type, created_at)"
@@ -958,6 +967,26 @@ class StateStore:
         "succeeding": a key that doesn't identify its content isn't a usable
         idempotency key.
 
+        Matching content is still not proof this batch was ever committed as
+        one call, though: two events with identical content can land under
+        the same keys via two separate calls into that same shared
+        namespace — e.g. two ``save_system_event`` calls in two different
+        transactions, under two different ``run_id``s — and each would pass
+        the content check above despite never having been committed
+        together.  To catch that, every call computes a ``batch_fingerprint``
+        — a sha256 hash of the batch's own ``(event_type, normalized
+        payload)`` pairs, sorted by ``duplicate_key`` so the caller's listing
+        order never changes it — and stamps it on every row the call writes.
+        Once every key is confirmed present with matching content, every one
+        of those rows' stored ``batch_fingerprint`` must equal the one this
+        call just computed for its own batch.  A row with a ``NULL``
+        fingerprint (written before this column existed, or by a path that
+        doesn't set it) or a different one (written by a different atomic
+        batch that happened to reuse this key's content) is not a replay of
+        *this* batch, and raises — even though its content matched.  Only
+        when every row agrees on both content and batch identity is
+        ``already_committed`` correct.
+
         Preconditions are checked next, before this batch's own keys are
         checked for a partial overlap with what is already on record.  A
         declared precondition is the caller stating what "someone else got
@@ -972,6 +1001,7 @@ class StateStore:
         """
         prepared = _prepare_atomic_system_events(events)
         keys = [item["duplicate_key"] for item in prepared]
+        batch_fingerprint = _compute_batch_fingerprint(prepared)
         with self.writer_lock("save_system_events_atomic"):
             with self._connect() as conn:
                 # Manual transaction control: take the write lock (BEGIN
@@ -999,6 +1029,15 @@ class StateStore:
                         raise ValueError(
                             "atomic system events conflict with an existing record "
                             f"with different content: {sorted(mismatched)}"
+                        )
+                    provenance_mismatched = _find_replay_provenance_mismatches(
+                        conn, keys, batch_fingerprint
+                    )
+                    if provenance_mismatched:
+                        raise ValueError(
+                            "atomic system events conflict with an existing record "
+                            "not committed as part of this atomic batch (missing or "
+                            f"different batch provenance): {sorted(provenance_mismatched)}"
                         )
                     return {
                         "committed": False,
@@ -1051,7 +1090,8 @@ class StateStore:
                     conn.execute(
                         "INSERT INTO system_events "
                         "(run_id, event_type, payload, duplicate_key, "
-                        "broker_order_id, order_id) VALUES (?, ?, ?, ?, ?, ?)",
+                        "broker_order_id, order_id, batch_fingerprint) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (
                             run_id,
                             item["event_type"],
@@ -1059,6 +1099,7 @@ class StateStore:
                             item["duplicate_key"],
                             item["broker_order_id"],
                             item["order_id"],
+                            batch_fingerprint,
                         ),
                     )
                 return {"committed": True, "conflict": None, "conflicting_keys": ()}
@@ -2157,6 +2198,60 @@ def _prepare_atomic_system_events(
     if len(set(keys)) != len(keys):
         raise ValueError("atomic system event duplicate keys must be unique")
     return prepared
+
+
+def _compute_batch_fingerprint(prepared: list[dict[str, Any]]) -> str:
+    """A stable identity for this batch, derived only from its own content.
+
+    A genuine retry of the same batch must compute the same fingerprint
+    without the caller passing anything extra, so it is a hash of the
+    batch's own ``(event_type, normalized payload)`` pairs -- nothing
+    nondeterministic (a timestamp, a random id, the connection, ``run_id``)
+    feeds into it. Sorting by ``duplicate_key`` first (unique within one
+    batch -- see the uniqueness check above) makes the fingerprint
+    independent of the order the caller lists events in. Payloads are
+    round-tripped through the same ``json.dumps(..., default=str)``
+    normalization used for the content-replay check, and the final
+    ``json.dumps(..., sort_keys=True)`` makes the hash independent of
+    dict key order at every nesting level.
+    """
+    ordered = sorted(prepared, key=lambda item: item["duplicate_key"])
+    canonical = json.dumps(
+        [
+            [item["event_type"], json.loads(json.dumps(item["payload"], default=str))]
+            for item in ordered
+        ],
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _find_replay_provenance_mismatches(
+    conn: sqlite3.Connection, keys: list[str], batch_fingerprint: str
+) -> list[str]:
+    """Which of ``keys`` are on record without *this* batch's provenance.
+
+    Called only once every one of ``keys`` is confirmed present with
+    matching content, to decide whether those rows were actually committed
+    together by this method, as opposed to landing under the same keys with
+    the same content via some other write path (or a different atomic
+    batch that happens to produce the same content).  ``duplicate_key`` is
+    one global namespace shared with ``save_system_event``, ``_insert``, and
+    several bespoke methods, none of which stamp a ``batch_fingerprint`` --
+    so a row from any of them comes back with ``NULL`` here and is reported
+    as mismatched, exactly like a row stamped with a different batch's
+    fingerprint would be.  Only when every row's stored fingerprint equals
+    the one just computed for this call's own batch is this a genuine
+    replay.
+    """
+    rows = conn.execute(
+        "SELECT duplicate_key, batch_fingerprint FROM system_events "
+        f"WHERE duplicate_key IN ({','.join('?' * len(keys))})",
+        keys,
+    ).fetchall()
+    return sorted(
+        str(row[0]) for row in rows if row[1] != batch_fingerprint
+    )
 
 
 def _find_replay_content_mismatches(
