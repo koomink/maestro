@@ -939,6 +939,25 @@ class StateStore:
         a thread, but that re-entrancy only covers the advisory file lock; it
         does not extend to a second, already-open SQLite transaction.
 
+        A replay is verified by content, not just by key: every one of a
+        batch's ``duplicate_key``s existing is not proof this exact batch
+        landed, since ``duplicate_key`` is one global namespace shared with
+        other write paths (``save_system_event``, ``_insert``, and several
+        bespoke methods).  Each key's stored ``event_type`` and payload are
+        therefore compared against what's being submitted now (excluding the
+        stored ``run_id``, since a legitimate retry after a crash may carry a
+        different one).  Stored payloads round-tripped through
+        ``json.dumps(..., default=str)`` are compared as parsed structures,
+        never as raw text, and the submitted payload is round-tripped the
+        same way before comparing, so a datetime stored as a string still
+        matches itself.  If every key matches, this is a genuine replay.  If
+        any key's stored content differs, this is an unexplained collision
+        and raises, in the same spirit as the partial-overlap refusal below —
+        which also means a payload with a nondeterministic field (a fresh
+        timestamp, a random id) will fail hard on retry instead of silently
+        "succeeding": a key that doesn't identify its content isn't a usable
+        idempotency key.
+
         Preconditions are checked next, before this batch's own keys are
         checked for a partial overlap with what is already on record.  A
         declared precondition is the caller stating what "someone else got
@@ -975,6 +994,12 @@ class StateStore:
                     ).fetchall()
                 }
                 if len(existing) == len(keys):
+                    mismatched = _find_replay_content_mismatches(conn, prepared)
+                    if mismatched:
+                        raise ValueError(
+                            "atomic system events conflict with an existing record "
+                            f"with different content: {sorted(mismatched)}"
+                        )
                     return {
                         "committed": False,
                         "conflict": "already_committed",
@@ -2132,6 +2157,43 @@ def _prepare_atomic_system_events(
     if len(set(keys)) != len(keys):
         raise ValueError("atomic system event duplicate keys must be unique")
     return prepared
+
+
+def _find_replay_content_mismatches(
+    conn: sqlite3.Connection, prepared: list[dict[str, Any]]
+) -> list[str]:
+    """Which of ``prepared``'s keys are on record under different content.
+
+    Called only once every one of ``prepared``'s keys is already present, to
+    decide whether this is a genuine replay of the same batch or an
+    unrelated write that happens to share a key.  ``run_id`` is deliberately
+    excluded: it is not part of what a key identifies.  Payloads are compared
+    as parsed structures after round-tripping the submitted side through the
+    same ``json.dumps(..., default=str)`` the stored side went through, so a
+    value JSON can't represent natively (e.g. a ``datetime``) still compares
+    equal to its own stored, stringified form.
+    """
+    keys = [item["duplicate_key"] for item in prepared]
+    stored_by_key = {
+        str(row[0]): (str(row[1]), row[2])
+        for row in conn.execute(
+            "SELECT duplicate_key, event_type, payload FROM system_events "
+            f"WHERE duplicate_key IN ({','.join('?' * len(keys))})",
+            keys,
+        ).fetchall()
+    }
+    mismatched = []
+    for item in prepared:
+        stored = stored_by_key.get(item["duplicate_key"])
+        if stored is None:
+            continue
+        stored_event_type, stored_payload_raw = stored
+        submitted_payload = json.loads(json.dumps(item["payload"], default=str))
+        if stored_event_type != item["event_type"] or json.loads(
+            stored_payload_raw
+        ) != submitted_payload:
+            mismatched.append(item["duplicate_key"])
+    return mismatched
 
 
 def _system_event_broker_order_id(payload: dict[str, Any]) -> str | None:

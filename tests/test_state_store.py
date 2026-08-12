@@ -920,6 +920,67 @@ def test_atomic_events_conflict_path_leaves_no_dangling_transaction(tmp_path):
     assert store.duplicate_key_exists("req:2")
 
 
+def test_atomic_events_replay_detects_a_key_reused_with_different_content(tmp_path):
+    """All of a batch's keys existing is not proof the batch itself landed --
+    other code paths write into the same duplicate_key namespace. If the stored
+    content under a key differs from what's being submitted now, this is an
+    unexplained collision and must raise, not be reported as a replay.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1", "amount": 100}}],
+    )
+    with pytest.raises(ValueError, match="content"):
+        store.save_system_events_atomic(
+            "run-2",
+            [
+                {
+                    "event_type": "funding_request",
+                    "payload": {"duplicate_key": "req:1", "amount": 999},
+                }
+            ],
+        )
+    # Nothing about the stored record must have changed.
+    stored = store.list_system_events_by_type("funding_request", limit=None)
+    assert len(stored) == 1
+    assert stored[0]["payload"]["amount"] == 100
+
+
+def test_atomic_events_replay_ignores_run_id(tmp_path):
+    """A legitimate retry after a crash may carry a different run id than the
+    original attempt. The run id must never be part of the replay comparison.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    events = [{"event_type": "funding_request", "payload": {"duplicate_key": "req:1"}}]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-2", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
+def test_atomic_events_replay_normalizes_payload_before_comparing(tmp_path):
+    """Stored payloads went through ``json.dumps(payload, default=str)``, which
+    stringifies values JSON cannot represent natively (e.g. datetimes). A
+    retried payload carrying the same datetime value as a real ``datetime``
+    object (not yet stringified) must still compare equal to what's stored --
+    comparing raw, un-normalized structures would falsely flag this as a
+    content mismatch.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    moment = datetime(2026, 1, 1, tzinfo=UTC)
+    events = [
+        {
+            "event_type": "funding_request",
+            "payload": {"duplicate_key": "req:1", "observed_at": moment},
+        }
+    ]
+    store.save_system_events_atomic("run-1", events)
+    result = store.save_system_events_atomic("run-1", events)
+    assert result["committed"] is False
+    assert result["conflict"] == "already_committed"
+
+
 def test_only_one_process_wins_the_head_transition(tmp_path):
     db = str(tmp_path / "s.db")
     store = StateStore(db)
