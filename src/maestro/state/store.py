@@ -302,20 +302,36 @@ class StateStore:
         # Not a ``with`` block: closing this file must never raise into the
         # caller nor replace a propagating exception (see _close_lock_file).
         lock_file = lock_path.open("a+", encoding="utf-8")
+        registered_waiter = False
+        acquired = False
         try:
             while True:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
                     break
                 except BlockingIOError as exc:
                     if time.monotonic() >= deadline:
                         raise TimeoutError(
-                            f"{busy_message} (waiter {owner}, "
-                            f"{self._describe_lock_holder(lock_path)}"
-                            f"{self._describe_other_lock(other_lock)}, "
-                            f"waited {time.monotonic() - started:.1f}s)"
+                            self._busy_diagnostics(
+                                busy_message,
+                                lock_path=lock_path,
+                                owner=owner,
+                                other_lock=other_lock,
+                                waited_seconds=time.monotonic() - started,
+                            )
                         ) from exc
+                    if not registered_waiter:
+                        # About to block: publish this wait-for edge so a peer
+                        # that times out can see who is waiting for what.
+                        registered_waiter = True
+                        self._write_waiter_record(lock_path, owner)
                     time.sleep(0.1)
+            if registered_waiter:
+                # Deregister immediately on acquire: an edge that outlived the
+                # wait would make every slow-but-healthy acquisition look like
+                # a cycle to the next process that times out.
+                self._clear_waiter_record(lock_path)
             self._write_lock_holder(lock_file, owner)
             if depth_attr is not None:
                 depth = getattr(self._lock_depths, depth_attr, 0)
@@ -329,6 +345,8 @@ class StateStore:
                 self._clear_lock_holder(lock_file)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         finally:
+            if registered_waiter and not acquired:
+                self._clear_waiter_record(lock_path)
             self._close_lock_file(lock_file)
 
     @staticmethod
@@ -398,6 +416,103 @@ class StateStore:
         except Exception:
             pass
 
+    @staticmethod
+    def waiter_record_path(lock_path: Path, pid: int) -> Path:
+        """One file per waiting process, so concurrent waiters never contend."""
+        return lock_path.with_name(f"{lock_path.name}.waiter.{pid}")
+
+    @classmethod
+    def _write_waiter_record(cls, lock_path: Path, owner: str) -> None:
+        """Publish a wait-for edge: this process is about to block on ``lock_path``.
+
+        Purely diagnostic and strictly best-effort — every failure is swallowed,
+        so it can never affect acquisition, release, or the exception raised.
+        Written unbuffered for the same reason as the holder record.
+        """
+        try:
+            record = {
+                "owner": owner,
+                "pid": os.getpid(),
+                "thread": threading.current_thread().name,
+                "waiting_for": str(lock_path),
+                "since": datetime.now(UTC).isoformat(),
+            }
+            path = cls.waiter_record_path(lock_path, os.getpid())
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                cls._write_all(fd, json.dumps(record, ensure_ascii=False).encode("utf-8"))
+            finally:
+                os.close(fd)
+        except Exception:
+            pass
+
+    @classmethod
+    def _clear_waiter_record(cls, lock_path: Path) -> None:
+        """Retract this process's wait-for edge. Best-effort; failures swallowed."""
+        try:
+            os.unlink(cls.waiter_record_path(lock_path, os.getpid()))
+        except Exception:
+            pass
+
+    @classmethod
+    def read_waiter_record(cls, lock_path: Path, pid: int) -> dict[str, Any] | None:
+        """Read a wait-for edge without taking any lock. Every failure absorbs to None.
+
+        A waiter record is only trusted when it names ``pid`` itself and that
+        process is still alive: a SIGKILLed waiter leaves its file behind, and a
+        stale edge reported as a live one would fabricate a deadlock.
+        """
+        try:
+            raw = cls.waiter_record_path(lock_path, pid).read_text(encoding="utf-8").strip()
+        except (OSError, ValueError):
+            return None
+        if not raw:
+            return None
+        try:
+            record = json.loads(raw)
+        except ValueError:
+            return None
+        if not isinstance(record, dict) or record.get("pid") != pid:
+            return None
+        if not cls._pid_is_alive(pid):
+            return None
+        return record
+
+    @staticmethod
+    def _pid_is_alive(pid: int) -> bool:
+        """True when /proc says the pid exists; True as well when we cannot tell."""
+        try:
+            proc_root = Path("/proc")
+            if not proc_root.is_dir():
+                return True
+            return (proc_root / str(pid)).exists()
+        except Exception:
+            return True
+
+    @classmethod
+    def _busy_diagnostics(
+        cls,
+        busy_message: str,
+        *,
+        lock_path: Path,
+        owner: str,
+        other_lock: tuple[str, Path] | None,
+        waited_seconds: float,
+    ) -> str:
+        """Build the timeout message. Prefixes are fixed; everything after is diagnostic.
+
+        Every component is independently failure-isolated, so a missing or
+        unreadable record only shrinks the message.
+        """
+        return (
+            f"{busy_message} (waiter {owner} pid={os.getpid()}, "
+            f"{cls._describe_lock_holder(lock_path)}"
+            f"{cls._describe_other_lock(other_lock)}"
+            f"{cls._describe_wait_for_edge(lock_path, other_lock)}, "
+            f"waited {waited_seconds:.1f}s"
+            f"{cls._describe_host_pressure()})"
+        )
+
     @classmethod
     def _describe_lock_holder(cls, lock_path: Path) -> str:
         holder = cls.read_lock_holder(lock_path)
@@ -407,7 +522,74 @@ class StateStore:
             f"holder {holder.get('owner', 'unknown')} "
             f"pid={holder.get('pid', 'unknown')} "
             f"since {holder.get('acquired_at', 'unknown')}"
+            f"{cls._describe_hold_age(holder.get('acquired_at'))}"
         )
+
+    @staticmethod
+    def _describe_hold_age(acquired_at: Any) -> str:
+        """How long the holder has held it — read against the waiter's own wait,
+        this separates "one process is doing long work" (hypothesis B: a long
+        hold, a short wait behind it) from "the whole box is slow" (hypothesis C:
+        waits piling up against a hold that is not unusually long)."""
+        try:
+            started = datetime.fromisoformat(str(acquired_at))
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            return f" held {(datetime.now(UTC) - started).total_seconds():.1f}s"
+        except Exception:
+            return ""
+
+    @classmethod
+    def _describe_wait_for_edge(
+        cls, lock_path: Path, other_lock: tuple[str, Path] | None
+    ) -> str:
+        """State plainly whether there is a wait-for *cycle*, not just two held locks.
+
+        Two processes each holding one lock is normal; a cycle is when the other
+        lock's holder is itself registered as waiting for *this* lock. Only that
+        second case is hypothesis A, so only it is reported as a cycle.
+        """
+        if other_lock is None:
+            return ""
+        label, other_path = other_lock
+        other_holder = cls.read_lock_holder(other_path)
+        pid = other_holder.get("pid") if other_holder else None
+        if not isinstance(pid, int):
+            return f", no wait-for cycle detected ({label} holder unknown)"
+        waiter = cls.read_waiter_record(lock_path, pid)
+        if waiter is None:
+            return (
+                f", no wait-for cycle detected ({label} holder pid={pid} is not "
+                f"registered as waiting for this lock)"
+            )
+        return (
+            f", WAIT-FOR CYCLE: {label} holder pid={pid} "
+            f"(owner={waiter.get('owner', 'unknown')}) is itself waiting for this lock "
+            f"since {waiter.get('since', 'unknown')}"
+        )
+
+    @staticmethod
+    def _describe_host_pressure() -> str:
+        """Cheap /proc-only pressure read for hypothesis C. No subprocesses, and
+        every read is isolated: an unreadable field just drops out."""
+        parts: list[str] = []
+        try:
+            fields = Path("/proc/loadavg").read_text(encoding="utf-8").split()
+            parts.append(f"load1={float(fields[0]):.2f}")
+            if len(fields) >= 4 and "/" in fields[3]:
+                parts.append(f"runnable={fields[3]}")
+        except Exception:
+            pass
+        try:
+            for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemAvailable:"):
+                    parts.append(f"mem_avail={float(line.split()[1]) / 1024:.1f}MB")
+                    break
+        except Exception:
+            pass
+        if not parts:
+            return ""
+        return ", host " + " ".join(parts)
 
     @classmethod
     def _describe_other_lock(cls, other_lock: tuple[str, Path] | None) -> str:
