@@ -146,7 +146,7 @@ def test_writer_lock_is_reentrant_in_the_same_thread(tmp_path):
             pass  # a TimeoutError here would mean reentrancy is broken
 
 
-def test_live_order_lock_is_exclusive_and_reentrant(tmp_path):
+def test_live_order_lock_is_reentrant_in_the_same_thread(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), 0)
     with store.live_order_lock("outer"):
         with store.live_order_lock("inner", timeout_seconds=0.1):
@@ -348,3 +348,23 @@ def test_writer_timeout_message_names_the_live_order_holder_and_the_waiter(tmp_p
     finally:
         writer_proc.join(timeout=10)
         live_proc.join(timeout=10)
+
+
+def test_account_refresh_lock_records_its_holder(tmp_path):
+    """depth_attr=None is the only path through _write_lock_holder; cover it."""
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    lock_path = store.path.with_suffix(store.path.suffix + ".refresh-kis_ps.lock")
+    with store.account_refresh_lock("kis_ps"):
+        holder = store.read_lock_holder(lock_path)
+        assert holder is not None
+        assert holder["owner"] == "account_refresh:kis_ps"
+
+
+def test_lock_file_is_cleared_after_the_guarded_body_raises(tmp_path):
+    """The finally path must clear the holder record even when the body raises --
+    the same path F1 hardens against a diagnostic-write failure."""
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    with pytest.raises(ValueError, match="boom"):
+        with store.writer_lock("approve_signal"):
+            raise ValueError("boom")
+    assert store.read_lock_holder(store.writer_lock_path) is None
