@@ -21,6 +21,29 @@ def _hold_writer_lock(db_path, hold_seconds, ready, done):
     done.set()
 
 
+def _race_workflow_head(db_path, attempt, ready, results):
+    from maestro.state.store import StateStore
+
+    store = StateStore(db_path)
+    ready.wait(5.0)
+    outcome = store.save_system_events_atomic(
+        f"run-{attempt}",
+        [
+            {
+                "event_type": "funding_workflow_head",
+                "payload": {"duplicate_key": "head:wf:v2", "attempt": attempt},
+            },
+            {
+                "event_type": "funding_request",
+                "payload": {"duplicate_key": f"req:{attempt}"},
+            },
+        ],
+        require_duplicate_keys=["head:wf:v1"],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    results.append((attempt, outcome["committed"], outcome["conflict"]))
+
+
 def _hold_live_order_lock(db_path, hold_seconds, ready, done):
     store = StateStore(db_path, 0)
     with store.live_order_lock("live_order_holder"):
@@ -723,6 +746,33 @@ def test_atomic_events_refuse_when_a_forbidden_key_appeared(tmp_path):
     assert not store.duplicate_key_exists("claim:1")
 
 
+def test_atomic_events_forbid_precondition_wins_over_a_partial_overlap(tmp_path):
+    """Pins the reordering: a forbid-precondition that covers the batch's own
+    overlapping key must report precondition_present, not raise. Preconditions
+    are checked before an own-key partial overlap falls back to the hard
+    ValueError -- a losing CAS race legitimately reuses the winner's target
+    key, and a declared precondition is how the caller says that overlap is
+    expected, not an unexplained collision.
+    """
+    store = StateStore(str(tmp_path / "s.db"))
+    store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}}],
+    )
+    result = store.save_system_events_atomic(
+        "run-2",
+        [
+            {"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v2"}},
+            {"event_type": "funding_request", "payload": {"duplicate_key": "req:2"}},
+        ],
+        forbid_duplicate_keys=["head:wf:v2"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_present"
+    assert result["conflicting_keys"] == ("head:wf:v2",)
+    assert not store.duplicate_key_exists("req:2")
+
+
 def test_atomic_events_replay_wins_over_a_failing_precondition(tmp_path):
     """A batch that already landed reports success, not a lost race.
 
@@ -739,3 +789,50 @@ def test_atomic_events_replay_wins_over_a_failing_precondition(tmp_path):
         "run-1", events, forbid_duplicate_keys=["head:wf:v2"]
     )
     assert second["conflict"] == "already_committed"
+
+
+def test_atomic_events_missing_precondition_keys_are_sorted_and_deduplicated(tmp_path):
+    """conflicting_keys must be normalized the same way on every branch of the
+    contract: already_committed and precondition_present both return
+    tuple(sorted(...)); precondition_missing must match, not leak caller
+    order or caller-supplied duplicates."""
+    store = StateStore(str(tmp_path / "s.db"))
+    result = store.save_system_events_atomic(
+        "run-1",
+        [{"event_type": "funding_workflow_claim", "payload": {"duplicate_key": "claim:1"}}],
+        require_duplicate_keys=["zzz", "aaa", "aaa", "bbb", "bbb"],
+    )
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_missing"
+    assert result["conflicting_keys"] == ("aaa", "bbb", "zzz")
+
+
+def test_only_one_process_wins_the_head_transition(tmp_path):
+    db = str(tmp_path / "s.db")
+    store = StateStore(db)
+    store.save_system_events_atomic(
+        "run-0",
+        [{"event_type": "funding_workflow_head", "payload": {"duplicate_key": "head:wf:v1"}}],
+    )
+    ready = multiprocessing.Event()
+    with multiprocessing.Manager() as manager:
+        results = manager.list()
+        procs = [
+            multiprocessing.Process(target=_race_workflow_head, args=(db, n, ready, results))
+            for n in (1, 2, 3)
+        ]
+        for proc in procs:
+            proc.start()
+        ready.set()
+        for proc in procs:
+            proc.join(30.0)
+            assert proc.exitcode == 0
+        outcomes = list(results)
+
+    winners = [item for item in outcomes if item[1] is True]
+    assert len(winners) == 1
+    assert {item[2] for item in outcomes if item[1] is False} == {"precondition_present"}
+    # The loser's request event must not exist: its batch was all-or-nothing.
+    winning_attempt = winners[0][0]
+    for attempt in (1, 2, 3):
+        assert store.duplicate_key_exists(f"req:{attempt}") is (attempt == winning_attempt)

@@ -918,7 +918,19 @@ class StateStore:
         reading the workflow head and then writing a claim in a separate
         statement leaves a window for another run to replace the head in
         between.  A batch whose own keys are all present is a replay and is
-        reported as such before the preconditions are consulted.
+        reported as such before anything else is consulted.
+
+        Preconditions are checked next, before this batch's own keys are
+        checked for a partial overlap with what is already on record.  A
+        declared precondition is the caller stating what "someone else got
+        here first" looks like for this transition — when a race is lost, the
+        losing batch's own key set legitimately overlaps the winner's (e.g.
+        both raced to write the same CAS target key), and that overlap must
+        be reported as ``precondition_present``/``precondition_missing``, not
+        raised as an unexplained collision.  Only once preconditions clear
+        does an own-key partial overlap fall back to the hard ``ValueError``:
+        for a caller that declared no preconditions, that overlap really is
+        an unexplained key collision.
         """
         prepared = _prepare_atomic_system_events(events)
         keys = [item["duplicate_key"] for item in prepared]
@@ -938,14 +950,6 @@ class StateStore:
                         "conflict": "already_committed",
                         "conflicting_keys": tuple(sorted(existing)),
                     }
-                if existing:
-                    # Half of this transition is already on record.  Committing
-                    # the rest would finish a transition nobody asked for, so
-                    # refuse rather than guess which half is authoritative.
-                    raise ValueError(
-                        "atomic system events conflict with an existing partial "
-                        f"record: {sorted(existing)}"
-                    )
                 required = [str(key) for key in require_duplicate_keys]
                 if required:
                     present = {
@@ -961,7 +965,7 @@ class StateStore:
                         return {
                             "committed": False,
                             "conflict": "precondition_missing",
-                            "conflicting_keys": tuple(missing),
+                            "conflicting_keys": tuple(sorted(set(missing))),
                         }
                 forbidden = [str(key) for key in forbid_duplicate_keys]
                 if forbidden:
@@ -979,6 +983,15 @@ class StateStore:
                             "conflict": "precondition_present",
                             "conflicting_keys": tuple(sorted(blocking)),
                         }
+                if existing:
+                    # Half of this transition is already on record, and no
+                    # declared precondition explains it.  Committing the rest
+                    # would finish a transition nobody asked for, so refuse
+                    # rather than guess which half is authoritative.
+                    raise ValueError(
+                        "atomic system events conflict with an existing partial "
+                        f"record: {sorted(existing)}"
+                    )
                 for item in prepared:
                     conn.execute(
                         "INSERT INTO system_events "
