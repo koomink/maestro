@@ -1,3 +1,4 @@
+import fcntl
 import json
 import multiprocessing
 import os
@@ -27,38 +28,82 @@ def _hold_live_order_lock(db_path, hold_seconds, ready, done):
     done.set()
 
 
-class _DiagnosticWriteFailingFile:
-    """Wraps a real lock file, making write()/truncate() raise OSError from a
-    given 1-based call count onward, without touching the flock itself.
+def _fail_diagnostic_record_io(
+    monkeypatch,
+    store,
+    *,
+    fail_write_from_call=None,
+    fail_ftruncate_from_call=None,
+):
+    """Make the unbuffered diagnostic record I/O raise ENOSPC from a given
+    1-based call count onward, for the writer lock file's fd only.
 
-    Used to simulate a full disk (ENOSPC) hitting only the lock-holder
-    diagnostic write/clear helpers -- not the flock acquire/release path.
+    The fault is injected at os.write/os.ftruncate -- the calls the helpers now
+    use -- and never touches flock. Restricting it to the lock file's own fd
+    matters: pytest's output capture goes through os.write too.
+    """
+    real_open = Path.open
+    real_write = os.write
+    real_ftruncate = os.ftruncate
+    target_fds = set()
+    calls = {"write": 0, "ftruncate": 0}
+
+    def fake_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        if self == store.writer_lock_path:
+            target_fds.add(handle.fileno())
+        return handle
+
+    def fake_write(fd, data):
+        if fd in target_fds:
+            calls["write"] += 1
+            if fail_write_from_call is not None and calls["write"] >= fail_write_from_call:
+                raise OSError(28, "No space left on device")
+        return real_write(fd, data)
+
+    def fake_ftruncate(fd, length):
+        if fd in target_fds:
+            calls["ftruncate"] += 1
+            if (
+                fail_ftruncate_from_call is not None
+                and calls["ftruncate"] >= fail_ftruncate_from_call
+            ):
+                raise OSError(28, "No space left on device")
+        return real_ftruncate(fd, length)
+
+    monkeypatch.setattr(Path, "open", fake_open)
+    monkeypatch.setattr(os, "write", fake_write)
+    monkeypatch.setattr(os, "ftruncate", fake_ftruncate)
+    return calls
+
+
+class _DirtyBufferLockFile:
+    """Mimics a buffered text stream whose diagnostic write left the buffer dirty.
+
+    The real failure this stands in for: on a full disk ``write()`` only fills
+    the Python-level buffer, ``flush()`` raises ENOSPC (and is swallowed inside
+    the diagnostic helper), the dirty buffer survives, and the *close* performed
+    when the lock file goes out of scope -- after flock is released and outside
+    every guard -- flushes again and raises ``OSError`` at the caller.
+
+    ``close()`` still closes the real handle before raising, exactly as
+    CPython's ``TextIOWrapper.close()`` does when its flush fails.
     """
 
-    def __init__(self, real, *, fail_write_from_call=None, fail_truncate_from_call=None):
+    def __init__(self, real):
         self._real = real
-        self._fail_write_from_call = fail_write_from_call
-        self._fail_truncate_from_call = fail_truncate_from_call
-        self._write_calls = 0
-        self._truncate_calls = 0
+        self.close_calls = 0
 
     def write(self, data):
-        self._write_calls += 1
-        if (
-            self._fail_write_from_call is not None
-            and self._write_calls >= self._fail_write_from_call
-        ):
-            raise OSError(28, "No space left on device")
-        return self._real.write(data)
+        return len(data)  # accepted into the "buffer", never reaches the disk
 
-    def truncate(self, *args):
-        self._truncate_calls += 1
-        if (
-            self._fail_truncate_from_call is not None
-            and self._truncate_calls >= self._fail_truncate_from_call
-        ):
-            raise OSError(28, "No space left on device")
-        return self._real.truncate(*args)
+    def flush(self):
+        raise OSError(28, "No space left on device")
+
+    def close(self):
+        self.close_calls += 1
+        self._real.close()
+        raise OSError(28, "No space left on device")
 
     def __getattr__(self, name):
         return getattr(self._real, name)
@@ -67,7 +112,25 @@ class _DiagnosticWriteFailingFile:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        return self._real.__exit__(exc_type, exc, tb)
+        self.close()
+        return False
+
+
+def _patch_lock_file_with(monkeypatch, store, factory):
+    """Make every ``Path.open`` of the writer lock file return ``factory(handle)``."""
+    real_open = Path.open
+    made = []
+
+    def fake_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        if self == store.writer_lock_path:
+            wrapper = factory(handle)
+            made.append(wrapper)
+            return wrapper
+        return handle
+
+    monkeypatch.setattr(Path, "open", fake_open)
+    return made
 
 
 def test_list_system_events_by_type_filters_by_since(tmp_path):
@@ -267,18 +330,13 @@ def test_write_lock_holder_failure_does_not_prevent_lock_acquisition_or_release(
 ):
     """A disk fault during the diagnostic write must never affect the flock itself."""
     store = StateStore(str(tmp_path / "state.db"), 0)
-    real_open = Path.open
-
-    def fake_open(self, *args, **kwargs):
-        handle = real_open(self, *args, **kwargs)
-        if self == store.writer_lock_path:
-            return _DiagnosticWriteFailingFile(handle, fail_write_from_call=1)
-        return handle
-
-    monkeypatch.setattr(Path, "open", fake_open)
+    calls = _fail_diagnostic_record_io(monkeypatch, store, fail_write_from_call=1)
 
     with store.writer_lock("victim"):
         pass  # must not raise even though the diagnostic write fails
+
+    assert calls["write"] >= 1  # the fault really was injected
+    monkeypatch.undo()
 
     # The flock must be released cleanly and the depth counter balanced --
     # reacquiring proves both (a leaked flock or a stuck depth would hang or
@@ -290,24 +348,61 @@ def test_write_lock_holder_failure_does_not_prevent_lock_acquisition_or_release(
 def test_clear_lock_holder_failure_preserves_the_original_exception(tmp_path, monkeypatch):
     """A disk fault while clearing the holder record must not mask the caller's error."""
     store = StateStore(str(tmp_path / "state.db"), 0)
-    real_open = Path.open
-
-    def fake_open(self, *args, **kwargs):
-        handle = real_open(self, *args, **kwargs)
-        if self == store.writer_lock_path:
-            # Call 1 is the acquire-time _write_lock_holder truncate; call 2
-            # onward is the release-time _clear_lock_holder truncate -- only
-            # the latter should fail, isolating this test to _clear_lock_holder.
-            return _DiagnosticWriteFailingFile(handle, fail_truncate_from_call=2)
-        return handle
-
-    monkeypatch.setattr(Path, "open", fake_open)
+    # Call 1 is the acquire-time _write_lock_holder ftruncate; call 2 onward is
+    # the release-time _clear_lock_holder ftruncate -- only the latter should
+    # fail, isolating this test to _clear_lock_holder.
+    calls = _fail_diagnostic_record_io(monkeypatch, store, fail_ftruncate_from_call=2)
 
     with pytest.raises(RuntimeError, match="^original business error$"):
         with store.writer_lock("victim"):
             raise RuntimeError("original business error")
 
+    assert calls["ftruncate"] >= 2  # the release-time fault really was injected
+    monkeypatch.undo()
+
     # The lock must still be released cleanly despite the diagnostic-clear failure.
+    with store.writer_lock("victim_again"):
+        pass
+
+
+def test_lock_file_close_failure_does_not_escape_the_lock(tmp_path, monkeypatch):
+    """H1: a close-time flush of a dirty diagnostic buffer must not raise at the caller.
+
+    The lock must still be acquired (exclusively), still be released, and the
+    ``with`` block must return normally even though flush/close both raise.
+    """
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    wrappers = _patch_lock_file_with(monkeypatch, store, _DirtyBufferLockFile)
+
+    body_ran = False
+    with store.writer_lock("victim"):
+        body_ran = True
+        # The flock must really be held while the diagnostic write is failing.
+        with open(store.writer_lock_path, "a+", encoding="utf-8") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    assert body_ran
+    assert wrappers and wrappers[0].close_calls == 1  # the close really was attempted
+
+    # The flock must have been released: with the fault removed, reacquiring
+    # must succeed (a leaked flock or an unbalanced depth counter would not).
+    monkeypatch.undo()
+    with store.writer_lock("victim_again"):
+        pass
+
+
+def test_lock_file_close_failure_preserves_the_original_exception(tmp_path, monkeypatch):
+    """H1: the caller's trading error must reach the caller with its own type and
+    message -- callers catch (RuntimeError, TimeoutError, ValueError), never OSError."""
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    _patch_lock_file_with(monkeypatch, store, _DirtyBufferLockFile)
+
+    with pytest.raises(RuntimeError, match="^original business error$"):
+        with store.writer_lock("victim"):
+            raise RuntimeError("original business error")
+
+    monkeypatch.undo()
     with store.writer_lock("victim_again"):
         pass
 

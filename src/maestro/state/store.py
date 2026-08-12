@@ -299,7 +299,10 @@ class StateStore:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout_seconds
         started = time.monotonic()
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
+        # Not a ``with`` block: closing this file must never raise into the
+        # caller nor replace a propagating exception (see _close_lock_file).
+        lock_file = lock_path.open("a+", encoding="utf-8")
+        try:
             while True:
                 try:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -325,14 +328,34 @@ class StateStore:
                     setattr(self._lock_depths, depth_attr, depth - 1)
                 self._clear_lock_holder(lock_file)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._close_lock_file(lock_file)
 
     @staticmethod
-    def _write_lock_holder(lock_file: Any, owner: str) -> None:
+    def _write_all(fd: int, payload: bytes) -> None:
+        """Unbuffered write of the whole payload; ``os.write`` may write partially."""
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                break
+            view = view[written:]
+
+    @classmethod
+    def _write_lock_holder(cls, lock_file: Any, owner: str) -> None:
         """Called only while the exclusive flock is held — no write race.
 
         This is a diagnostic write. A failure here (e.g. ENOSPC) must never
         prevent the caller from acquiring the lock or change what exception
         acquisition raises, so every exception is swallowed.
+
+        The record is written with unbuffered file-descriptor calls
+        (``os.ftruncate``/``os.write``) rather than through the buffered text
+        stream: a buffered write that fails at ``flush()`` leaves the buffer
+        dirty, and the later ``close()`` — which happens after flock release,
+        outside this guard — would flush again and raise ``OSError`` at the
+        caller. With no Python-level buffer involved, every I/O error surfaces
+        here, where it is swallowed.
         """
         try:
             record = {
@@ -340,10 +363,10 @@ class StateStore:
                 "pid": os.getpid(),
                 "acquired_at": datetime.now(UTC).isoformat(),
             }
-            lock_file.seek(0)
-            lock_file.truncate()
-            lock_file.write(json.dumps(record, ensure_ascii=False))
-            lock_file.flush()
+            fd = lock_file.fileno()
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            cls._write_all(fd, json.dumps(record, ensure_ascii=False).encode("utf-8"))
         except Exception:
             pass
 
@@ -353,12 +376,25 @@ class StateStore:
 
         This runs in the ``finally`` of the guarded block, so a failure here
         must never replace or mask whatever exception (if any) is already
-        propagating out of the caller's business logic.
+        propagating out of the caller's business logic. Unbuffered for the same
+        reason as _write_lock_holder.
         """
         try:
-            lock_file.seek(0)
-            lock_file.truncate()
-            lock_file.flush()
+            os.ftruncate(lock_file.fileno(), 0)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _close_lock_file(lock_file: Any) -> None:
+        """Close the lock file so that the close can never disturb the outcome.
+
+        The flock is already released by the time this runs. A ``with`` block
+        here would let a close-time error (a dirty buffer flushed at close, or
+        EIO on close) escape from outside every guard — replacing a propagating
+        trading exception with an ``OSError`` that no caller catches.
+        """
+        try:
+            lock_file.close()
         except Exception:
             pass
 
