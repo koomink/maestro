@@ -147,6 +147,57 @@ def test_live_order_lock_records_its_own_holder(tmp_path):
         assert holder["owner"] == "resolve_pending_signal_approval"
 
 
+def test_timeout_message_names_the_holder(tmp_path):
+    db = str(tmp_path / "state.db")
+    StateStore(db, 0)
+    ready = multiprocessing.Event()
+    done = multiprocessing.Event()
+    proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 3.0, ready, done))
+    proc.start()
+    try:
+        assert ready.wait(timeout=10)
+        store = StateStore(db, 0)
+        with pytest.raises(TimeoutError) as exc_info:
+            with store.writer_lock("victim", timeout_seconds=0.3):
+                pass
+        message = str(exc_info.value)
+        assert "State writer lock is busy" in message  # existing prefix preserved
+        assert "holder" in message
+        assert str(proc.pid) in message  # the actual holder's PID
+        assert "waited" in message
+    finally:
+        proc.join(timeout=10)
+
+
+def test_timeout_message_says_unknown_when_the_record_is_missing(tmp_path, monkeypatch):
+    """Even without a record, the exception type and prefix stay the same."""
+    store = StateStore(str(tmp_path / "state.db"), 0)
+    monkeypatch.setattr(StateStore, "_write_lock_holder", staticmethod(lambda *a, **k: None))
+    ready = multiprocessing.Event()
+    done = multiprocessing.Event()
+    # Contend with another thread in the same process -- _lock_depths is
+    # thread-local, so this actually blocks.
+    import threading
+
+    def hold():
+        with store.writer_lock("holder"):
+            ready.set()
+            done.wait(timeout=5)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert ready.wait(timeout=5)
+        with pytest.raises(TimeoutError) as exc_info:
+            with store.writer_lock("victim", timeout_seconds=0.3):
+                pass
+        assert "State writer lock is busy" in str(exc_info.value)
+        assert "unknown" in str(exc_info.value)
+    finally:
+        done.set()
+        thread.join(timeout=5)
+
+
 def test_read_lock_holder_tolerates_truncated_multibyte_utf8(tmp_path):
     store = StateStore(str(tmp_path / "state.db"), 0)
     record = {"owner": "보유자", "pid": 123, "acquired_at": "2026-08-12T00:00:00+00:00"}

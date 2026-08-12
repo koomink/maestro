@@ -297,6 +297,7 @@ class StateStore:
             return
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout_seconds
+        started = time.monotonic()
         with lock_path.open("a+", encoding="utf-8") as lock_file:
             while True:
                 try:
@@ -304,7 +305,10 @@ class StateStore:
                     break
                 except BlockingIOError as exc:
                     if time.monotonic() >= deadline:
-                        raise TimeoutError(busy_message) from exc
+                        raise TimeoutError(
+                            f"{busy_message} ({self._describe_lock_holder(lock_path)}, "
+                            f"waited {time.monotonic() - started:.1f}s)"
+                        ) from exc
                     time.sleep(0.1)
             self._write_lock_holder(lock_file, owner)
             if depth_attr is not None:
@@ -338,6 +342,17 @@ class StateStore:
         lock_file.seek(0)
         lock_file.truncate()
         lock_file.flush()
+
+    @classmethod
+    def _describe_lock_holder(cls, lock_path: Path) -> str:
+        holder = cls.read_lock_holder(lock_path)
+        if not holder:
+            return "holder unknown"
+        return (
+            f"holder {holder.get('owner', 'unknown')} "
+            f"pid={holder.get('pid', 'unknown')} "
+            f"since {holder.get('acquired_at', 'unknown')}"
+        )
 
     @staticmethod
     def read_lock_holder(lock_path: Path) -> dict[str, Any] | None:
