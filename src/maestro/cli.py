@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import sqlite3
 import subprocess
 import time
 from collections.abc import Callable
@@ -719,9 +720,15 @@ def _send_no_action_notice(
     for chat_id in chat_ids:
         duplicate_key = f"telegram-no-action:{today}:{scope}:{chat_id}"
         try:
-            if store.duplicate_key_exists(duplicate_key):
-                continue
-            client.send_message(int(chat_id), ui_catalog.NO_ACTION_NOTICE)
+            # 전송 **전에** 원자적으로 자리를 잡는다. duplicate_key의 UNIQUE
+            # 인덱스가 곧 claim이므로 조회 후 기록 사이의 틈이 없다. 보내고 나서
+            # 기록하면 그 사이에 프로세스가 죽었을 때 다음 실행이 같은 알림을
+            # 다시 보낸다 -- 정상 재실행 테스트만으로는 보이지 않는 구멍이다.
+            #
+            # 그 대가로 이 알림은 at-most-once다: 전송이 실패한 채팅은 그날
+            # 알림을 잃는다. 승인 카드와 달리 버튼이 없어 놓친 쪽이 덜 위험하고,
+            # 세 상태(intent/result/failure)를 한 줄짜리 알림에 들이는 것보다
+            # 단순하다. 놓친 채팅은 아래 경고로 남는다.
             save_audited_system_event(
                 store,
                 audit,
@@ -734,6 +741,13 @@ def _send_no_action_notice(
                     "duplicate_key": duplicate_key,
                 },
             )
+        except sqlite3.IntegrityError:
+            continue  # 이미 보냈거나, 보내는 중에 중단된 실행이 자리를 잡아 두었다
+        except Exception as exc:  # noqa: BLE001 - 채팅 하나가 나머지를 막지 않는다
+            typer.echo(f"telegram_no_action=warn chat={chat_id} message={exc}")
+            continue
+        try:
+            client.send_message(int(chat_id), ui_catalog.NO_ACTION_NOTICE)
         except Exception as exc:  # noqa: BLE001 - 채팅 하나가 나머지를 막지 않는다
             typer.echo(f"telegram_no_action=warn chat={chat_id} message={exc}")
             continue

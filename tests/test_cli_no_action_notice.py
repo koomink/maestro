@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from maestro import cli as _cli
 from maestro.cli import _run_daily_signal_approval
 from maestro.config.loader import load_config
 from maestro.integrations.telegram.ui.catalog import NO_ACTION_NOTICE
@@ -49,9 +50,12 @@ def _drive_no_action_day(
     budget_sent=False,
     strategies=("tranquillo",),
     failing_chats=(),
+    order=None,
+    crash_after_send=False,
 ):
     sent: list[tuple[int, str]] = []
     unreachable = set(failing_chats)
+    trace = order if order is not None else []
 
     class FakeBotClient:
         def __init__(self, **kwargs):
@@ -61,7 +65,10 @@ def _drive_no_action_day(
             del reply_markup
             if chat_id in unreachable:
                 raise RuntimeError(f"telegram unreachable for chat {chat_id}")
+            trace.append("send")
             sent.append((chat_id, text))
+            if crash_after_send:
+                raise KeyboardInterrupt("process died before recording the send")
             return {"ok": True, "result": {"message_id": len(sent)}}
 
     class FakeOrchestrator:
@@ -77,6 +84,14 @@ def _drive_no_action_day(
     monkeypatch.setattr("maestro.cli._refresh_daily_readonly", lambda config, identity: None)
     monkeypatch.setattr("maestro.cli.MaestroOrchestrator", FakeOrchestrator)
     monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", FakeBotClient)
+    real_save = _cli.save_audited_system_event
+
+    def traced_save(store, audit, run_id, event_type, payload):
+        if event_type == "telegram_no_action_notice":
+            trace.append("claim")
+        return real_save(store, audit, run_id, event_type, payload)
+
+    monkeypatch.setattr("maestro.cli.save_audited_system_event", traced_save)
     monkeypatch.setattr(
         "maestro.cli._send_signal_summary_notification", lambda config, summary: None
     )
@@ -89,13 +104,16 @@ def _drive_no_action_day(
         lambda config, signal_run_id: funding_sent,
     )
 
-    _run_daily_signal_approval(
-        readonly_config=Path("readonly.yaml"),
-        signal_config=Path("signal.yaml"),
-        approval_config=Path("approval.yaml"),
-        stop_telegram_operator=False,
-        telegram_operator_service="maestro-telegram-operator.service",
-    )
+    try:
+        _run_daily_signal_approval(
+            readonly_config=Path("readonly.yaml"),
+            signal_config=Path("signal.yaml"),
+            approval_config=Path("approval.yaml"),
+            stop_telegram_operator=False,
+            telegram_operator_service="maestro-telegram-operator.service",
+        )
+    except KeyboardInterrupt:
+        pass  # 프로세스가 죽은 자리를 그대로 흉내낸 것
     return sent
 
 
@@ -173,11 +191,41 @@ def test_one_unreachable_chat_does_not_silence_the_rest(monkeypatch, tmp_path):
     assert sent == [(200, NO_ACTION_NOTICE)]
 
 
-def test_a_chat_that_failed_is_retried_while_the_others_are_not(monkeypatch, tmp_path):
-    """성공한 채팅만 완료로 기록한다 — 리마인더 sweep이 쓰는 규약 그대로."""
+def test_the_claim_is_written_before_the_send(monkeypatch, tmp_path):
+    """전송 후 기록 전에 죽으면 다음 실행이 같은 알림을 다시 보낸다.
+
+    승인 카드와 달리 이 알림에는 버튼이 없으므로, 세 상태(intent/result/failure)
+    까지 가지 않고 전송 전 원자적 claim으로 at-most-once를 취한다.
+    """
+    config = _telegram_config(tmp_path)
+    order: list[str] = []
+
+    sent = _drive_no_action_day(monkeypatch, config, order=order)
+
+    assert sent, "알림이 나가야 한다"
+    assert order[:2] == ["claim", "send"], f"claim이 먼저여야 한다: {order}"
+
+
+def test_a_notice_lost_to_a_crash_after_sending_is_not_repeated(monkeypatch, tmp_path):
+    """전송은 성공했는데 프로세스가 죽은 경우 — claim이 이미 남아 있다."""
+    config = _telegram_config(tmp_path)
+    crashed = _drive_no_action_day(monkeypatch, config, crash_after_send=True)
+    assert crashed == [(100, NO_ACTION_NOTICE)]
+
+    sent = _drive_no_action_day(monkeypatch, config)
+
+    assert sent == [(200, NO_ACTION_NOTICE)], "중단된 실행이 보낸 알림을 다시 보냈다"
+
+
+def test_a_chat_that_failed_is_not_resent_the_next_run(monkeypatch, tmp_path):
+    """at-most-once의 대가: 전송이 실패한 채팅은 그날 알림을 잃는다.
+
+    claim을 먼저 쓰기 때문이다. 놓친 채팅은 로그로 남고, 일간 실행이 통째로
+    실패한 경우는 별도의 실패 알림이 덮는다.
+    """
     config = _telegram_config(tmp_path)
     _drive_no_action_day(monkeypatch, config, failing_chats={100})
 
     sent = _drive_no_action_day(monkeypatch, config)
 
-    assert sent == [(100, NO_ACTION_NOTICE)]
+    assert sent == []
