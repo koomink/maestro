@@ -8,6 +8,7 @@ from maestro.integrations.telegram.ui.cards import (
     approval_detail_pages,
     approval_reminder_text,
     render_approval_card,
+    render_approval_stage_card,
     telegram_text_length,
 )
 
@@ -339,3 +340,58 @@ def test_decision_text_for_expired_does_not_claim_the_operator_rejected():
     text = approval_decision_text("expired", "appr_x", orders_submitted=0, orders_failed=0)
     assert text == catalog.DECISION_EXPIRED
     assert "거절" not in text
+
+
+def test_the_pending_stage_card_is_byte_identical_to_the_plain_approval_card():
+    """Stage 2 must not change what the operator sees before deciding.
+
+    The dispatch path renders through the stage-aware function now, so any
+    divergence here would silently redesign the approval card that production
+    has been sending all along.
+    """
+    request = _request()
+
+    assert render_approval_stage_card(request, "pending") == render_approval_card(
+        request, expanded=False
+    )
+
+
+def test_a_decided_card_keeps_the_body_and_gains_a_stage_header():
+    """One card carries both what was ordered and how far it got.
+
+    Replacing the body with a bare result line is what the stream of separate
+    notifications already did; the point of the card is that the two stay
+    together.
+    """
+    card = render_approval_stage_card(_request(), "in_progress")
+
+    assert card.text.startswith(catalog.CARD_STAGE_LABELS["in_progress"])
+    assert "KODEX 200" in card.text
+    assert catalog.APPROVAL_TITLE in card.text
+
+
+def test_the_buttons_disappear_once_the_decision_is_made():
+    """A decided approval that still offers 승인/거절 invites a second decision.
+
+    The callback would be rejected as stale, but only after the operator has
+    been told the thing is still theirs to decide.
+    """
+    for stage in ("in_progress", "done", "attention"):
+        assert render_approval_stage_card(_request(), stage).reply_markup is None
+
+
+def test_an_unknown_stage_falls_back_to_the_pending_card():
+    """A stage we cannot name must not drop the buttons off a live approval."""
+    card = render_approval_stage_card(_request(), "not_a_stage")
+
+    assert card.reply_markup is not None
+
+
+def test_a_stage_card_stays_within_the_telegram_limit():
+    """The header is added on top of a body already clamped to the limit."""
+    request = _request()
+    request.proposed_orders = request.proposed_orders * 200
+
+    card = render_approval_stage_card(request, "attention")
+
+    assert telegram_text_length(card.text) <= TELEGRAM_TEXT_LIMIT

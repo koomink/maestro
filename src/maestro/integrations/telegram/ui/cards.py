@@ -66,6 +66,30 @@ def render_approval_card(
     )
 
 
+def render_approval_stage_card(request: ApprovalRequest, stage: str) -> RenderedCard:
+    """The one approval card, rendered at whatever stage it has reached.
+
+    Before a decision this is exactly the card production already sends --
+    identical bytes, buttons and all -- so the lifecycle taking over delivery
+    changes nothing the operator sees. Afterwards the body stays and a stage
+    line goes on top: the card is meant to replace a stream of notifications,
+    and a bare result line would lose what was actually ordered.
+
+    The buttons go away with the decision. Leaving them on a resolved approval
+    offers a choice that is no longer there -- the callback is refused as
+    stale, but only after the operator believed it was still theirs to make.
+    """
+    label = catalog.CARD_STAGE_LABELS.get(stage)
+    if stage == "pending" or label is None:
+        # An unrecognised stage must not strip the buttons off a live approval,
+        # so anything we cannot name renders as the actionable card.
+        return render_approval_card(request, expanded=False)
+    return RenderedCard(
+        text=_clamp(f"{label}\n\n{_collapsed_text(request)}"),
+        reply_markup=None,
+    )
+
+
 def approval_detail_pages(request: ApprovalRequest) -> list[str]:
     """펼친 뷰 전체 내용을 Telegram 길이 한도 이하의 쪽들로 나눈다."""
     header = _header_lines(request)
