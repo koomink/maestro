@@ -17,6 +17,9 @@
 - **모든 하중 테스트는 뮤테이션으로 비공허성을 증명한다.** 구현을 되돌려 테스트가 실패하는 것을 확인하고 복원한다.
 - **상태 키는 `(card_key, chat_id)`.** `card_key` 단독으로 `message_id`를 들고 있는 자료구조를 만들지 않는다. 운영 chat이 현재 하나뿐이라는 사실은 이 계약을 접을 근거가 아니다.
 - **전송 전 intent를 먼저 기록한다.** `sendMessage`/`editMessageText` 호출 앞에 intent, 응답 뒤에 result. intent만 있고 result 없는 상태가 조회 가능해야 한다.
+- **모르는 것을 안다고 취급하지 않는다.** intent만 남은 복사본은 *미전달*이 아니라 **전달 여부 불명(ambiguous)**이다. 자동 재전송하지 않는다. 관측 가능성을 만든 뒤 그 위에서 곧바로 자동 조치를 하는 것은 이 프로젝트가 오늘 이미 한 번 저지른 실수다 — 락 스펙 3회차에서 "만료된 리스를 자동 회수"가 정확히 같은 모양이었고, 같은 이유로 철회했다.
+- **`StateStore.list_system_events_by_type`는 `ORDER BY id DESC`다** (`store.py:1815`). 이벤트를 시간순으로 접으려면 반드시 뒤집어야 한다. 기본 `limit`은 10이므로 항상 명시한다.
+- **`duplicate_key`에는 UNIQUE 인덱스가 있고**(`store.py:203`) `save_system_event`는 평범한 INSERT다. 같은 키를 두 번 쓰면 `IntegrityError`다. 재시도 가능한 이벤트의 키에는 시도별 고유값이 들어가야 한다.
 - **의존성 방향은 `handlers.py → ui/` 단방향.** `ui/`는 handlers·orchestrator·execution을 임포트하지 않는다.
 - **기존 알림 경로를 제거하지 않는다.** 개별 주문 알림·미체결 경고·halt·정산 불일치 알림은 카드와 **병행 유지**한다(스펙 「단계 2의 안전망」). 제거는 단계 5다.
 - **UI 실패가 거래를 막지 않는다.** 단, 조용히 사라지지도 않는다 — 연속 3회 실패는 고정 템플릿 알림과 healthcheck degraded로 이어진다.
@@ -31,6 +34,7 @@
 | 파일 | 책임 |
 |---|---|
 | `src/maestro/integrations/telegram/ui/card_state.py` (신규) | `telegram_ui_card` 이벤트의 스키마와 순수 해석 함수 — 이벤트 목록 → 현재 전달 복사본 상태 |
+| `src/maestro/integrations/telegram/ui/approval_stage.py` (신규) | 승인 payload → 카드 단계 판정 (순수 함수, 역행 금지 순위 포함) |
 | `src/maestro/integrations/telegram/ui/lifecycle.py` (신규) | 유일한 상태 보유 컴포넌트. 전송(intent→send→result), sweep 갱신, 폴백 |
 | `src/maestro/integrations/telegram/ui/cards.py` | 기존 승인 카드 + 신규 데일리 요약 카드 렌더러 (순수 함수) |
 | `src/maestro/integrations/telegram/ui/catalog.py` | 신규 문구 (노옵, 폴백 템플릿) |
@@ -50,11 +54,17 @@
 - Consumes: 없음
 - Produces:
   - `CardStage` — `Literal["pending", "in_progress", "done", "attention"]`
-  - `CardIntent(card_key: str, chat_id: int, stage: str, render_hash: str)` — NamedTuple
-  - `CardCopy(card_key, chat_id, message_id: int | None, stage: str, render_hash: str, delivered: bool)` — NamedTuple
-  - `card_intent_event(card_key, chat_id, stage, render_hash) -> dict[str, Any]`
-  - `card_result_event(card_key, chat_id, stage, render_hash, message_id) -> dict[str, Any]`
-  - `resolve_card_copies(events: Sequence[Mapping[str, Any]]) -> dict[tuple[str, int], CardCopy]`
+  - `Delivery` — `Literal["confirmed", "failed", "unknown"]`
+  - `CardCopy(card_key, chat_id, message_id: int | None, stage: str, render_hash: str, delivery: str, operation_id: str)` — NamedTuple
+  - `new_operation_id() -> str`
+  - `card_intent_event(card_key, chat_id, stage, render_hash, operation_id) -> dict[str, Any]`
+  - `card_result_event(card_key, chat_id, stage, render_hash, operation_id, message_id) -> dict[str, Any]`
+  - `card_failure_event(card_key, chat_id, stage, render_hash, operation_id, error: str) -> dict[str, Any]`
+  - `resolve_card_copies(events: Sequence[Mapping[str, Any]]) -> dict[tuple[str, int], CardCopy]` — **events는 오래된 것부터**
+
+**왜 `delivered: bool`이 아니라 `delivery` 3값인가.** boolean은 "전달됨/안 됨"만 표현하는데, 실제로는 세 번째 상태가 있다. 예외를 잡아 실패를 기록한 경우는 **전달되지 않았음을 안다**(`failed`). 프로세스가 호출 도중 죽어 intent만 남은 경우는 **모른다**(`unknown`). 이 둘을 boolean으로 뭉치면 후자를 전자처럼 재전송하게 되고, 원래 전송이 성공했다면 버튼 달린 카드가 두 장 생긴다. 두 번째 카드는 갱신되지 않으므로 영원히 "⏳ 승인 대기"로 남고, 진짜 카드가 "✅ 완료"일 때 운영자가 그 낡은 쪽을 보면 승인이 아직 안 됐다고 판단한다.
+
+**왜 `operation_id`인가.** `duplicate_key`가 `(phase, card_key, chat_id, stage)`까지만이면 같은 단계의 두 번째 시도가 같은 키를 쓴다. UNIQUE 인덱스에 걸려 재시도 자체가 `IntegrityError`로 죽는다. 시도마다 고유 id를 부여하고 intent·result·failure가 그 id를 공유하게 하면, 재시도가 가능해지는 동시에 3a-3이 "어느 intent가 어느 결과와 짝인지"를 복원할 수 있다.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -86,31 +96,54 @@ def test_one_logical_card_keeps_a_separate_copy_per_chat():
     assert copies[("approval:appr_1", 200)].message_id == 5002
 
 
-def test_an_intent_without_a_result_is_observable():
-    """The crash window must be visible, not silently absent.
+def test_an_intent_without_a_result_is_unknown_not_undelivered():
+    """The crash window must read as "we do not know", never as "not sent".
 
     If sendMessage succeeded and the process died before the result was
-    written, the card exists in Telegram with no message_id here. Healing that
-    is 3a-3, but it can only heal what it can see.
+    written, the card exists in Telegram with no message_id here. Calling that
+    undelivered invites a resend that duplicates a card nobody can update.
     """
-    events = [card_intent_event("approval:appr_1", 100, "pending", "h1")]
+    events = [card_intent_event("approval:appr_1", 100, "pending", "h1", "op1")]
 
     copy = resolve_card_copies(events)[("approval:appr_1", 100)]
 
-    assert copy.delivered is False
+    assert copy.delivery == "unknown"
     assert copy.message_id is None
+
+
+def test_a_caught_error_records_a_known_failure():
+    """Distinct from unknown: we hold the exception, so it never left."""
+    events = [
+        card_intent_event("approval:appr_1", 100, "pending", "h1", "op1"),
+        card_failure_event("approval:appr_1", 100, "pending", "h1", "op1", "connection refused"),
+    ]
+
+    assert resolve_card_copies(events)[("approval:appr_1", 100)].delivery == "failed"
 
 
 def test_a_result_supersedes_its_intent():
     events = [
-        card_intent_event("approval:appr_1", 100, "pending", "h1"),
-        card_result_event("approval:appr_1", 100, "pending", "h1", 5001),
+        card_intent_event("approval:appr_1", 100, "pending", "h1", "op1"),
+        card_result_event("approval:appr_1", 100, "pending", "h1", "op1", 5001),
     ]
 
     copy = resolve_card_copies(events)[("approval:appr_1", 100)]
 
-    assert copy.delivered is True
+    assert copy.delivery == "confirmed"
     assert copy.message_id == 5001
+
+
+def test_a_retry_at_the_same_stage_gets_a_distinct_duplicate_key():
+    """system_events has a UNIQUE index on duplicate_key (store.py:203).
+
+    Without a per-attempt id the second attempt at one stage dies with
+    IntegrityError, which would make retry impossible by construction.
+    """
+    first = card_intent_event("approval:appr_1", 100, "pending", "h1", "op1")
+    second = card_intent_event("approval:appr_1", 100, "pending", "h1", "op2")
+
+    assert first["duplicate_key"] != second["duplicate_key"]
+    assert first["operation_id"] == "op1"
 
 
 def test_a_later_stage_supersedes_an_earlier_one_for_that_chat_only():
@@ -136,13 +169,33 @@ def test_events_are_ordered_by_arrival_not_by_stage_name():
     assert resolve_card_copies(events)[("approval:appr_1", 100)].stage == "in_progress"
 
 
-def test_a_duplicate_key_is_present_on_every_event():
-    """Without it the store cannot dedupe a retried write."""
-    intent = card_intent_event("approval:appr_1", 100, "pending", "h1")
-    result = card_result_event("approval:appr_1", 100, "pending", "h1", 5001)
+def test_intent_and_result_of_one_attempt_share_an_operation_id():
+    """3a-3 has to pair an outcome with the intent that caused it."""
+    intent = card_intent_event("approval:appr_1", 100, "pending", "h1", "op1")
+    result = card_result_event("approval:appr_1", 100, "pending", "h1", "op1", 5001)
 
-    assert intent["duplicate_key"] == "telegram-ui-card:intent:approval:appr_1:100:pending"
-    assert result["duplicate_key"] == "telegram-ui-card:result:approval:appr_1:100:pending"
+    assert intent["operation_id"] == result["operation_id"] == "op1"
+    assert intent["duplicate_key"] == "telegram-ui-card:intent:approval:appr_1:100:pending:op1"
+    assert result["duplicate_key"] == "telegram-ui-card:result:approval:appr_1:100:pending:op1"
+
+
+def test_events_must_be_folded_oldest_first():
+    """The store returns ORDER BY id DESC (store.py:1815).
+
+    Feeding that straight in makes the oldest event win, so a delivered card
+    reads back as unknown and the sweep sends it again. This pins the direction
+    the resolver expects; lifecycle.py is responsible for reversing.
+    """
+    oldest_first = [
+        card_intent_event("approval:appr_1", 100, "pending", "h1", "op1"),
+        card_result_event("approval:appr_1", 100, "pending", "h1", "op1", 5001),
+    ]
+
+    assert resolve_card_copies(oldest_first)[("approval:appr_1", 100)].delivery == "confirmed"
+    assert (
+        resolve_card_copies(list(reversed(oldest_first)))[("approval:appr_1", 100)].delivery
+        == "unknown"
+    )
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -169,46 +222,95 @@ CardStage = Literal["pending", "in_progress", "done", "attention"]
 EVENT_TYPE = "telegram_ui_card"
 
 
+Delivery = Literal["confirmed", "failed", "unknown"]
+
+_PHASE_DELIVERY: dict[str, Delivery] = {
+    "intent": "unknown",
+    "result": "confirmed",
+    "failure": "failed",
+}
+
+
 class CardCopy(NamedTuple):
     card_key: str
     chat_id: int
     message_id: int | None
     stage: str
     render_hash: str
-    delivered: bool
+    delivery: str
+    operation_id: str
 
 
-def _duplicate_key(phase: str, card_key: str, chat_id: int, stage: str) -> str:
-    return f"telegram-ui-card:{phase}:{card_key}:{chat_id}:{stage}"
+def new_operation_id() -> str:
+    return uuid.uuid4().hex[:16]
+
+
+def _duplicate_key(
+    phase: str, card_key: str, chat_id: int, stage: str, operation_id: str
+) -> str:
+    # operation_id is what makes a retry writable at all: system_events has a
+    # UNIQUE index on duplicate_key (store.py:203).
+    return f"telegram-ui-card:{phase}:{card_key}:{chat_id}:{stage}:{operation_id}"
+
+
+def _event(
+    phase: str,
+    card_key: str,
+    chat_id: int,
+    stage: str,
+    render_hash: str,
+    operation_id: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "card_key": card_key,
+        "chat_id": chat_id,
+        "stage": stage,
+        "render_hash": render_hash,
+        "operation_id": operation_id,
+        "duplicate_key": _duplicate_key(phase, card_key, chat_id, stage, operation_id),
+        **extra,
+    }
 
 
 def card_intent_event(
-    card_key: str, chat_id: int, stage: str, render_hash: str
+    card_key: str, chat_id: int, stage: str, render_hash: str, operation_id: str
 ) -> dict[str, Any]:
     """Written before the Telegram call, so a crash mid-send leaves a trace."""
-    return {
-        "phase": "intent",
-        "card_key": card_key,
-        "chat_id": chat_id,
-        "stage": stage,
-        "render_hash": render_hash,
-        "duplicate_key": _duplicate_key("intent", card_key, chat_id, stage),
-    }
+    return _event("intent", card_key, chat_id, stage, render_hash, operation_id)
 
 
 def card_result_event(
-    card_key: str, chat_id: int, stage: str, render_hash: str, message_id: int
+    card_key: str,
+    chat_id: int,
+    stage: str,
+    render_hash: str,
+    operation_id: str,
+    message_id: int,
 ) -> dict[str, Any]:
     """Written after the call. message_id does not exist before it."""
-    return {
-        "phase": "result",
-        "card_key": card_key,
-        "chat_id": chat_id,
-        "stage": stage,
-        "render_hash": render_hash,
-        "message_id": message_id,
-        "duplicate_key": _duplicate_key("result", card_key, chat_id, stage),
-    }
+    return _event(
+        "result", card_key, chat_id, stage, render_hash, operation_id, message_id=message_id
+    )
+
+
+def card_failure_event(
+    card_key: str,
+    chat_id: int,
+    stage: str,
+    render_hash: str,
+    operation_id: str,
+    error: str,
+) -> dict[str, Any]:
+    """Written when the client raised: we hold the error, so it never landed.
+
+    This is what separates a known failure from the unknown of a crash. Only a
+    known failure may be retried automatically.
+    """
+    return _event(
+        "failure", card_key, chat_id, stage, render_hash, operation_id, error=error
+    )
 
 
 def resolve_card_copies(
@@ -216,9 +318,15 @@ def resolve_card_copies(
 ) -> dict[tuple[str, int], CardCopy]:
     """Fold the event list into the current state of every delivery copy.
 
-    Later events win, in arrival order -- not in stage order. A status that
-    arrives out of sequence still describes what we last knew, and inventing a
-    stage ranking here would silently discard corrections.
+    **Events must arrive oldest first.** StateStore.list_system_events_by_type
+    returns ORDER BY id DESC (store.py:1815), so callers reverse it; folding
+    the store's order directly makes the oldest event win and a delivered card
+    read back as unknown.
+
+    Within that order the last event wins, in arrival order -- not in stage
+    order. A status that arrives out of sequence still describes what we last
+    knew, and inventing a stage ranking here would silently discard
+    corrections.
     """
     copies: dict[tuple[str, int], CardCopy] = {}
     for event in events:
@@ -228,7 +336,6 @@ def resolve_card_copies(
             continue
         key = (card_key, raw_chat_id)
         previous = copies.get(key)
-        is_result = event.get("phase") == "result"
         message_id = event.get("message_id")
         copies[key] = CardCopy(
             card_key=card_key,
@@ -240,10 +347,13 @@ def resolve_card_copies(
             ),
             stage=str(event.get("stage") or ""),
             render_hash=str(event.get("render_hash") or ""),
-            delivered=is_result,
+            delivery=_PHASE_DELIVERY.get(str(event.get("phase") or ""), "unknown"),
+            operation_id=str(event.get("operation_id") or ""),
         )
     return copies
 ```
+
+import에 `uuid`와 `Literal`을 추가한다.
 
 - [ ] **Step 4: Run the tests**
 
@@ -349,11 +459,9 @@ def test_a_crash_between_send_and_result_leaves_an_undelivered_intent(tmp_path):
     result = manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
     assert result["failed"] == (100,)
-    copies = resolve_card_copies(
-        [row["payload"] for row in store.list_system_events_by_type(EVENT_TYPE)]
-    )
-    copy = copies[("approval:appr_1", 100)]
-    assert copy.delivered is False
+    copy = _copies_from_store(store)[("approval:appr_1", 100)]
+    # Telegram accepted it and then we died: not "failed", "unknown".
+    assert copy.delivery == "unknown"
     assert copy.message_id is None
 
 
@@ -362,9 +470,7 @@ def test_every_chat_gets_its_own_copy(tmp_path):
 
     manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
-    copies = resolve_card_copies(
-        [row["payload"] for row in store.list_system_events_by_type(EVENT_TYPE)]
-    )
+    copies = _copies_from_store(store)
     assert sorted(chat_id for _, chat_id in copies) == [100, 200]
     assert copies[("approval:appr_1", 100)].message_id != copies[
         ("approval:appr_1", 200)
@@ -379,11 +485,16 @@ def test_one_failing_chat_does_not_block_the_others(tmp_path):
 
     assert result["sent"] == (200,)
     assert result["failed"] == (100,)
-    copies = resolve_card_copies(
-        [row["payload"] for row in store.list_system_events_by_type(EVENT_TYPE)]
-    )
-    assert copies[("approval:appr_1", 100)].delivered is False
-    assert copies[("approval:appr_1", 200)].delivered is True
+    copies = _copies_from_store(store)
+    # A caught exception is a *known* failure, so this one is retryable.
+    assert copies[("approval:appr_1", 100)].delivery == "failed"
+    assert copies[("approval:appr_1", 200)].delivery == "confirmed"
+
+
+def _copies_from_store(store):
+    """Read back the way lifecycle.py does: newest-first, so reverse it."""
+    rows = store.list_system_events_by_type(EVENT_TYPE, limit=2000)
+    return resolve_card_copies([row["payload"] for row in reversed(rows)])
 
 
 def test_the_render_hash_is_stable_for_equal_content(tmp_path):
@@ -454,22 +565,45 @@ class CardLifecycleManager:
         sent: list[int] = []
         failed: list[int] = []
         for chat_id in self.chat_ids:
+            operation_id = new_operation_id()
             self.store.save_system_event(
-                run_id, EVENT_TYPE, card_intent_event(card_key, chat_id, stage, render_hash)
+                run_id,
+                EVENT_TYPE,
+                card_intent_event(card_key, chat_id, stage, render_hash, operation_id),
             )
             try:
                 response = self._send(chat_id, rendered)
-            except Exception:  # noqa: BLE001 - one chat must not stop the rest
+            except Exception as exc:  # noqa: BLE001 - one chat must not stop the rest
+                # We hold the exception, so the message did not land. Recording
+                # that is what makes this attempt safe to retry later; without
+                # it the copy would be indistinguishable from a crash and
+                # would have to be left alone.
+                self.store.save_system_event(
+                    run_id,
+                    EVENT_TYPE,
+                    card_failure_event(
+                        card_key, chat_id, stage, render_hash, operation_id, str(exc)
+                    ),
+                )
                 failed.append(chat_id)
                 continue
             message_id = self._message_id(response)
             if message_id is None:
+                self.store.save_system_event(
+                    run_id,
+                    EVENT_TYPE,
+                    card_failure_event(
+                        card_key, chat_id, stage, render_hash, operation_id, "no message_id"
+                    ),
+                )
                 failed.append(chat_id)
                 continue
             self.store.save_system_event(
                 run_id,
                 EVENT_TYPE,
-                card_result_event(card_key, chat_id, stage, render_hash, message_id),
+                card_result_event(
+                    card_key, chat_id, stage, render_hash, operation_id, message_id
+                ),
             )
             sent.append(chat_id)
         return {"sent": tuple(sent), "failed": tuple(failed)}
@@ -545,8 +679,8 @@ def test_an_unchanged_render_is_not_sent_again(tmp_path):
     assert client.edited == []
 
 
-def test_an_undelivered_copy_is_sent_rather_than_edited(tmp_path):
-    """There is no message_id to edit, so the copy is delivered instead."""
+def test_a_known_failed_copy_is_sent_again(tmp_path):
+    """A caught exception means it never landed, so retrying is safe."""
     client = FakeClient(fail_for={100})
     store, manager = _manager(tmp_path, client)
     manager.deliver("run_1", "approval:appr_1", "pending", CARD)
@@ -557,6 +691,51 @@ def test_an_undelivered_copy_is_sent_rather_than_edited(tmp_path):
 
     assert 100 in result["sent"]
     assert 200 in result["edited"]
+
+
+def test_an_ambiguous_copy_is_never_resent(tmp_path):
+    """The crash window: Telegram may already hold this card.
+
+    Resending would post a second card we have no message_id for, so it never
+    updates -- it sits at the old stage forever while the real one moves on.
+    For an approval card with buttons and a deadline, an operator reading the
+    stale copy concludes the decision is still outstanding.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    # Only an intent: exactly what a process death mid-send leaves behind.
+    store.save_system_event(
+        "run_1",
+        EVENT_TYPE,
+        card_intent_event("approval:appr_1", 100, "pending", "h1", "op-crashed"),
+    )
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+
+    assert client.sent == []
+    assert client.edited == []
+    assert result["ambiguous"] == (100,)
+
+
+def test_a_delivered_card_is_not_resent_after_a_round_trip_through_the_store(tmp_path):
+    """The integration failure the unit tests cannot see.
+
+    resolve_card_copies folds oldest-first, but the store returns newest-first.
+    Hand-built ascending lists in the unit tests hide that; only a real read
+    back out of StateStore catches it. Getting this wrong makes every delivered
+    card look unknown, and the sweep escalates all of them.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    sent_after_first = len(client.sent)
+
+    result = manager.refresh("run_1", "approval:appr_1", "pending", CARD)
+
+    assert len(client.sent) == sent_after_first
+    assert result["skipped"] == (100,)
+    assert result["ambiguous"] == ()
 
 
 def test_an_edit_failure_falls_back_to_a_new_message(tmp_path):
@@ -627,18 +806,35 @@ Expected: FAIL — `AttributeError: 'CardLifecycleManager' object has no attribu
         skipped: list[int] = []
         sent: list[int] = []
         failed: list[int] = []
+        ambiguous: list[int] = []
         for chat_id in self.chat_ids:
             copy = copies.get((card_key, chat_id))
-            if copy is not None and copy.delivered and copy.render_hash == render_hash:
+            if (
+                copy is not None
+                and copy.delivery == "confirmed"
+                and copy.render_hash == render_hash
+            ):
                 skipped.append(chat_id)
                 continue
-            if copy is None or not copy.delivered or copy.message_id is None:
-                outcome = self.deliver(run_id, card_key, stage, rendered)
-                sent.extend(chat for chat in outcome["sent"] if chat == chat_id)
-                failed.extend(chat for chat in outcome["failed"] if chat == chat_id)
+            if copy is not None and copy.delivery == "unknown":
+                # We do not know whether Telegram already has this card, and
+                # the Bot API gives us no way to ask. Sending again is how a
+                # duplicate is created; staying silent is how one is avoided.
+                # The operator is told through the plain-text escalation path
+                # instead (Task 7), which does not add another button-bearing
+                # card for the same approval.
+                ambiguous.append(chat_id)
+                self._escalate_ambiguous(run_id, card_key, chat_id, stage)
                 continue
+            if copy is None or copy.message_id is None:
+                outcome = self._deliver_one(run_id, card_key, stage, rendered, chat_id)
+                (sent if outcome else failed).append(chat_id)
+                continue
+            operation_id = new_operation_id()
             self.store.save_system_event(
-                run_id, EVENT_TYPE, card_intent_event(card_key, chat_id, stage, render_hash)
+                run_id,
+                EVENT_TYPE,
+                card_intent_event(card_key, chat_id, stage, render_hash, operation_id),
             )
             try:
                 self.client.edit_message_text(
@@ -647,14 +843,27 @@ Expected: FAIL — `AttributeError: 'CardLifecycleManager' object has no attribu
                     rendered.text,
                     reply_markup=rendered.reply_markup,
                 )
-            except Exception:  # noqa: BLE001 - fall back to a fresh message
+            except Exception as exc:  # noqa: BLE001 - fall back to a fresh message
+                # An edit that raised did not change the message, and we still
+                # hold the original message_id, so this is a known failure --
+                # not the ambiguous case. A fresh send is the documented
+                # fallback for a 48h-expired or deleted message.
+                self.store.save_system_event(
+                    run_id,
+                    EVENT_TYPE,
+                    card_failure_event(
+                        card_key, chat_id, stage, render_hash, operation_id, str(exc)
+                    ),
+                )
                 outcome = self._deliver_one(run_id, card_key, stage, rendered, chat_id)
                 (sent if outcome else failed).append(chat_id)
                 continue
             self.store.save_system_event(
                 run_id,
                 EVENT_TYPE,
-                card_result_event(card_key, chat_id, stage, render_hash, copy.message_id),
+                card_result_event(
+                    card_key, chat_id, stage, render_hash, operation_id, copy.message_id
+                ),
             )
             edited.append(chat_id)
         return {
@@ -662,15 +871,21 @@ Expected: FAIL — `AttributeError: 'CardLifecycleManager' object has no attribu
             "skipped": tuple(skipped),
             "sent": tuple(sent),
             "failed": tuple(failed),
+            "ambiguous": tuple(ambiguous),
         }
 
     def _copies(self, card_key: str):
         from maestro.integrations.telegram.ui.card_state import resolve_card_copies
 
-        rows = self.store.list_system_events_by_type(EVENT_TYPE, limit=1000)
+        # list_system_events_by_type is ORDER BY id DESC (store.py:1815) and
+        # resolve_card_copies folds oldest-first, so this must be reversed.
+        # Feeding the store's order straight in makes a delivered card read
+        # back as unknown, and the sweep then treats it as needing repair.
+        rows = self.store.list_system_events_by_type(EVENT_TYPE, limit=2000)
+        payloads = [row["payload"] for row in reversed(rows)]
         return {
             key: copy
-            for key, copy in resolve_card_copies([row["payload"] for row in rows]).items()
+            for key, copy in resolve_card_copies(payloads).items()
             if key[0] == card_key
         }
 ```
@@ -838,9 +1053,95 @@ Expected: FAIL — `AttributeError: ... '_sweep_lifecycle_cards'`
         ):
 ```
 
-- [ ] **Step 4: Implement the sweep**
+- [ ] **Step 4: Implement the stage machine**
 
-`_sweep_lifecycle_cards` 는 활성 승인 봉투를 조회해 각 `approval:<approval_id>` 카드의 현재 단계를 판정하고 `self._card_manager.refresh(...)` 를 호출한다. 단계 판정은 기존 이벤트에서 읽는다: `telegram_approval_ack` → `in_progress`, `signal_approval_completed` → `done`, `live_order_recovery_required` → `attention`, 그 외 `pending`.
+**이벤트 *유형*만 보면 안 된다. payload를 읽어야 한다.** 운영 DB에서 확인한 실제 페이로드가 그 이유를 보여준다 — 2026-08-12 US 런의 `signal_approval_completed`는 `approval_status='approved'`이면서 `orders_failed=1`이다. 유형만 보고 `done`으로 매핑하면 **절반만 집행되고 중단된 로테이션이 "✅ 완료"로 표시된다.**
+
+`ui/approval_stage.py` (신규, 순수 함수)에 상태 머신을 둔다. handlers가 이벤트를 모아 넘기고, `ui/`는 판정만 한다:
+
+```python
+STAGE_RANK = {"pending": 0, "in_progress": 1, "done": 2, "attention": 3}
+
+
+def approval_stage(
+    ack: Mapping[str, Any] | None,
+    completed: Mapping[str, Any] | None,
+    unresolved_recovery: bool,
+) -> str:
+    """Decide one approval card's stage from payloads, not event types.
+
+    attention outranks everything: a run that needs a human must never be
+    displayed as finished, and the stage must not walk back to a calmer value
+    on a later sweep.
+    """
+    if unresolved_recovery:
+        return "attention"
+    if completed is not None:
+        failed = int(completed.get("orders_failed") or 0)
+        status = str(completed.get("approval_status") or "")
+        if failed > 0 or status not in {"approved", "not_required"}:
+            return "attention"
+        return "done"
+    if ack is not None:
+        status = str(ack.get("status") or "")
+        if status == "approved":
+            return "in_progress"
+        if status in {"rejected", "expired"}:
+            return "done"
+        return "attention"
+    return "pending"
+```
+
+**역행 금지**: sweep은 저장된 직전 단계와 비교해 `STAGE_RANK`가 낮아지는 전이를 무시한다. 순서가 뒤바뀐 이벤트 도착이 "⚠️ 확인 필요"를 "🔵 진행 중"으로 되돌리면 운영자가 개입을 놓친다.
+
+**recovery 상관관계**: `live_order_recovery_required`에는 `approval_id`가 없다 — `order_id`뿐이다(운영 DB 확인). 승인과 잇는 경로는 `live_order_batch_lifecycle`의 `items[].request.approval_id` 또는 `live_order_submit_intent`의 request다. `unresolved_recovery`는 "이 승인의 order_id 중 recovery_required가 있고, 그 뒤에 해당 order의 terminal lifecycle이 없는 것"으로 판정한다. terminal이 왔으면 해제한다.
+
+- [ ] **Step 4b: Test every transition**
+
+```python
+@pytest.mark.parametrize(
+    "ack,completed,recovery,expected",
+    [
+        (None, None, False, "pending"),
+        ({"status": "approved"}, None, False, "in_progress"),
+        ({"status": "rejected"}, None, False, "done"),
+        ({"status": "expired"}, None, False, "done"),
+        # The 2026-08-12 shape: approved, but one order failed.
+        (
+            {"status": "approved"},
+            {"approval_status": "approved", "orders_failed": 1},
+            False,
+            "attention",
+        ),
+        (
+            {"status": "approved"},
+            {"approval_status": "approved", "orders_failed": 0},
+            False,
+            "done",
+        ),
+        ({"status": "approved"}, {"approval_status": "approved", "orders_failed": 0}, True,
+         "attention"),
+    ],
+)
+def test_the_stage_machine_reads_payloads_not_event_types(ack, completed, recovery, expected):
+    assert approval_stage(ack, completed, recovery) == expected
+
+
+def test_the_stage_never_walks_back_to_a_calmer_value(tmp_path):
+    router, store, client = _router_with_cards(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_1")
+    _record_recovery_required(store, envelope)
+    router._sweep_lifecycle_cards()
+
+    _record_late_in_progress_event(store, envelope)
+    router._sweep_lifecycle_cards()
+
+    assert "⚠️" in client.edited[-1][2]
+```
+
+- [ ] **Step 4c: Wire the sweep**
+
+`_sweep_lifecycle_cards` 는 활성 승인 봉투를 조회해 각 `approval:<approval_id>` 카드의 단계를 위 함수로 판정하고 `self._card_manager.refresh(...)` 를 호출한다. 승인 그룹이 2개 이상인 signal run에만 `daily:<signal_run_id>` 부모 카드를 추가로 갱신한다.
 
 - [ ] **Step 5: Keep the legacy path**
 
@@ -918,7 +1219,13 @@ git commit -m "feat(telegram-ui): announce a no-action day in one line"
 - Test: `tests/test_telegram_card_lifecycle.py`
 
 **Interfaces:**
-- Produces: `catalog.CARD_FALLBACK_TEMPLATE`, `CardLifecycleManager.consecutive_failures(card_key, chat_id) -> int`
+- Produces: `catalog.CARD_FALLBACK_TEMPLATE`, `catalog.CARD_AMBIGUOUS_TEMPLATE`, `CardLifecycleManager.consecutive_failures(card_key, chat_id) -> int`, `CardLifecycleManager._escalate_ambiguous(run_id, card_key, chat_id, stage)`
+
+> **Task 3 의존**: `_escalate_ambiguous` 는 Task 3의 `refresh` 가 호출하지만 정의는 여기다. Task 3을 먼저 구현할 경우 이 메서드를 no-op 스텁으로 두고 Task 7에서 채운다. 스텁 상태에서도 `test_an_ambiguous_copy_is_never_resent` 는 통과해야 한다 — 그 테스트가 검증하는 것은 "재전송하지 않는다"이지 "알린다"가 아니다.
+
+**ambiguous 에스컬레이션이 폴백과 같은 경로인 이유.** 둘 다 "카드 렌더링을 신뢰할 수 없거나 카드로 말할 수 없는 상황"이고, 둘 다 **버튼 없는 고정 텍스트**여야 한다. ambiguous에 카드를 다시 보내면 같은 승인에 버튼 달린 카드가 두 장 생기는데, 그것이 바로 재전송을 막은 이유다. 알림은 상태를 알릴 뿐 조작 수단을 늘리지 않는다.
+
+같은 `(card_key, chat_id, stage)`에 대한 ambiguous 통지는 **한 번만** 보낸다. 매 sweep마다 반복하면 2분 주기로 같은 문구가 쌓인다. 통지 발송을 `telegram_ui_card_ambiguous_notified` 이벤트로 기록해 중복을 억제한다.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -987,6 +1294,10 @@ git commit -m "feat(telegram-ui): fall back to plain text after three failed ren
 | 노옵 한 줄 | Task 6 |
 | 기존 알림 병행 유지 | Task 5 Step 5 (테스트로 고정) |
 | 연속 3회 실패 → 폴백 + degraded | Task 7 |
+| 이벤트 fold 순서 (store는 DESC) | Task 1 (`test_events_must_be_folded_oldest_first`), Task 3 (store 왕복 통합 테스트) |
+| 재시도 가능한 `duplicate_key` | Task 1 (`operation_id`) |
+| ambiguous ≠ 미전달 | Task 1 (`delivery` 3값), Task 3 (재전송 금지), Task 7 (에스컬레이션) |
+| payload 기반 단계 판정 + 역행 금지 | Task 5 Step 4·4b |
 
 **남은 결정 — 실행자에게**
 
