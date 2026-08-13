@@ -270,7 +270,22 @@ class CardLifecycleManager:
 
     @staticmethod
     def _message_id(response: Mapping[str, Any] | None) -> int | None:
+        """Accept both the raw Bot API envelope and an already-unwrapped result.
+
+        TelegramBotAPIClient._post returns what Telegram sent -- ``{"ok": true,
+        "result": {"message_id": ...}}`` -- while notification helpers pass the
+        result alone. Looking only at the top level would leave every real card
+        without a message_id: unknown forever, never editable, and escalated as
+        ambiguous on the next sweep.
+        """
         if not isinstance(response, Mapping):
             return None
         value = response.get("message_id")
-        return value if isinstance(value, int) else None
+        if isinstance(value, int):
+            return value
+        result = response.get("result")
+        if isinstance(result, Mapping):
+            nested = result.get("message_id")
+            if isinstance(nested, int):
+                return nested
+        return None

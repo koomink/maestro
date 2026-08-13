@@ -113,6 +113,30 @@ def test_an_ok_response_without_a_message_id_is_unknown(tmp_path):
     assert manager.deliver("run_1", "approval:appr_1", "pending", CARD)["unknown"] == (100,)
 
 
+def test_the_real_bot_api_envelope_yields_a_message_id(tmp_path):
+    """TelegramBotAPIClient returns the whole envelope, not the result alone.
+
+    _post hands back {"ok": true, "result": {"message_id": ...}} (bot.py:159).
+    Reading only a top-level message_id makes every production card unknown --
+    never editable, and escalated as ambiguous on the very next sweep. The
+    other fakes here flatten the response and cannot see that.
+    """
+
+    class EnvelopeClient(FakeClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            flat = super().send_message(chat_id, text, reply_markup)
+            return {"ok": True, "result": {"message_id": flat["message_id"]}}
+
+    store, manager = _manager(tmp_path, EnvelopeClient(), chat_ids=(100,))
+
+    result = manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+
+    assert result["sent"] == (100,)
+    copy = _copies_from_store(store)[("approval:appr_1", 100)]
+    assert copy.delivery == "confirmed"
+    assert copy.message_id == 5001
+
+
 def test_every_chat_gets_its_own_copy(tmp_path):
     store, manager = _manager(tmp_path, FakeClient())
 
