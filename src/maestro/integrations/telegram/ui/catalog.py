@@ -64,3 +64,13 @@ MARKET_OVERSEAS = "해외 주식"
 MARKET_MIXED = "국내·해외 주식"
 
 EXPANDED_HEADER = "자세한 내용"
+
+CARD_STAGE_LABELS = {
+    "pending": "⏳ 대기",
+    "in_progress": "🔵 진행 중",
+    "done": "✅ 완료",
+    "attention": "⚠️ 확인 필요",
+}
+DAILY_CARD_TITLE = "📊 오늘의 투자 현황"
+DAILY_CARD_GROUP = "• {label} — {stage}"
+NO_ACTION_NOTICE = "오늘은 매매할 것이 없어요."

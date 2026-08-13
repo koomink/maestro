@@ -1,5 +1,6 @@
 """카드 렌더러: 상태 데이터 → (text, reply_markup). 순수 함수만."""
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +33,9 @@ def telegram_text_length(text: str) -> int:
 @dataclass(frozen=True)
 class RenderedCard:
     text: str
-    reply_markup: dict[str, Any]
+    # None where a card is deliberately read-only: the daily summary carries no
+    # buttons because each group is approved against its own approval_id.
+    reply_markup: dict[str, Any] | None
     page: int = 0
     page_count: int = 1
 
@@ -427,3 +430,24 @@ def _float_or_none(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def render_daily_card(
+    signal_run_id: str,
+    groups: Sequence[Mapping[str, Any]],
+) -> RenderedCard:
+    """Read-only parent card: one line per approval group.
+
+    No buttons. Each group is approved independently against its own
+    approval_id, so a button here would have nothing unambiguous to bind to.
+    The signal_run_id is the card's identity, not part of its text -- operators
+    read strategy names, not run ids.
+    """
+    lines = [catalog.DAILY_CARD_TITLE, ""]
+    for group in groups:
+        label = str(group.get("label") or "?")
+        stage = catalog.CARD_STAGE_LABELS.get(
+            str(group.get("stage") or ""), catalog.CARD_STAGE_LABELS["pending"]
+        )
+        lines.append(catalog.DAILY_CARD_GROUP.format(label=label, stage=stage))
+    return RenderedCard(text=_clamp("\n".join(lines)), reply_markup=None)
