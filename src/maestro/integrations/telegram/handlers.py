@@ -2238,19 +2238,47 @@ class TelegramOperatorCommandRouter:
         """카드 하나를 갱신한다. 실패해도 나머지 카드는 계속 돈다.
 
         여기서 예외가 새어 나가면 뒤의 카드가 전부 갱신되지 않고, poll_once가
-        예외를 삼키므로 조용히 그렇게 된다. 그리고 격리만 하고 끝내면 같은
-        오류가 매 poll 반복되면서도 fallback은 영원히 발송되지 않으므로, 실패를
-        카드 투영에 기록해 전송 거절과 같은 임계값을 타게 한다.
+        예외를 삼키므로 조용히 그렇게 된다.
+
+        **렌더 실패와 refresh 실패를 같은 것으로 다루지 않는다.** 렌더는 아무것도
+        보내지 않았음이 확정이므로 전송 거절과 같은 카운터를 태워 fallback으로
+        잇는다. 반면 refresh에서 새어 나온 예외는 이미 텔레그램에 카드를 보낸
+        뒤일 수 있다(전송은 성공하고 result 기록만 실패한 경우가 그렇다). 그것을
+        실패로 덮으면 '전달 여부 불명'이 '전달 안 됨'으로 바뀌고, 다음 sweep이
+        재전송을 안전하다고 판단해 버튼 달린 카드가 두 장 생긴다. refresh는
+        chat별 실패를 이미 스스로 기록하므로, 여기서는 격리만 하고 delivery
+        상태는 건드리지 않는다.
         """
         try:
             rendered = render()
+        except Exception as exc:  # noqa: BLE001 - 카드 하나가 나머지를 막지 않는다
+            self._log_card_failure(exc)
+            self._record_card_render_failure(run_id, card_key, stage, exc)
+            return
+        try:
             self._card_manager.refresh(run_id, card_key, stage, rendered)
         except Exception as exc:  # noqa: BLE001 - 카드 하나가 나머지를 막지 않는다
+            self._log_card_failure(exc)
+
+    def _log_card_failure(self, exc: Exception) -> None:
+        """기록 경로 자체가 깨져도 sweep을 멈추지 않는다.
+
+        _record_update_failure는 DB와 감사 로그에 쓴다. 그것이 실패해서 예외가
+        새어 나가면 이 카드 이후의 카드가 전부 갱신되지 않는다 — 격리하려고 둔
+        코드가 격리를 무너뜨리는 셈이다.
+        """
+        try:
             self._record_update_failure(None, exc)
-            try:
-                self._card_manager.record_render_failure(run_id, card_key, stage, str(exc))
-            except Exception as record_exc:  # noqa: BLE001 - 저장까지 깨진 경우
-                self._record_update_failure(None, record_exc)
+        except Exception:  # noqa: BLE001 - 더 알릴 곳이 없다
+            pass
+
+    def _record_card_render_failure(
+        self, run_id: str, card_key: str, stage: str, exc: Exception
+    ) -> None:
+        try:
+            self._card_manager.record_render_failure(run_id, card_key, stage, str(exc))
+        except Exception as record_exc:  # noqa: BLE001 - 저장까지 깨진 경우
+            self._log_card_failure(record_exc)
 
     def _latest_payloads_by_approval_id(self, event_type: str) -> dict[str, Mapping[str, Any]]:
         """approval_id별 최신 페이로드. 이벤트는 DESC로 오므로 뒤집어 접는다."""

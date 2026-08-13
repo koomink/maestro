@@ -4,6 +4,7 @@
 한 장이고, 단계가 바뀌면 그 메시지를 edit한다.
 """
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -571,19 +572,23 @@ def test_one_unrenderable_card_does_not_stop_the_others(tmp_path):
     assert _stage_of(store, "approval:appr_good") == "in_progress"
 
 
-def test_a_repeatedly_unrenderable_card_falls_back_to_plain_text(tmp_path):
-    """격리만 하면 같은 오류가 매 poll 반복되면서 아무도 알지 못한다."""
+def test_a_repeatedly_unrenderable_card_falls_back_to_plain_text(monkeypatch, tmp_path):
+    """격리만 하면 같은 오류가 매 poll 반복되면서 아무도 알지 못한다.
+
+    렌더 실패는 아무것도 보내지 않았음이 확정이므로 전송 거절과 같은 카운터를
+    탄다.
+    """
     router, store, client = _router_with_cards(tmp_path)
     _dispatch_approval(router, approval_id="appr_1")
     _save_ack(store, approval_id="appr_1")
-    original = router._card_manager.refresh
 
-    def exploding(run_id, card_key, stage, rendered):
-        if card_key == "approval:appr_1":
-            raise ValueError("renderer blew up")
-        return original(run_id, card_key, stage, rendered)
+    def exploding_renderer(request, stage):
+        raise ValueError("renderer blew up")
 
-    router._card_manager.refresh = exploding
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.render_approval_stage_card",
+        exploding_renderer,
+    )
     for _ in range(3):
         router._sweep_lifecycle_cards()
 
@@ -616,3 +621,85 @@ def test_a_broken_parent_card_does_not_stop_the_next_signal_run(tmp_path):
 
     assert store.load_card_delivery_state("daily:signal_2"), "뒤쪽 부모 카드가 갱신되지 않았다"
     assert any(catalog.DAILY_CARD_TITLE in message["text"] for message in client.sent)
+
+
+def test_a_failed_result_write_after_sending_does_not_become_a_known_failure(tmp_path):
+    """전송은 됐는데 result 기록이 실패한 경우 — 전달 여부는 '불명'이다.
+
+    이것을 렌더 실패로 접어 projection을 failed로 덮으면, 다음 sweep이 재전송이
+    안전하다고 판단해 버튼 달린 승인 카드가 두 장 생긴다. 이 브랜치가 처음부터
+    막아 온 바로 그 상태다.
+    """
+    router, store, client = _router_with_cards(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_1", card_delivery_version=1)
+    original = store.record_card_event
+
+    def failing_result(run_id, payload):
+        if payload.get("phase") == "result":
+            raise sqlite3.OperationalError("database is locked")
+        return original(run_id, payload)
+
+    store.record_card_event = failing_result
+    router._sweep_lifecycle_cards()
+    store.record_card_event = original
+
+    cards = [message for message in client.sent if message["reply_markup"]]
+    assert len(cards) == 1, "카드는 실제로 나갔다"
+    copies = store.load_card_delivery_state("approval:appr_1")
+    assert [copy["delivery"] for copy in copies] == ["unknown"], "불명이 실패로 바뀌었다"
+
+    router._sweep_lifecycle_cards()
+
+    cards = [message for message in client.sent if message["reply_markup"]]
+    assert len(cards) == 1, "불명 상태의 카드를 다시 보냈다"
+
+
+def test_a_broken_failure_log_does_not_break_the_card_isolation(tmp_path):
+    """실패를 기록하는 경로도 DB를 쓴다 — 그것이 깨져도 sweep은 계속돌아야 한다."""
+    router, store, client = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_bad")
+    _dispatch_approval(router, approval_id="appr_good")
+    _save_ack(store, approval_id="appr_bad")
+    _save_ack(store, approval_id="appr_good")
+    original = router._card_manager.refresh
+
+    def exploding(run_id, card_key, stage, rendered):
+        if card_key == "approval:appr_bad":
+            raise ValueError("renderer blew up")
+        return original(run_id, card_key, stage, rendered)
+
+    def broken_log(update_id, exc):
+        raise sqlite3.OperationalError("audit log is unwritable")
+
+    router._card_manager.refresh = exploding
+    router._record_update_failure = broken_log
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_good") == "in_progress"
+
+
+def test_one_unrenderable_card_does_not_stop_the_others_render_path(monkeypatch, tmp_path):
+    """렌더 단계에서 깨진 카드도 뒤의 승인을 막지 않는다.
+
+    refresh 단계의 격리와는 다른 분기다 — 렌더 실패는 카운터를 태우고 그 자리에서
+    돌아가므로, 그 경로가 좁게 잡히면 여기서만 드러난다.
+    """
+    router, store, client = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_bad")
+    _dispatch_approval(router, approval_id="appr_good")
+    _save_ack(store, approval_id="appr_bad")
+    _save_ack(store, approval_id="appr_good")
+    real_render = render_approval_stage_card
+
+    def selective(request, stage):
+        if request.approval_id == "appr_bad":
+            raise ValueError("renderer blew up")
+        return real_render(request, stage)
+
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.render_approval_stage_card", selective
+    )
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_good") == "in_progress"
+    assert store.load_card_delivery_state("approval:appr_bad")[0]["consecutive_failures"] == 1
