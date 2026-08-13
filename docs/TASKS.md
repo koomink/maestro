@@ -818,6 +818,16 @@
       currency is missing or the adapter answers in another one, share the
       currency fallback with the live gate, and quote blocked maximums in whole
       tradable steps
+- [x] Replace the stream of Telegram approval/order notifications with one card
+      per approval that the poll sweep edits in place: state keyed by
+      `(card_key, chat_id)` in a projection table, intent recorded before every
+      send so a copy of unknown delivery is never resent, stage decided from
+      event payloads on separate progress/attention axes, a read-only daily
+      parent card for multi-group signal runs, a one-line no-action notice, and
+      a plain-text fallback plus `telegram_ui` health degrade after three
+      consecutive failures. See
+      [specs/2026-08-09-telegram-ux-redesign-design.md](superpowers/specs/2026-08-09-telegram-ux-redesign-design.md)
+      stage 2; the legacy notification paths stay in parallel until stage 5
 - [ ] Price rotation orders off the Toss order book (`/api/v1/orderbook`), walking
       to the level where cumulative volume covers the order and capping at
       `max_quote_deviation_pct`, to raise the sell fill rate. See

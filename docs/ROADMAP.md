@@ -574,6 +574,33 @@ Implemented scope:
 This milestone treats Telegram as a constrained mobile operator console, not a
 general administration surface. Recovery remains CLI/runbook driven.
 
+### Korean card UX redesign (stages 1-5)
+
+Design: [specs/2026-08-09-telegram-ux-redesign-design.md](superpowers/specs/2026-08-09-telegram-ux-redesign-design.md).
+Replaces the developer-facing key/value messages with Korean cards that a single
+message updates in place, rather than a stream of separate notifications.
+
+Delivered:
+
+- Stage 1: the `ui/` module (catalog, renderers, Korean formatting), the Korean
+  approval card with a detail toggle, and the five-command menu.
+- Stage 2: the card lifecycle manager. One approval, one card, keyed by
+  `(card_key, chat_id)`; every send records its intent before the API call, so a
+  copy of unknown delivery is never resent. A projection table
+  (`telegram_ui_card_state`) holds current state, the poll sweep edits each card
+  as its stage changes, a read-only daily parent card appears when a signal run
+  has more than one approval group, quiet days get a one-line notice, and three
+  consecutive failures fall back to plain text and degrade the `telegram_ui`
+  health check.
+- Stages 3a-1 and 3a-2 (consistency groundwork, taken out of order after
+  production incidents): two-phase approval persistence and
+  `save_system_events_atomic`.
+
+Remaining: 3a-3 through 3a-5, the monthly funding card (3b), the exception
+wizard (4), and the lookup cards plus removal of the legacy notification paths
+(5). The legacy per-order notifications run **in parallel** with cards until
+stage 5, by design.
+
 ## Post-v1.1 — KIS Performance Tracking & Analytics Dashboard
 
 Planned scope:

@@ -1,5 +1,9 @@
 # 라이프사이클 카드 매니저 (단계 2) Implementation Plan
 
+> **상태: 구현 완료 (2026-08-14).** 7개 태스크 전부와 두 차례 리뷰 반영까지
+> `feat/telegram-ux-phase2`에 반영됐다. 계획과 달라진 두 가지는 아래 「구현에서
+> 달라진 점」에 적었다. 이 문서는 이제 이력이며 남은 작업은 없다.
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 승인·데일리 카드를 한 번 보내고 이후 상태 변화마다 그 메시지를 갱신하는 라이프사이클 매니저를 만들어, 연속 알림 나열을 카드 하나로 대체한다.
@@ -12,7 +16,8 @@
 
 ## Global Constraints
 
-- 테스트 기준선: `.venv/bin/python -m pytest tests/ -q` → **1352 passed, 9 skipped**. 각 태스크는 이 수를 줄이지 않는다.
+- 테스트 기준선: 계획 작성 시점 **1352 passed, 9 skipped**. 단계 2 착수 시점 1392,
+  **완료 시점 1450 passed, 9 skipped** (2026-08-14). 각 태스크는 이 수를 줄이지 않는다.
 - 린트: `.venv/bin/python -m ruff check src tests --output-format=concise` → `All checks passed!`
 - **모든 하중 테스트는 뮤테이션으로 비공허성을 증명한다.** 구현을 되돌려 테스트가 실패하는 것을 확인하고 복원한다.
 - **상태 키는 `(card_key, chat_id)`.** `card_key` 단독으로 `message_id`를 들고 있는 자료구조를 만들지 않는다. 운영 chat이 현재 하나뿐이라는 사실은 이 계약을 접을 근거가 아니다.
@@ -70,7 +75,7 @@
 
 **왜 `operation_id`인가.** `duplicate_key`가 `(phase, card_key, chat_id, stage)`까지만이면 같은 단계의 두 번째 시도가 같은 키를 쓴다. UNIQUE 인덱스에 걸려 재시도 자체가 `IntegrityError`로 죽는다. 시도마다 고유 id를 부여하고 intent·result·failure가 그 id를 공유하게 하면, 재시도가 가능해지는 동시에 3a-3이 "어느 intent가 어느 결과와 짝인지"를 복원할 수 있다.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/test_telegram_card_state.py`:
 
@@ -202,12 +207,12 @@ def test_events_must_be_folded_oldest_first():
     )
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_card_state.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'maestro.integrations.telegram.ui.card_state'`
 
-- [ ] **Step 3: Implement the module**
+- [x] **Step 3: Implement the module**
 
 `src/maestro/integrations/telegram/ui/card_state.py`:
 
@@ -359,16 +364,16 @@ def resolve_card_copies(
 
 import에 `uuid`와 `Literal`을 추가한다.
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_card_state.py -q`
 Expected: 6 passed
 
-- [ ] **Step 5: Mutation-verify the key**
+- [x] **Step 5: Mutation-verify the key**
 
 `key = (card_key, raw_chat_id)` 를 `key = (card_key,)` 로 바꾸고(그리고 타입 오류를 피하기 위해 dict 타입 주석을 완화하고) `test_one_logical_card_keeps_a_separate_copy_per_chat` 과 `test_a_later_stage_supersedes_an_earlier_one_for_that_chat_only` 이 **둘 다** FAIL 하는지 확인한 뒤 복원한다. 하나만 실패하면 나머지 하나는 이 계약을 지키지 못한다.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/maestro/integrations/telegram/ui/card_state.py tests/test_telegram_card_state.py
@@ -390,7 +395,7 @@ git commit -m "feat(telegram-ui): key card state by (card_key, chat_id) with sen
   - `.deliver(run_id: str, card_key: str, stage: str, rendered: RenderedCard) -> dict[str, Any]` — 반환 `{"sent": tuple[int, ...], "failed": tuple[int, ...]}`
   - `.render_hash(rendered: RenderedCard) -> str`
 
-- [ ] **Step 0: Make an explicit rejection distinguishable**
+- [x] **Step 0: Make an explicit rejection distinguishable**
 
 `_post`는 전송 실패(`URLError`)와 텔레그램의 명시적 거절(`ok: false`)을 **둘 다 `RuntimeError`로** 던진다. 이 상태에서 결과를 분류하려면 예외 메시지 문자열을 매칭해야 하는데, 그건 문구를 바꾸는 순간 조용히 깨진다.
 
@@ -433,7 +438,7 @@ def test_a_timeout_is_not_reported_as_a_rejection():
         client.send_message(100, "hi")
 ```
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 `tests/test_telegram_card_lifecycle.py`:
 
@@ -583,12 +588,12 @@ def test_the_render_hash_is_stable_for_equal_content(tmp_path):
     assert manager.render_hash(CARD) == manager.render_hash(same)
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_card_lifecycle.py -v`
 Expected: FAIL — `ModuleNotFoundError: ... 'lifecycle'`
 
-- [ ] **Step 3: Implement the manager**
+- [x] **Step 3: Implement the manager**
 
 `src/maestro/integrations/telegram/ui/lifecycle.py`:
 
@@ -710,15 +715,15 @@ class CardLifecycleManager:
         return value if isinstance(value, int) else None
 ```
 
-- [ ] **Step 4: Run the tests**
+- [x] **Step 4: Run the tests**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_card_lifecycle.py -q && .venv/bin/python -m pytest tests/ -q`
 
-- [ ] **Step 5: Mutation-verify the ordering**
+- [x] **Step 5: Mutation-verify the ordering**
 
 intent 기록 줄을 `_send` 호출 **뒤로** 옮기고, `test_delivery_writes_intent_before_calling_telegram` 과 `test_a_crash_between_send_and_result_leaves_an_undelivered_intent` 이 **둘 다** FAIL 하는지 확인한 뒤 복원한다.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/maestro/integrations/telegram/ui/lifecycle.py tests/test_telegram_card_lifecycle.py
@@ -737,7 +742,7 @@ git commit -m "feat(telegram-ui): deliver cards per chat, recording intent befor
 - Consumes: Task 2의 `CardLifecycleManager`
 - Produces: `.refresh(run_id: str, card_key: str, stage: str, rendered: RenderedCard) -> dict[str, Any]`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_refresh_edits_the_existing_message_per_chat(tmp_path):
@@ -865,12 +870,12 @@ class FakeClient:
         return {"message_id": message_id}
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_card_lifecycle.py -k refresh -v`
 Expected: FAIL — `AttributeError: 'CardLifecycleManager' object has no attribute 'refresh'`
 
-- [ ] **Step 3: Implement refresh**
+- [x] **Step 3: Implement refresh**
 
 ```python
     def refresh(
@@ -1044,7 +1049,7 @@ Expected: FAIL — `AttributeError: 'CardLifecycleManager' object has no attribu
 
 `resolve_card_copies` 는 삭제하지 않는다 — 3a-3이 시도 이력을 재구성할 때 쓰고, Task 1의 순수 테스트가 계속 그것을 검증한다.
 
-- [ ] **Step 3b: Pin that an old card is not resent**
+- [x] **Step 3b: Pin that an old card is not resent**
 
 ```python
 def test_a_card_older_than_any_event_window_is_still_found(tmp_path):
@@ -1069,15 +1074,15 @@ def test_a_card_older_than_any_event_window_is_still_found(tmp_path):
 
 `deliver` 의 chat 루프 본문을 `_deliver_one(run_id, card_key, stage, rendered, chat_id) -> bool` 로 추출하고 `deliver` 와 `refresh` 가 공유하게 한다. 같은 코드를 두 벌 두지 않는다.
 
-- [ ] **Step 4: Run everything**
+- [x] **Step 4: Run everything**
 
 Run: `.venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check src tests --output-format=concise`
 
-- [ ] **Step 5: Mutation-verify the hash skip**
+- [x] **Step 5: Mutation-verify the hash skip**
 
 `copy.render_hash == render_hash` 를 `False` 로 바꾸고 `test_an_unchanged_render_is_not_sent_again` 이 FAIL 하는지 확인한 뒤 복원한다.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/maestro/integrations/telegram/ui/lifecycle.py tests/test_telegram_card_lifecycle.py
@@ -1096,7 +1101,7 @@ git commit -m "feat(telegram-ui): refresh each copy in place, repairing undelive
 - Consumes: 없음 (순수 함수)
 - Produces: `render_daily_card(signal_run_id: str, groups: Sequence[Mapping[str, Any]]) -> RenderedCard`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_the_daily_card_lists_every_approval_group_with_its_stage():
@@ -1135,12 +1140,12 @@ def test_a_mixed_outcome_is_rendered_without_collapsing_to_one_stage():
     assert "⚠️" in card.text
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_cards.py -k daily -v`
 Expected: FAIL — `ImportError: cannot import name 'render_daily_card'`
 
-- [ ] **Step 3: Add the stage labels to catalog.py**
+- [x] **Step 3: Add the stage labels to catalog.py**
 
 ```python
 CARD_STAGE_LABELS = {
@@ -1153,7 +1158,7 @@ CARD_STAGE_LABELS = {
 DAILY_CARD_TITLE = "📊 오늘의 투자 현황"
 ```
 
-- [ ] **Step 4: Implement the renderer**
+- [x] **Step 4: Implement the renderer**
 
 ```python
 def render_daily_card(
@@ -1173,11 +1178,11 @@ def render_daily_card(
     return RenderedCard(text=_clamp("\n".join(lines)), reply_markup=None)
 ```
 
-- [ ] **Step 5: Run everything**
+- [x] **Step 5: Run everything**
 
 Run: `.venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check src tests --output-format=concise`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/maestro/integrations/telegram/ui/ tests/test_telegram_cards.py
@@ -1196,7 +1201,7 @@ git commit -m "feat(telegram-ui): render the read-only daily summary card"
 - Consumes: Task 2·3의 `CardLifecycleManager`
 - Produces: `TelegramCommandRouter._card_manager` 속성, `_sweep_lifecycle_cards()`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_an_approval_stage_change_edits_the_card_instead_of_sending_a_new_one(tmp_path):
@@ -1213,12 +1218,12 @@ def test_an_approval_stage_change_edits_the_card_instead_of_sending_a_new_one(tm
     assert client.edited, "the existing card should have been edited"
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `.venv/bin/python -m pytest tests/test_telegram_approval_card.py -v`
 Expected: FAIL — `AttributeError: ... '_sweep_lifecycle_cards'`
 
-- [ ] **Step 3: Register the sweep**
+- [x] **Step 3: Register the sweep**
 
 `poll_once` 의 sweep 튜플에 추가한다. 기존 두 sweep과 같은 예외 격리를 그대로 받는다:
 
@@ -1230,7 +1235,7 @@ Expected: FAIL — `AttributeError: ... '_sweep_lifecycle_cards'`
         ):
 ```
 
-- [ ] **Step 4: Implement the stage machine**
+- [x] **Step 4: Implement the stage machine**
 
 **이벤트 *유형*만 보면 안 된다. payload를 읽어야 한다.** 운영 DB에서 확인한 실제 페이로드가 그 이유를 보여준다 — 2026-08-12 US 런의 `signal_approval_completed`는 `approval_status='approved'`이면서 `orders_failed=1`이다. 유형만 보고 `done`으로 매핑하면 **절반만 집행되고 중단된 로테이션이 "✅ 완료"로 표시된다.**
 
@@ -1293,7 +1298,7 @@ def card_stage(progress: str, needs_attention: bool) -> str:
 
 **recovery 상관관계**: `live_order_recovery_required`에는 `approval_id`가 없다 — `order_id`뿐이다(운영 DB 확인). 승인과 잇는 경로는 `live_order_batch_lifecycle`의 `items[].request.approval_id` 또는 `live_order_submit_intent`의 request다. `unresolved_recovery`는 "이 승인의 order_id 중 recovery_required가 있고, 그 뒤에 해당 order의 terminal lifecycle이 없는 것"으로 판정한다. terminal이 왔으면 해제한다.
 
-- [ ] **Step 4b: Test every transition**
+- [x] **Step 4b: Test every transition**
 
 ```python
 @pytest.mark.parametrize(
@@ -1361,11 +1366,11 @@ def test_a_failed_order_keeps_attention_even_after_recovery_clears():
     )
 ```
 
-- [ ] **Step 4c: Wire the sweep**
+- [x] **Step 4c: Wire the sweep**
 
 `_sweep_lifecycle_cards` 는 활성 승인 봉투를 조회해 각 `approval:<approval_id>` 카드의 단계를 위 함수로 판정하고 `self._card_manager.refresh(...)` 를 호출한다. 승인 그룹이 2개 이상인 signal run에만 `daily:<signal_run_id>` 부모 카드를 추가로 갱신한다.
 
-- [ ] **Step 5: Keep the legacy path**
+- [x] **Step 5: Keep the legacy path**
 
 `_sweep_pending_approvals` 의 기존 전송을 **삭제하지 않는다.** 스펙 「단계 2의 안전망」에 따라 병행 유지한다. 이를 테스트로 고정한다:
 
@@ -1380,11 +1385,11 @@ def test_the_legacy_notification_path_still_runs(tmp_path):
     assert client.sent, "the legacy path must still deliver"
 ```
 
-- [ ] **Step 6: Run everything**
+- [x] **Step 6: Run everything**
 
 Run: `.venv/bin/python -m pytest tests/ -q && .venv/bin/python -m ruff check src tests --output-format=concise`
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/maestro/integrations/telegram/handlers.py tests/test_telegram_approval_card.py
@@ -1402,7 +1407,7 @@ git commit -m "feat(telegram-ui): drive the approval card from the lifecycle swe
 **Interfaces:**
 - Produces: `catalog.NO_ACTION_NOTICE`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_the_no_action_notice_is_one_line_and_names_no_internals():
@@ -1411,21 +1416,21 @@ def test_the_no_action_notice_is_one_line_and_names_no_internals():
     assert "signal" not in NO_ACTION_NOTICE.lower()
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 Expected: FAIL — `ImportError: cannot import name 'NO_ACTION_NOTICE'`
 
-- [ ] **Step 3: Add the string**
+- [x] **Step 3: Add the string**
 
 ```python
 NO_ACTION_NOTICE = "오늘은 매매할 것이 없어요."
 ```
 
-- [ ] **Step 4: Use it where the daily run reports no action**
+- [x] **Step 4: Use it where the daily run reports no action**
 
 `cli.py` 의 `daily-signal-approval` 이 `status=no_action` 을 출력하는 분기에서 이 문구를 텔레그램으로 1회 전송한다. 카드가 아니라 한 줄 알림이므로 lifecycle을 거치지 않는다.
 
-- [ ] **Step 5: Run everything and commit**
+- [x] **Step 5: Run everything and commit**
 
 ```bash
 git add src/maestro/integrations/telegram/ui/catalog.py src/maestro/cli.py tests/
@@ -1449,7 +1454,7 @@ git commit -m "feat(telegram-ui): announce a no-action day in one line"
 
 같은 `(card_key, chat_id, stage)`에 대한 ambiguous 통지는 **한 번만** 보낸다. 매 sweep마다 반복하면 2분 주기로 같은 문구가 쌓인다. 통지 발송을 `telegram_ui_card_ambiguous_notified` 이벤트로 기록해 중복을 억제한다.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_three_consecutive_failures_send_a_plain_text_fallback(tmp_path):
@@ -1480,15 +1485,15 @@ def test_two_failures_do_not_trigger_the_fallback(tmp_path):
     assert manager.consecutive_failures("approval:appr_1", 100) == 2
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Expected: FAIL — `AttributeError: ... 'consecutive_failures'`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 실패 시 `telegram_ui_card_failure` 이벤트를 남기고, 성공 시 그 카운터를 리셋하는 이벤트를 남긴다. 3회 연속이면 `CARD_FALLBACK_TEMPLATE.format(card_key=..., stage=...)` 을 `cards.py` 를 거치지 않고 직접 전송한다. `telegram_ui` 헬스체크를 degraded로 전환한다.
 
-- [ ] **Step 4: Run everything, mutation-verify (임계값을 5로 바꾸면 첫 테스트가 FAIL), commit**
+- [x] **Step 4: Run everything, mutation-verify (임계값을 5로 바꾸면 첫 테스트가 FAIL), commit**
 
 ```bash
 git add src/maestro/integrations/telegram/ui/ tests/test_telegram_card_lifecycle.py
@@ -1533,3 +1538,34 @@ git commit -m "feat(telegram-ui): fall back to plain text after three failed ren
 **범위 밖 (확인용)**
 
 월간 자금 카드(3b), 예외 마법사(4), 조회 카드·구 경로 제거(5), 그리고 intent만 있고 result 없는 카드의 **자가 치유**(3a-3). 단계 2는 그 상태를 *만들고 관측 가능하게* 할 뿐 고치지 않는다.
+
+
+---
+
+## 구현에서 달라진 점 (2026-08-14)
+
+계획을 그대로 따르지 않은 곳과 그 이유. 다음 단계가 이 결정 위에 쌓인다.
+
+**승인 카드의 최초 전송은 sweep이 아니라 dispatch가 한다.** Task 5의 테스트는
+sweep이 첫 전송까지 하는 모양이었지만, orchestrator의
+`_dispatch_signal_approval_locked`가 이미 카드를 보내고 있었으므로 그대로 두면 한
+승인에 버튼 달린 카드가 두 장 생긴다. dispatch를 `CardLifecycleManager.deliver`
+경유로 바꿔 카드가 태어날 때부터 `message_id`를 갖게 하고, sweep은 갱신만 한다.
+
+**`render_approval_stage_card`를 새로 만들었다.** `render_approval_card`는 제안
+본문과 승인/거절 버튼만 그린다. pending에서는 기존 카드와 바이트 단위로 동일하고,
+그 뒤로는 본문을 유지한 채 단계 헤더를 얹고 버튼을 뗀다.
+
+**`PendingApprovalEnvelope.card_delivery_version`이 이관 경계다.** 0은 카드 이관
+이전에 dispatch된 승인(sweep이 손대지 않는다), 1은 전송 **전에** intent가 기록됨을
+보장하므로 투영이 비어 있으면 전송이 시작되지도 못했다는 뜻이고 sweep이 재전송한다.
+이것이 없으면 pending 저장 직후 죽은 승인이 영원히 운영자에게 닿지 않는다.
+
+**`telegram_ui_card_state`에는 마이그레이션이 필요하다.** 이 브랜치의 앞선 커밋이
+`consecutive_failures` 없이 테이블을 만들었고, 운영 DB에도 그 상태로 존재했다.
+`CREATE TABLE IF NOT EXISTS`는 컬럼을 더하지 않으므로 `PRAGMA table_info` +
+`ALTER TABLE`을 추가했다 (`store.py`, 다른 테이블과 같은 규약).
+
+**노옵 알림은 at-most-once다.** 전송 전에 duplicate_key로 자리를 잡으므로 중복은
+없지만, 전송이 실패한 채팅은 그날 알림을 잃는다. 버튼 없는 한 줄 알림이라 중복보다
+누락이 싸다는 판단이다. 남는 이벤트는 전송 완료가 아니라 `status: "claimed"`다.
