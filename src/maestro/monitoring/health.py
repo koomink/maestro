@@ -8,6 +8,7 @@ from maestro.config.models import MaestroConfig
 from maestro.core.clock import utc_now
 from maestro.core.enums import RunMode
 from maestro.credentials import DEFAULT_CREDENTIAL_RESOLVER
+from maestro.integrations.telegram.ui.card_state import FALLBACK_AFTER_FAILURES
 from maestro.monitoring.audit_logger import _event_hash
 from maestro.monitoring.health_models import (
     HealthCheck,
@@ -26,6 +27,8 @@ from maestro.safety.controls import SafetyControlService
 from maestro.state.store import StateStore
 
 _SCHEDULED_RUN_EVENT_TYPES = ("run_once_completed", "signal_run_completed")
+#: Enough to identify what broke without letting one bad day flood the report.
+_MAX_REPORTED_FAILING_CARDS = 5
 
 
 def latest_scheduled_run_event(store: StateStore) -> dict[str, Any] | None:
@@ -90,6 +93,7 @@ class HealthService:
                 "live_approval_preflight",
                 self._live_approval_preflight_check,
             ),
+            FunctionHealthCheckProvider("telegram_ui", self._telegram_ui_check),
             FunctionHealthCheckProvider("broker_snapshot", self._broker_snapshot_check),
             FunctionHealthCheckProvider("reconciliation", self._reconciliation_check),
         ]
@@ -412,6 +416,32 @@ class HealthService:
             details={
                 "created_at": latest["created_at"],
                 "age_seconds": age_seconds if age_seconds is not None else "unknown",
+            },
+        )
+
+    def _telegram_ui_check(self) -> HealthCheck:
+        """Card delivery. Degrades once a copy has failed enough to fall back.
+
+        The plain-text fallback tells the operator that one card is broken; it
+        does not tell anyone watching /health or the ops check, which would
+        otherwise keep reporting a healthy system while the operator's cards
+        have stopped arriving.
+
+        Threshold matches the fallback's, deliberately: the same run of
+        failures that gives up on the card is what degrades the service.
+        """
+        failing = self.store.list_failing_card_copies(FALLBACK_AFTER_FAILURES)
+        if not failing:
+            return HealthCheck(name="telegram_ui", status="ok", message="cards delivering")
+        return HealthCheck(
+            name="telegram_ui",
+            status="warn",
+            message=f"{len(failing)} card copies failing",
+            details={
+                "cards": [
+                    f"{row['card_key']}@{row['chat_id']}:{row['consecutive_failures']}"
+                    for row in failing[:_MAX_REPORTED_FAILING_CARDS]
+                ],
             },
         )
 

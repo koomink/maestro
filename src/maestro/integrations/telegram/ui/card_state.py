@@ -13,6 +13,13 @@ Delivery = Literal["confirmed", "failed", "unknown"]
 
 EVENT_TYPE = "telegram_ui_card"
 
+#: Three straight failures means the card path is not working for this chat:
+#: the lifecycle falls back to plain text and the telegram_ui health check
+#: degrades. Both read this one number so they cannot drift apart -- a
+#: fallback the operator sees while health still reports ok is the confusing
+#: half-state this constant exists to prevent.
+FALLBACK_AFTER_FAILURES = 3
+
 # Only an explicit Telegram rejection proves non-delivery. An intent left
 # without any outcome means the process died mid-call, which is not the same
 # thing and must never be treated as one.

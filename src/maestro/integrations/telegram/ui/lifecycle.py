@@ -13,6 +13,7 @@ from typing import Any
 from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.ui import catalog
 from maestro.integrations.telegram.ui.card_state import (
+    FALLBACK_AFTER_FAILURES,
     CardCopy,
     card_failure_event,
     card_intent_event,
@@ -20,9 +21,6 @@ from maestro.integrations.telegram.ui.card_state import (
     new_operation_id,
 )
 from maestro.integrations.telegram.ui.cards import RenderedCard
-
-#: Three straight failures means the card path is not working for this chat.
-_FALLBACK_AFTER_FAILURES = 3
 
 
 class CardLifecycleManager:
@@ -91,7 +89,7 @@ class CardLifecycleManager:
                     card_key, chat_id, stage, render_hash, operation_id, str(exc)
                 ),
             )
-            if self.consecutive_failures(card_key, chat_id) >= _FALLBACK_AFTER_FAILURES:
+            if self.consecutive_failures(card_key, chat_id) >= FALLBACK_AFTER_FAILURES:
                 self._escalate_repeated_failures(run_id, card_key, chat_id, stage)
             return "failed"
         except Exception:  # noqa: BLE001 - one chat must not stop the rest

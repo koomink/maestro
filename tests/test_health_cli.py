@@ -1083,3 +1083,68 @@ def _save_beta_ready_events(store: StateStore) -> None:
         "broker_reconciliation",
         {"passed": True, "issues": [], "broker_snapshot_id": snapshot["id"]},
     )
+
+
+def _card_failure(store, *, card_key, chat_id, times):
+    """카드 전송이 연속으로 거절당한 상태를 만든다 (투영이 세는 그대로)."""
+    from maestro.integrations.telegram.ui.card_state import card_failure_event
+
+    for attempt in range(times):
+        store.record_card_event(
+            "run_cards",
+            card_failure_event(card_key, chat_id, "pending", "h1", f"op{attempt}", "refused"),
+        )
+
+
+def test_telegram_ui_health_degrades_after_three_failed_cards(tmp_path):
+    """카드가 세 번 연속 실패하면 fallback만 보내고 끝나면 안 된다.
+
+    /health와 운영 헬스체크가 계속 정상으로 보이면, 운영자에게 카드가 끊긴
+    사실이 어디에도 남지 않는다.
+    """
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_failure(store, card_key="approval:appr_1", chat_id=100, times=3)
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    check = checks["telegram_ui"]
+
+    assert check.status == "warn"
+    assert "approval:appr_1" in str(check.details)
+
+
+def test_telegram_ui_health_is_ok_below_the_threshold(tmp_path):
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_failure(store, card_key="approval:appr_1", chat_id=100, times=2)
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    assert checks["telegram_ui"].status == "ok"
+
+
+def test_a_delivered_card_clears_the_degraded_state(tmp_path):
+    """투영이 성공 시 카운터를 0으로 되돌리므로 헬스도 스스로 회복한다.
+
+    이벤트 로그를 세는 구현이었다면 한 번 degraded가 영원히 남는다.
+    """
+    from maestro.integrations.telegram.ui.card_state import card_result_event
+
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_failure(store, card_key="approval:appr_1", chat_id=100, times=3)
+    store.record_card_event(
+        "run_cards",
+        card_result_event("approval:appr_1", 100, "pending", "h1", "op-ok", 5001),
+    )
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    assert checks["telegram_ui"].status == "ok"
+
+
+def test_telegram_ui_health_is_ok_when_no_card_was_ever_sent(tmp_path):
+    """카드를 쓰지 않는 배포에서 헬스가 경고를 내면 안 된다."""
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    assert checks["telegram_ui"].status == "ok"

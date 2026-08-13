@@ -1566,6 +1566,29 @@ class StateStore:
             for row in rows
         ]
 
+    def list_failing_card_copies(self, min_consecutive_failures: int) -> list[dict[str, Any]]:
+        """Delivery copies whose sends keep being refused, worst first.
+
+        Read from the projection rather than the event log so it heals itself:
+        record_card_event resets the counter on a confirmed send, whereas a
+        count over past failure events would leave health degraded forever
+        after one bad spell.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT card_key, chat_id, consecutive_failures FROM telegram_ui_card_state "
+                "WHERE consecutive_failures >= ? ORDER BY consecutive_failures DESC, card_key",
+                (int(min_consecutive_failures),),
+            ).fetchall()
+        return [
+            {
+                "card_key": str(row[0]),
+                "chat_id": int(row[1]),
+                "consecutive_failures": int(row[2]),
+            }
+            for row in rows
+        ]
+
     def load_fill_watermarks(self) -> dict[str, tuple[float, float]]:
         with self._connect() as conn:
             rows = conn.execute(
