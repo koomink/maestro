@@ -2148,6 +2148,7 @@ class TelegramOperatorCommandRouter:
         acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
         completions = self._latest_payloads_by_approval_id("signal_approval_completed")
         blocked_order_ids = self._unresolved_recovery_order_ids()
+        failed_approval_ids = self._resolution_failed_approval_ids()
 
         stages: dict[str, str] = {}
         groups: dict[str, list[PendingApprovalEnvelope]] = defaultdict(list)
@@ -2155,15 +2156,18 @@ class TelegramOperatorCommandRouter:
             approval_id = envelope.approval_id
             card_key = f"approval:{approval_id}"
             copies = self._card_manager.copies(card_key)
-            if not copies:
-                # lifecycle이 이 카드를 보낸 적이 없다 = 이관 이전에 dispatch된
-                # 승인이다. 신규 봉투는 dispatch가 전송 **전에** intent를 남기므로
-                # 거절당했더라도 행이 있다. 여기서 새로 보내면 배포 순간 떠 있던
-                # 승인마다 버튼 달린 카드가 두 장이 된다 — 갱신되는 쪽은 하나뿐이고,
-                # 낡은 쪽은 영원히 "승인 대기"로 남는다. 그 승인은 병행 유지 중인
-                # 구 알림 경로가 계속 책임진다. 부모 카드 집계에도 넣지 않는다 —
-                # 단계를 모르는 그룹이 남으면 sweep 전체가 죽는다.
+            if not copies and envelope.card_delivery_version < 1:
+                # 카드 이관 이전에 dispatch된 승인이다. 그때는 카드를 직접
+                # 전송하고 message_id를 남기지 않았으므로, 여기서 새로 보내면
+                # 버튼 달린 카드가 두 장이 된다 — 갱신되는 쪽은 하나뿐이고
+                # 낡은 쪽은 영원히 "승인 대기"로 남는다. 그 승인은 병행 유지
+                # 중인 구 알림 경로가 계속 책임진다. 부모 카드 집계에도 넣지
+                # 않는다 — 단계를 모르는 그룹이 남으면 sweep 전체가 죽는다.
                 continue
+            # version 1인데 투영이 비었다면 전송이 시작되지도 못한 것이다
+            # (deliver는 첫 API 호출 **전에** intent를 남긴다). 그대로 두면
+            # 승인 요청이 운영자에게 영영 닿지 않으므로 아래 refresh가 최초
+            # 전송을 대신한다.
             groups[envelope.signal_run_id].append(envelope)
             stage = card_stage(
                 keep_forward_progress(
@@ -2176,17 +2180,27 @@ class TelegramOperatorCommandRouter:
                     unresolved_recovery=bool(
                         blocked_order_ids & self._envelope_order_ids(envelope)
                     ),
+                    unresolved_failure=(
+                        approval_id in failed_approval_ids
+                        and completions.get(approval_id) is None
+                    ),
                 ),
             )
             stages[approval_id] = stage
             if self._card_is_settled(copies, card_key, stage):
                 continue
-            self._card_manager.refresh(
-                envelope.run_id,
-                card_key,
-                stage,
-                render_approval_stage_card(envelope.request, stage),
-            )
+            try:
+                self._card_manager.refresh(
+                    envelope.run_id,
+                    card_key,
+                    stage,
+                    render_approval_stage_card(envelope.request, stage),
+                )
+            except Exception as exc:  # noqa: BLE001 - 카드 하나가 나머지를 막지 않는다
+                # 렌더가 깨지는 것은 이 승인 하나의 문제다. 여기서 새어 나가면
+                # 뒤의 승인들이 전부 갱신되지 않고, poll_once가 예외를 삼키므로
+                # 조용히 그렇게 된다.
+                self._record_update_failure(None, exc)
 
         for signal_run_id, group in groups.items():
             # 승인 그룹이 하나뿐이면 부모 카드는 같은 말을 두 번 하는 것뿐이다.
@@ -2226,6 +2240,20 @@ class TelegramOperatorCommandRouter:
             if isinstance(approval_id, str) and approval_id:
                 payloads[approval_id] = payload
         return payloads
+
+    def _resolution_failed_approval_ids(self) -> set[str]:
+        """집행이 실패로 끝난 승인. 3a-1이 이미 남기고 있던 기록이다.
+
+        완료가 뒤따랐는지는 호출부가 판단한다 — 재개가 성공하면 완료가 남으므로
+        과거의 실패가 카드를 붙잡지 않는다.
+        """
+        return {
+            str(row["payload"].get("approval_id"))
+            for row in self.store.list_system_events_by_type(
+                "telegram_approval_resolution_failed", limit=None
+            )
+            if row["payload"].get("approval_id")
+        }
 
     def _unresolved_recovery_order_ids(self) -> set[str]:
         """아직 종결되지 않은 복구 대상 주문. 승인과는 order_id로만 이어진다.

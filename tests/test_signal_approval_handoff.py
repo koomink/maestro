@@ -1566,7 +1566,7 @@ class RefusingTelegramClient(FakeTelegramClient):
         raise TelegramApiRejected("Telegram Bot API returned not ok for method: sendMessage")
 
 
-def test_dispatch_records_the_card_so_later_stages_can_edit_it(monkeypatch, tmp_path):
+def test_dispatch_marks_the_envelope_as_lifecycle_owned(monkeypatch, tmp_path):
     """The approval card is owned by the lifecycle from birth.
 
     Sending it here without recording a message_id is what forced the sweep to
@@ -1598,6 +1598,12 @@ def test_dispatch_records_the_card_so_later_stages_can_edit_it(monkeypatch, tmp_
     approval_id = store.list_system_events_by_type("telegram_approval_pending")[0]["payload"][
         "approval_id"
     ]
+    assert (
+        store.list_system_events_by_type("telegram_approval_pending")[0]["payload"][
+            "card_delivery_version"
+        ]
+        == 1
+    ), "sweep이 '전송 전에 죽은 승인'을 알아보려면 이 표시가 있어야 한다"
     copies = store.load_card_delivery_state(f"approval:{approval_id}")
     assert [copy["chat_id"] for copy in copies] == [100]
     assert copies[0]["delivery"] == "confirmed"

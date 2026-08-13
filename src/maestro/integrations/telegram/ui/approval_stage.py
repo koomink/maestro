@@ -43,6 +43,7 @@ def approval_needs_attention(
     ack: Mapping[str, Any] | None,
     completed: Mapping[str, Any] | None,
     unresolved_recovery: bool,
+    unresolved_failure: bool = False,
 ) -> bool:
     """Whether a human still has to look.
 
@@ -50,8 +51,12 @@ def approval_needs_attention(
     that actually failed does not: that is a fact about the past with no way to
     close it out until the stage 4 exception wizard exists, and letting it
     lapse would render a half-executed rotation as complete.
+
+    unresolved_failure covers the resolution that raised and never completed.
+    Without it an approval whose execution failed outright reads as "🔵 진행
+    중" forever -- the operator waits for a run that already stopped.
     """
-    if unresolved_recovery:
+    if unresolved_recovery or unresolved_failure:
         return True
     if completed is not None:
         failed = int(completed.get("orders_failed") or 0)

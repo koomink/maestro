@@ -1016,6 +1016,10 @@ class MaestroOrchestrator:
                 created_at=request.created_at,
                 expires_at=request.expires_at,
                 duplicate_key=f"telegram-approval-pending:{request.approval_id}",
+                # 카드 전송은 바로 아래에서 lifecycle이 한다. 이 표시가 있어야
+                # sweep이 "전송 전에 죽은 승인"을 "구 코드가 이미 보낸 승인"과
+                # 구분해 살려낼 수 있다.
+                card_delivery_version=1,
             )
             self._record_event(
                 run_id,

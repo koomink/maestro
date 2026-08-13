@@ -91,6 +91,9 @@ def _save_pending_envelope(
     order_count=1,
     reminder_seconds=None,
     created_ago=timedelta(0),
+    # 기본값은 이관 이전의 모양이다. 그 봉투에는 이 필드 자체가 없었으므로
+    # 저장된 payload에서 되살리면 0이 된다.
+    card_delivery_version=0,
 ):
     now = datetime.now(UTC)
     created_at = now - created_ago
@@ -129,6 +132,7 @@ def _save_pending_envelope(
         created_at=created_at,
         expires_at=now + timedelta(hours=1),
         duplicate_key=f"telegram-approval-pending:{approval_id}",
+        card_delivery_version=card_delivery_version,
     )
     store.save_system_event(
         envelope.run_id, "telegram_approval_pending", envelope.model_dump(mode="json")
@@ -143,6 +147,7 @@ def _dispatch_approval(router, **kwargs):
     카드 없이 봉투만 만들어 두고 sweep에 첫 전송을 시키는 테스트는 이관 이전
     상태를 흉내내는 것이지 정상 경로가 아니다.
     """
+    kwargs.setdefault("card_delivery_version", 1)
     envelope = _save_pending_envelope(router.store, **kwargs)
     router._card_manager.deliver(
         envelope.run_id,
@@ -180,6 +185,19 @@ def _save_completed(store, *, approval_id, orders_failed=0, approval_status="app
             "orders_submitted": 1,
             "orders_failed": orders_failed,
             "approval_status": approval_status,
+        },
+    )
+
+
+def _save_resolution_failed(store, *, approval_id, status="approved"):
+    store.save_system_event(
+        f"run_{approval_id}",
+        "telegram_approval_resolution_failed",
+        {
+            "approval_id": approval_id,
+            "status": status,
+            "error_type": "RuntimeError",
+            "error_message": "broker rejected the batch",
         },
     )
 
@@ -482,3 +500,72 @@ def test_a_pre_cutover_run_with_two_groups_does_not_break_the_sweep(tmp_path):
 
     assert client.sent == []
     assert store.load_card_delivery_state("daily:signal_old") == []
+
+
+def test_an_approval_that_crashed_before_its_card_was_sent_is_repaired(tmp_path):
+    """pending 저장과 카드 전송 사이에서 죽으면 승인이 운영자에게 닿지 않는다.
+
+    투영이 비었다는 사실만으로는 "구 코드가 이미 보냈다"와 "새 코드가 보내기
+    전에 죽었다"를 구분할 수 없다. 후자를 건너뛰면 그 승인은 카드도 없고 다시
+    시도되지도 않는다. envelope의 delivery 버전이 그 둘을 가른다.
+    """
+    router, store, client = _router_with_cards(tmp_path)
+    envelope = _save_pending_envelope(
+        store, approval_id="appr_crashed", card_delivery_version=1
+    )
+    assert envelope.card_delivery_version == 1, "신규 envelope는 lifecycle 소유임을 선언한다"
+
+    router._sweep_lifecycle_cards()
+
+    assert len(client.sent) == 1, "전송 전에 중단된 승인은 sweep이 살려야 한다"
+    assert _stage_of(store, "approval:appr_crashed") == "pending"
+
+
+def test_a_resolution_failure_puts_the_card_in_attention(tmp_path):
+    """집행이 실패했는데 카드가 "🔵 진행 중"이면 운영자는 기다리기만 한다.
+
+    ack는 approved, completion은 없고, 3a-1이 남긴 resolution_failed만 있는
+    상태 — 재개가 소진되면 여기서 멈춘다.
+    """
+    router, store, client = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1")
+    _save_resolution_failed(store, approval_id="appr_1")
+
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_1") == "attention"
+    assert catalog.CARD_STAGE_LABELS["attention"] in client.edited[-1]["text"]
+
+
+def test_a_failure_that_a_retry_resolved_does_not_hold_the_card(tmp_path):
+    """재개가 성공하면 완료 기록이 남는다. 과거의 실패가 카드를 붙잡으면 안 된다."""
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1")
+    _save_resolution_failed(store, approval_id="appr_1")
+    _save_completed(store, approval_id="appr_1", orders_failed=0)
+
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_1") == "done"
+
+
+def test_one_unrenderable_card_does_not_stop_the_others(tmp_path):
+    """카드 하나가 못 그려진다고 나머지 승인이 전부 멈추면 안 된다."""
+    router, store, client = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_bad")
+    _dispatch_approval(router, approval_id="appr_good")
+    _save_ack(store, approval_id="appr_bad")
+    _save_ack(store, approval_id="appr_good")
+    broken = router._card_manager.refresh
+
+    def refresh(run_id, card_key, stage, rendered):
+        if card_key == "approval:appr_bad":
+            raise ValueError("renderer blew up")
+        return broken(run_id, card_key, stage, rendered)
+
+    router._card_manager.refresh = refresh
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_good") == "in_progress"
