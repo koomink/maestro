@@ -1,4 +1,7 @@
+import multiprocessing
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 
 import pytest
@@ -78,7 +81,15 @@ def test_fill_watermark_table_prevents_double_apply(tmp_path):
     assert store.load_fill_watermarks()["KIS-10"] == (10.0, 700_000.0)
 
 
-def test_fill_reconciliation_acquires_writer_lock_before_live_order_lock(tmp_path):
+def test_fill_reconciliation_acquires_live_order_lock_before_writer_lock(tmp_path):
+    """Pins the acquisition order itself, so a future edit cannot silently re-invert it.
+
+    This test previously asserted the opposite order. That was a characterization
+    of whatever 9e87e5d happened to write when it first wrapped this method in
+    locks, not a requirement: both locks are held across the entire body, so
+    either order gives identical mutual exclusion. Only the deadlock exposure
+    differs, and writer-first was the inverted side.
+    """
     store, audit = _context(tmp_path, PortfolioState(cash=1_000_000.0, positions={}))
     lock_order: list[str] = []
     original_writer_lock = store.writer_lock
@@ -101,7 +112,7 @@ def test_fill_reconciliation_acquires_writer_lock_before_live_order_lock(tmp_pat
 
     PartialFillReconciliationService(store, audit).reconcile_latest("run_fill_lock_order")
 
-    assert lock_order[:2] == ["writer", "live_order"]
+    assert lock_order[:2] == ["live_order", "writer"]
 
 
 def test_fill_watermarks_seed_from_legacy_events(tmp_path):
@@ -741,6 +752,83 @@ def test_reconcile_fills_cli_outputs_result(tmp_path):
     assert result.exit_code == 0
     assert "applied_fills=1" in result.output
     assert "portfolio_updated=true" in result.output
+
+
+def _hold_live_order_lock_then_take_writer(db_path, ready, go, result) -> None:
+    """Run in a separate process so flock actually contends (it is per-process)."""
+    store = StateStore(db_path)
+    with store.live_order_lock("outside_live_holder", timeout_seconds=10.0):
+        ready.set()
+        go.wait(20.0)
+        try:
+            with store.writer_lock("outside_writer", timeout_seconds=2.0):
+                result["writer"] = "acquired"
+        except TimeoutError as exc:
+            result["writer"] = "timeout"
+            result["message"] = str(exc)
+
+
+def test_fill_reconciliation_takes_the_live_order_lock_before_the_writer_lock(tmp_path):
+    """A holder of live_order_lock must still be able to take writer_lock.
+
+    reconcile_latest used to take writer_lock first and then live_order_lock,
+    the inverse of every other live-order path (resolve_pending_signal_approval,
+    submit_approved_order, workflow_recovery). That inversion deadlocked the
+    2026-08-11 and 2026-08-12 US rotations: the operator held live_order_lock
+    across a broker submit and waited for writer_lock, while the 2-minutely
+    resume-order-tracking job held writer_lock inside reconcile_latest and
+    waited for live_order_lock. Both timed out and died.
+    """
+    store, audit = _context(tmp_path, PortfolioState(cash=1_000_000.0, positions={}))
+    _save_status(store, _status(order_id="KIS-1", filled=1.0, ordered=3.0, avg_price=70_000.0))
+    manager = multiprocessing.Manager()
+    ready = manager.Event()
+    go = manager.Event()
+    result = manager.dict()
+    holder = multiprocessing.Process(
+        target=_hold_live_order_lock_then_take_writer,
+        args=(str(tmp_path / "state.db"), ready, go, result),
+    )
+    reconcile_errors: list[BaseException] = []
+
+    def _reconcile() -> None:
+        try:
+            PartialFillReconciliationService(store, audit).reconcile_latest("run_lock_order")
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            reconcile_errors.append(exc)
+
+    holder.start()
+    reconcile = threading.Thread(target=_reconcile)
+    try:
+        assert ready.wait(20.0), "the outside process never took live_order_lock"
+        reconcile.start()
+        # Release the outside writer attempt only once reconcile_latest is
+        # committed to its first lock. Under the inverted order it grabs
+        # writer_lock, so this loop exits immediately and the deadlock is
+        # reproduced deterministically rather than by sleeping and hoping.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            record = StateStore.read_lock_holder(store.writer_lock_path)
+            if record is not None and record.get("owner") == "fill_reconciliation":
+                break
+            time.sleep(0.02)
+        go.set()
+        holder.join(30.0)
+        reconcile.join(60.0)
+    finally:
+        go.set()
+        if holder.is_alive():
+            holder.terminate()
+        holder.join(10.0)
+        if reconcile.is_alive():
+            reconcile.join(30.0)
+
+    assert result.get("writer") == "acquired", (
+        "holding live_order_lock blocked writer_lock, so reconcile_latest still "
+        f"inverts the lock order: {result.get('message')}"
+    )
+    assert reconcile_errors == []
+    assert reconcile.is_alive() is False
 
 
 def _context(tmp_path, state: PortfolioState) -> tuple[StateStore, AuditLogger]:

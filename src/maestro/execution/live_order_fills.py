@@ -32,8 +32,12 @@ class PartialFillReconciliationService:
         self.account_snapshot_refresher = account_snapshot_refresher
 
     def reconcile_latest(self, run_id: str, *, limit: int = 1000) -> FillReconciliationResult:
-        with self.state_store.writer_lock("fill_reconciliation"):
-            with self.state_store.live_order_lock("fill_reconciliation"):
+        # live_order_lock outermost, then writer_lock — the same order every
+        # other live-order path uses (resolve_pending_signal_approval,
+        # submit_approved_order, workflow_recovery). The inverse deadlocked the
+        # 2026-08-11/08-12 US rotations against the resume-order-tracking timer.
+        with self.state_store.live_order_lock("fill_reconciliation"):
+            with self.state_store.writer_lock("fill_reconciliation"):
                 current_state = self.state_store.load_latest_portfolio_state()
                 next_state = current_state.model_copy(deep=True)
                 applied_by_order = self._load_applied_watermarks()
