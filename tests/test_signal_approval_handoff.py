@@ -26,6 +26,7 @@ from maestro.execution.live_orders import (
     PartialFillSummary,
 )
 from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
+from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.orchestration.orchestrator import (
     MaestroOrchestrator,
     signal_contract_fingerprint_diff,
@@ -1545,3 +1546,88 @@ def _mock_kis_snapshot_refresh(monkeypatch) -> None:
 
     monkeypatch.setattr(KISReadOnlyService, "__init__", init_service)
     monkeypatch.setattr(KISReadOnlyService, "fetch_and_store_snapshot", fetch_snapshot)
+
+
+class EnvelopeReturningTelegramClient(FakeTelegramClient):
+    """Returns what the real Bot API returns: {"ok": ..., "result": {...}}."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.next_message_id = 7000
+
+    def send_message(self, chat_id: int, text: str, reply_markup=None):
+        super().send_message(chat_id, text, reply_markup)
+        self.next_message_id += 1
+        return {"ok": True, "result": {"message_id": self.next_message_id}}
+
+
+class RefusingTelegramClient(FakeTelegramClient):
+    def send_message(self, chat_id: int, text: str, reply_markup=None):
+        raise TelegramApiRejected("Telegram Bot API returned not ok for method: sendMessage")
+
+
+def test_dispatch_records_the_card_so_later_stages_can_edit_it(monkeypatch, tmp_path):
+    """The approval card is owned by the lifecycle from birth.
+
+    Sending it here without recording a message_id is what forced the sweep to
+    post its own second card: two button-bearing cards for one approval, only
+    one of which ever updates.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _live_signal_config(tmp_path, "expired")
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    config.approval.whitelisted_user_ids = [100]
+    config.approval.timeout_seconds = 600
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    client = EnvelopeReturningTelegramClient()
+
+    MaestroOrchestrator(
+        config,
+        telegram_client=client,
+        order_capacity_lookup=lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=10_000_000,
+            max_buy_quantity=100_000,
+            source="fake",
+        ),
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    approval_id = store.list_system_events_by_type("telegram_approval_pending")[0]["payload"][
+        "approval_id"
+    ]
+    copies = store.load_card_delivery_state(f"approval:{approval_id}")
+    assert [copy["chat_id"] for copy in copies] == [100]
+    assert copies[0]["delivery"] == "confirmed"
+    assert copies[0]["message_id"] == client.next_message_id
+    assert copies[0]["stage"] == "pending"
+
+
+def test_dispatch_still_fails_loudly_when_telegram_refuses_every_chat(monkeypatch, tmp_path):
+    """An approval nobody can see must not be reported as dispatched.
+
+    Only an explicit rejection counts: a timeout leaves the card ambiguous, and
+    treating that as failure is what would resend it.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _live_signal_config(tmp_path, "expired")
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    config.approval.whitelisted_user_ids = [100]
+    config.approval.timeout_seconds = 600
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    with pytest.raises(RuntimeError, match="refused the approval card"):
+        MaestroOrchestrator(
+            config,
+            telegram_client=RefusingTelegramClient(),
+            order_capacity_lookup=lambda order: BrokerBuyingPower(
+                symbol=order.symbol,
+                order_price=order.price,
+                cash_buying_power=10_000_000,
+                max_buy_quantity=100_000,
+                source="fake",
+            ),
+        ).dispatch_signal_approval(signal_summary.signal_run_id)

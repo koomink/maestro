@@ -94,7 +94,8 @@ from maestro.execution.rotation_cohort import (
 )
 from maestro.fx.service import ConfiguredFXRefreshService
 from maestro.integrations.telegram.bot import TelegramBotAPIClient
-from maestro.integrations.telegram.ui.cards import render_approval_card
+from maestro.integrations.telegram.ui.cards import render_approval_stage_card
+from maestro.integrations.telegram.ui.lifecycle import CardLifecycleManager
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.ops.readonly_refresh import (
     latest_snapshot_for_account,
@@ -998,7 +999,7 @@ class MaestroOrchestrator:
             )
             if request is None:
                 raise ValueError("live_approval mode requires an approval request")
-            card = render_approval_card(request, expanded=False)
+            card = render_approval_stage_card(request, "pending")
             message = card.text
             envelope = PendingApprovalEnvelope(
                 approval_id=request.approval_id,
@@ -1021,9 +1022,26 @@ class MaestroOrchestrator:
                 "telegram_approval_pending",
                 envelope.model_dump(mode="json"),
             )
-            markup = card.reply_markup
-            for chat_id in self.config.approval.telegram_allowed_chat_ids:
-                client.send_message(chat_id, message, reply_markup=markup)
+            # 카드는 태어날 때부터 lifecycle이 소유한다. 여기서 직접 보내면
+            # message_id가 어디에도 남지 않아 이후 단계 변화를 그 메시지에
+            # 반영할 수 없고, sweep이 두 번째 카드를 새로 보내게 된다 — 한
+            # 승인에 버튼 달린 카드가 두 장 생기는 바로 그 상태다.
+            delivery = CardLifecycleManager(
+                self.state_store,
+                self.audit,
+                client,
+                chat_ids=[
+                    int(chat_id) for chat_id in self.config.approval.telegram_allowed_chat_ids
+                ],
+            ).deliver(run_id, f"approval:{request.approval_id}", "pending", card)
+            if not delivery["sent"] and not delivery["unknown"]:
+                # 모든 채팅이 명시적으로 거절됐다 — 승인 요청이 아무에게도
+                # 닿지 않았음이 확정이다. 전송 불명(unknown)은 여기 해당하지
+                # 않는다: 텔레그램이 이미 받았을 수 있고, 그것을 실패로 접으면
+                # 재전송으로 이어진다.
+                raise RuntimeError(
+                    f"Telegram refused the approval card for every chat: {request.approval_id}"
+                )
             pending_count += 1
 
         self.state_store.save_system_event(

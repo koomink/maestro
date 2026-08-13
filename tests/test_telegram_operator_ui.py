@@ -3125,9 +3125,14 @@ def _telegram_live_readonly_config_path(tmp_path) -> Path:
 
 
 def test_dispatch_uses_korean_approval_card():
+    """Dispatch renders through the stage-aware entry point now.
+
+    At "pending" it returns the same card as before, byte for byte -- pinned by
+    test_telegram_ui_cards -- so the operator's first view is unchanged.
+    """
     from maestro.orchestration import orchestrator as orch
 
-    assert orch.render_approval_card is not None
+    assert orch.render_approval_stage_card is not None
 
 
 def test_ui_detail_callback_expands_approval_card(tmp_path):
