@@ -1,7 +1,7 @@
 import os
 import subprocess
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -88,6 +88,7 @@ from maestro.integrations.telegram.ui.approval_stage import (
     keep_forward_progress,
 )
 from maestro.integrations.telegram.ui.cards import (
+    RenderedCard,
     approval_decision_text,
     approval_markup,
     approval_reminder_text,
@@ -2189,18 +2190,14 @@ class TelegramOperatorCommandRouter:
             stages[approval_id] = stage
             if self._card_is_settled(copies, card_key, stage):
                 continue
-            try:
-                self._card_manager.refresh(
-                    envelope.run_id,
-                    card_key,
-                    stage,
-                    render_approval_stage_card(envelope.request, stage),
-                )
-            except Exception as exc:  # noqa: BLE001 - 카드 하나가 나머지를 막지 않는다
-                # 렌더가 깨지는 것은 이 승인 하나의 문제다. 여기서 새어 나가면
-                # 뒤의 승인들이 전부 갱신되지 않고, poll_once가 예외를 삼키므로
-                # 조용히 그렇게 된다.
-                self._record_update_failure(None, exc)
+            self._refresh_card(
+                envelope.run_id,
+                card_key,
+                stage,
+                lambda envelope=envelope, stage=stage: render_approval_stage_card(
+                    envelope.request, stage
+                ),
+            )
 
         for signal_run_id, group in groups.items():
             # 승인 그룹이 하나뿐이면 부모 카드는 같은 말을 두 번 하는 것뿐이다.
@@ -2211,23 +2208,49 @@ class TelegramOperatorCommandRouter:
             stage = _daily_card_stage(group_stages)
             if self._card_is_settled(self._card_manager.copies(card_key), card_key, stage):
                 continue
-            self._card_manager.refresh(
+            self._refresh_card(
                 group[0].run_id,
                 card_key,
                 stage,
-                render_daily_card(
-                    signal_run_id,
-                    [
-                        {
-                            "label": _telegram_strategy_display_label(
-                                envelope.source_strategy_ids
-                            ),
-                            "stage": group_stage,
-                        }
-                        for envelope, group_stage in zip(group, group_stages, strict=True)
-                    ],
+                lambda signal_run_id=signal_run_id, group=group, group_stages=group_stages: (
+                    render_daily_card(
+                        signal_run_id,
+                        [
+                            {
+                                "label": _telegram_strategy_display_label(
+                                    envelope.source_strategy_ids
+                                ),
+                                "stage": group_stage,
+                            }
+                            for envelope, group_stage in zip(group, group_stages, strict=True)
+                        ],
+                    )
                 ),
             )
+
+    def _refresh_card(
+        self,
+        run_id: str,
+        card_key: str,
+        stage: str,
+        render: Callable[[], RenderedCard],
+    ) -> None:
+        """카드 하나를 갱신한다. 실패해도 나머지 카드는 계속 돈다.
+
+        여기서 예외가 새어 나가면 뒤의 카드가 전부 갱신되지 않고, poll_once가
+        예외를 삼키므로 조용히 그렇게 된다. 그리고 격리만 하고 끝내면 같은
+        오류가 매 poll 반복되면서도 fallback은 영원히 발송되지 않으므로, 실패를
+        카드 투영에 기록해 전송 거절과 같은 임계값을 타게 한다.
+        """
+        try:
+            rendered = render()
+            self._card_manager.refresh(run_id, card_key, stage, rendered)
+        except Exception as exc:  # noqa: BLE001 - 카드 하나가 나머지를 막지 않는다
+            self._record_update_failure(None, exc)
+            try:
+                self._card_manager.record_render_failure(run_id, card_key, stage, str(exc))
+            except Exception as record_exc:  # noqa: BLE001 - 저장까지 깨진 경우
+                self._record_update_failure(None, record_exc)
 
     def _latest_payloads_by_approval_id(self, event_type: str) -> dict[str, Mapping[str, Any]]:
         """approval_id별 최신 페이로드. 이벤트는 DESC로 오므로 뒤집어 접는다."""

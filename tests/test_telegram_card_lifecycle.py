@@ -362,3 +362,53 @@ def test_a_confirmed_send_resets_the_failure_run(tmp_path):
     manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
     assert manager.consecutive_failures("approval:appr_1", 100) == 0
+
+
+def test_a_card_that_cannot_be_rendered_counts_toward_the_fallback(tmp_path):
+    """렌더 실패도 카드가 닿지 않는 것이다 — 전송 거절과 같은 카운터를 쓴다.
+
+    렌더가 깨진 채 격리만 하면 같은 오류가 매 poll 반복되면서도 fallback은
+    영원히 발송되지 않고 telegram_ui 헬스는 계속 ok로 남는다.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+
+    for _ in range(3):
+        manager.record_render_failure("run_1", "approval:appr_1", "pending", "boom")
+
+    assert manager.consecutive_failures("approval:appr_1", 100) == 3
+    assert any("appr_1" in text for _, text in client.sent), "fallback이 나가지 않았다"
+    assert store.list_failing_card_copies(3)
+
+
+def test_a_render_failure_records_no_hash_and_is_retried(tmp_path):
+    """일어나지 않은 렌더의 해시를 남기지 않는다.
+
+    다음 정상 렌더가 건너뛰어지지 않게 막는 것은 delivery 상태다 (refresh는
+    confirmed인 복사본만 접는다). 해시를 비워 두는 것은 그와 별개로, 기록이
+    사실과 어긋나지 않게 하기 위함이다.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    manager.record_render_failure("run_1", "approval:appr_1", "pending", "boom")
+
+    copy = manager.copies("approval:appr_1")[("approval:appr_1", 100)]
+    assert copy.render_hash == "", "일어나지 않은 렌더의 해시가 기록됐다"
+    assert copy.delivery == "failed"
+
+    result = manager.refresh("run_1", "approval:appr_1", "pending", CARD)
+
+    assert result["skipped"] == ()
+    assert result["edited"] == (100,)
+
+
+def test_a_recovered_render_clears_the_failure_run(tmp_path):
+    client = FakeClient()
+    _, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    manager.record_render_failure("run_1", "approval:appr_1", "pending", "boom")
+
+    manager.refresh("run_1", "approval:appr_1", "pending", CARD)
+
+    assert manager.consecutive_failures("approval:appr_1", 100) == 0

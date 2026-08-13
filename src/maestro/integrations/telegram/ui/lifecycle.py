@@ -195,6 +195,31 @@ class CardLifecycleManager:
             "ambiguous": tuple(ambiguous),
         }
 
+    def record_render_failure(
+        self, run_id: str, card_key: str, stage: str, error: str
+    ) -> None:
+        """A card we could not even produce, counted like a refused send.
+
+        Rendering is what the fallback exists for: the spec asks for plain text
+        after three consecutive render *or* edit failures. Isolating a broken
+        renderer without counting it means the same exception repeats every
+        poll while the fallback never fires and telegram_ui health stays ok --
+        the operator loses the card and nothing anywhere says so.
+
+        The render hash is left empty because a failed attempt produced no
+        content to hash; storing one would record a render that never
+        happened. What actually keeps the next good render from being skipped
+        is the delivery state -- refresh only skips a copy it knows is
+        confirmed, and this one is now failed.
+        """
+        for chat_id in self.chat_ids:
+            self.store.record_card_event(
+                run_id,
+                card_failure_event(card_key, chat_id, stage, "", new_operation_id(), error),
+            )
+            if self.consecutive_failures(card_key, chat_id) >= FALLBACK_AFTER_FAILURES:
+                self._escalate_repeated_failures(run_id, card_key, chat_id, stage)
+
     def copies(self, card_key: str) -> dict[tuple[str, int], CardCopy]:
         """Read the projection, not the log."""
         return {

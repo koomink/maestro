@@ -569,3 +569,50 @@ def test_one_unrenderable_card_does_not_stop_the_others(tmp_path):
     router._sweep_lifecycle_cards()
 
     assert _stage_of(store, "approval:appr_good") == "in_progress"
+
+
+def test_a_repeatedly_unrenderable_card_falls_back_to_plain_text(tmp_path):
+    """격리만 하면 같은 오류가 매 poll 반복되면서 아무도 알지 못한다."""
+    router, store, client = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1")
+    original = router._card_manager.refresh
+
+    def exploding(run_id, card_key, stage, rendered):
+        if card_key == "approval:appr_1":
+            raise ValueError("renderer blew up")
+        return original(run_id, card_key, stage, rendered)
+
+    router._card_manager.refresh = exploding
+    for _ in range(3):
+        router._sweep_lifecycle_cards()
+
+    assert store.list_failing_card_copies(3), "telegram_ui 헬스가 감지할 근거가 없다"
+    assert any(
+        catalog.CARD_FALLBACK_TEMPLATE.split("(")[0] in message["text"]
+        for message in client.sent
+    ), "고정 템플릿 fallback이 나가지 않았다"
+
+
+def test_a_broken_parent_card_does_not_stop_the_next_signal_run(tmp_path):
+    """부모 카드 하나가 실패하면 뒤쪽 run의 부모 카드까지 멈춘다."""
+    router, store, client = _router_with_cards(tmp_path)
+    for signal_run_id in ("signal_1", "signal_2"):
+        _dispatch_approval(
+            router, approval_id=f"appr_{signal_run_id}_a", signal_run_id=signal_run_id
+        )
+        _dispatch_approval(
+            router, approval_id=f"appr_{signal_run_id}_b", signal_run_id=signal_run_id
+        )
+    original = router._card_manager.refresh
+
+    def exploding(run_id, card_key, stage, rendered):
+        if card_key == "daily:signal_1":
+            raise ValueError("parent card blew up")
+        return original(run_id, card_key, stage, rendered)
+
+    router._card_manager.refresh = exploding
+    router._sweep_lifecycle_cards()
+
+    assert store.load_card_delivery_state("daily:signal_2"), "뒤쪽 부모 카드가 갱신되지 않았다"
+    assert any(catalog.DAILY_CARD_TITLE in message["text"] for message in client.sent)
