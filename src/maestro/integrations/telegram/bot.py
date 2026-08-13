@@ -18,6 +18,17 @@ from maestro.execution.live_orders import (
 from maestro.integrations.telegram.ui.cards import approval_detail_pages
 
 
+class TelegramApiRejected(RuntimeError):
+    """Telegram answered ok=false: the message was definitively not delivered.
+
+    Separate from transport failures on purpose. A timeout or a dropped
+    connection may have happened after Telegram accepted the message, and an
+    unparseable body means it certainly answered, so those stay ambiguous.
+    Only an explicit rejection is safe to retry automatically. Subclassing
+    RuntimeError keeps every existing ``except RuntimeError`` caller working.
+    """
+
+
 class TelegramBotClient(Protocol):
     def send_message(
         self,
@@ -167,7 +178,9 @@ class TelegramBotAPIClient:
         if not isinstance(decoded, Mapping):
             raise ValueError(f"Malformed Telegram response for method: {method}")
         if not decoded.get("ok"):
-            raise RuntimeError(f"Telegram Bot API returned not ok for method: {method}")
+            raise TelegramApiRejected(
+                f"Telegram Bot API returned not ok for method: {method}"
+            )
         return decoded
 
 
