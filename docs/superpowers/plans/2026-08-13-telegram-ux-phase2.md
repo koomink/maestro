@@ -17,7 +17,9 @@
 - **모든 하중 테스트는 뮤테이션으로 비공허성을 증명한다.** 구현을 되돌려 테스트가 실패하는 것을 확인하고 복원한다.
 - **상태 키는 `(card_key, chat_id)`.** `card_key` 단독으로 `message_id`를 들고 있는 자료구조를 만들지 않는다. 운영 chat이 현재 하나뿐이라는 사실은 이 계약을 접을 근거가 아니다.
 - **전송 전 intent를 먼저 기록한다.** `sendMessage`/`editMessageText` 호출 앞에 intent, 응답 뒤에 result. intent만 있고 result 없는 상태가 조회 가능해야 한다.
-- **모르는 것을 안다고 취급하지 않는다.** intent만 남은 복사본은 *미전달*이 아니라 **전달 여부 불명(ambiguous)**이다. 자동 재전송하지 않는다. 관측 가능성을 만든 뒤 그 위에서 곧바로 자동 조치를 하는 것은 이 프로젝트가 오늘 이미 한 번 저지른 실수다 — 락 스펙 3회차에서 "만료된 리스를 자동 회수"가 정확히 같은 모양이었고, 같은 이유로 철회했다.
+- **모르는 것을 안다고 취급하지 않는다.** intent만 남은 복사본은 *미전달*이 아니라 **전달 여부 불명(unknown)**이다. 자동 재전송하지 않는다. 관측 가능성을 만든 뒤 그 위에서 곧바로 자동 조치를 하는 것은 이 프로젝트가 오늘 이미 한 번 저지른 실수다 — 락 스펙 3회차에서 "만료된 리스를 자동 회수"가 정확히 같은 모양이었고, 같은 이유로 철회했다.
+- **"예외를 잡았다"는 미전달의 증거가 아니다.** `TelegramBotClient._post`(`bot.py:148-170`)가 던지는 네 예외 중 미전달이 확정되는 것은 **텔레그램이 `ok: false`로 거절한 경우 하나뿐**이다. `TimeoutError`와 `URLError`는 수락 후 응답만 유실됐을 수 있고, 응답 파싱 실패(`ValueError`)는 오히려 전달됐을 가능성이 높다. 그리고 URLError와 `ok: false`는 **둘 다 `RuntimeError`**라 타입만으로 구분되지 않는다 — 전용 예외를 도입해야 한다(Task 2 Step 0).
+- **현재 상태를 LIMIT 걸린 이벤트 조회로 재구성하지 않는다.** 이벤트 로그는 이력이고, 카드의 현재 상태는 `(card_key, chat_id)`로 직접 조회 가능한 투영 테이블에 둔다. 전역 상한으로 자르면 오래 대기한 승인 카드의 마지막 result가 범위 밖으로 밀려 "그런 카드는 없다"가 되고, 중복 전송으로 이어진다. 이벤트가 sweep마다 쌓이므로 **운영 기간이 길어지면 반드시 도달하는 상태**다.
 - **`StateStore.list_system_events_by_type`는 `ORDER BY id DESC`다** (`store.py:1815`). 이벤트를 시간순으로 접으려면 반드시 뒤집어야 한다. 기본 `limit`은 10이므로 항상 명시한다.
 - **`duplicate_key`에는 UNIQUE 인덱스가 있고**(`store.py:203`) `save_system_event`는 평범한 INSERT다. 같은 키를 두 번 쓰면 `IntegrityError`다. 재시도 가능한 이벤트의 키에는 시도별 고유값이 들어가야 한다.
 - **의존성 방향은 `handlers.py → ui/` 단방향.** `ui/`는 handlers·orchestrator·execution을 임포트하지 않는다.
@@ -34,7 +36,9 @@
 | 파일 | 책임 |
 |---|---|
 | `src/maestro/integrations/telegram/ui/card_state.py` (신규) | `telegram_ui_card` 이벤트의 스키마와 순수 해석 함수 — 이벤트 목록 → 현재 전달 복사본 상태 |
-| `src/maestro/integrations/telegram/ui/approval_stage.py` (신규) | 승인 payload → 카드 단계 판정 (순수 함수, 역행 금지 순위 포함) |
+| `src/maestro/integrations/telegram/ui/approval_stage.py` (신규) | 승인 payload → 진행 단계 + 주의 플래그 판정 (순수 함수) |
+| `src/maestro/integrations/telegram/bot.py` | `TelegramApiRejected` 예외 — 명시적 거절과 전송 불명을 구분 가능하게 |
+| `src/maestro/state/store.py` | `telegram_ui_card_state` 투영 테이블 + 이벤트·투영 원자 기록 API |
 | `src/maestro/integrations/telegram/ui/lifecycle.py` (신규) | 유일한 상태 보유 컴포넌트. 전송(intent→send→result), sweep 갱신, 폴백 |
 | `src/maestro/integrations/telegram/ui/cards.py` | 기존 승인 카드 + 신규 데일리 요약 카드 렌더러 (순수 함수) |
 | `src/maestro/integrations/telegram/ui/catalog.py` | 신규 문구 (노옵, 폴백 템플릿) |
@@ -386,6 +390,49 @@ git commit -m "feat(telegram-ui): key card state by (card_key, chat_id) with sen
   - `.deliver(run_id: str, card_key: str, stage: str, rendered: RenderedCard) -> dict[str, Any]` — 반환 `{"sent": tuple[int, ...], "failed": tuple[int, ...]}`
   - `.render_hash(rendered: RenderedCard) -> str`
 
+- [ ] **Step 0: Make an explicit rejection distinguishable**
+
+`_post`는 전송 실패(`URLError`)와 텔레그램의 명시적 거절(`ok: false`)을 **둘 다 `RuntimeError`로** 던진다. 이 상태에서 결과를 분류하려면 예외 메시지 문자열을 매칭해야 하는데, 그건 문구를 바꾸는 순간 조용히 깨진다.
+
+`src/maestro/integrations/telegram/bot.py`:
+
+```python
+class TelegramApiRejected(RuntimeError):
+    """Telegram answered ok=false: the message was definitively not delivered.
+
+    Separate from transport failures on purpose. A timeout or a dropped
+    connection may have happened after Telegram accepted the message, so those
+    stay ambiguous; only an explicit rejection is safe to retry.
+    """
+```
+
+`_post` 의 마지막 분기를 교체한다:
+
+```python
+        if not decoded.get("ok"):
+            raise TelegramApiRejected(
+                f"Telegram Bot API returned not ok for method: {method}"
+            )
+```
+
+`TelegramApiRejected` 는 `RuntimeError` 하위이므로 기존에 `RuntimeError` 를 잡던 코드는 그대로 동작한다. 회귀 테스트:
+
+```python
+def test_an_ok_false_response_raises_a_distinguishable_rejection():
+    """String-matching the message would break the moment the wording changes."""
+    client = _client_returning({"ok": False, "description": "chat not found"})
+
+    with pytest.raises(TelegramApiRejected):
+        client.send_message(100, "hi")
+
+
+def test_a_timeout_is_not_reported_as_a_rejection():
+    client = _client_raising(TimeoutError("timed out"))
+
+    with pytest.raises(TimeoutError):
+        client.send_message(100, "hi")
+```
+
 - [ ] **Step 1: Write the failing tests**
 
 `tests/test_telegram_card_lifecycle.py`:
@@ -403,14 +450,16 @@ CARD = RenderedCard(text="📩 승인해 주세요", reply_markup=None)
 
 
 class FakeClient:
-    def __init__(self, *, fail_for: set[int] | None = None):
+    def __init__(self, *, reject_for: set[int] | None = None):
         self.sent: list[tuple[int, str]] = []
-        self.fail_for = fail_for or set()
+        # reject_for raises TelegramApiRejected -- a *known* non-delivery.
+        # Transport ambiguity is modelled by the dedicated clients below.
+        self.reject_for = reject_for or set()
         self.next_message_id = 5000
 
     def send_message(self, chat_id, text, reply_markup=None):
-        if chat_id in self.fail_for:
-            raise RuntimeError(f"telegram refused chat {chat_id}")
+        if chat_id in self.reject_for:
+            raise TelegramApiRejected(f"telegram refused chat {chat_id}")
         self.sent.append((chat_id, text))
         self.next_message_id += 1
         return {"message_id": self.next_message_id}
@@ -446,23 +495,55 @@ def test_delivery_writes_intent_before_calling_telegram(tmp_path):
     assert order == ["intent", "send", "result"]
 
 
-def test_a_crash_between_send_and_result_leaves_an_undelivered_intent(tmp_path):
-    """Exactly the window the spec amendment exists to make visible."""
+def test_a_timeout_after_telegram_accepted_stays_unknown(tmp_path):
+    """The window the spec amendment exists to make visible.
 
-    class CrashingClient(FakeClient):
+    A timeout does not tell us the message failed -- Telegram may hold it and
+    only the reply was lost. Recording a failure here is what would license a
+    resend and duplicate an approval card.
+    """
+
+    class TimingOutClient(FakeClient):
         def send_message(self, chat_id, text, reply_markup=None):
             super().send_message(chat_id, text, reply_markup)
-            raise RuntimeError("process died after Telegram accepted it")
+            raise TimeoutError("Telegram Bot API timed out for method: sendMessage")
 
-    store, manager = _manager(tmp_path, CrashingClient(), chat_ids=(100,))
+    store, manager = _manager(tmp_path, TimingOutClient(), chat_ids=(100,))
+
+    result = manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+
+    assert result["unknown"] == (100,)
+    assert result["failed"] == ()
+    copy = _copies_from_store(store)[("approval:appr_1", 100)]
+    assert copy.delivery == "unknown"
+    assert copy.message_id is None
+
+
+def test_an_explicit_rejection_is_recorded_as_a_failure(tmp_path):
+    """ok=false is the one exception that proves nothing was delivered."""
+
+    class RejectingClient(FakeClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            raise TelegramApiRejected("Telegram Bot API returned not ok")
+
+    store, manager = _manager(tmp_path, RejectingClient(), chat_ids=(100,))
 
     result = manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
     assert result["failed"] == (100,)
-    copy = _copies_from_store(store)[("approval:appr_1", 100)]
-    # Telegram accepted it and then we died: not "failed", "unknown".
-    assert copy.delivery == "unknown"
-    assert copy.message_id is None
+    assert _copies_from_store(store)[("approval:appr_1", 100)].delivery == "failed"
+
+
+def test_an_ok_response_without_a_message_id_is_unknown(tmp_path):
+    """We cannot address what we probably just created."""
+
+    class NoIdClient(FakeClient):
+        def send_message(self, chat_id, text, reply_markup=None):
+            return {"ok": True}
+
+    store, manager = _manager(tmp_path, NoIdClient(), chat_ids=(100,))
+
+    assert manager.deliver("run_1", "approval:appr_1", "pending", CARD)["unknown"] == (100,)
 
 
 def test_every_chat_gets_its_own_copy(tmp_path):
@@ -477,24 +558,22 @@ def test_every_chat_gets_its_own_copy(tmp_path):
     ].message_id
 
 
-def test_one_failing_chat_does_not_block_the_others(tmp_path):
+def test_one_rejected_chat_does_not_block_the_others(tmp_path):
     """The reminder path already works this way; the card path must too."""
-    store, manager = _manager(tmp_path, FakeClient(fail_for={100}))
+    store, manager = _manager(tmp_path, FakeClient(reject_for={100}))
 
     result = manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
     assert result["sent"] == (200,)
     assert result["failed"] == (100,)
     copies = _copies_from_store(store)
-    # A caught exception is a *known* failure, so this one is retryable.
     assert copies[("approval:appr_1", 100)].delivery == "failed"
     assert copies[("approval:appr_1", 200)].delivery == "confirmed"
 
 
-def _copies_from_store(store):
-    """Read back the way lifecycle.py does: newest-first, so reverse it."""
-    rows = store.list_system_events_by_type(EVENT_TYPE, limit=2000)
-    return resolve_card_copies([row["payload"] for row in reversed(rows)])
+def _copies_from_store(store, card_key="approval:appr_1"):
+    """Read the projection, the same source lifecycle.py reads."""
+    return store.load_card_copies(card_key)
 
 
 def test_the_render_hash_is_stable_for_equal_content(tmp_path):
@@ -564,6 +643,7 @@ class CardLifecycleManager:
         render_hash = self.render_hash(rendered)
         sent: list[int] = []
         failed: list[int] = []
+        unknown: list[int] = []
         for chat_id in self.chat_ids:
             operation_id = new_operation_id()
             self.store.save_system_event(
@@ -573,11 +653,10 @@ class CardLifecycleManager:
             )
             try:
                 response = self._send(chat_id, rendered)
-            except Exception as exc:  # noqa: BLE001 - one chat must not stop the rest
-                # We hold the exception, so the message did not land. Recording
-                # that is what makes this attempt safe to retry later; without
-                # it the copy would be indistinguishable from a crash and
-                # would have to be left alone.
+            except TelegramApiRejected as exc:
+                # ok=false. Telegram looked at it and refused, so nothing was
+                # delivered. This is the *only* exception that makes an attempt
+                # safe to retry automatically.
                 self.store.save_system_event(
                     run_id,
                     EVENT_TYPE,
@@ -587,16 +666,19 @@ class CardLifecycleManager:
                 )
                 failed.append(chat_id)
                 continue
+            except Exception:  # noqa: BLE001 - one chat must not stop the rest
+                # Timeout, dropped connection, unparseable body: any of these
+                # can happen after Telegram accepted the message. Leaving the
+                # intent without a result is what marks it unknown, and unknown
+                # is never resent. Writing a failure event here is exactly the
+                # misclassification that duplicates approval cards.
+                unknown.append(chat_id)
+                continue
             message_id = self._message_id(response)
             if message_id is None:
-                self.store.save_system_event(
-                    run_id,
-                    EVENT_TYPE,
-                    card_failure_event(
-                        card_key, chat_id, stage, render_hash, operation_id, "no message_id"
-                    ),
-                )
-                failed.append(chat_id)
+                # ok=true with no message_id means we cannot address the
+                # message we probably just created. Unknown, not failed.
+                unknown.append(chat_id)
                 continue
             self.store.save_system_event(
                 run_id,
@@ -606,7 +688,11 @@ class CardLifecycleManager:
                 ),
             )
             sent.append(chat_id)
-        return {"sent": tuple(sent), "failed": tuple(failed)}
+        return {
+            "sent": tuple(sent),
+            "failed": tuple(failed),
+            "unknown": tuple(unknown),
+        }
 
     def _send(self, chat_id: int, rendered: RenderedCard) -> Mapping[str, Any] | None:
         try:
@@ -681,10 +767,10 @@ def test_an_unchanged_render_is_not_sent_again(tmp_path):
 
 def test_a_known_failed_copy_is_sent_again(tmp_path):
     """A caught exception means it never landed, so retrying is safe."""
-    client = FakeClient(fail_for={100})
+    client = FakeClient(reject_for={100})
     store, manager = _manager(tmp_path, client)
     manager.deliver("run_1", "approval:appr_1", "pending", CARD)
-    client.fail_for = set()
+    client.reject_for = set()
     progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
 
     result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
@@ -758,16 +844,16 @@ def test_an_edit_failure_falls_back_to_a_new_message(tmp_path):
 
 ```python
 class FakeClient:
-    def __init__(self, *, fail_for=None, edit_fails=False):
+    def __init__(self, *, reject_for=None, edit_fails=False):
         self.sent = []
         self.edited = []
-        self.fail_for = fail_for or set()
+        self.reject_for = reject_for or set()
         self.edit_fails = edit_fails
         self.next_message_id = 5000
 
     def send_message(self, chat_id, text, reply_markup=None):
-        if chat_id in self.fail_for:
-            raise RuntimeError(f"telegram refused chat {chat_id}")
+        if chat_id in self.reject_for:
+            raise TelegramApiRejected(f"telegram refused chat {chat_id}")
         self.sent.append((chat_id, text))
         self.next_message_id += 1
         return {"message_id": self.next_message_id}
@@ -875,19 +961,110 @@ Expected: FAIL — `AttributeError: 'CardLifecycleManager' object has no attribu
         }
 
     def _copies(self, card_key: str):
-        from maestro.integrations.telegram.ui.card_state import resolve_card_copies
+        # Read the projection, not the log. Reconstructing current state by
+        # scanning the newest N events cannot be made correct: events accrue on
+        # every sweep, so a card that has waited long enough will have its last
+        # result pushed past any limit, read back as absent, and be sent again.
+        return self.store.load_card_copies(card_key)
+```
 
-        # list_system_events_by_type is ORDER BY id DESC (store.py:1815) and
-        # resolve_card_copies folds oldest-first, so this must be reversed.
-        # Feeding the store's order straight in makes a delivered card read
-        # back as unknown, and the sweep then treats it as needing repair.
-        rows = self.store.list_system_events_by_type(EVENT_TYPE, limit=2000)
-        payloads = [row["payload"] for row in reversed(rows)]
-        return {
-            key: copy
-            for key, copy in resolve_card_copies(payloads).items()
-            if key[0] == card_key
-        }
+**투영 테이블.** `store.py` 에 추가한다:
+
+```python
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS telegram_ui_card_state "
+                "("
+                "card_key TEXT NOT NULL, "
+                "chat_id INTEGER NOT NULL, "
+                "message_id INTEGER, "
+                "stage TEXT NOT NULL, "
+                "render_hash TEXT NOT NULL, "
+                "delivery TEXT NOT NULL, "
+                "operation_id TEXT NOT NULL, "
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (card_key, chat_id)"
+                ")"
+            )
+```
+
+**이벤트와 투영은 한 트랜잭션에서 쓴다.** `writer_lock` 은 advisory flock이라 트랜잭션을 공유하지 않는다(락 스펙에서 확인한 사실). 둘이 갈라지면 투영이 낡은 채로 남아 카드가 중복된다.
+
+```python
+    def record_card_event(self, run_id: str, payload: dict[str, Any]) -> None:
+        """Append the card event and update its projection atomically.
+
+        The event log is the history 3a-3 will need; the projection is the
+        current state the sweep reads. Writing them separately would let a
+        crash leave the projection stale, which is the duplicate-card bug in
+        another form.
+        """
+        payload_json = json.dumps(payload, default=str)
+        with self.writer_lock("record_card_event"):
+            with self._connect() as conn:
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "INSERT INTO system_events (run_id, event_type, payload, duplicate_key) "
+                    "VALUES (?, ?, ?, ?)",
+                    (run_id, "telegram_ui_card", payload_json, payload.get("duplicate_key")),
+                )
+                conn.execute(
+                    "INSERT INTO telegram_ui_card_state "
+                    "(card_key, chat_id, message_id, stage, render_hash, delivery, "
+                    "operation_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(card_key, chat_id) DO UPDATE SET "
+                    "message_id=COALESCE(excluded.message_id, telegram_ui_card_state.message_id), "
+                    "stage=excluded.stage, render_hash=excluded.render_hash, "
+                    "delivery=excluded.delivery, operation_id=excluded.operation_id, "
+                    "updated_at=CURRENT_TIMESTAMP",
+                    (
+                        payload["card_key"],
+                        payload["chat_id"],
+                        payload.get("message_id"),
+                        payload["stage"],
+                        payload["render_hash"],
+                        _PHASE_DELIVERY.get(payload["phase"], "unknown"),
+                        payload["operation_id"],
+                    ),
+                )
+
+    def load_card_copies(self, card_key: str) -> dict[tuple[str, int], CardCopy]:
+        """Current state of every delivery copy. No limit, no scan."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT card_key, chat_id, message_id, stage, render_hash, delivery, "
+                "operation_id FROM telegram_ui_card_state WHERE card_key = ?",
+                (card_key,),
+            ).fetchall()
+        return {(str(row[0]), int(row[1])): CardCopy(*row) for row in rows}
+```
+
+`lifecycle.py` 의 모든 `store.save_system_event(run_id, EVENT_TYPE, ...)` 호출을 `store.record_card_event(run_id, ...)` 로 바꾼다.
+
+`resolve_card_copies` 는 삭제하지 않는다 — 3a-3이 시도 이력을 재구성할 때 쓰고, Task 1의 순수 테스트가 계속 그것을 검증한다.
+
+- [ ] **Step 3b: Pin that an old card is not resent**
+
+```python
+def test_a_card_older_than_any_event_window_is_still_found(tmp_path):
+    """The projection is why this works; a scan of recent events would not.
+
+    An approval can wait hours while sweeps append events for other cards.
+    Reconstructing state from the newest N events would lose this card and
+    post a duplicate.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_old", "pending", CARD)
+    for index in range(3000):
+        manager.deliver("run_noise", f"daily:noise_{index}", "pending", CARD)
+    sent_before = len(client.sent)
+
+    result = manager.refresh("run_1", "approval:appr_old", "pending", CARD)
+
+    assert result["skipped"] == (100,)
+    assert len(client.sent) == sent_before
 ```
 
 `deliver` 의 chat 루프 본문을 `_deliver_one(run_id, card_key, stage, rendered, chat_id) -> bool` 로 추출하고 `deliver` 와 `refresh` 가 공유하게 한다. 같은 코드를 두 벌 두지 않는다.
@@ -1059,28 +1236,18 @@ Expected: FAIL — `AttributeError: ... '_sweep_lifecycle_cards'`
 
 `ui/approval_stage.py` (신규, 순수 함수)에 상태 머신을 둔다. handlers가 이벤트를 모아 넘기고, `ui/`는 판정만 한다:
 
+**두 축을 분리한다.** 초안은 `attention`을 진행 단계의 최상위 값으로 두고 역행을 금지했는데, 그러면 **복구가 끝나도 카드가 영원히 "⚠️ 확인 필요"에 갇힌다** — 같은 문단에서 "terminal이 오면 해제한다"고 써놓고 순위 규칙이 그 전이를 막는 자기모순이었다. 진행은 되돌릴 수 없지만 사고는 해소된다. 서로 다른 것이므로 따로 모델링한다.
+
 ```python
-STAGE_RANK = {"pending": 0, "in_progress": 1, "done": 2, "attention": 3}
+PROGRESS_RANK = {"pending": 0, "in_progress": 1, "done": 2}
 
 
-def approval_stage(
+def approval_progress(
     ack: Mapping[str, Any] | None,
     completed: Mapping[str, Any] | None,
-    unresolved_recovery: bool,
 ) -> str:
-    """Decide one approval card's stage from payloads, not event types.
-
-    attention outranks everything: a run that needs a human must never be
-    displayed as finished, and the stage must not walk back to a calmer value
-    on a later sweep.
-    """
-    if unresolved_recovery:
-        return "attention"
+    """How far this approval got. Monotonic -- never walks back."""
     if completed is not None:
-        failed = int(completed.get("orders_failed") or 0)
-        status = str(completed.get("approval_status") or "")
-        if failed > 0 or status not in {"approved", "not_required"}:
-            return "attention"
         return "done"
     if ack is not None:
         status = str(ack.get("status") or "")
@@ -1088,11 +1255,41 @@ def approval_stage(
             return "in_progress"
         if status in {"rejected", "expired"}:
             return "done"
-        return "attention"
     return "pending"
+
+
+def approval_needs_attention(
+    ack: Mapping[str, Any] | None,
+    completed: Mapping[str, Any] | None,
+    unresolved_recovery: bool,
+) -> bool:
+    """Whether a human still has to look. Clears when the incident clears."""
+    if unresolved_recovery:
+        return True
+    if completed is not None:
+        failed = int(completed.get("orders_failed") or 0)
+        status = str(completed.get("approval_status") or "")
+        if failed > 0 or status not in {"approved", "not_required"}:
+            return True
+    if ack is not None and str(ack.get("status") or "") not in {
+        "approved",
+        "rejected",
+        "expired",
+    }:
+        return True
+    return False
+
+
+def card_stage(progress: str, needs_attention: bool) -> str:
+    """What the card shows. Attention wins the display, not the history."""
+    return "attention" if needs_attention else progress
 ```
 
-**역행 금지**: sweep은 저장된 직전 단계와 비교해 `STAGE_RANK`가 낮아지는 전이를 무시한다. 순서가 뒤바뀐 이벤트 도착이 "⚠️ 확인 필요"를 "🔵 진행 중"으로 되돌리면 운영자가 개입을 놓친다.
+**역행 금지는 진행 축에만 적용한다.** sweep은 저장된 직전 진행값과 비교해 `PROGRESS_RANK`가 낮아지는 전이를 무시한다. 순서가 뒤바뀐 이벤트가 "완료"를 "진행 중"으로 되돌리면 안 된다.
+
+**주의 플래그는 매번 다시 계산한다.** 복구가 끝나면 그대로 내려간다. 그것이 이 축을 분리한 이유다.
+
+한 가지 남는 판단: `orders_failed > 0` 은 사고가 *있었다*는 사실이라 저절로 사라지지 않는다. 이 경우 주의 플래그는 운영자가 예외 카드(단계 4)에서 종결하기 전까지 유지된다. 단계 2 범위에서는 종결 수단이 없으므로 **그대로 유지되는 것이 맞다** — 조용히 내려가면 실패한 로테이션이 완료로 보인다.
 
 **recovery 상관관계**: `live_order_recovery_required`에는 `approval_id`가 없다 — `order_id`뿐이다(운영 DB 확인). 승인과 잇는 경로는 `live_order_batch_lifecycle`의 `items[].request.approval_id` 또는 `live_order_submit_intent`의 request다. `unresolved_recovery`는 "이 승인의 order_id 중 recovery_required가 있고, 그 뒤에 해당 order의 terminal lifecycle이 없는 것"으로 판정한다. terminal이 왔으면 해제한다.
 
@@ -1123,20 +1320,45 @@ def approval_stage(
          "attention"),
     ],
 )
-def test_the_stage_machine_reads_payloads_not_event_types(ack, completed, recovery, expected):
-    assert approval_stage(ack, completed, recovery) == expected
+def test_the_stage_reads_payloads_not_event_types(ack, completed, recovery, expected):
+    progress = approval_progress(ack, completed)
+    assert card_stage(progress, approval_needs_attention(ack, completed, recovery)) == expected
 
 
-def test_the_stage_never_walks_back_to_a_calmer_value(tmp_path):
-    router, store, client = _router_with_cards(tmp_path)
-    envelope = _save_pending_envelope(store, approval_id="appr_1")
-    _record_recovery_required(store, envelope)
-    router._sweep_lifecycle_cards()
+def test_a_resolved_recovery_releases_the_attention_flag():
+    """The contradiction the first draft shipped: attention could never clear.
 
-    _record_late_in_progress_event(store, envelope)
-    router._sweep_lifecycle_cards()
+    Ranking attention above done and forbidding backward transitions meant a
+    recovered incident stayed on the card forever, so a real new incident
+    became indistinguishable from an old resolved one.
+    """
+    ack = {"status": "approved"}
+    completed = {"approval_status": "approved", "orders_failed": 0}
 
-    assert "⚠️" in client.edited[-1][2]
+    assert approval_needs_attention(ack, completed, unresolved_recovery=True) is True
+    assert approval_needs_attention(ack, completed, unresolved_recovery=False) is False
+
+
+def test_progress_never_walks_back():
+    """Out-of-order arrival must not undo how far the run actually got."""
+    assert PROGRESS_RANK["done"] > PROGRESS_RANK["in_progress"] > PROGRESS_RANK["pending"]
+
+
+def test_a_failed_order_keeps_attention_even_after_recovery_clears():
+    """orders_failed is a fact about the past; it does not resolve itself.
+
+    Stage 2 has no way to close it out -- that is the exception wizard in
+    stage 4 -- and letting it lapse would render a half-executed rotation as
+    complete.
+    """
+    assert (
+        approval_needs_attention(
+            {"status": "approved"},
+            {"approval_status": "approved", "orders_failed": 1},
+            unresolved_recovery=False,
+        )
+        is True
+    )
 ```
 
 - [ ] **Step 4c: Wire the sweep**
@@ -1236,20 +1458,20 @@ def test_three_consecutive_failures_send_a_plain_text_fallback(tmp_path):
     The fallback deliberately does not go through cards.py -- if rendering is
     what is failing, rendering the fallback would fail too.
     """
-    client = FakeClient(fail_for={100})
+    client = FakeClient(reject_for={100})
     store, manager = _manager(tmp_path, client, chat_ids=(100,))
 
     for _ in range(3):
         manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
-    client.fail_for = set()
+    client.reject_for = set()
     manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
     assert any("appr_1" in text and "확인" in text for _, text in client.sent)
 
 
 def test_two_failures_do_not_trigger_the_fallback(tmp_path):
-    client = FakeClient(fail_for={100})
+    client = FakeClient(reject_for={100})
     _, manager = _manager(tmp_path, client, chat_ids=(100,))
 
     for _ in range(2):
@@ -1298,6 +1520,9 @@ git commit -m "feat(telegram-ui): fall back to plain text after three failed ren
 | 재시도 가능한 `duplicate_key` | Task 1 (`operation_id`) |
 | ambiguous ≠ 미전달 | Task 1 (`delivery` 3값), Task 3 (재전송 금지), Task 7 (에스컬레이션) |
 | payload 기반 단계 판정 + 역행 금지 | Task 5 Step 4·4b |
+| 예외별 전달 판정 (거절만 재시도) | Task 2 Step 0·3 |
+| 카드 현재 상태를 상한 없이 조회 | Task 3 (`telegram_ui_card_state` 투영 + `record_card_event`) |
+| 복구 완료 시 주의 해제 | Task 5 Step 4 (진행/주의 두 축 분리) |
 
 **남은 결정 — 실행자에게**
 
