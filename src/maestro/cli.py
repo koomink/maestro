@@ -57,6 +57,7 @@ from maestro.integrations.telegram.handlers import (
     TelegramOperatorCommandRouter,
     telegram_bot_commands,
 )
+from maestro.integrations.telegram.ui import catalog as ui_catalog
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
@@ -421,6 +422,10 @@ def _run_daily_signal_approval(
             typer.echo(
                 f"symphony_daily status=no_action signal_run_id={signal_summary.signal_run_id}"
             )
+            # 아무 일도 없었다는 것도 소식이다. 침묵은 조용한 하루와 죽은 봇을
+            # 구분해 주지 않는다. 카드가 아니라 한 줄이므로 lifecycle을 거치지
+            # 않는다 -- 갱신할 상태가 없다.
+            _send_no_action_notice(signal_maestro_config)
         return
 
     approval_orchestrator = MaestroOrchestrator(
@@ -672,6 +677,34 @@ def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) ->
         typer.echo(f"telegram_signal_summary=warn message={exc}")
         return
     typer.echo(f"telegram_signal_summary=sent chats={len(chat_ids)}")
+
+
+def _send_no_action_notice(maestro_config: MaestroConfig) -> None:
+    """오늘 매매할 것이 없었다고 한 줄로 알린다.
+
+    시그널 요약 알림과 같은 규약을 따른다: 토큰이 없거나 전송이 실패해도 일간
+    실행 자체를 실패시키지 않는다 -- 알리지 못한 것은 하지 않은 것과 다르고,
+    이 시점에는 이미 아무 주문도 만들지 않기로 끝난 뒤다.
+    """
+    if maestro_config.approval.provider != "telegram":
+        return
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
+        typer.echo("telegram_no_action=warn message=missing_bot_token")
+        return
+    try:
+        client = TelegramBotAPIClient(
+            token_env=maestro_config.approval.telegram_bot_token_env,
+            timeout_seconds=10.0,
+        )
+        for chat_id in chat_ids:
+            client.send_message(chat_id, ui_catalog.NO_ACTION_NOTICE)
+    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+        typer.echo(f"telegram_no_action=warn message={exc}")
+        return
+    typer.echo(f"telegram_no_action=sent chats={len(chat_ids)}")
 
 
 def _systemctl(action: str, service: str) -> None:
