@@ -31,6 +31,9 @@ class CardCopy(NamedTuple):
     render_hash: str
     delivery: str
     operation_id: str
+    #: Consecutive known failures for this copy; reset by a confirmed send.
+    #: Only meaningful when read from the projection.
+    consecutive_failures: int = 0
 
 
 def new_operation_id() -> str:

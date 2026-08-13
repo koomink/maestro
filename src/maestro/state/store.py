@@ -234,6 +234,7 @@ class StateStore:
                 "render_hash TEXT NOT NULL, "
                 "delivery TEXT NOT NULL, "
                 "operation_id TEXT NOT NULL, "
+                "consecutive_failures INTEGER NOT NULL DEFAULT 0, "
                 "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
                 "PRIMARY KEY (card_key, chat_id)"
                 ")"
@@ -1515,13 +1516,20 @@ class StateStore:
                 conn.execute(
                     "INSERT INTO telegram_ui_card_state "
                     "(card_key, chat_id, message_id, stage, render_hash, delivery, "
-                    "operation_id, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "operation_id, consecutive_failures, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
                     "ON CONFLICT(card_key, chat_id) DO UPDATE SET "
                     "message_id=COALESCE("
                     "excluded.message_id, telegram_ui_card_state.message_id), "
                     "stage=excluded.stage, render_hash=excluded.render_hash, "
                     "delivery=excluded.delivery, operation_id=excluded.operation_id, "
+                    # Counted here rather than by scanning the log: the run of
+                    # failures is state, and reconstructing it from recent
+                    # events hits the same window problem as the copy itself.
+                    "consecutive_failures=CASE excluded.delivery "
+                    "WHEN 'failed' THEN telegram_ui_card_state.consecutive_failures + 1 "
+                    "WHEN 'confirmed' THEN 0 "
+                    "ELSE telegram_ui_card_state.consecutive_failures END, "
                     "updated_at=CURRENT_TIMESTAMP",
                     (
                         str(payload["card_key"]),
@@ -1531,6 +1539,7 @@ class StateStore:
                         str(payload["render_hash"]),
                         str(payload["delivery"]),
                         str(payload["operation_id"]),
+                        1 if str(payload["delivery"]) == "failed" else 0,
                     ),
                 )
 
@@ -1539,8 +1548,8 @@ class StateStore:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT card_key, chat_id, message_id, stage, render_hash, delivery, "
-                "operation_id FROM telegram_ui_card_state WHERE card_key = ? "
-                "ORDER BY chat_id",
+                "operation_id, consecutive_failures FROM telegram_ui_card_state "
+                "WHERE card_key = ? ORDER BY chat_id",
                 (card_key,),
             ).fetchall()
         return [
@@ -1552,6 +1561,7 @@ class StateStore:
                 "render_hash": str(row[4]),
                 "delivery": str(row[5]),
                 "operation_id": str(row[6]),
+                "consecutive_failures": int(row[7]),
             }
             for row in rows
         ]

@@ -74,3 +74,11 @@ CARD_STAGE_LABELS = {
 DAILY_CARD_TITLE = "📊 오늘의 투자 현황"
 DAILY_CARD_GROUP = "• {label} — {stage}"
 NO_ACTION_NOTICE = "오늘은 매매할 것이 없어요."
+CARD_FALLBACK_TEMPLATE = (
+    "⚠️ 카드를 표시하지 못했어요 ({card_key}, 단계 {stage}). "
+    "카드 없이 알려드리니 /history에서 확인해 주세요."
+)
+CARD_AMBIGUOUS_TEMPLATE = (
+    "⚠️ 카드 전송 결과를 확인하지 못했어요 ({card_key}, 단계 {stage}). "
+    "같은 카드가 두 장 보이거나 갱신되지 않을 수 있어요."
+)

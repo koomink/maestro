@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from maestro.integrations.telegram.bot import TelegramApiRejected
+from maestro.integrations.telegram.ui import catalog
 from maestro.integrations.telegram.ui.card_state import (
     CardCopy,
     card_failure_event,
@@ -19,6 +20,9 @@ from maestro.integrations.telegram.ui.card_state import (
     new_operation_id,
 )
 from maestro.integrations.telegram.ui.cards import RenderedCard
+
+#: Three straight failures means the card path is not working for this chat.
+_FALLBACK_AFTER_FAILURES = 3
 
 
 class CardLifecycleManager:
@@ -87,6 +91,8 @@ class CardLifecycleManager:
                     card_key, chat_id, stage, render_hash, operation_id, str(exc)
                 ),
             )
+            if self.consecutive_failures(card_key, chat_id) >= _FALLBACK_AFTER_FAILURES:
+                self._escalate_repeated_failures(run_id, card_key, chat_id, stage)
             return "failed"
         except Exception:  # noqa: BLE001 - one chat must not stop the rest
             # Timeout, dropped connection, unparseable body: any of these can
@@ -198,11 +204,61 @@ class CardLifecycleManager:
             for row in self.store.load_card_delivery_state(card_key)
         }
 
+    def consecutive_failures(self, card_key: str, chat_id: int) -> int:
+        copy = self.copies(card_key).get((card_key, chat_id))
+        return copy.consecutive_failures if copy is not None else 0
+
     def _escalate_ambiguous(
         self, run_id: str, card_key: str, chat_id: int, stage: str
     ) -> None:
-        """Filled in by Task 7. A no-op here still satisfies the rule that
-        matters: an ambiguous copy is not resent."""
+        """Tell the operator, once, that we cannot account for this copy.
+
+        Plain text with no buttons on purpose. Re-rendering the card is exactly
+        what we refused to do, and a second button-bearing card for one
+        approval is the outcome this whole path exists to avoid.
+
+        Deduplicated per (card_key, chat_id, stage): the sweep runs every poll,
+        and an ambiguous copy stays ambiguous until a human looks at it.
+        """
+        notice_key = f"telegram-ui-card-ambiguous:{card_key}:{chat_id}:{stage}"
+        if self.store.duplicate_key_exists(notice_key):
+            return
+        try:
+            self.client.send_message(
+                chat_id, catalog.CARD_AMBIGUOUS_TEMPLATE.format(card_key=card_key, stage=stage)
+            )
+        except Exception:  # noqa: BLE001 - the sweep must keep going
+            return
+        self.store.save_system_event(
+            run_id,
+            "telegram_ui_card_ambiguous",
+            {"card_key": card_key, "chat_id": chat_id, "stage": stage,
+             "duplicate_key": notice_key},
+        )
+
+    def _escalate_repeated_failures(
+        self, run_id: str, card_key: str, chat_id: int, stage: str
+    ) -> None:
+        """After three straight failures, say it without the renderer.
+
+        If rendering is what keeps failing, rendering the fallback would fail
+        too, so this is a fixed template carrying only the card identity.
+        """
+        notice_key = f"telegram-ui-card-fallback:{card_key}:{chat_id}:{stage}"
+        if self.store.duplicate_key_exists(notice_key):
+            return
+        try:
+            self.client.send_message(
+                chat_id, catalog.CARD_FALLBACK_TEMPLATE.format(card_key=card_key, stage=stage)
+            )
+        except Exception:  # noqa: BLE001 - the sweep must keep going
+            return
+        self.store.save_system_event(
+            run_id,
+            "telegram_ui_card_fallback",
+            {"card_key": card_key, "chat_id": chat_id, "stage": stage,
+             "duplicate_key": notice_key},
+        )
 
     def _send(self, chat_id: int, rendered: RenderedCard) -> Mapping[str, Any] | None:
         try:

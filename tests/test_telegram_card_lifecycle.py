@@ -1,4 +1,5 @@
 from maestro.integrations.telegram.bot import TelegramApiRejected
+from maestro.integrations.telegram.ui import catalog
 from maestro.integrations.telegram.ui.card_state import resolve_card_copies
 from maestro.integrations.telegram.ui.cards import RenderedCard
 from maestro.integrations.telegram.ui.lifecycle import CardLifecycleManager
@@ -204,9 +205,31 @@ def test_an_ambiguous_copy_is_never_resent(tmp_path):
 
     result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
 
-    assert client.sent == []
-    assert client.edited == []
     assert result["ambiguous"] == (100,)
+    assert client.edited == []
+    # The card itself is never re-sent; the operator gets a plain-text notice
+    # instead, so one approval never grows a second set of buttons.
+    assert [text for _, text in client.sent] == [
+        catalog.CARD_AMBIGUOUS_TEMPLATE.format(card_key="approval:appr_1", stage="in_progress")
+    ]
+
+
+def test_the_ambiguous_notice_is_sent_only_once(tmp_path):
+    """The sweep runs every poll and the copy stays ambiguous until a human
+    looks; repeating the notice every two minutes would bury it."""
+    from maestro.integrations.telegram.ui.card_state import card_intent_event
+
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    store.record_card_event(
+        "run_1", card_intent_event("approval:appr_1", 100, "pending", "h1", "op-crashed")
+    )
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+    manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+
+    assert len(client.sent) == 1
 
 
 def test_a_delivered_card_survives_a_round_trip_through_the_store(tmp_path):
@@ -262,3 +285,56 @@ def test_an_edit_rejection_falls_back_to_a_new_message(tmp_path):
     assert result["sent"] == (100,)
     copies = manager.copies("approval:appr_1")
     assert copies[("approval:appr_1", 100)].message_id == client.next_message_id
+
+
+def test_three_consecutive_rejections_send_a_plain_text_fallback(tmp_path):
+    """The operator must not lose the thread because the card path is broken.
+
+    The fallback deliberately does not go through cards.py: if rendering is
+    what fails, rendering the fallback would fail too.
+    """
+    class CardRejectingClient(FakeClient):
+        """Rejects this card's content, accepts anything else.
+
+        Models the case the fallback is for -- a card Telegram will not take,
+        while the chat itself is reachable. A dead chat cannot be helped by
+        sending it more messages.
+        """
+
+        def send_message(self, chat_id, text, reply_markup=None):
+            if text == CARD.text:
+                raise TelegramApiRejected("bad entity in card markup")
+            return super().send_message(chat_id, text, reply_markup)
+
+    client = CardRejectingClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+
+    for _ in range(3):
+        manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+
+    assert manager.consecutive_failures("approval:appr_1", 100) == 3
+    assert [text for _, text in client.sent] == [
+        catalog.CARD_FALLBACK_TEMPLATE.format(card_key="approval:appr_1", stage="pending")
+    ]
+
+
+def test_two_rejections_do_not_trigger_the_fallback(tmp_path):
+    client = FakeClient(reject_for={100})
+    _, manager = _manager(tmp_path, client, chat_ids=(100,))
+
+    for _ in range(2):
+        manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+
+    assert manager.consecutive_failures("approval:appr_1", 100) == 2
+    assert client.sent == []
+
+
+def test_a_confirmed_send_resets_the_failure_run(tmp_path):
+    client = FakeClient(reject_for={100})
+    _, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    client.reject_for = set()
+
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+
+    assert manager.consecutive_failures("approval:appr_1", 100) == 0
