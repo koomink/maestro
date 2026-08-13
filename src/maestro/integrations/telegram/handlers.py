@@ -2153,9 +2153,18 @@ class TelegramOperatorCommandRouter:
         groups: dict[str, list[PendingApprovalEnvelope]] = defaultdict(list)
         for envelope in envelopes:
             approval_id = envelope.approval_id
-            groups[envelope.signal_run_id].append(envelope)
             card_key = f"approval:{approval_id}"
             copies = self._card_manager.copies(card_key)
+            if not copies:
+                # lifecycle이 이 카드를 보낸 적이 없다 = 이관 이전에 dispatch된
+                # 승인이다. 신규 봉투는 dispatch가 전송 **전에** intent를 남기므로
+                # 거절당했더라도 행이 있다. 여기서 새로 보내면 배포 순간 떠 있던
+                # 승인마다 버튼 달린 카드가 두 장이 된다 — 갱신되는 쪽은 하나뿐이고,
+                # 낡은 쪽은 영원히 "승인 대기"로 남는다. 그 승인은 병행 유지 중인
+                # 구 알림 경로가 계속 책임진다. 부모 카드 집계에도 넣지 않는다 —
+                # 단계를 모르는 그룹이 남으면 sweep 전체가 죽는다.
+                continue
+            groups[envelope.signal_run_id].append(envelope)
             stage = card_stage(
                 keep_forward_progress(
                     _shown_progress(copies),

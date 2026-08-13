@@ -14,6 +14,7 @@ from maestro.config.loader import load_config
 from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.integrations.telegram.ui import catalog
+from maestro.integrations.telegram.ui.cards import render_approval_stage_card
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state.store import StateStore
 
@@ -135,6 +136,23 @@ def _save_pending_envelope(
     return envelope
 
 
+def _dispatch_approval(router, **kwargs):
+    """봉투를 남기고 카드를 보낸다 — orchestrator의 dispatch가 하는 그대로.
+
+    프로덕션에서 승인 카드는 dispatch가 태어나게 하고 sweep은 갱신만 한다.
+    카드 없이 봉투만 만들어 두고 sweep에 첫 전송을 시키는 테스트는 이관 이전
+    상태를 흉내내는 것이지 정상 경로가 아니다.
+    """
+    envelope = _save_pending_envelope(router.store, **kwargs)
+    router._card_manager.deliver(
+        envelope.run_id,
+        f"approval:{envelope.approval_id}",
+        "pending",
+        render_approval_stage_card(envelope.request, "pending"),
+    )
+    return envelope
+
+
 def _save_ack(store, *, approval_id, status="approved"):
     store.save_system_event(
         f"run_{approval_id}",
@@ -188,7 +206,7 @@ def _stage_of(store, card_key, chat_id=100):
 def test_an_approval_stage_change_edits_the_card_instead_of_sending_a_new_one(tmp_path):
     """연달아 오던 'Maestro live order update' 스트림을 카드 한 장으로 대체한다."""
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
 
     router._sweep_lifecycle_cards()
     sent_after_first = len(client.sent)
@@ -204,7 +222,7 @@ def test_an_approval_stage_change_edits_the_card_instead_of_sending_a_new_one(tm
 def test_an_unchanged_approval_is_not_edited_every_poll(tmp_path):
     """sweep은 2분마다 돈다. 같은 단계에서 매번 edit하면 API만 태운다."""
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
 
     router._sweep_lifecycle_cards()
     router._sweep_lifecycle_cards()
@@ -221,7 +239,7 @@ def test_a_half_executed_rotation_is_not_reported_as_complete(tmp_path):
     "✅ 완료"로 표시된다.
     """
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     router._sweep_lifecycle_cards()
 
     _save_ack(store, approval_id="appr_1")
@@ -234,7 +252,7 @@ def test_a_half_executed_rotation_is_not_reported_as_complete(tmp_path):
 
 def test_a_clean_completion_reaches_done(tmp_path):
     router, store, _ = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     router._sweep_lifecycle_cards()
 
     _save_ack(store, approval_id="appr_1")
@@ -247,7 +265,7 @@ def test_a_clean_completion_reaches_done(tmp_path):
 def test_an_unresolved_recovery_holds_the_card_in_attention(tmp_path):
     """복구 대상 주문은 이 승인의 order_id로 잇는다 — 페이로드에 approval_id가 없다."""
     router, store, _ = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     _save_ack(store, approval_id="appr_1")
     _save_completed(store, approval_id="appr_1", orders_failed=0)
     _save_recovery_required(store, approval_id="appr_1")
@@ -260,8 +278,8 @@ def test_an_unresolved_recovery_holds_the_card_in_attention(tmp_path):
 def test_a_recovery_for_another_approval_does_not_touch_this_card(tmp_path):
     """order_id로 잇지 않고 '복구가 하나라도 있으면 주의'로 접으면 전부 물든다."""
     router, store, _ = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
-    _save_pending_envelope(store, approval_id="appr_2")
+    _dispatch_approval(router, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_2")
     for approval_id in ("appr_1", "appr_2"):
         _save_ack(store, approval_id=approval_id)
         _save_completed(store, approval_id=approval_id, orders_failed=0)
@@ -276,7 +294,7 @@ def test_a_recovery_for_another_approval_does_not_touch_this_card(tmp_path):
 def test_a_resolved_recovery_releases_the_card_from_attention(tmp_path):
     """진행과 주의를 두 축으로 나눈 이유. 사고가 해소되면 카드도 풀려야 한다."""
     router, store, _ = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     _save_ack(store, approval_id="appr_1")
     _save_completed(store, approval_id="appr_1", orders_failed=0)
     _save_recovery_required(store, approval_id="appr_1")
@@ -299,7 +317,7 @@ def test_progress_does_not_walk_back_when_an_event_lands_late(tmp_path):
     진행 축이 되돌아가도 화면에서는 보이지 않아 아무것도 검증하지 못한다.
     """
     router, store, _ = _router_with_cards(tmp_path, chat_ids=(100, 200), reject_for=(200,))
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     _save_ack(store, approval_id="appr_1")
     _save_completed(store, approval_id="appr_1", orders_failed=0)
     router._sweep_lifecycle_cards()
@@ -329,7 +347,7 @@ def test_a_settled_card_wakes_up_when_something_new_happens(tmp_path):
     영영 반영되지 않는다.
     """
     router, store, _ = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     _save_ack(store, approval_id="appr_1")
     _save_completed(store, approval_id="appr_1", orders_failed=0)
     router._sweep_lifecycle_cards()
@@ -344,7 +362,7 @@ def test_a_settled_card_wakes_up_when_something_new_happens(tmp_path):
 def test_a_settled_card_stops_being_swept(tmp_path):
     """done은 종점이다. 승인은 계속 쌓이므로 끝난 카드를 매 poll 다시 그리면 안 된다."""
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     _save_ack(store, approval_id="appr_1")
     _save_completed(store, approval_id="appr_1", orders_failed=0)
     router._sweep_lifecycle_cards()
@@ -359,7 +377,7 @@ def test_a_settled_card_stops_being_swept(tmp_path):
 def test_the_daily_parent_card_appears_only_when_a_run_has_two_groups(tmp_path):
     """승인 그룹이 하나면 부모 카드는 같은 말을 두 번 하는 것뿐이다."""
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_solo", signal_run_id="signal_solo")
+    _dispatch_approval(router, approval_id="appr_solo", signal_run_id="signal_solo")
 
     router._sweep_lifecycle_cards()
 
@@ -369,8 +387,8 @@ def test_the_daily_parent_card_appears_only_when_a_run_has_two_groups(tmp_path):
 
 def test_two_groups_in_one_run_get_a_daily_parent_card(tmp_path):
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_a", signal_run_id="signal_1")
-    _save_pending_envelope(store, approval_id="appr_b", signal_run_id="signal_1")
+    _dispatch_approval(router, approval_id="appr_a", signal_run_id="signal_1")
+    _dispatch_approval(router, approval_id="appr_b", signal_run_id="signal_1")
 
     router._sweep_lifecycle_cards()
 
@@ -382,8 +400,8 @@ def test_two_groups_in_one_run_get_a_daily_parent_card(tmp_path):
 
 def test_the_daily_card_follows_its_groups(tmp_path):
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_a", signal_run_id="signal_1")
-    _save_pending_envelope(store, approval_id="appr_b", signal_run_id="signal_1")
+    _dispatch_approval(router, approval_id="appr_a", signal_run_id="signal_1")
+    _dispatch_approval(router, approval_id="appr_b", signal_run_id="signal_1")
     router._sweep_lifecycle_cards()
 
     _save_ack(store, approval_id="appr_a")
@@ -416,7 +434,7 @@ def test_the_legacy_notification_path_still_runs(tmp_path):
 def test_the_card_sweep_is_registered_and_cannot_wedge_the_poll_loop(tmp_path):
     """poll_once의 sweep 튜플에 들어가 같은 예외 격리를 받는다."""
     router, store, client = _router_with_cards(tmp_path)
-    _save_pending_envelope(store, approval_id="appr_1")
+    _dispatch_approval(router, approval_id="appr_1")
     calls: list[str] = []
 
     def exploding_sweep():
@@ -427,3 +445,40 @@ def test_the_card_sweep_is_registered_and_cannot_wedge_the_poll_loop(tmp_path):
 
     assert router.poll_once(offset=None) is None
     assert calls == ["swept"], "poll_once가 카드 sweep을 부르지 않았다"
+
+
+def test_an_approval_dispatched_before_the_cutover_gets_no_second_card(tmp_path):
+    """배포 시점에 이미 떠 있던 승인에 카드를 새로 보내면 안 된다.
+
+    구 코드의 dispatch는 send_message로 직접 보내고 message_id를 남기지 않았다.
+    그런 봉투는 투영에 행이 하나도 없고, sweep이 그것을 "아직 안 보냈다"로 읽으면
+    운영자 화면에 버튼 달린 카드가 두 장 생긴다 — 배포 순간 진행 중이던 승인마다.
+
+    투영이 비어 있다는 것은 곧 lifecycle이 이 카드를 보낸 적이 없다는 뜻이다.
+    신규 봉투는 dispatch가 전송 전에 intent를 남기므로 거절당한 경우에도 행이 있다.
+    """
+    router, store, client = _router_with_cards(tmp_path)
+    # 봉투만 있고 카드 기록은 없다 — 구 경로가 보낸 승인의 모양 그대로.
+    _save_pending_envelope(store, approval_id="appr_legacy")
+
+    router._sweep_lifecycle_cards()
+
+    assert client.sent == [], "구 카드가 있는 승인에 새 카드를 보냈다"
+    assert client.edited == []
+    assert store.load_card_delivery_state("approval:appr_legacy") == []
+
+
+def test_a_pre_cutover_run_with_two_groups_does_not_break_the_sweep(tmp_path):
+    """건너뛴 승인이 부모 카드 집계에 남아 있으면 sweep 전체가 죽는다.
+
+    poll_once가 예외를 삼켜 주므로 조용히 실패하고, 그 뒤로 어떤 카드도
+    갱신되지 않는다.
+    """
+    router, store, client = _router_with_cards(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_a", signal_run_id="signal_old")
+    _save_pending_envelope(store, approval_id="appr_b", signal_run_id="signal_old")
+
+    router._sweep_lifecycle_cards()
+
+    assert client.sent == []
+    assert store.load_card_delivery_state("daily:signal_old") == []
