@@ -14,6 +14,31 @@ from typing import Any
 from maestro.config.identity import ConfigIdentity
 from maestro.state.models import PortfolioState
 
+# Lock re-entrancy depth, per thread, keyed by resolved lock-file path rather
+# than by StateStore instance. flock is owned by the open file description, so
+# two StateStore objects pointing at one database hold genuinely separate
+# handles: instance-scoped depths would let the same thread take a lock it
+# already holds (a self-deadlock) and would let the ordering rule below be
+# sidestepped by simply constructing a second store. Several call paths do
+# build their own StateStore, so that boundary is real, not hypothetical.
+_LOCK_DEPTHS = threading.local()
+
+
+def _lock_depths() -> dict[str, int]:
+    depths = getattr(_LOCK_DEPTHS, "by_path", None)
+    if depths is None:
+        depths = {}
+        _LOCK_DEPTHS.by_path = depths
+    return depths
+
+
+def _lock_key(lock_path: Path) -> str:
+    """Normalize so two spellings of one lock file share a depth entry."""
+    try:
+        return str(lock_path.resolve())
+    except OSError:
+        return str(lock_path.absolute())
+
 
 class StateStore:
     def __init__(
@@ -28,7 +53,6 @@ class StateStore:
         self.lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self.writer_lock_path = self.lock_path
         self.live_order_lock_path = self.path.with_suffix(self.path.suffix + ".live.lock")
-        self._lock_depths = threading.local()
         self.initial_cash = float(initial_cash or 0.0)
         self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
         self._init_db()
@@ -299,11 +323,13 @@ class StateStore:
         *,
         owner: str,
         timeout_seconds: float,
-        depth_attr: str | None,
+        reentrant: bool,
         busy_message: str,
         other_lock: tuple[str, Path] | None = None,
     ) -> Any:
-        if depth_attr is not None and getattr(self._lock_depths, depth_attr, 0) > 0:
+        depths = _lock_depths()
+        depth_key = _lock_key(lock_path) if reentrant else None
+        if depth_key is not None and depths.get(depth_key, 0) > 0:
             yield
             return
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,15 +356,15 @@ class StateStore:
                         ) from exc
                     time.sleep(0.1)
             self._write_lock_holder(lock_file, owner)
-            if depth_attr is not None:
-                depth = getattr(self._lock_depths, depth_attr, 0)
-                setattr(self._lock_depths, depth_attr, depth + 1)
+            if depth_key is not None:
+                depths[depth_key] = depths.get(depth_key, 0) + 1
             try:
                 yield
             finally:
-                if depth_attr is not None:
-                    depth = getattr(self._lock_depths, depth_attr)
-                    setattr(self._lock_depths, depth_attr, depth - 1)
+                if depth_key is not None:
+                    depths[depth_key] -= 1
+                    if depths[depth_key] <= 0:
+                        del depths[depth_key]
                 self._clear_lock_holder(lock_file)
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
         finally:
@@ -531,7 +557,7 @@ class StateStore:
             self.lock_path,
             owner=owner,
             timeout_seconds=timeout_seconds,
-            depth_attr="writer",
+            reentrant=True,
             busy_message=f"State writer lock is busy: {self.lock_path}",
             other_lock=("live_order_lock", self.live_order_lock_path),
         ):
@@ -553,10 +579,36 @@ class StateStore:
             lock_path,
             owner=f"account_refresh:{account_id}",
             timeout_seconds=timeout_seconds,
-            depth_attr=None,
+            reentrant=False,
             busy_message=f"Account refresh is already running: {account_id}",
         ):
             yield
+
+    def holds_writer_lock(self) -> bool:
+        """Whether this thread currently holds this database's writer lock."""
+        return _lock_depths().get(_lock_key(self.lock_path), 0) > 0
+
+    def _assert_live_order_lock_order(self, owner: str) -> None:
+        """live_order_lock is the outer lock; writer_lock is only taken under it.
+
+        A thread already holding writer_lock must not take live_order_lock. That
+        inversion is what deadlocked the 2026-08-11 and 2026-08-12 US rotations
+        against a concurrent process holding the two locks in the agreed order.
+        flock is per-process, so such a bug cannot be caught by single-process
+        tests and only surfaces as a cross-process hang under production timing.
+        Raising here converts it into a loud, local, immediately attributable
+        failure at the exact call site that broke the rule.
+        """
+        depths = _lock_depths()
+        if depths.get(_lock_key(self.live_order_lock_path), 0) > 0:
+            # Re-entrant: the outermost acquisition already established the order.
+            return
+        if depths.get(_lock_key(self.lock_path), 0) > 0:
+            raise RuntimeError(
+                f"Lock order violation: live_order_lock ({owner}) was requested "
+                "while this thread already holds writer_lock. Acquire "
+                "live_order_lock first, then writer_lock under it."
+            )
 
     @contextmanager
     def live_order_lock(
@@ -565,11 +617,12 @@ class StateStore:
         *,
         timeout_seconds: float = 30.0,
     ) -> Any:
+        self._assert_live_order_lock_order(owner)
         with self._file_lock(
             self.live_order_lock_path,
             owner=owner,
             timeout_seconds=timeout_seconds,
-            depth_attr="live_order",
+            reentrant=True,
             busy_message=f"Live order lock is busy: {self.live_order_lock_path}",
             other_lock=("writer_lock", self.lock_path),
         ):

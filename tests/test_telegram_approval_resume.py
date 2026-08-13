@@ -879,7 +879,7 @@ def test_record_resolution_completed_checks_and_writes_under_the_writer_lock(tmp
 
     def _spy(duplicate_key):
         if duplicate_key.startswith("telegram-approval-completed:"):
-            observed.append(getattr(store._lock_depths, "writer", 0) > 0)
+            observed.append(store.holds_writer_lock())
         return original(duplicate_key)
 
     store.duplicate_key_exists = _spy
