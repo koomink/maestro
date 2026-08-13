@@ -558,6 +558,27 @@ class StateStore:
         ):
             yield
 
+    def _assert_live_order_lock_order(self, owner: str) -> None:
+        """live_order_lock is the outer lock; writer_lock is only taken under it.
+
+        A thread already holding writer_lock must not take live_order_lock. That
+        inversion is what deadlocked the 2026-08-11 and 2026-08-12 US rotations
+        against a concurrent process holding the two locks in the agreed order.
+        flock is per-process, so such a bug cannot be caught by single-process
+        tests and only surfaces as a cross-process hang under production timing.
+        Raising here converts it into a loud, local, immediately attributable
+        failure at the exact call site that broke the rule.
+        """
+        if getattr(self._lock_depths, "live_order", 0) > 0:
+            # Re-entrant: the outermost acquisition already established the order.
+            return
+        if getattr(self._lock_depths, "writer", 0) > 0:
+            raise RuntimeError(
+                f"Lock order violation: live_order_lock ({owner}) was requested "
+                "while this thread already holds writer_lock. Acquire "
+                "live_order_lock first, then writer_lock under it."
+            )
+
     @contextmanager
     def live_order_lock(
         self,
@@ -565,6 +586,7 @@ class StateStore:
         *,
         timeout_seconds: float = 30.0,
     ) -> Any:
+        self._assert_live_order_lock_order(owner)
         with self._file_lock(
             self.live_order_lock_path,
             owner=owner,

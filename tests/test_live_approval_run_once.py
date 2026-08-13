@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -910,3 +911,47 @@ def _overseas_live_approval_config(
     config_path = tmp_path / "live_approval_kis_overseas.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+def test_live_execution_entry_points_take_the_live_order_lock_outermost(tmp_path, monkeypatch):
+    """approve_signal and run_once both descend into submit_approved_order.
+
+    That takes live_order_lock, so these entry points must take it before
+    writer_lock. Holding writer first is the inversion that deadlocks against a
+    concurrent reconcile_latest, which takes live_order_lock then writer_lock.
+    StateStore raises on the violation, but this pins the acquisition order at
+    the entry points themselves so a refactor cannot quietly rely on that.
+    """
+    orchestrator = MaestroOrchestrator(load_config(_overseas_live_approval_config(tmp_path)))
+    lock_order: list[tuple[str, str]] = []
+    original_writer_lock = orchestrator.state_store.writer_lock
+    original_live_order_lock = orchestrator.state_store.live_order_lock
+
+    @contextmanager
+    def recording_writer_lock(owner: str, **kwargs):
+        lock_order.append(("writer", owner))
+        with original_writer_lock(owner, **kwargs):
+            yield
+
+    @contextmanager
+    def recording_live_order_lock(owner: str, **kwargs):
+        lock_order.append(("live_order", owner))
+        with original_live_order_lock(owner, **kwargs):
+            yield
+
+    orchestrator.state_store.writer_lock = recording_writer_lock
+    orchestrator.state_store.live_order_lock = recording_live_order_lock
+    monkeypatch.setattr(MaestroOrchestrator, "_run_once_locked", lambda self: None)
+    monkeypatch.setattr(
+        MaestroOrchestrator, "_approve_signal_locked", lambda self, signal_run_id: None
+    )
+
+    orchestrator.run_once()
+    orchestrator.approve_signal("signal_lock_order")
+
+    assert lock_order == [
+        ("live_order", "run_once"),
+        ("writer", "run_once"),
+        ("live_order", "approve_signal"),
+        ("writer", "approve_signal"),
+    ]

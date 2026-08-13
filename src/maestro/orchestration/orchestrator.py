@@ -271,8 +271,11 @@ class MaestroOrchestrator:
         self._order_capacity_clients: dict[str | None, Any] = {}
 
     def run_once(self) -> RunOnceSummary:
-        with self.state_store.writer_lock("run_once"):
-            return self._run_once_locked()
+        # live_order_lock outermost: _run_once_locked can reach
+        # _execute_live_approval_orders -> submit_approved_order, which takes it.
+        with self.state_store.live_order_lock("run_once"):
+            with self.state_store.writer_lock("run_once"):
+                return self._run_once_locked()
 
     def run_signal(
         self,
@@ -287,8 +290,11 @@ class MaestroOrchestrator:
             )
 
     def approve_signal(self, signal_run_id: str) -> SignalApprovalSummary:
-        with self.state_store.writer_lock("approve_signal"):
-            return self._approve_signal_locked(signal_run_id)
+        # live_order_lock outermost: _approve_signal_locked can reach
+        # _execute_live_approval_orders -> submit_approved_order, which takes it.
+        with self.state_store.live_order_lock("approve_signal"):
+            with self.state_store.writer_lock("approve_signal"):
+                return self._approve_signal_locked(signal_run_id)
 
     def dispatch_signal_approval(self, signal_run_id: str) -> ApprovalDispatchResult:
         """Persist and send live Telegram approvals without polling for a decision."""

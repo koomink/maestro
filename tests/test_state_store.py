@@ -1081,3 +1081,31 @@ def test_only_one_process_wins_the_head_transition(tmp_path):
     winning_attempt = winners[0][0]
     for attempt in (1, 2, 3):
         assert store.duplicate_key_exists(f"req:{attempt}") is (attempt == winning_attempt)
+
+
+def test_live_order_lock_refuses_to_nest_under_the_writer_lock(tmp_path):
+    """The ordering rule is enforced, not merely documented.
+
+    flock is per-process, so a writer -> live_order nesting cannot deadlock in a
+    single-process test — it only hangs when a second process holds the two locks
+    in the agreed order, which is how the 2026-08-11/08-12 US rotations died.
+    Raising at the violating call site is what makes the rule testable at all.
+    """
+    store = StateStore(str(tmp_path / "state.db"))
+
+    with store.writer_lock("outer_writer"):
+        with pytest.raises(RuntimeError, match="Lock order violation"):
+            with store.live_order_lock("inner_live"):
+                pass
+
+
+def test_live_order_lock_allows_the_writer_lock_nested_under_it(tmp_path):
+    """The agreed order, plus a re-entrant live_order_lock taken under it."""
+    store = StateStore(str(tmp_path / "state.db"))
+
+    with store.live_order_lock("outer_live"):
+        with store.writer_lock("inner_writer"):
+            with store.live_order_lock("reentrant_live"):
+                store.save_system_event("run_order_check", "maestro_heartbeat", {})
+
+    assert len(store.list_system_events_by_type("maestro_heartbeat")) == 1
