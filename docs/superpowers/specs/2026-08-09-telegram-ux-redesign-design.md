@@ -85,10 +85,11 @@ src/maestro/integrations/telegram/
   문구 수정은 이 파일만 수정하면 끝난다.
 - **cards.py** — 순수 함수: `render_*(data) -> RenderedCard(text, reply_markup)`.
   네트워크·DB 접근 없음. 접힘/펼침 뷰를 같은 데이터로 렌더.
-- **lifecycle.py** — 유일한 상태 보유 컴포넌트. 카드별
+- **lifecycle.py** — 유일한 상태 보유 컴포넌트. 전달 복사본별
   `(card_key, chat_id, message_id, 단계, 렌더 해시)`를 state store의
   system event(`telegram_ui_card`)로 기록하고, poll 루프 sweep에서 상태 변화를
-  감지해 `edit_message_text`로 갱신.
+  감지해 `edit_message_text`로 갱신. 전송은 항상 intent를 먼저 기록한 뒤
+  수행한다(아래 데이터 흐름 1번).
 - **format.py** — `money_kr`, `deadline_kr` 등 한국어 표기 유틸.
 
 **의존성 방향**: `handlers.py → ui/` 단방향. `ui/`는 handlers·orchestrator·
@@ -505,9 +506,30 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 
 ## 데이터 흐름
 
-1. 카드 전송 시 `telegram_ui_card` system event로
-   `(card_key, chat_id, message_id, 단계, 렌더 데이터 해시)` 기록.
-   기존 state store 사용, 새 저장소 없음.
+1. 카드 상태는 `telegram_ui_card` system event로 기록한다. 기존 state store
+   사용, 새 저장소 없음.
+
+   **상태 키는 `(card_key, chat_id)`다.** `card_key`는 논리 카드이고, 전달
+   복사본은 chat별로 하나씩 존재한다. `card_key` 하나가 `message_id` 하나를
+   들고 있는 구조는 금지한다 — 지금 운영 chat이 하나뿐이라 그렇게 접고 싶어지지만,
+   접는 순간 두 번째 chat이 추가될 때 카드가 한 곳에서만 갱신되고 나머지는
+   영원히 낡은 화면으로 남는다. 되돌리려면 이미 쌓인 기록을 마이그레이션해야 한다.
+
+   **전송 전에 intent를 먼저 기록한다.** 순서는
+   `intent → 텔레그램 호출 → result`이며, `(card_key, chat_id, 단계)`가
+   intent의 키다. `message_id`는 텔레그램이 응답해야 존재하므로 result에만 있다.
+
+   이 순서가 아니면 — 즉 전송 후에만 기록하면 — `sendMessage`가 성공하고
+   이벤트를 쓰기 전에 프로세스가 죽었을 때 **텔레그램에는 카드가 있는데 우리
+   기록에는 없는** 상태가 된다. sweep은 그 카드를 영원히 갱신하지 않고, 재시도는
+   중복 카드를 만든다. 이는 2026-08-11·08-12 주문 경로에서 확인한 ambiguous
+   submit과 정확히 같은 결함 모양이다: 외부 시스템에 부작용을 일으킨 뒤 기록을
+   나중에 쓰는 것. 대상만 브로커에서 텔레그램으로 바뀐다.
+
+   intent만 있고 result가 없는 카드는 **관측 가능한 상태**여야 한다. 그것을
+   찾아 자가 치유하는 것은 단계 3a-3의 몫이지만, **그 기록을 만드는 것은 단계 2**다.
+   나중에 끼워 넣으면 이미 쌓인 intent 없는 기록을 마이그레이션해야 하고,
+   그만큼 3a-3이 커진다.
    `card_key`는 카드 유형별 원천 ID로 정한다:
    승인 카드 = `approval:<approval_id>` (유일한 액션 카드),
    데일리 요약 카드 = `daily:<signal_run_id>` (읽기 전용 집계),
