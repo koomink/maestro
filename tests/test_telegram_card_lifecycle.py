@@ -53,16 +53,13 @@ def test_delivery_writes_intent_before_calling_telegram(tmp_path):
             return super().send_message(chat_id, text, reply_markup)
 
     store, manager = _manager(tmp_path, RecordingClient(), chat_ids=(100,))
-    from maestro.integrations.telegram.ui.card_state import EVENT_TYPE
+    original = store.record_card_event
 
-    original = store.save_system_event
+    def spy(run_id, payload):
+        order.append(str(payload.get("phase")))
+        return original(run_id, payload)
 
-    def spy(run_id, event_type, payload):
-        if event_type == EVENT_TYPE:
-            order.append(str(payload.get("phase")))
-        return original(run_id, event_type, payload)
-
-    store.save_system_event = spy
+    store.record_card_event = spy
 
     manager.deliver("run_1", "approval:appr_1", "pending", CARD)
 
@@ -146,3 +143,122 @@ def test_the_render_hash_is_stable_for_equal_content(tmp_path):
     same = RenderedCard(text=CARD.text, reply_markup=None)
 
     assert manager.render_hash(CARD) == manager.render_hash(same)
+
+
+def test_refresh_edits_the_existing_message_per_chat(tmp_path):
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client)
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+
+    assert sorted(result["edited"]) == [100, 200]
+    assert [chat_id for chat_id, _, _ in client.edited] == [100, 200]
+
+
+def test_an_unchanged_render_is_not_sent_again(tmp_path):
+    """Telegram answers 'message is not modified' and it costs an API call."""
+    client = FakeClient()
+    _, manager = _manager(tmp_path, client)
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+
+    result = manager.refresh("run_1", "approval:appr_1", "pending", CARD)
+
+    assert result["edited"] == ()
+    assert result["skipped"] == (100, 200)
+    assert client.edited == []
+
+
+def test_a_known_failed_copy_is_sent_again(tmp_path):
+    """A rejection means it never landed, so retrying is safe."""
+    client = FakeClient(reject_for={100})
+    store, manager = _manager(tmp_path, client)
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    client.reject_for = set()
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+
+    assert 100 in result["sent"]
+    assert 200 in result["edited"]
+
+
+def test_an_ambiguous_copy_is_never_resent(tmp_path):
+    """The crash window: Telegram may already hold this card.
+
+    Resending would post a second card we have no message_id for, so it never
+    updates -- it sits at the old stage forever while the real one moves on.
+    For an approval card with buttons and a deadline, an operator reading the
+    stale copy concludes the decision is still outstanding.
+    """
+    from maestro.integrations.telegram.ui.card_state import card_intent_event
+
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    # Only an intent: exactly what a process death mid-send leaves behind.
+    store.record_card_event(
+        "run_1", card_intent_event("approval:appr_1", 100, "pending", "h1", "op-crashed")
+    )
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+
+    assert client.sent == []
+    assert client.edited == []
+    assert result["ambiguous"] == (100,)
+
+
+def test_a_delivered_card_survives_a_round_trip_through_the_store(tmp_path):
+    """The integration failure a hand-built event list cannot show.
+
+    Reconstructing state by folding recent events gets the direction wrong or
+    runs past a limit; the projection is read by key and does neither.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    sent_after_first = len(client.sent)
+
+    result = manager.refresh("run_1", "approval:appr_1", "pending", CARD)
+
+    assert len(client.sent) == sent_after_first
+    assert result["skipped"] == (100,)
+    assert result["ambiguous"] == ()
+
+
+def test_a_card_older_than_any_event_window_is_still_found(tmp_path):
+    """An approval can wait hours while sweeps append events for other cards.
+
+    Scanning the newest N events would lose this card and post a duplicate.
+    """
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_old", "pending", CARD)
+    for index in range(1200):
+        manager.deliver("run_noise", f"daily:noise_{index}", "pending", CARD)
+    sent_before = len(client.sent)
+
+    result = manager.refresh("run_1", "approval:appr_old", "pending", CARD)
+
+    assert result["skipped"] == (100,)
+    assert len(client.sent) == sent_before
+
+
+def test_an_edit_rejection_falls_back_to_a_new_message(tmp_path):
+    """48h expiry or a deleted message must not strand the card."""
+
+    class EditRejectingClient(FakeClient):
+        def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            raise TelegramApiRejected("message to edit not found")
+
+    client = EditRejectingClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "approval:appr_1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh("run_1", "approval:appr_1", "in_progress", progressed)
+
+    assert result["sent"] == (100,)
+    copies = manager.copies("approval:appr_1")
+    assert copies[("approval:appr_1", 100)].message_id == client.next_message_id

@@ -57,6 +57,9 @@ def _event(
 ) -> dict[str, Any]:
     return {
         "phase": phase,
+        # Carried on the payload so the store can project it without importing
+        # this module -- state/ must not depend on an integration.
+        "delivery": _PHASE_DELIVERY[phase],
         "card_key": card_key,
         "chat_id": chat_id,
         "stage": stage,

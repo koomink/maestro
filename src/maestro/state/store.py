@@ -225,6 +225,20 @@ class StateStore:
                 ")"
             )
             conn.execute(
+                "CREATE TABLE IF NOT EXISTS telegram_ui_card_state "
+                "("
+                "card_key TEXT NOT NULL, "
+                "chat_id INTEGER NOT NULL, "
+                "message_id INTEGER, "
+                "stage TEXT NOT NULL, "
+                "render_hash TEXT NOT NULL, "
+                "delivery TEXT NOT NULL, "
+                "operation_id TEXT NOT NULL, "
+                "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (card_key, chat_id)"
+                ")"
+            )
+            conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_approval_id "
                 "ON approvals(approval_id)"
             )
@@ -1473,6 +1487,74 @@ class StateStore:
 
     def save_system_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         self._insert("system_events", run_id, event_type, payload)
+
+    def record_card_event(self, run_id: str, payload: dict[str, Any]) -> None:
+        """Append a Telegram card event and update its projection atomically.
+
+        The event log is the history phase 3a-3 will need to reconstruct
+        attempts; the projection is the current state the sweep reads. Writing
+        them separately would let a crash leave the projection stale, and a
+        stale projection is the duplicate-card bug in another form --
+        ``writer_lock`` is an advisory flock and shares no transaction, so
+        wrapping two calls in it would not help.
+
+        Reconstructing current state by scanning recent events instead cannot
+        be made correct: events accrue on every sweep, so a card that has
+        waited long enough always has its last result pushed past any limit.
+        """
+        payload_json = json.dumps(payload, default=str)
+        with self.writer_lock("record_card_event"):
+            with self._connect() as conn:
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "INSERT INTO system_events (run_id, event_type, payload, duplicate_key) "
+                    "VALUES (?, ?, ?, ?)",
+                    (run_id, "telegram_ui_card", payload_json, payload.get("duplicate_key")),
+                )
+                conn.execute(
+                    "INSERT INTO telegram_ui_card_state "
+                    "(card_key, chat_id, message_id, stage, render_hash, delivery, "
+                    "operation_id, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(card_key, chat_id) DO UPDATE SET "
+                    "message_id=COALESCE("
+                    "excluded.message_id, telegram_ui_card_state.message_id), "
+                    "stage=excluded.stage, render_hash=excluded.render_hash, "
+                    "delivery=excluded.delivery, operation_id=excluded.operation_id, "
+                    "updated_at=CURRENT_TIMESTAMP",
+                    (
+                        str(payload["card_key"]),
+                        int(payload["chat_id"]),
+                        payload.get("message_id"),
+                        str(payload["stage"]),
+                        str(payload["render_hash"]),
+                        str(payload["delivery"]),
+                        str(payload["operation_id"]),
+                    ),
+                )
+
+    def load_card_delivery_state(self, card_key: str) -> list[dict[str, Any]]:
+        """Current state of every delivery copy of one card. No limit, no scan."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT card_key, chat_id, message_id, stage, render_hash, delivery, "
+                "operation_id FROM telegram_ui_card_state WHERE card_key = ? "
+                "ORDER BY chat_id",
+                (card_key,),
+            ).fetchall()
+        return [
+            {
+                "card_key": str(row[0]),
+                "chat_id": int(row[1]),
+                "message_id": row[2],
+                "stage": str(row[3]),
+                "render_hash": str(row[4]),
+                "delivery": str(row[5]),
+                "operation_id": str(row[6]),
+            }
+            for row in rows
+        ]
 
     def load_fill_watermarks(self) -> dict[str, tuple[float, float]]:
         with self._connect() as conn:
