@@ -1109,3 +1109,37 @@ def test_live_order_lock_allows_the_writer_lock_nested_under_it(tmp_path):
                 store.save_system_event("run_order_check", "maestro_heartbeat", {})
 
     assert len(store.list_system_events_by_type("maestro_heartbeat")) == 1
+
+
+def test_lock_order_guard_spans_separate_store_instances_on_one_database(tmp_path):
+    """The rule is about the database's locks, not about one StateStore object.
+
+    Several call paths build their own StateStore/MaestroOrchestrator over the
+    same sqlite file, so tracking depth per instance would let a second store
+    walk straight past the guard and re-create the inversion it exists to
+    forbid.
+    """
+    db_path = str(tmp_path / "state.db")
+    store_a = StateStore(db_path)
+    store_b = StateStore(db_path)
+
+    with store_a.writer_lock("outer_writer_on_store_a"):
+        with pytest.raises(RuntimeError, match="Lock order violation"):
+            with store_b.live_order_lock("inner_live_on_store_b"):
+                pass
+
+
+def test_writer_lock_is_reentrant_across_store_instances_on_one_database(tmp_path):
+    """flock is held by the open file description, so a second instance opening
+    the same lock file would block against its own thread forever. Depth keyed by
+    lock path makes the nested acquisition re-entrant instead of self-deadlocking.
+    """
+    db_path = str(tmp_path / "state.db")
+    store_a = StateStore(db_path)
+    store_b = StateStore(db_path)
+
+    with store_a.writer_lock("outer_writer_on_store_a"):
+        with store_b.writer_lock("inner_writer_on_store_b", timeout_seconds=2.0):
+            store_b.save_system_event("run_nested", "maestro_heartbeat", {})
+
+    assert len(store_a.list_system_events_by_type("maestro_heartbeat")) == 1
