@@ -35,12 +35,23 @@ class _Summary:
     action_required = False
     orders_preview_count = 0
     contribution_override = False
-    loaded_strategies = ["tranquillo"]
     no_order_reasons: list[str] = []
 
+    def __init__(self, strategies):
+        self.loaded_strategies = list(strategies)
 
-def _drive_no_action_day(monkeypatch, config, *, funding_sent=False, budget_sent=False):
+
+def _drive_no_action_day(
+    monkeypatch,
+    config,
+    *,
+    funding_sent=False,
+    budget_sent=False,
+    strategies=("tranquillo",),
+    failing_chats=(),
+):
     sent: list[tuple[int, str]] = []
+    unreachable = set(failing_chats)
 
     class FakeBotClient:
         def __init__(self, **kwargs):
@@ -48,6 +59,8 @@ def _drive_no_action_day(monkeypatch, config, *, funding_sent=False, budget_sent
 
         def send_message(self, chat_id, text, reply_markup=None):
             del reply_markup
+            if chat_id in unreachable:
+                raise RuntimeError(f"telegram unreachable for chat {chat_id}")
             sent.append((chat_id, text))
             return {"ok": True, "result": {"message_id": len(sent)}}
 
@@ -57,7 +70,7 @@ def _drive_no_action_day(monkeypatch, config, *, funding_sent=False, budget_sent
 
         def run_signal(self, **kwargs):
             del kwargs
-            return _Summary()
+            return _Summary(strategies)
 
     monkeypatch.setenv(config.approval.telegram_bot_token_env, "test-token")
     monkeypatch.setattr("maestro.cli._load_operator_config", lambda path: (config, None))
@@ -125,3 +138,46 @@ def test_a_non_telegram_provider_sends_nothing(monkeypatch, tmp_path, provider):
     config.approval.provider = provider
 
     assert _drive_no_action_day(monkeypatch, config) == []
+
+
+def test_the_notice_is_sent_once_per_day_and_scope(monkeypatch, tmp_path):
+    """같은 날 같은 전략 묶음을 다시 돌려도 알림이 다시 가면 안 된다.
+
+    스펙 「중복 방지」: 카드 생성·노옵 알림은 duplicate_key로 멱등 처리한다.
+    """
+    config = _telegram_config(tmp_path)
+
+    first = _drive_no_action_day(monkeypatch, config)
+    second = _drive_no_action_day(monkeypatch, config)
+
+    assert first == [(100, NO_ACTION_NOTICE), (200, NO_ACTION_NOTICE)]
+    assert second == [], "재실행이 같은 알림을 다시 보냈다"
+
+
+def test_the_other_market_run_still_gets_its_own_notice(monkeypatch, tmp_path):
+    """KR·US 런은 같은 날 따로 돈다. 날짜만으로 접으면 한쪽이 침묵한다."""
+    config = _telegram_config(tmp_path)
+
+    _drive_no_action_day(monkeypatch, config)
+    sent = _drive_no_action_day(monkeypatch, config, strategies=["crescendo_us"])
+
+    assert sent == [(100, NO_ACTION_NOTICE), (200, NO_ACTION_NOTICE)]
+
+
+def test_one_unreachable_chat_does_not_silence_the_rest(monkeypatch, tmp_path):
+    """첫 채팅이 실패했다고 뒤 채팅이 시도조차 못 하면 안 된다."""
+    config = _telegram_config(tmp_path)
+
+    sent = _drive_no_action_day(monkeypatch, config, failing_chats={100})
+
+    assert sent == [(200, NO_ACTION_NOTICE)]
+
+
+def test_a_chat_that_failed_is_retried_while_the_others_are_not(monkeypatch, tmp_path):
+    """성공한 채팅만 완료로 기록한다 — 리마인더 sweep이 쓰는 규약 그대로."""
+    config = _telegram_config(tmp_path)
+    _drive_no_action_day(monkeypatch, config, failing_chats={100})
+
+    sent = _drive_no_action_day(monkeypatch, config)
+
+    assert sent == [(100, NO_ACTION_NOTICE)]

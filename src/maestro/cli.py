@@ -7,6 +7,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TypeVar
+from zoneinfo import ZoneInfo
 
 import typer
 import yaml
@@ -425,7 +426,7 @@ def _run_daily_signal_approval(
             # 아무 일도 없었다는 것도 소식이다. 침묵은 조용한 하루와 죽은 봇을
             # 구분해 주지 않는다. 카드가 아니라 한 줄이므로 lifecycle을 거치지
             # 않는다 -- 갱신할 상태가 없다.
-            _send_no_action_notice(signal_maestro_config)
+            _send_no_action_notice(signal_maestro_config, signal_identity, signal_summary)
         return
 
     approval_orchestrator = MaestroOrchestrator(
@@ -679,12 +680,23 @@ def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) ->
     typer.echo(f"telegram_signal_summary=sent chats={len(chat_ids)}")
 
 
-def _send_no_action_notice(maestro_config: MaestroConfig) -> None:
+def _send_no_action_notice(
+    maestro_config: MaestroConfig,
+    identity: ConfigIdentity,
+    summary,
+) -> None:
     """오늘 매매할 것이 없었다고 한 줄로 알린다.
 
-    시그널 요약 알림과 같은 규약을 따른다: 토큰이 없거나 전송이 실패해도 일간
-    실행 자체를 실패시키지 않는다 -- 알리지 못한 것은 하지 않은 것과 다르고,
-    이 시점에는 이미 아무 주문도 만들지 않기로 끝난 뒤다.
+    채팅마다 독립적으로 보내고 성공한 채팅만 완료로 기록한다 -- 리마인더
+    sweep과 같은 규약이다. 하나의 try로 묶으면 첫 채팅이 닿지 않을 때 나머지는
+    시도조차 되지 않고, 어느 채팅이 빠졌는지도 남지 않는다.
+
+    duplicate_key는 (운영 시간대 날짜, 전략 묶음, 채팅)이다. 날짜만으로 접으면
+    같은 날 따로 도는 KR/US 런 중 한쪽이 침묵하고, signal_run_id로 잡으면 런을
+    다시 돌릴 때마다 같은 말을 다시 보낸다.
+
+    토큰이 없거나 전송이 실패해도 일간 실행 자체를 실패시키지 않는다 -- 이
+    시점에는 이미 아무 주문도 만들지 않기로 끝난 뒤다.
     """
     if maestro_config.approval.provider != "telegram":
         return
@@ -694,17 +706,39 @@ def _send_no_action_notice(maestro_config: MaestroConfig) -> None:
     if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
         typer.echo("telegram_no_action=warn message=missing_bot_token")
         return
-    try:
-        client = TelegramBotAPIClient(
-            token_env=maestro_config.approval.telegram_bot_token_env,
-            timeout_seconds=10.0,
-        )
-        for chat_id in chat_ids:
-            client.send_message(chat_id, ui_catalog.NO_ACTION_NOTICE)
-    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-        typer.echo(f"telegram_no_action=warn message={exc}")
-        return
-    typer.echo(f"telegram_no_action=sent chats={len(chat_ids)}")
+    timezone = operator_timezone(maestro_config)
+    today = utc_now().astimezone(ZoneInfo(timezone)).date().isoformat()
+    scope = ",".join(sorted(getattr(summary, "loaded_strategies", None) or ["all"]))
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    client = TelegramBotAPIClient(
+        token_env=maestro_config.approval.telegram_bot_token_env,
+        timeout_seconds=10.0,
+    )
+    sent = 0
+    for chat_id in chat_ids:
+        duplicate_key = f"telegram-no-action:{today}:{scope}:{chat_id}"
+        try:
+            if store.duplicate_key_exists(duplicate_key):
+                continue
+            client.send_message(int(chat_id), ui_catalog.NO_ACTION_NOTICE)
+            save_audited_system_event(
+                store,
+                audit,
+                summary.signal_run_id,
+                "telegram_no_action_notice",
+                {
+                    "chat_id": int(chat_id),
+                    "notice_date": today,
+                    "strategy_scope": scope,
+                    "duplicate_key": duplicate_key,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 채팅 하나가 나머지를 막지 않는다
+            typer.echo(f"telegram_no_action=warn chat={chat_id} message={exc}")
+            continue
+        sent += 1
+    typer.echo(f"telegram_no_action=sent chats={sent}")
 
 
 def _systemctl(action: str, service: str) -> None:
