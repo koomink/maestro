@@ -19,6 +19,9 @@ from maestro.core.strategy_names import (
     strategy_command_slug as _telegram_strategy_command_slug,
 )
 from maestro.core.strategy_names import (
+    strategy_display_label as _telegram_strategy_display_label,
+)
+from maestro.core.strategy_names import (
     strategy_display_name as _telegram_strategy_display_name,
 )
 from maestro.core.time_display import format_operator_time, operator_timezone
@@ -77,12 +80,22 @@ from maestro.execution.order_builder import (
 from maestro.execution.order_capacity import OrderCapacityService
 from maestro.integrations.telegram.bot import TelegramBotClient
 from maestro.integrations.telegram.ui import catalog as ui_catalog
+from maestro.integrations.telegram.ui.approval_stage import (
+    PROGRESS_RANK,
+    approval_needs_attention,
+    approval_progress,
+    card_stage,
+    keep_forward_progress,
+)
 from maestro.integrations.telegram.ui.cards import (
     approval_decision_text,
     approval_markup,
     approval_reminder_text,
     render_approval_card,
+    render_approval_stage_card,
+    render_daily_card,
 )
+from maestro.integrations.telegram.ui.lifecycle import CardLifecycleManager
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
@@ -188,6 +201,12 @@ class TelegramOperatorCommandRouter:
         self.signal_config_path = Path(signal_config_path) if signal_config_path else None
         self.approval_config_path = Path(approval_config_path) if approval_config_path else None
         self.config_identity = config_identity
+        self._card_manager = CardLifecycleManager(
+            store,
+            audit,
+            client,
+            chat_ids=[int(chat_id) for chat_id in config.approval.telegram_allowed_chat_ids],
+        )
 
     def process_update(self, update: Mapping[str, Any]) -> bool:
         callback = update.get("callback_query")
@@ -292,7 +311,11 @@ class TelegramOperatorCommandRouter:
 
     def poll_once(self, *, offset: int | None = None, timeout_seconds: int = 0) -> int | None:
         # sweep 실패가 update 폴링을 막으면 승인·거절 콜백을 영영 처리하지 못한다.
-        for sweep in (self._sweep_pending_approvals, self._sweep_recovery_notifications):
+        for sweep in (
+            self._sweep_pending_approvals,
+            self._sweep_recovery_notifications,
+            self._sweep_lifecycle_cards,
+        ):
             try:
                 sweep()
             except Exception as exc:  # noqa: BLE001 - 폴링 루프를 막지 않는 것이 우선
@@ -2103,6 +2126,139 @@ class TelegramOperatorCommandRouter:
                         },
                     )
                     chat_reminders.add((*key, chat_id))
+
+    def _sweep_lifecycle_cards(self) -> None:
+        """승인 카드를 현재 단계로 맞춘다. 단계가 그대로면 아무것도 보내지 않는다.
+
+        기존 알림 경로와 **병행**해서 돈다. 카드 전달이 프로덕션에서 증명되기
+        전에 구 경로를 떼는 것은 단계 5다.
+        """
+        envelopes = [
+            PendingApprovalEnvelope.model_validate(row["payload"])
+            for row in self.store.list_system_events_by_type(
+                # 창을 두지 않는다 — 오래 기다린 승인이 밀려나면 그 카드는
+                # 영영 갱신되지 않는다. 끝난 카드를 다시 그리지 않는 것은
+                # _card_is_settled가 투영을 보고 판단한다.
+                "telegram_approval_pending",
+                limit=None,
+            )
+        ]
+        if not envelopes:
+            return
+        acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
+        completions = self._latest_payloads_by_approval_id("signal_approval_completed")
+        blocked_order_ids = self._unresolved_recovery_order_ids()
+
+        stages: dict[str, str] = {}
+        groups: dict[str, list[PendingApprovalEnvelope]] = defaultdict(list)
+        for envelope in envelopes:
+            approval_id = envelope.approval_id
+            groups[envelope.signal_run_id].append(envelope)
+            card_key = f"approval:{approval_id}"
+            copies = self._card_manager.copies(card_key)
+            stage = card_stage(
+                keep_forward_progress(
+                    _shown_progress(copies),
+                    approval_progress(acks.get(approval_id), completions.get(approval_id)),
+                ),
+                approval_needs_attention(
+                    acks.get(approval_id),
+                    completions.get(approval_id),
+                    unresolved_recovery=bool(
+                        blocked_order_ids & self._envelope_order_ids(envelope)
+                    ),
+                ),
+            )
+            stages[approval_id] = stage
+            if self._card_is_settled(copies, card_key, stage):
+                continue
+            self._card_manager.refresh(
+                envelope.run_id,
+                card_key,
+                stage,
+                render_approval_stage_card(envelope.request, stage),
+            )
+
+        for signal_run_id, group in groups.items():
+            # 승인 그룹이 하나뿐이면 부모 카드는 같은 말을 두 번 하는 것뿐이다.
+            if len(group) < 2:
+                continue
+            card_key = f"daily:{signal_run_id}"
+            group_stages = [stages[envelope.approval_id] for envelope in group]
+            stage = _daily_card_stage(group_stages)
+            if self._card_is_settled(self._card_manager.copies(card_key), card_key, stage):
+                continue
+            self._card_manager.refresh(
+                group[0].run_id,
+                card_key,
+                stage,
+                render_daily_card(
+                    signal_run_id,
+                    [
+                        {
+                            "label": _telegram_strategy_display_label(
+                                envelope.source_strategy_ids
+                            ),
+                            "stage": group_stage,
+                        }
+                        for envelope, group_stage in zip(group, group_stages, strict=True)
+                    ],
+                ),
+            )
+
+    def _latest_payloads_by_approval_id(self, event_type: str) -> dict[str, Mapping[str, Any]]:
+        """approval_id별 최신 페이로드. 이벤트는 DESC로 오므로 뒤집어 접는다."""
+        payloads: dict[str, Mapping[str, Any]] = {}
+        for row in reversed(self.store.list_system_events_by_type(event_type, limit=None)):
+            payload = row["payload"]
+            approval_id = payload.get("approval_id")
+            # approval_id 없는 구 이벤트는 어느 승인 그룹의 것인지 알 수 없다.
+            # 추측하면 한 그룹의 완료가 다른 그룹의 유실을 가린다.
+            if isinstance(approval_id, str) and approval_id:
+                payloads[approval_id] = payload
+        return payloads
+
+    def _unresolved_recovery_order_ids(self) -> set[str]:
+        """아직 종결되지 않은 복구 대상 주문. 승인과는 order_id로만 이어진다.
+
+        `live_order_recovery_required` 페이로드에는 approval_id가 없다. 복구가
+        완료되면 blocker가 사라지므로 주의 플래그도 그대로 풀린다.
+        """
+        preview = WorkflowRecoveryService(self.config, self.store, self.audit).preview()
+        return {blocker.order_id for blocker in preview.blockers if blocker.order_id}
+
+    @staticmethod
+    def _envelope_order_ids(envelope: PendingApprovalEnvelope) -> set[str]:
+        # 집행은 envelope.orders를 그대로 OrderIntent로 되살리므로
+        # (orchestrator.resolve_pending_signal_approval) order_id가 일치한다.
+        return {
+            str(order.get("order_id"))
+            for order in envelope.orders
+            if order.get("order_id") is not None
+        }
+
+    def _card_is_settled(
+        self,
+        copies: Mapping[tuple[str, int], Any],
+        card_key: str,
+        stage: str,
+    ) -> bool:
+        """이 카드에 더 할 일이 없는가.
+
+        done은 종점이다. 승인 기록은 계속 쌓이므로 끝난 카드까지 매 poll 다시
+        그리면 sweep 비용이 무한히 는다. **attention은 종점이 아니다** — 복구가
+        해소되면 풀려야 하므로 계속 다시 판정한다.
+
+        판정은 지금 계산한 단계로 매번 다시 한다. 투영이 done이라는 이유만으로
+        건너뛰면 그 뒤에 생긴 복구 건이 카드에 영영 반영되지 않는다.
+        """
+        if stage != "done":
+            return False
+        for chat_id in self._card_manager.chat_ids:
+            copy = copies.get((card_key, chat_id))
+            if copy is None or copy.delivery != "confirmed" or copy.stage != "done":
+                return False
+        return True
 
     def _sweep_recovery_notifications(self) -> None:
         safety = SafetyControlService(self.store, self.audit).current_state()
@@ -4613,6 +4769,32 @@ class TelegramOperatorCommandRouter:
                     return None
                 return envelope
         return None
+
+
+def _shown_progress(copies: Mapping[tuple[str, int], Any]) -> str | None:
+    """카드가 지금까지 보여준 진행 단계 중 가장 앞선 것.
+
+    'attention'은 진행이 아니라 주의 축이므로 여기서 세지 않는다.
+    """
+    shown = [copy.stage for copy in copies.values() if copy.stage in PROGRESS_RANK]
+    if not shown:
+        return None
+    return max(shown, key=lambda stage: PROGRESS_RANK[stage])
+
+
+def _daily_card_stage(group_stages: list[str]) -> str:
+    """부모 카드가 기록할 단계. 화면의 줄들은 그룹별로 따로 그려진다.
+
+    이 값은 투영에 남는 요약일 뿐이므로 가장 나쁜 쪽을 취한다 — 한 그룹이라도
+    주의가 필요하면 부모도 종점으로 접히지 않아야 다시 판정된다.
+    """
+    if "attention" in group_stages:
+        return "attention"
+    if all(stage == "done" for stage in group_stages):
+        return "done"
+    if any(stage == "in_progress" for stage in group_stages):
+        return "in_progress"
+    return "pending"
 
 
 def _command_name(text: str) -> str:
