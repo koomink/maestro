@@ -239,6 +239,20 @@ class StateStore:
                 "PRIMARY KEY (card_key, chat_id)"
                 ")"
             )
+            card_state_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(telegram_ui_card_state)").fetchall()
+            }
+            if "consecutive_failures" not in card_state_columns:
+                # CREATE TABLE IF NOT EXISTS leaves an existing table alone, and
+                # an earlier commit on this branch already created this one
+                # without the counter -- on the operator's database included.
+                # Without this the first card write and every telegram_ui health
+                # check die with "no such column".
+                conn.execute(
+                    "ALTER TABLE telegram_ui_card_state "
+                    "ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"
+                )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_approval_id "
                 "ON approvals(approval_id)"
