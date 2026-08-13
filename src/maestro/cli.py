@@ -735,6 +735,11 @@ def _send_no_action_notice(
                 summary.signal_run_id,
                 "telegram_no_action_notice",
                 {
+                    # 이 이벤트는 전송 완료가 아니라 **자리를 잡았다**는 기록이다.
+                    # 전송 전에 쓰기 때문에, 바로 뒤 전송이 실패했거나 프로세스가
+                    # 죽었더라도 이 행은 남는다. 감사 시 "보냈다"로 읽히면
+                    # 사실과 어긋난다.
+                    "status": "claimed",
                     "chat_id": int(chat_id),
                     "notice_date": today,
                     "strategy_scope": scope,
