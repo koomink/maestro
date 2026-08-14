@@ -1,6 +1,6 @@
 [Unit]
 Description=Maestro dashboard liveness probe (auto-heal a hung/unreachable server)
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 
 # Restart ONLY when the server is unreachable (connection refused / timeout) —
 # i.e. the process is hung or dead. A reachable server that returns an HTTP

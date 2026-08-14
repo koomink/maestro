@@ -40,8 +40,8 @@ where = ["src"]
 pythonpath = [
     "src",
     "examples/sample_static_allocation/src",
-    "../Virtuoso/virtuoso-tranquillo/src",
-    "../Virtuoso/virtuoso-crescendo/src",
+    "../virtuoso/virtuoso-tranquillo/src",
+    "../virtuoso/virtuoso-crescendo/src",
 ]
 markers = [
     "integration: optional tests that may call external services and are skipped by default",

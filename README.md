@@ -561,7 +561,7 @@ For scheduled operation, install the Symphony systemd templates under
 [scripts/operator/symphony_signal_then_approval.sh](scripts/operator/symphony_signal_then_approval.sh)
 to run approval only when `run-signal` emits `action_required=true`.
 Install Tranquillo into the Maestro virtualenv with
-`uv pip install --python .venv/bin/python /root/projects/Symphony/Virtuoso/virtuoso-tranquillo`
+`uv pip install --python .venv/bin/python /home/symphony/virtuoso/virtuoso-tranquillo`
 for operator rehearsals; do not rely on `PYTHONPATH` or an editable install.
 
 Safe execution config defaults:

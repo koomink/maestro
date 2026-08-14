@@ -1,15 +1,17 @@
 [Unit]
 Description=Maestro Symphony KR account observation refresh
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=root
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG} --account-ids kis_isa,kis_ps --max-age-seconds 899 --source timer_kr_market
+ExecStart=/home/symphony/maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG} --account-ids kis_isa,kis_ps --max-age-seconds 899 --source timer_kr_market
 TimeoutStartSec=300
 StandardOutput=journal
 StandardError=journal

@@ -1,6 +1,6 @@
 [Unit]
 Description=Probe the Maestro dashboard every minute and auto-heal if unreachable
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 
 [Timer]
 OnBootSec=2min

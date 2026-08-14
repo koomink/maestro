@@ -1,5 +1,5 @@
 [Unit]
-Description=Maestro Symphony daily signal approval (US strategies, US session)
+Description=Maestro Symphony contribution rebalance (KR strategies, KRX session)
 Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
@@ -11,7 +11,7 @@ Group=symphony
 UMask=0077
 WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/home/symphony/maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids crescendo_us
+ExecStart=/home/symphony/maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids tranquillo --contribution-override
 TimeoutStartSec=1200
 StandardOutput=journal
 StandardError=journal

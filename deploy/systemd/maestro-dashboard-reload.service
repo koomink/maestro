@@ -1,6 +1,6 @@
 [Unit]
 Description=Restart Maestro dashboard after a config/asset change
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 
 # Triggered by maestro-dashboard.path. A short delay debounces bursty writes
 # (e.g. a vite build replacing several files at once) into a single restart.

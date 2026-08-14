@@ -1,6 +1,6 @@
 [Unit]
 Description=Restart Maestro dashboard when backend source (src/maestro) changes
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 After=network.target
 
 # Complements maestro-dashboard.path, which only watches the operator config
@@ -11,7 +11,7 @@ After=network.target
 # until someone notices and restarts manually.
 [Service]
 Type=simple
-ExecStart=/bin/bash /root/projects/Symphony/Maestro/deploy/scripts/watch_dashboard_backend.sh
+ExecStart=/bin/bash /usr/local/libexec/maestro/watch_dashboard_backend.sh
 Restart=always
 RestartSec=5
 StandardOutput=journal

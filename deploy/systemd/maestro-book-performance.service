@@ -1,0 +1,17 @@
+[Unit]
+Description=Generate Maestro book performance report
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/virtuoso/virtuoso-crescendo
+EnvironmentFile=/etc/maestro/maestro.env
+ExecStart=/home/symphony/maestro/.venv/bin/python backtests/generate_book_performance.py --signal-config /home/symphony/maestro-operator/symphony_signal.yaml --data-dir /home/symphony/maestro-operator/var/backtest_data --output /home/symphony/maestro-operator/var/book_performance.json
+TimeoutStartSec=900
+StandardOutput=journal
+StandardError=journal

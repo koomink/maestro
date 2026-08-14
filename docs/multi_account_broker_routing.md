@@ -51,7 +51,7 @@ Example:
 
 ```yaml
 app_fragment_paths:
-  - ../../../Virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
+  - ../../../virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
 broker_accounts_path: broker_accounts.yaml
 strategy_account_map_path: strategy_accounts.yaml
 

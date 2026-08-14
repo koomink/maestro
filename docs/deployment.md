@@ -57,7 +57,7 @@ maestro personal-check --config ~/maestro-operator/maestro_personal.yaml
 
 Then follow `docs/personal_operator_mvp.md` before enabling any live submission.
 For the Symphony operator flow, copy all three operator configs to an
-operator-local config set, for example `/root/maestro-operator/`. Copy the
+operator-local config set, for example `/home/symphony/maestro-operator/`. Copy the
 shared `broker_accounts.yaml` and `strategy_accounts.yaml` files beside them;
 the phase configs load them through `broker_accounts_path` and
 `strategy_account_map_path`. Use

@@ -264,6 +264,15 @@ The Symphony workflow uses three phase-specific YAML files resolved from
 `MAESTRO_READONLY_CONFIG`, `MAESTRO_SIGNAL_CONFIG`, and
 `MAESTRO_APPROVAL_CONFIG`; they must share one state/audit identity.
 
+The supported VPS layout keeps the Maestro checkout at
+`/home/symphony/maestro`, Virtuoso apps at `/home/symphony/virtuoso`, and
+operator-local YAML/state/audit material at `/home/symphony/maestro-operator`.
+Application systemd units run as `symphony:symphony` with `UMask=0077`; the
+dashboard health, reload, and source-watcher control-plane helpers remain
+root-run. The source watcher invokes the installed root-owned
+`/usr/local/libexec/maestro/watch_dashboard_backend.sh` rather than a mutable
+checkout script.
+
 SQLite currently uses connection timeout, `busy_timeout`, and WAL mode for
 basic multi-process coexistence. StateStore also serializes writes with a
 writer lock, stores the operator config path plus full, state-affecting, and

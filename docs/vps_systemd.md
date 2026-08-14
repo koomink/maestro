@@ -21,10 +21,10 @@ KIS_BROKERAGE_APP_SECRET=
 KIS_ACCESS_TOKEN=
 KIS_APPROVAL_KEY=
 EXCHANGERATE_API_KEY=
-MAESTRO_CONFIG=/root/maestro-operator/maestro_personal.yaml
-MAESTRO_READONLY_CONFIG=/root/maestro-operator/symphony_readonly.yaml
-MAESTRO_SIGNAL_CONFIG=/root/maestro-operator/symphony_signal.yaml
-MAESTRO_APPROVAL_CONFIG=/root/maestro-operator/symphony_approval.yaml
+MAESTRO_CONFIG=/home/symphony/maestro-operator/maestro_personal.yaml
+MAESTRO_READONLY_CONFIG=/home/symphony/maestro-operator/symphony_readonly.yaml
+MAESTRO_SIGNAL_CONFIG=/home/symphony/maestro-operator/symphony_signal.yaml
+MAESTRO_APPROVAL_CONFIG=/home/symphony/maestro-operator/symphony_approval.yaml
 ```
 
 Do not commit this file. Do not paste secret values into tickets, docs, audit
@@ -37,7 +37,7 @@ normal automated usage to about 744 requests in a 31-day month. Use
 ## Operator Config
 
 Single-profile deployments can use one operator-local config outside the git
-checkout, for example `/root/maestro-operator/maestro_personal.yaml`, and point
+checkout, for example `/home/symphony/maestro-operator/maestro_personal.yaml`, and point
 `MAESTRO_CONFIG` at that file.
 
 The Symphony multi-account deployment uses an operator-local config set instead:
@@ -60,9 +60,12 @@ Description=Maestro health check
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro health
+ExecStart=/home/symphony/maestro/.venv/bin/maestro health
 ```
 
 ## Example Read-only Sync Service
@@ -73,9 +76,12 @@ Description=Maestro KIS multi-asset read-only sync
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro kis-sync
+ExecStart=/home/symphony/maestro/.venv/bin/maestro kis-sync
 ```
 
 ## Example Telegram Operator Service
@@ -88,9 +94,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/opt/maestro/.venv/bin/maestro telegram-operator --config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --timeout-seconds 10
+ExecStart=/home/symphony/maestro/.venv/bin/maestro telegram-operator --config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --timeout-seconds 10
 Restart=always
 RestartSec=5
 
@@ -131,9 +140,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --host 127.0.0.1 --port 8503
+ExecStart=/home/symphony/maestro/.venv/bin/maestro dashboard --config ${MAESTRO_READONLY_CONFIG} --host 127.0.0.1 --port 8503
 Restart=always
 RestartSec=5
 KillSignal=SIGINT
@@ -164,9 +176,12 @@ Description=Maestro heartbeat
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro heartbeat
+ExecStart=/home/symphony/maestro/.venv/bin/maestro heartbeat
 ```
 
 ```ini
@@ -200,9 +215,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG} --max-age-seconds 3599 --source timer_off_market
+ExecStart=/home/symphony/maestro/.venv/bin/maestro kis-sync --config ${MAESTRO_READONLY_CONFIG} --max-age-seconds 3599 --source timer_off_market
 TimeoutStartSec=300
 ```
 
@@ -250,9 +268,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids tranquillo
+ExecStart=/home/symphony/maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids tranquillo
 TimeoutStartSec=1200
 ```
 
@@ -310,10 +331,13 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
 ExecStartPre=-/bin/systemctl stop maestro-telegram-operator.service
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro run-once
+ExecStart=/home/symphony/maestro/.venv/bin/maestro run-once
 ExecStopPost=-/bin/systemctl start maestro-telegram-operator.service
 TimeoutStartSec=900
 ```

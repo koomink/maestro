@@ -271,12 +271,12 @@ a separate operator phase. `run-once` remains a legacy single-pipeline entrypoin
 for paper and older workflows.
 
 Broker account definitions are centralized in `broker_accounts_path`, normally
-`/root/maestro-operator/broker_accounts.yaml` in deployment. Add or disable KIS
+`/home/symphony/maestro-operator/broker_accounts.yaml` in deployment. Add or disable KIS
 logical accounts there, and keep secret values in `/etc/maestro/maestro.env`.
 
 Strategy-to-account routing for `symphony_signal` and `symphony_approval` is
 centralized in `strategy_account_map_path`, normally
-`/root/maestro-operator/strategy_accounts.yaml` in deployment. Change `enabled`, account mappings, and phase controls there, then validate the phase configs before the next scheduled signal run.
+`/home/symphony/maestro-operator/strategy_accounts.yaml` in deployment. Change `enabled`, account mappings, and phase controls there, then validate the phase configs before the next scheduled signal run.
 The mapping file participates in config fingerprint checks, so approval rejects
 a signal package if the mapping changes between signal generation and approval.
 Development-only strategies may remain outside this mapping. If the operator

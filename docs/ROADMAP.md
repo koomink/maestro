@@ -544,6 +544,9 @@ Completed scope:
   operator status views.
 - Update systemd units and timers so examples use the same operator config or
   config set instead of Telegram-specific or example-only configs.
+- Migrate repository deployment assets to the `/home/symphony` layout, with
+  application services running as `symphony:symphony` under `UMask=0077` and
+  root-run dashboard control-plane helpers retained at their privilege boundary.
 - Add Symphony systemd timers and a signal-to-approval wrapper that invokes
   approval only when `run-signal` emits `action_required=true`.
 - Keep paper-to-live promotion based on broker snapshot adoption, not paper DB

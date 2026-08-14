@@ -1,15 +1,17 @@
 [Unit]
 Description=Maestro Symphony daily signal approval (KR strategies, KRX session)
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=root
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids tranquillo
+ExecStart=/home/symphony/maestro/.venv/bin/maestro daily-signal-approval --readonly-config ${MAESTRO_READONLY_CONFIG} --signal-config ${MAESTRO_SIGNAL_CONFIG} --approval-config ${MAESTRO_APPROVAL_CONFIG} --strategy-ids tranquillo
 TimeoutStartSec=1200
 StandardOutput=journal
 StandardError=journal

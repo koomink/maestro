@@ -6,6 +6,23 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = REPO_ROOT / "scripts/operator/symphony_signal_then_approval.sh"
 SYSTEMD_DIR = REPO_ROOT / "deploy/systemd"
+APP_SERVICE_NAMES = {
+    "maestro-book-performance.service",
+    "maestro-dashboard.service",
+    "maestro-fx-refresh.service",
+    "maestro-heartbeat.service",
+    "maestro-resume-order-tracking.service",
+    "maestro-run-once.service",
+    "maestro-symphony-readonly.service",
+    "maestro-symphony-readonly-kr.service",
+    "maestro-symphony-readonly-us.service",
+    "maestro-symphony-rebalance-kr.service",
+    "maestro-symphony-rebalance-us.service",
+    "maestro-symphony-signal.service",
+    "maestro-symphony-signal-kr.service",
+    "maestro-symphony-signal-us.service",
+    "maestro-telegram-operator.service",
+}
 
 
 def _write_executable(path: Path, content: str) -> None:
@@ -161,3 +178,32 @@ def test_symphony_systemd_units_wire_operator_configs_and_daily_cli():
     assert "Restart=always" in telegram_service
     assert "maestro run-once" in legacy_run_once
     assert "symphony_signal_then_approval.sh" not in legacy_run_once
+
+
+def test_application_units_run_as_symphony_from_the_home_layout():
+    for name in APP_SERVICE_NAMES:
+        content = (SYSTEMD_DIR / name).read_text()
+        assert "User=symphony" in content
+        assert "Group=symphony" in content
+        assert "UMask=0077" in content
+        assert "/root/projects/Symphony" not in content
+        assert "/root/maestro-operator" not in content
+
+
+def test_deployment_assets_have_no_active_root_runtime_paths():
+    paths = [
+        *SYSTEMD_DIR.glob("maestro-*"),
+        REPO_ROOT / "deploy/maestro-dashboard.service",
+        REPO_ROOT / "deploy/scripts/watch_dashboard_backend.sh",
+        REPO_ROOT / "scripts/operator/symphony_signal_then_approval.sh",
+    ]
+    for path in paths:
+        content = path.read_text()
+        assert "/root/projects/Symphony" not in content
+        assert "/root/maestro-operator" not in content
+
+
+def test_root_watcher_executes_the_root_owned_installed_script():
+    content = (SYSTEMD_DIR / "maestro-dashboard-src-watch.service").read_text()
+    assert "ExecStart=/bin/bash /usr/local/libexec/maestro/watch_dashboard_backend.sh" in content
+    assert "/home/symphony/maestro/deploy/scripts" not in content

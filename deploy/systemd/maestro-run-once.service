@@ -1,16 +1,18 @@
 [Unit]
 Description=Maestro scheduled run-once
-Documentation=file:/root/projects/Symphony/Maestro/docs/vps_systemd.md
+Documentation=file:/home/symphony/maestro/docs/vps_systemd.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=root
-WorkingDirectory=/root/projects/Symphony/Maestro
+User=symphony
+Group=symphony
+UMask=0077
+WorkingDirectory=/home/symphony/maestro
 EnvironmentFile=/etc/maestro/maestro.env
 ExecStartPre=-/bin/systemctl stop maestro-telegram-operator.service
-ExecStart=/root/projects/Symphony/Maestro/.venv/bin/maestro run-once
+ExecStart=/home/symphony/maestro/.venv/bin/maestro run-once
 ExecStopPost=-/bin/systemctl start maestro-telegram-operator.service
 TimeoutStartSec=900
 StandardOutput=journal

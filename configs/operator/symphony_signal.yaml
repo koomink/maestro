@@ -1,6 +1,6 @@
 mode: live_approval
 app_fragment_paths:
-  - ../../../Virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
+  - ../../../virtuoso/virtuoso-tranquillo/configs/fragments/tranquillo.yaml
 strategy_account_map_path: strategy_accounts.yaml
 broker_accounts_path: broker_accounts.yaml
 

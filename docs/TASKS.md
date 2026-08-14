@@ -584,6 +584,9 @@
 - [x] Surface config path, fingerprint, state path, and audit path in
       Telegram/dashboard operator status
 - [x] Update systemd docs to use one operator config across services and timers
+- [x] Migrate repository deployment assets to the `/home/symphony` layout with
+      `symphony:symphony` application services, `UMask=0077`, and root-run
+      dashboard control-plane helpers
 - [x] Document broker snapshot adoption as the live baseline transition instead
       of promoting paper SQLite state
 

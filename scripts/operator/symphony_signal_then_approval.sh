@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-MAESTRO_BIN="${MAESTRO_BIN:-/root/projects/Symphony/Maestro/.venv/bin/maestro}"
+MAESTRO_BIN="${MAESTRO_BIN:-/home/symphony/maestro/.venv/bin/maestro}"
 SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 TELEGRAM_OPERATOR_SERVICE="${MAESTRO_TELEGRAM_OPERATOR_SERVICE:-maestro-telegram-operator.service}"
 STOP_TELEGRAM_OPERATOR="${MAESTRO_STOP_TELEGRAM_OPERATOR:-1}"
