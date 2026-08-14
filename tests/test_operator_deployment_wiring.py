@@ -229,3 +229,4 @@ def test_book_performance_timer_preserves_the_deployed_daily_schedule():
     assert "OnCalendar=Mon-Sat 07:20 Asia/Seoul" in content
     assert "Persistent=true" in content
     assert "RandomizedDelaySec=300" in content
+    assert "WantedBy=timers.target" in content
