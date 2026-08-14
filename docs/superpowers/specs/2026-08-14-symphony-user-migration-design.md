@@ -199,6 +199,13 @@ The following control-plane helpers remain root-run because they invoke
 - `maestro-dashboard-health.service`
 - `maestro-dashboard-src-watch.service`
 
+The root-run source watcher must not execute a script from the user-writable
+source checkout. Cutover installs `deploy/scripts/watch_dashboard_backend.sh`
+as `/usr/local/libexec/maestro/watch_dashboard_backend.sh`, owned by
+`root:root` mode `0755`, and the service executes that root-owned copy. The
+script watches `/home/symphony/maestro/src/maestro`; changing source does not
+change the privileged executable until an explicit root installation step.
+
 Timer and path units remain system units. The dashboard path unit and backend
 watch script use the new source and operator paths.
 
