@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily refresh of the Maestro book-performance backtest cache
+
+[Timer]
+OnCalendar=Mon-Sat 07:20 Asia/Seoul
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

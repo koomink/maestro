@@ -221,3 +221,11 @@ def test_run_once_elevates_only_telegram_control_commands():
 def test_book_performance_does_not_load_the_operator_environment_file():
     content = (SYSTEMD_DIR / "maestro-book-performance.service").read_text()
     assert "EnvironmentFile=/etc/maestro/maestro.env" not in content
+
+
+def test_book_performance_timer_preserves_the_deployed_daily_schedule():
+    content = (SYSTEMD_DIR / "maestro-book-performance.timer").read_text()
+
+    assert "OnCalendar=Mon-Sat 07:20 Asia/Seoul" in content
+    assert "Persistent=true" in content
+    assert "RandomizedDelaySec=300" in content
