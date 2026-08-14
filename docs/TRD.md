@@ -273,6 +273,13 @@ root-run. The source watcher invokes the installed root-owned
 `/usr/local/libexec/maestro/watch_dashboard_backend.sh` rather than a mutable
 checkout script.
 
+Production was cut over to this layout on 2026-08-14. The captured service,
+timer, and path activation set was restored with the generic Symphony signal
+timer left disabled. The previous root source/operator trees and the cutover
+rollback bundle remain held until at least one KR and one US scheduled cycle
+passes; this scheduled-cycle acceptance is operational validation, not a
+change to the architecture above.
+
 SQLite currently uses connection timeout, `busy_timeout`, and WAL mode for
 basic multi-process coexistence. StateStore also serializes writes with a
 writer lock, stores the operator config path plus full, state-affecting, and

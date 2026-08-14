@@ -710,7 +710,7 @@ Expected: all new-home clones are clean on `main`; Maestro verification passes. 
 - Consumes: green root baseline, green new-home main branches, staged runtime, and current operator state.
 - Produces: production services running from `/home/symphony` with a complete rollback bundle.
 
-- [ ] **Step 1: Create the cutover rollback directory**
+- [x] **Step 1: Create the cutover rollback directory**
 
 ```bash
 MIGRATION_STAMP=$(date -u +%Y%m%dT%H%M%SZ)
@@ -719,7 +719,7 @@ sudo install -d -o root -g root -m 0700 "/root/maestro-migration-backup/cutover-
 
 Keep `MIGRATION_STAMP` in the maintenance shell.
 
-- [ ] **Step 2: Back up root-managed files without printing secrets**
+- [x] **Step 2: Back up root-managed files without printing secrets**
 
 ```bash
 sudo cp -a /etc/maestro/maestro.env "/root/maestro-migration-backup/cutover-$MIGRATION_STAMP/maestro.env"
@@ -728,7 +728,7 @@ sudo cp -a /etc/systemd/system/maestro-* "/root/maestro-migration-backup/cutover
 
 Expected: backup directory remains mode `0700`; never display `maestro.env`.
 
-- [ ] **Step 3: Stop timers and restart triggers first**
+- [x] **Step 3: Stop timers and restart triggers first**
 
 ```bash
 sudo systemctl stop maestro-dashboard-health.timer
@@ -739,7 +739,7 @@ sudo systemctl stop maestro-symphony-signal.timer maestro-symphony-signal-kr.tim
 sudo systemctl stop maestro-dashboard.path maestro-dashboard-src-watch.service
 ```
 
-- [ ] **Step 4: Stop applications and active one-shot work**
+- [x] **Step 4: Stop applications and active one-shot work**
 
 ```bash
 sudo systemctl stop maestro-telegram-operator.service maestro-dashboard.service
@@ -749,7 +749,7 @@ pgrep -af '/root/projects/Symphony/Maestro/.venv/bin/maestro'
 
 Expected: both checks show no active Maestro workload. Stop an exact remaining unit and recheck if necessary.
 
-- [ ] **Step 5: Checkpoint, verify, and back up authoritative state**
+- [x] **Step 5: Checkpoint, verify, and back up authoritative state**
 
 ```bash
 sudo sqlite3 /root/maestro-operator/var/symphony_state.db 'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA integrity_check;'
@@ -759,7 +759,7 @@ sudo cp -a /root/maestro-operator/var/symphony_audit.jsonl "/root/maestro-migrat
 
 Expected: checkpoint completes and integrity is `ok`. Abort and restart root services otherwise.
 
-- [ ] **Step 6: Perform the final operator synchronization**
+- [x] **Step 6: Perform the final operator synchronization**
 
 ```bash
 sudo rsync -aHAX --chown=symphony:symphony \
@@ -770,7 +770,7 @@ sudo find /home/symphony/maestro-operator -type f -exec chmod 0600 {} +
 
 Do not use `--delete` during the first cutover.
 
-- [ ] **Step 7: Rewrite only approved prefixes in live YAML**
+- [x] **Step 7: Rewrite only approved prefixes in live YAML**
 
 ```bash
 sudo -u symphony perl -0pi -e 's#/root/maestro-operator#/home/symphony/maestro-operator#g' \
@@ -787,7 +787,7 @@ rg -l '/root/maestro-operator|/root/projects/Symphony' \
 
 Expected: `rg` has no output.
 
-- [ ] **Step 8: Update environment path values without printing them**
+- [x] **Step 8: Update environment path values without printing them**
 
 ```bash
 sudo perl -0pi -e 's#/root/maestro-operator#/home/symphony/maestro-operator#g; s#/root/projects/Symphony/Maestro#/home/symphony/maestro#g; s#/root/projects/Symphony/Virtuoso/virtuoso-tranquillo#/home/symphony/virtuoso/virtuoso-tranquillo#g; s#/root/projects/Symphony/Virtuoso/virtuoso-crescendo#/home/symphony/virtuoso/virtuoso-crescendo#g; s#/root/projects/Symphony/Virtuoso/virtuoso-fugue#/home/symphony/virtuoso/virtuoso-fugue#g' /etc/maestro/maestro.env
@@ -798,7 +798,7 @@ if sudo rg -q '/root/maestro-operator|/root/projects/Symphony' /etc/maestro/maes
 sudo -u symphony test -r /etc/maestro/maestro.env
 ```
 
-- [ ] **Step 9: Initialize and verify copied DB once as `symphony`**
+- [x] **Step 9: Initialize and verify copied DB once as `symphony`**
 
 ```bash
 sudo -u symphony -H /home/symphony/maestro/.venv/bin/python -c \
@@ -808,7 +808,7 @@ sudo -u symphony sqlite3 -readonly /home/symphony/maestro-operator/var/symphony_
 
 Expected: constructor exits zero and integrity is `ok`.
 
-- [ ] **Step 10: Install only the previously deployed unit set**
+- [x] **Step 10: Install only the previously deployed unit set**
 
 Install this exact previously deployed set. Do not install `maestro-run-once.service`, `maestro-run-once.timer`, or another source-only unit absent from the before inventory.
 
@@ -867,7 +867,7 @@ sudo systemd-analyze verify /etc/systemd/system/maestro-*.service \
 
 Expected: verification exits zero.
 
-- [ ] **Step 11: Start dashboard and Telegram first**
+- [x] **Step 11: Start dashboard and Telegram first**
 
 ```bash
 sudo systemctl start maestro-dashboard.service
@@ -879,7 +879,7 @@ sudo journalctl -u maestro-dashboard.service -u maestro-telegram-operator.servic
 
 Expected: HTTP succeeds, units are active, and logs have no permission, import, path, lock, or migration error.
 
-- [ ] **Step 12: Start control-plane watchers**
+- [x] **Step 12: Start control-plane watchers**
 
 ```bash
 sudo systemctl start maestro-dashboard-src-watch.service maestro-dashboard.path
@@ -888,7 +888,7 @@ sudo systemctl is-active maestro-dashboard-src-watch.service maestro-dashboard.p
 
 Expected: watcher is active and path unit is active/waiting.
 
-- [ ] **Step 13: Verify safe one-shot services individually**
+- [x] **Step 13: Verify safe one-shot services individually**
 
 ```bash
 sudo systemctl reset-failed maestro-fx-refresh.service
@@ -900,7 +900,7 @@ sudo systemctl status maestro-fx-refresh.service maestro-heartbeat.service maest
 
 Expected: all complete successfully. Do not start signal or rebalance services manually.
 
-- [ ] **Step 14: Restore recorded timer/path enablement**
+- [x] **Step 14: Restore recorded timer/path enablement**
 
 Use `unit-files.before.txt` as authority. For the captured 2026-08-14 baseline, start this exact active timer set after service checks; keep the generic signal timer disabled:
 
@@ -940,7 +940,7 @@ Expected: after set matches before set; `maestro-symphony-signal.timer` remains 
 - Consumes: running new-home services and before-state files.
 - Produces: evidence-backed acceptance and an explicit no-delete rollback hold.
 
-- [ ] **Step 1: Verify runtime identity and active paths**
+- [x] **Step 1: Verify runtime identity and active paths**
 
 ```bash
 systemctl show -p User -p Group -p WorkingDirectory \
@@ -952,7 +952,7 @@ if sudo rg -q '/root/projects/Symphony|/root/maestro-operator' /etc/maestro/maes
 
 Expected: users are `symphony`, active commands use home paths, and old-path checks pass silently.
 
-- [ ] **Step 2: Verify permissions and integrity**
+- [x] **Step 2: Verify permissions and integrity**
 
 ```bash
 stat -c '%A %U:%G %n' /home/symphony /home/symphony/maestro /home/symphony/maestro-operator /home/symphony/maestro-operator/var /etc/maestro /etc/maestro/maestro.env
@@ -962,7 +962,7 @@ sudo -u symphony sqlite3 -readonly /home/symphony/maestro-operator/var/symphony_
 
 Expected: design modes, writable runtime directory, and `ok` integrity.
 
-- [ ] **Step 3: Verify units and logs**
+- [x] **Step 3: Verify units and logs**
 
 ```bash
 systemctl list-units --all --type=service --type=timer --type=path 'maestro-*' --no-legend --no-pager
@@ -973,7 +973,7 @@ sudo journalctl -u maestro-dashboard.service -u maestro-telegram-operator.servic
 
 Expected: no new permission, CHDIR, import, DB lock, or migration error.
 
-- [ ] **Step 4: Re-run production-tree verification**
+- [x] **Step 4: Re-run production-tree verification**
 
 ```bash
 sudo -u symphony -H sh -c 'cd /home/symphony/maestro && .venv/bin/pytest -q && .venv/bin/ruff check .'
@@ -983,9 +983,14 @@ sudo -u symphony -H env PATH=/home/symphony/.local/node-v24.19.0/bin:/usr/bin:/b
 
 Expected: tests, Ruff, and TypeScript check pass on production source.
 
-- [ ] **Step 5: Record completion without secrets**
+- [x] **Step 5: Record cutover completion without secrets**
 
-Mark migration complete in `docs/TASKS.md`, update TRD/ROADMAP only if their runtime statements would otherwise be false, and append checked evidence to this plan: commit SHAs, pass counts, unit comparison, integrity results, and backup directory name. Never include environment values, account identifiers, or token contents.
+Mark the runtime cutover complete in `docs/TASKS.md` while keeping final
+scheduled-cycle acceptance pending. Update TRD/ROADMAP only if their runtime
+statements would otherwise be false, and append checked evidence to this plan:
+commit SHAs, pass counts, unit comparison, integrity results, and backup
+directory name. Never include environment values, account identifiers, or
+token contents.
 
 - [ ] **Step 6: Commit and push the record**
 
@@ -1012,6 +1017,44 @@ Confirm these remain:
 ```
 
 Do not delete or repurpose them. Cleanup is a separate approved task after scheduled-cycle acceptance and state/audit comparison.
+
+### Cutover evidence recorded 2026-08-14
+
+The production runtime cutover is complete, but the migration is not yet
+finally accepted. Task 8 Step 7 still requires one observed KR and one observed
+US scheduled cycle, and Step 8 keeps the rollback assets on hold until that
+acceptance and a state/audit comparison are complete.
+
+- Deployed source revisions: Maestro `94bc7bb`, Tranquillo `3c4e3b2`,
+  Crescendo `350875c`, and Fugue `31f5a6c`.
+- Production-source verification: Maestro `1491 passed, 9 skipped`; Ruff
+  passed; `dashboard:check` passed.
+- The copied production SQLite database passed `PRAGMA integrity_check` with
+  `ok` before activation and during post-cutover verification.
+- Application units run as `symphony:symphony` from `/home/symphony/maestro`;
+  operator state is under `/home/symphony/maestro-operator`, and Virtuoso source
+  is under `/home/symphony/virtuoso`.
+- The deployed unit filenames and active service/timer/path set match the
+  captured pre-cutover baseline. Dashboard, Telegram, the dashboard source
+  watcher, and dashboard path units are active. The active timer set is book
+  performance, dashboard health, FX refresh, heartbeat, resume-order tracking,
+  Symphony read-only (generic, KR, and US), and Symphony signal (KR and US).
+  The generic Symphony signal timer remains disabled.
+- The retained rollback bundle is
+  `/root/maestro-migration-backup/cutover-20260814T122318Z`; the previous root
+  source and operator trees are also retained.
+- During the stopped-writer copy, a stale destination WAL/SHM pair from staging
+  made the first home-path database copy malformed. The root database and
+  cutover backup remained integral. The malformed destination trio was
+  quarantined in the rollback bundle, the verified cutover backup was installed
+  cleanly, and its integrity was rechecked before services started.
+- A single legacy config-identity row still referenced the old canonical path.
+  It was rebound with a guarded one-row update after verifying the expected old
+  identity; no account identifiers or secret material were recorded.
+- The captured deployment expected `maestro-book-performance.timer`, but its
+  repository template was initially absent. Task 7A added the timer template
+  and deployment coverage in Maestro `94bc7bb`; the complete captured unit set
+  was then installed and verified before activation.
 
 ## Rollback Procedure
 

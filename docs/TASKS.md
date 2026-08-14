@@ -587,6 +587,12 @@
 - [x] Migrate repository deployment assets to the `/home/symphony` layout with
       `symphony:symphony` application services, `UMask=0077`, and root-run
       dashboard control-plane helpers
+- [x] Cut over the production Maestro/Virtuoso runtime and operator state to
+      `/home/symphony`, retain the verified root rollback bundle, and restore
+      the captured service/timer/path activation set
+- [ ] Complete migration acceptance after one KR and one US scheduled cycle,
+      then separately review whether the retained root rollback assets can be
+      cleaned up
 - [x] Document broker snapshot adoption as the live baseline transition instead
       of promoting paper SQLite state
 

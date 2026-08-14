@@ -547,6 +547,9 @@ Completed scope:
 - Migrate repository deployment assets to the `/home/symphony` layout, with
   application services running as `symphony:symphony` under `UMask=0077` and
   root-run dashboard control-plane helpers retained at their privilege boundary.
+- Cut over the production runtime and operator state to the supported home
+  layout, restore the captured unit activation set, and retain the root rollback
+  bundle pending one successful KR and one successful US scheduled cycle.
 - Add Symphony systemd timers and a signal-to-approval wrapper that invokes
   approval only when `run-signal` emits `action_required=true`.
 - Keep paper-to-live promotion based on broker snapshot adoption, not paper DB
