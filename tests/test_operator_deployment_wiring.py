@@ -207,3 +207,17 @@ def test_root_watcher_executes_the_root_owned_installed_script():
     content = (SYSTEMD_DIR / "maestro-dashboard-src-watch.service").read_text()
     assert "ExecStart=/bin/bash /usr/local/libexec/maestro/watch_dashboard_backend.sh" in content
     assert "/home/symphony/maestro/deploy/scripts" not in content
+
+
+def test_run_once_elevates_only_telegram_control_commands():
+    content = (SYSTEMD_DIR / "maestro-run-once.service").read_text()
+    assert "User=symphony" in content
+    assert "ExecStartPre=+/bin/systemctl stop maestro-telegram-operator.service" in content
+    assert "ExecStopPost=+/bin/systemctl start maestro-telegram-operator.service" in content
+    assert "ExecStartPre=-/bin/systemctl stop maestro-telegram-operator.service" not in content
+    assert "ExecStopPost=-/bin/systemctl start maestro-telegram-operator.service" not in content
+
+
+def test_book_performance_does_not_load_the_operator_environment_file():
+    content = (SYSTEMD_DIR / "maestro-book-performance.service").read_text()
+    assert "EnvironmentFile=/etc/maestro/maestro.env" not in content
