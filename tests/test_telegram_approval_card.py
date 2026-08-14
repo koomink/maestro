@@ -370,6 +370,7 @@ def test_a_settled_card_wakes_up_when_something_new_happens(tmp_path):
     _save_ack(store, approval_id="appr_1")
     _save_completed(store, approval_id="appr_1", orders_failed=0)
     router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
     assert _stage_of(store, "approval:appr_1") == "done"
 
     _save_recovery_required(store, approval_id="appr_1")
@@ -703,3 +704,217 @@ def test_one_unrenderable_card_does_not_stop_the_others_render_path(monkeypatch,
 
     assert _stage_of(store, "approval:appr_good") == "in_progress"
     assert store.load_card_delivery_state("approval:appr_bad")[0]["consecutive_failures"] == 1
+
+
+def test_adding_a_chat_does_not_resend_every_past_card(tmp_path):
+    """허용 채팅을 늘려도 지난 카드가 새 채팅으로 쏟아지지 않는다.
+
+    카드의 수신자는 그 카드가 처음 전송될 때 정해진다. 매 sweep 현재 설정을
+    다시 읽으면, 채팅 하나를 추가한 순간 과거의 모든 완료 카드가 "복사본이
+    없다"로 보여 신규 전송된다 — 운영 기간에 비례하는 양이고, 그 폭주가
+    지금 처리해야 할 승인 알림을 rate limit 뒤로 밀어낸다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    _dispatch_approval(router, approval_id="appr_old")
+    _save_ack(store, approval_id="appr_old")
+    _save_completed(store, approval_id="appr_old")
+    router._sweep_lifecycle_cards()
+    assert _stage_of(store, "approval:appr_old") == "done"
+
+    wider, _, wider_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    wider._sweep_lifecycle_cards()
+
+    assert [message["chat_id"] for message in wider_client.sent] == []
+    assert _stage_of(store, "approval:appr_old", chat_id=200) is None
+
+
+def test_adding_a_chat_does_not_resend_a_daily_parent_card(tmp_path):
+    """부모 카드도 같다 — 승인 그룹이 여럿이면 폭주는 그만큼 커진다."""
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    for index in range(2):
+        _dispatch_approval(
+            router, approval_id=f"appr_{index}", signal_run_id="signal_shared"
+        )
+        _save_ack(store, approval_id=f"appr_{index}")
+        _save_completed(store, approval_id=f"appr_{index}")
+    router._sweep_lifecycle_cards()
+    assert _stage_of(store, "daily:signal_shared") == "done"
+
+    wider, _, wider_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    wider._sweep_lifecycle_cards()
+
+    assert wider_client.sent == []
+
+
+def test_a_new_chat_still_gets_a_card_that_was_never_delivered(tmp_path):
+    """수신자를 고정하는 것은 전송된 카드에 대해서다.
+
+    한 번도 나가지 못한 카드까지 새 채팅에서 빼면, 전송 직전에 죽은 승인이
+    설정을 바꾼 뒤로는 영영 아무에게도 닿지 않는다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    _save_pending_envelope(store, approval_id="appr_never", card_delivery_version=1)
+
+    wider, _, wider_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    wider._sweep_lifecycle_cards()
+
+    assert sorted(message["chat_id"] for message in wider_client.sent) == [100, 200]
+
+
+def test_a_settled_run_is_not_read_back_on_every_poll(tmp_path):
+    """종결된 카드는 렌더뿐 아니라 조회에서도 빠져야 한다.
+
+    poll마다 전체 승인 이벤트를 파싱하고 승인당 투영을 한 번씩 더 읽으면,
+    callback polling 지연이 운영 기간에 비례해 계속 늘어난다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_done")
+    _save_ack(store, approval_id="appr_done")
+    _save_completed(store, approval_id="appr_done")
+    router._sweep_lifecycle_cards()  # done으로 편집
+    router._sweep_lifecycle_cards()  # 그 결과를 보고 종결로 표시
+    _dispatch_approval(router, approval_id="appr_open")
+
+    read: list[str] = []
+    real_load = store.load_card_delivery_state
+    store.load_card_delivery_state = lambda card_key: (
+        read.append(card_key) or real_load(card_key)
+    )
+    router._sweep_lifecycle_cards()
+    store.load_card_delivery_state = real_load
+
+    assert "approval:appr_open" in read
+    assert "approval:appr_done" not in read
+
+
+def test_a_later_approval_for_a_settled_run_is_still_swept(tmp_path):
+    """종결 표시는 run 단위다. 뒤늦게 붙은 승인까지 묻으면 안 된다."""
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_first", signal_run_id="signal_shared")
+    _save_ack(store, approval_id="appr_first")
+    _save_completed(store, approval_id="appr_first")
+    router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
+
+    _dispatch_approval(router, approval_id="appr_late", signal_run_id="signal_shared")
+    _save_ack(store, approval_id="appr_late")
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_late") == "in_progress"
+
+
+def test_a_removed_chat_does_not_hold_health_in_warn_forever(tmp_path):
+    """설정에서 뺀 채팅의 실패 카운터는 health를 영구 warn으로 만든다.
+
+    그 복사본은 다시 성공할 기회가 없으므로 카운터가 0으로 돌아올 길이 없다.
+    """
+    from maestro.monitoring.health import HealthService
+
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100, 200), reject_for=(200,))
+    _dispatch_approval(router, approval_id="appr_1")
+    for _ in range(3):
+        router._card_manager.record_render_failure(
+            "run_appr_1", "approval:appr_1", "pending", "boom"
+        )
+    assert HealthService(router.config, store).run().checks
+
+    narrowed_config = load_config(_telegram_config_path(tmp_path, chat_ids=(100,)))
+    checks = {
+        check.name: check for check in HealthService(narrowed_config, store).run().checks
+    }
+
+    assert checks["telegram_ui"].details["cards"] == ["approval:appr_1@100:3"]
+
+
+def test_a_run_whose_parent_card_is_stuck_is_not_marked_settled(monkeypatch, tmp_path):
+    """자식 카드가 전부 done이어도 부모 카드가 못 따라오면 run은 종결이 아니다.
+
+    여기서 종결로 표시하면 데일리 카드는 영원히 옛 단계에 멈춘 채 스캔에서
+    빠진다 — 되살릴 사건이 없으므로 다시는 손대지 못한다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    for index in range(2):
+        _dispatch_approval(router, approval_id=f"appr_{index}", signal_run_id="signal_shared")
+        _save_ack(store, approval_id=f"appr_{index}")
+        _save_completed(store, approval_id=f"appr_{index}")
+
+    def exploding_daily(signal_run_id, entries):
+        raise ValueError("parent card renderer blew up")
+
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.render_daily_card", exploding_daily
+    )
+    router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()
+
+    read: list[str] = []
+    real_load = store.load_card_delivery_state
+    store.load_card_delivery_state = lambda card_key: (
+        read.append(card_key) or real_load(card_key)
+    )
+    router._sweep_lifecycle_cards()
+    store.load_card_delivery_state = real_load
+
+    assert "approval:appr_0" in read
+
+
+def test_adding_a_chat_does_not_resend_an_open_card_either(tmp_path):
+    """수신자 고정은 완료된 카드에만 적용되는 규칙이 아니다.
+
+    아직 열려 있는 승인이라도, 이미 나간 카드에 뒤늦게 채팅을 더하면 그 채팅은
+    갱신될 뿐인 두 번째 카드를 받는다 — 버튼 달린 카드가 두 장 도는 상태다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    _dispatch_approval(router, approval_id="appr_open")
+
+    wider, _, wider_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    _save_ack(store, approval_id="appr_open")
+    wider._sweep_lifecycle_cards()
+
+    assert wider_client.sent == []
+    assert _stage_of(store, "approval:appr_open") == "in_progress"
+
+
+def test_a_render_failure_does_not_invent_a_copy_in_a_new_chat(tmp_path):
+    """렌더 실패 카운터도 이 카드의 수신자에게만 붙는다.
+
+    없던 채팅에 실패 복사본을 만들면, 그 복사본이 다음 refresh에서 '아직 안 보낸
+    카드'로 보여 결국 과거 카드를 새 채팅으로 보내게 된다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    _dispatch_approval(router, approval_id="appr_1")
+
+    wider, _, _ = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    wider._card_manager.record_render_failure(
+        "run_appr_1", "approval:appr_1", "pending", "boom"
+    )
+
+    assert [row["chat_id"] for row in store.load_card_delivery_state("approval:appr_1")] == [100]
+
+
+def test_adding_a_chat_does_not_reopen_every_settled_run(tmp_path):
+    """종결 판정도 수신자 기준이다.
+
+    현재 설정 전부로 보면 채팅을 하나 더한 순간 과거의 모든 run이 다시 미종결이
+    되어, 전송은 막더라도 스캔 비용은 그대로 돌아온다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    _dispatch_approval(router, approval_id="appr_old")
+    _save_ack(store, approval_id="appr_old")
+    _save_completed(store, approval_id="appr_old")
+    router._sweep_lifecycle_cards()
+
+    # 채팅을 넓힌 뒤에 종결 판정이 내려지는 순서다. 넓히기 전에 이미 표시가
+    # 남았다면 그 run은 SQL에서 빠지므로 판정 자체가 실행되지 않는다.
+    wider, wider_store, _ = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    wider._sweep_lifecycle_cards()
+
+    read: list[str] = []
+    real_load = wider_store.load_card_delivery_state
+    wider_store.load_card_delivery_state = lambda card_key: (
+        read.append(card_key) or real_load(card_key)
+    )
+    wider._sweep_lifecycle_cards()
+    wider_store.load_card_delivery_state = real_load
+
+    assert read == []

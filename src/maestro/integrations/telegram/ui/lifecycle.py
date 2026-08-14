@@ -127,7 +127,7 @@ class CardLifecycleManager:
         sent: list[int] = []
         failed: list[int] = []
         ambiguous: list[int] = []
-        for chat_id in self.chat_ids:
+        for chat_id in self.audience(card_key, copies):
             copy = copies.get((card_key, chat_id))
             if (
                 copy is not None
@@ -211,8 +211,12 @@ class CardLifecycleManager:
         happened. What actually keeps the next good render from being skipped
         is the delivery state -- refresh only skips a copy it knows is
         confirmed, and this one is now failed.
+
+        Counted against the card's audience, not the configured chats: a chat
+        that never held this card would otherwise gain a copy here, and that
+        invented copy is what a later refresh would treat as a first send.
         """
-        for chat_id in self.chat_ids:
+        for chat_id in self.audience(card_key, self.copies(card_key)):
             self.store.record_card_event(
                 run_id,
                 card_failure_event(card_key, chat_id, stage, "", new_operation_id(), error),
@@ -226,6 +230,24 @@ class CardLifecycleManager:
             (row["card_key"], row["chat_id"]): CardCopy(**row)
             for row in self.store.load_card_delivery_state(card_key)
         }
+
+    def audience(self, card_key: str, copies: Mapping[tuple[str, int], CardCopy]) -> list[int]:
+        """The chats this card is addressed to -- fixed the first time it went out.
+
+        Not ``self.chat_ids``. The configured list is the audience only for a
+        card that has never been delivered; after that it is the set of chats
+        that already hold a copy, narrowed to the ones still configured.
+
+        Reading the current configuration on every refresh instead is how
+        adding one allowed chat resends every card Maestro has ever produced:
+        each past card looks like it is missing a copy, and a missing copy is
+        indistinguishable from a first send. Narrowing to configured chats is
+        the other half -- a copy in a chat the operator removed can never
+        succeed again, so refreshing it only accumulates failures.
+        """
+        if not copies:
+            return list(self.chat_ids)
+        return [chat_id for chat_id in self.chat_ids if (card_key, chat_id) in copies]
 
     def consecutive_failures(self, card_key: str, chat_id: int) -> int:
         copy = self.copies(card_key).get((card_key, chat_id))

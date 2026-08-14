@@ -429,8 +429,22 @@ class HealthService:
 
         Threshold matches the fallback's, deliberately: the same run of
         failures that gives up on the card is what degrades the service.
+
+        Scoped to the currently allowed chats. A copy in a chat the operator
+        has removed gets no further sends, so its failure count can never be
+        reset by a success -- counting it would pin this check to warn forever
+        over a chat nobody is watching any more.
+
+        With no chats to scope by, report on every copy. The allowed list is
+        resolved from MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS when the config leaves
+        it empty, so "no chats" also describes a health run that never loaded
+        the operator's environment -- and narrowing to nothing there would
+        turn a broken card channel into a clean bill of health.
         """
-        failing = self.store.list_failing_card_copies(FALLBACK_AFTER_FAILURES)
+        allowed = [int(chat_id) for chat_id in self.config.approval.telegram_allowed_chat_ids]
+        failing = self.store.list_failing_card_copies(
+            FALLBACK_AFTER_FAILURES, chat_ids=allowed or None
+        )
         if not failing:
             return HealthCheck(name="telegram_ui", status="ok", message="cards delivering")
         return HealthCheck(

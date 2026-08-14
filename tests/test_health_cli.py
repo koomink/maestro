@@ -1113,6 +1113,23 @@ def test_telegram_ui_health_degrades_after_three_failed_cards(tmp_path):
     assert "approval:appr_1" in str(check.details)
 
 
+def test_a_health_run_without_the_chat_list_still_reports_broken_cards(tmp_path):
+    """허용 채팅을 좁혀서 보는 것은 그 목록을 알 때뿐이다.
+
+    목록은 설정이 비어 있으면 MAESTRO_TELEGRAM_ALLOWED_CHAT_IDS에서 온다.
+    환경을 읽지 않은 채 health를 돌리면 목록이 빈 채로 보이는데, 그때
+    "해당 채팅 없음"으로 좁혀 버리면 끊긴 카드 채널이 정상으로 보고된다.
+    """
+    config = load_config(_readonly_config(tmp_path))
+    assert config.approval.telegram_allowed_chat_ids == []
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_failure(store, card_key="approval:appr_1", chat_id=100, times=3)
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+
+    assert checks["telegram_ui"].status == "warn"
+
+
 def test_telegram_ui_health_is_ok_below_the_threshold(tmp_path):
     config = load_config(_readonly_config(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)

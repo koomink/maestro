@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,6 +253,25 @@ class StateStore:
                     "ALTER TABLE telegram_ui_card_state "
                     "ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"
                 )
+            conn.execute(
+                # The terminal index for card sweeping. A signal run whose cards
+                # have all reached a confirmed "done" is recorded here so the
+                # sweep can exclude it in SQL instead of loading and re-deciding
+                # every approval Maestro has ever dispatched on every poll.
+                #
+                # Keyed by signal run rather than approval so a daily parent card
+                # never sees a partial group. The order and approval ids are kept
+                # so a recovery or resolution failure that lands later can find
+                # the run again -- see reopen_settled_signal_runs.
+                "CREATE TABLE IF NOT EXISTS telegram_ui_settled_run "
+                "("
+                "signal_run_id TEXT PRIMARY KEY, "
+                "approval_ids TEXT NOT NULL, "
+                "order_ids TEXT NOT NULL, "
+                "max_event_id INTEGER NOT NULL, "
+                "settled_at TEXT DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_approval_id "
                 "ON approvals(approval_id)"
@@ -1580,20 +1599,37 @@ class StateStore:
             for row in rows
         ]
 
-    def list_failing_card_copies(self, min_consecutive_failures: int) -> list[dict[str, Any]]:
+    def list_failing_card_copies(
+        self,
+        min_consecutive_failures: int,
+        chat_ids: Sequence[int] | None = None,
+    ) -> list[dict[str, Any]]:
         """Delivery copies whose sends keep being refused, worst first.
 
         Read from the projection rather than the event log so it heals itself:
         record_card_event resets the counter on a confirmed send, whereas a
         count over past failure events would leave health degraded forever
         after one bad spell.
+
+        ``chat_ids`` narrows the answer to the chats still being delivered to.
+        Self-healing only works for a copy that can still succeed: once the
+        operator removes a failing chat from the configuration, nothing will
+        ever send to it again, so its counter is frozen and an unfiltered
+        count holds telegram_ui in warn for the life of the database.
         """
+        sql = (
+            "SELECT card_key, chat_id, consecutive_failures FROM telegram_ui_card_state "
+            "WHERE consecutive_failures >= ?"
+        )
+        values: list[Any] = [int(min_consecutive_failures)]
+        if chat_ids is not None:
+            if not chat_ids:
+                return []
+            sql += f" AND chat_id IN ({','.join('?' * len(chat_ids))})"
+            values.extend(int(chat_id) for chat_id in chat_ids)
+        sql += " ORDER BY consecutive_failures DESC, card_key"
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT card_key, chat_id, consecutive_failures FROM telegram_ui_card_state "
-                "WHERE consecutive_failures >= ? ORDER BY consecutive_failures DESC, card_key",
-                (int(min_consecutive_failures),),
-            ).fetchall()
+            rows = conn.execute(sql, values).fetchall()
         return [
             {
                 "card_key": str(row[0]),
@@ -1602,6 +1638,97 @@ class StateStore:
             }
             for row in rows
         ]
+
+    def list_unsettled_pending_approvals(self) -> list[dict[str, Any]]:
+        """Pending-approval events whose cards may still need work.
+
+        The card sweep runs on every poll and the event log only grows, so
+        deciding which cards are finished in Python means parsing every
+        approval ever dispatched and reading one projection row per approval,
+        every time -- callback polling gets slower with each operating day.
+        Excluding settled runs here keeps the work proportional to what is
+        actually open.
+
+        A run comes back on its own when a *later* approval joins it: the new
+        event's id is above the ``max_event_id`` recorded when the run
+        settled, so the row no longer covers it. Recovery and resolution
+        failures carry no such id and are handled by
+        ``reopen_settled_signal_runs`` instead.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT events.id AS id, events.payload AS payload FROM system_events AS events "
+                "LEFT JOIN telegram_ui_settled_run AS settled "
+                "ON settled.signal_run_id = json_extract(events.payload, '$.signal_run_id') "
+                "WHERE events.event_type = 'telegram_approval_pending' "
+                "AND (settled.signal_run_id IS NULL OR settled.max_event_id < events.id) "
+                "ORDER BY events.id DESC"
+            ).fetchall()
+        return [{"id": int(row["id"]), "payload": json.loads(row["payload"])} for row in rows]
+
+    def mark_signal_run_cards_settled(
+        self,
+        signal_run_id: str,
+        *,
+        approval_ids: Sequence[str],
+        order_ids: Sequence[str],
+        max_event_id: int,
+    ) -> None:
+        """Record that every card of one signal run is delivered and done."""
+        with self.writer_lock("mark_signal_run_cards_settled"):
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO telegram_ui_settled_run "
+                    "(signal_run_id, approval_ids, order_ids, max_event_id, settled_at) "
+                    "VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP) "
+                    "ON CONFLICT(signal_run_id) DO UPDATE SET "
+                    "approval_ids=excluded.approval_ids, order_ids=excluded.order_ids, "
+                    "max_event_id=MAX(excluded.max_event_id, "
+                    "telegram_ui_settled_run.max_event_id), "
+                    "settled_at=CURRENT_TIMESTAMP",
+                    (
+                        str(signal_run_id),
+                        json.dumps(sorted({str(value) for value in approval_ids})),
+                        json.dumps(sorted({str(value) for value in order_ids})),
+                        int(max_event_id),
+                    ),
+                )
+
+    def reopen_settled_signal_runs(
+        self, order_ids: Iterable[str], approval_ids: Iterable[str]
+    ) -> int:
+        """Un-settle runs touched by an unresolved recovery or a failed resolution.
+
+        "done" is terminal for progress but not for attention: a recovery
+        raised days after a rotation completed has to reach that rotation's
+        card. Dropping the row is what puts the run back in the sweep's scan,
+        and the card's stage is then recomputed from scratch as always.
+        """
+        order_id_list = sorted({str(value) for value in order_ids})
+        approval_id_list = sorted({str(value) for value in approval_ids})
+        if not order_id_list and not approval_id_list:
+            return 0
+        clauses: list[str] = []
+        values: list[Any] = []
+        for column, wanted in (
+            ("order_ids", order_id_list),
+            ("approval_ids", approval_id_list),
+        ):
+            if not wanted:
+                continue
+            clauses.append(
+                f"EXISTS (SELECT 1 FROM json_each(telegram_ui_settled_run.{column}) "
+                f"WHERE json_each.value IN ({','.join('?' * len(wanted))}))"
+            )
+            values.extend(wanted)
+        with self.writer_lock("reopen_settled_signal_runs"):
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    f"DELETE FROM telegram_ui_settled_run WHERE {' OR '.join(clauses)}",
+                    values,
+                )
+                return int(cursor.rowcount)
 
     def load_fill_watermarks(self) -> dict[str, tuple[float, float]]:
         with self._connect() as conn:

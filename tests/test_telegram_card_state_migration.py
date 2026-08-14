@@ -118,3 +118,31 @@ def test_the_database_stays_intact_through_the_upgrade(tmp_path):
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_a_database_that_predates_the_terminal_index_gains_it(tmp_path):
+    """종결 표시 테이블도 앞선 커밋이 만든 DB에는 없다.
+
+    없으면 sweep의 첫 조회가 'no such table'로 죽고, 그 예외는 poll_once가
+    삼키므로 카드 갱신이 조용히 멈춘다.
+    """
+    path = _old_schema_db(tmp_path)
+    store = StateStore(path, 0.0)
+
+    store.mark_signal_run_cards_settled(
+        "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=7
+    )
+
+    assert store.reopen_settled_signal_runs(["ord_1"], []) == 1
+
+
+def test_an_unknown_recovery_does_not_disturb_settled_runs(tmp_path):
+    """되살리는 것은 이 run에 실제로 걸린 건뿐이다."""
+    store = StateStore(tmp_path / "state.db", 0.0)
+    store.mark_signal_run_cards_settled(
+        "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=7
+    )
+
+    assert store.reopen_settled_signal_runs(["ord_other"], ["appr_other"]) == 0
+    assert store.reopen_settled_signal_runs([], []) == 0
+    assert store.reopen_settled_signal_runs([], ["appr_1"]) == 1

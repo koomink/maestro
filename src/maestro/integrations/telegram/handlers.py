@@ -2134,28 +2134,41 @@ class TelegramOperatorCommandRouter:
         기존 알림 경로와 **병행**해서 돈다. 카드 전달이 프로덕션에서 증명되기
         전에 구 경로를 떼는 것은 단계 5다.
         """
-        envelopes = [
-            PendingApprovalEnvelope.model_validate(row["payload"])
-            for row in self.store.list_system_events_by_type(
-                # 창을 두지 않는다 — 오래 기다린 승인이 밀려나면 그 카드는
-                # 영영 갱신되지 않는다. 끝난 카드를 다시 그리지 않는 것은
-                # _card_is_settled가 투영을 보고 판단한다.
-                "telegram_approval_pending",
-                limit=None,
-            )
-        ]
-        if not envelopes:
-            return
-        acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
-        completions = self._latest_payloads_by_approval_id("signal_approval_completed")
         blocked_order_ids = self._unresolved_recovery_order_ids()
         failed_approval_ids = self._resolution_failed_approval_ids()
+        # 종결 표시를 먼저 걷어낸다. attention은 종점이 아니므로, 완료된 지
+        # 한참 지난 회전에 복구가 붙으면 그 run은 다시 스캔에 들어와야 한다.
+        self.store.reopen_settled_signal_runs(blocked_order_ids, failed_approval_ids)
+
+        # 창을 두지 않는다 — 오래 기다린 승인이 밀려나면 그 카드는 영영
+        # 갱신되지 않는다. 대신 끝난 run을 SQL에서 빼서, 매 poll 하는 일이
+        # 운영 기간이 아니라 실제로 열려 있는 승인에 비례하게 만든다.
+        rows = self.store.list_unsettled_pending_approvals()
+        if not rows:
+            return
+        envelopes = [
+            (int(row["id"]), PendingApprovalEnvelope.model_validate(row["payload"]))
+            for row in rows
+        ]
+        acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
+        completions = self._latest_payloads_by_approval_id("signal_approval_completed")
 
         stages: dict[str, str] = {}
         groups: dict[str, list[PendingApprovalEnvelope]] = defaultdict(list)
-        for envelope in envelopes:
+        run_settled: dict[str, bool] = {}
+        run_max_event_id: dict[str, int] = {}
+        run_approval_ids: dict[str, set[str]] = defaultdict(set)
+        run_order_ids: dict[str, set[str]] = defaultdict(set)
+        for event_id, envelope in envelopes:
             approval_id = envelope.approval_id
+            signal_run_id = envelope.signal_run_id
             card_key = f"approval:{approval_id}"
+            run_settled.setdefault(signal_run_id, True)
+            run_max_event_id[signal_run_id] = max(
+                run_max_event_id.get(signal_run_id, 0), event_id
+            )
+            run_approval_ids[signal_run_id].add(approval_id)
+            run_order_ids[signal_run_id] |= self._envelope_order_ids(envelope)
             copies = self._card_manager.copies(card_key)
             if not copies and envelope.card_delivery_version < 1:
                 # 카드 이관 이전에 dispatch된 승인이다. 그때는 카드를 직접
@@ -2164,6 +2177,7 @@ class TelegramOperatorCommandRouter:
                 # 낡은 쪽은 영원히 "승인 대기"로 남는다. 그 승인은 병행 유지
                 # 중인 구 알림 경로가 계속 책임진다. 부모 카드 집계에도 넣지
                 # 않는다 — 단계를 모르는 그룹이 남으면 sweep 전체가 죽는다.
+                # 이 승인에는 할 일이 없으므로 run의 종결 여부도 바꾸지 않는다.
                 continue
             # version 1인데 투영이 비었다면 전송이 시작되지도 못한 것이다
             # (deliver는 첫 API 호출 **전에** intent를 남긴다). 그대로 두면
@@ -2190,6 +2204,7 @@ class TelegramOperatorCommandRouter:
             stages[approval_id] = stage
             if self._card_is_settled(copies, card_key, stage):
                 continue
+            run_settled[signal_run_id] = False
             self._refresh_card(
                 envelope.run_id,
                 card_key,
@@ -2208,6 +2223,7 @@ class TelegramOperatorCommandRouter:
             stage = _daily_card_stage(group_stages)
             if self._card_is_settled(self._card_manager.copies(card_key), card_key, stage):
                 continue
+            run_settled[signal_run_id] = False
             self._refresh_card(
                 group[0].run_id,
                 card_key,
@@ -2226,6 +2242,19 @@ class TelegramOperatorCommandRouter:
                         ],
                     )
                 ),
+            )
+
+        for signal_run_id, settled in run_settled.items():
+            if not settled:
+                continue
+            # 이 run의 카드는 전부 done이고 전달도 확인됐다. 표시를 남겨 다음
+            # poll부터 스캔에서 빠지게 한다 — 되살아나야 할 이유(뒤늦은 승인,
+            # 복구, 처리 실패)는 전부 위에서 표시를 걷어내는 쪽으로 처리한다.
+            self.store.mark_signal_run_cards_settled(
+                signal_run_id,
+                approval_ids=sorted(run_approval_ids[signal_run_id]),
+                order_ids=sorted(run_order_ids[signal_run_id]),
+                max_event_id=run_max_event_id[signal_run_id],
             )
 
     def _refresh_card(
@@ -2339,10 +2368,13 @@ class TelegramOperatorCommandRouter:
 
         판정은 지금 계산한 단계로 매번 다시 한다. 투영이 done이라는 이유만으로
         건너뛰면 그 뒤에 생긴 복구 건이 카드에 영영 반영되지 않는다.
+
+        기준은 이 카드의 수신자다. 현재 설정된 채팅 전부로 보면, 채팅을 하나
+        추가한 순간 과거의 완료 카드가 전부 "미종결"이 되어 다시 전송된다.
         """
         if stage != "done":
             return False
-        for chat_id in self._card_manager.chat_ids:
+        for chat_id in self._card_manager.audience(card_key, copies):
             copy = copies.get((card_key, chat_id))
             if copy is None or copy.delivery != "confirmed" or copy.stage != "done":
                 return False
