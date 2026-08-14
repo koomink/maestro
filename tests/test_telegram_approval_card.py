@@ -348,18 +348,18 @@ def test_progress_does_not_walk_back_when_an_event_lands_late(tmp_path):
     assert _stage_of(store, "approval:appr_1") == "done"
 
     # 완료 이벤트가 조회되지 않는 상황(늦게 도착·유실)을 그대로 재현한다.
-    original = store.list_system_events_by_type
+    original = store.latest_payloads_by_approval_id
 
-    def without_completion(event_type, **kwargs):
+    def without_completion(event_type, approval_ids):
         if event_type == "signal_approval_completed":
-            return []
-        return original(event_type, **kwargs)
+            return {}
+        return original(event_type, approval_ids)
 
-    store.list_system_events_by_type = without_completion
+    store.latest_payloads_by_approval_id = without_completion
     try:
         router._sweep_lifecycle_cards()
     finally:
-        store.list_system_events_by_type = original
+        store.latest_payloads_by_approval_id = original
 
     assert _stage_of(store, "approval:appr_1") == "done", "완료가 진행 중으로 되돌아갔다"
 
@@ -1074,3 +1074,137 @@ def test_a_resolution_failure_after_a_run_settles_still_reaches_the_card(tmp_pat
     router._sweep_lifecycle_cards()
 
     assert _stage_of(store, "approval:appr_1") == "attention"
+
+
+def test_a_crash_while_recording_a_render_failure_does_not_orphan_a_chat(monkeypatch, tmp_path):
+    """렌더가 처음부터 실패하면 refresh에 닿지 못하므로 수신자가 기록되지 않는다.
+
+    그 상태에서 실패를 chat별로 남기다 죽으면, 남은 채팅은 다시 "나중에 추가된
+    채팅"으로 보인다 — deliver와 똑같은 구멍이 렌더 실패 경로에 남아 있었다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    _save_pending_envelope(store, approval_id="appr_1", card_delivery_version=1)
+
+    def exploding_renderer(request, stage):
+        raise ValueError("renderer blew up")
+
+    monkeypatch.setattr(
+        "maestro.integrations.telegram.handlers.render_approval_stage_card", exploding_renderer
+    )
+    real_record = store.record_card_event
+
+    def die_on_the_second_chat(run_id, payload):
+        if payload["chat_id"] == 200:
+            raise ProcessDied("died between chats")
+        return real_record(run_id, payload)
+
+    store.record_card_event = die_on_the_second_chat
+    with pytest.raises(ProcessDied):
+        router._sweep_lifecycle_cards()
+    store.record_card_event = real_record
+
+    monkeypatch.undo()
+    resumed, _, resumed_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    resumed._sweep_lifecycle_cards()
+
+    assert sorted(message["chat_id"] for message in resumed_client.sent) == [100, 200]
+
+
+def test_a_fully_settled_database_reads_no_event_history(tmp_path):
+    """종결 인덱스의 목표는 "비용이 열린 승인 수에 비례"다.
+
+    unsettled가 하나도 없는데 ack·completion·resolution failure 전체를 읽어
+    역직렬화하면, 줄이려던 비용이 그대로 남는다.
+
+    복구 미리보기가 읽는 이벤트는 여기서 세지 않는다. 그것은 이 sweep이 만든
+    비용이 아니라 `_sweep_recovery_notifications`가 매 poll 이미 치르고 있는
+    비용이고, blocker 판정을 SQL로 옮기면 그 로직이 두 벌이 된다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1")
+    _save_completed(store, approval_id="appr_1")
+    router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
+
+    scanned: list[str] = []
+    real_list = store.list_system_events_by_type
+    store.list_system_events_by_type = lambda event_type, **kwargs: (
+        scanned.append(event_type) or real_list(event_type, **kwargs)
+    )
+    router._sweep_lifecycle_cards()
+    store.list_system_events_by_type = real_list
+
+    assert {
+        "telegram_approval_ack",
+        "signal_approval_completed",
+        "telegram_approval_resolution_failed",
+        "telegram_approval_pending",
+    }.isdisjoint(str(event_type) for event_type in scanned)
+
+
+def test_the_stage_lookup_is_scoped_to_the_approvals_still_open(tmp_path):
+    """열린 승인이 있어도 전체 이력을 읽을 이유는 없다.
+
+    전체를 접어 dict로 만든 뒤 열린 승인만 꺼내 쓰면, 읽고 역직렬화하는 양은
+    줄지 않는다 — 줄어야 하는 것이 바로 그 양이다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    for index in range(3):
+        _dispatch_approval(router, approval_id=f"appr_old_{index}")
+        _save_ack(store, approval_id=f"appr_old_{index}")
+    _dispatch_approval(router, approval_id="appr_open")
+    _save_ack(store, approval_id="appr_open")
+
+    acks = store.latest_payloads_by_approval_id("telegram_approval_ack", ["appr_open"])
+
+    assert set(acks) == {"appr_open"}
+
+
+def test_the_latest_payload_wins_when_an_approval_has_several(tmp_path):
+    """스코프를 좁히면서 "마지막 것이 이긴다"를 잃으면 안 된다.
+
+    재개가 부분 완료를 남긴 뒤 다시 완료를 남기는 경우가 그렇다 — 앞의 것을
+    택하면 반쯤 집행된 회전이 완료로 보인다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_completed(store, approval_id="appr_1", orders_failed=1)
+    _save_completed(store, approval_id="appr_1", orders_failed=0)
+
+    completions = store.latest_payloads_by_approval_id("signal_approval_completed", ["appr_1"])
+
+    assert completions["appr_1"]["orders_failed"] == 0
+
+
+def test_an_open_approval_does_not_drag_the_whole_history_in(tmp_path):
+    """열린 승인이 하나 있다고 전체 이력을 읽을 이유는 없다.
+
+    전체를 접어 놓고 열린 승인만 꺼내 쓰면 답은 같지만 비용은 그대로다 —
+    종결 인덱스가 줄이려던 것이 정확히 그 비용이다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    for index in range(3):
+        _dispatch_approval(router, approval_id=f"appr_old_{index}")
+        _save_ack(store, approval_id=f"appr_old_{index}")
+        _save_completed(store, approval_id=f"appr_old_{index}")
+    router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
+    _dispatch_approval(router, approval_id="appr_open")
+    _save_ack(store, approval_id="appr_open")
+
+    scanned: list[str] = []
+    real_list = store.list_system_events_by_type
+    store.list_system_events_by_type = lambda event_type, **kwargs: (
+        scanned.append(event_type) or real_list(event_type, **kwargs)
+    )
+    router._sweep_lifecycle_cards()
+    store.list_system_events_by_type = real_list
+
+    assert _stage_of(store, "approval:appr_open") == "in_progress"
+    assert {
+        "telegram_approval_ack",
+        "signal_approval_completed",
+        "telegram_approval_resolution_failed",
+        "telegram_approval_pending",
+    }.isdisjoint(str(event_type) for event_type in scanned)

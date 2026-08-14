@@ -1,7 +1,7 @@
 import os
 import subprocess
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from math import isfinite
 from pathlib import Path
@@ -2134,27 +2134,42 @@ class TelegramOperatorCommandRouter:
         기존 알림 경로와 **병행**해서 돈다. 카드 전달이 프로덕션에서 증명되기
         전에 구 경로를 떼는 것은 단계 5다.
         """
-        acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
-        completions = self._latest_payloads_by_approval_id("signal_approval_completed")
-        blocked_order_ids = self._unresolved_recovery_order_ids()
-        # 완료가 뒤따른 실패는 되살릴 이유가 없다. 재개가 성공한 run까지 매 poll
-        # 표시를 지웠다 다시 쓰면, 종결 인덱스가 없애려던 조회·쓰기가 그 run에는
-        # 영구히 남는다. 카드 단계를 정할 때 쓰는 판정과 같은 기준이다.
-        unresolved_failures = self._resolution_failed_approval_ids() - completions.keys()
         # 종결 표시를 먼저 걷어낸다. attention은 종점이 아니므로, 완료된 지
         # 한참 지난 회전에 복구가 붙으면 그 run은 다시 스캔에 들어와야 한다.
-        self.store.reopen_settled_signal_runs(blocked_order_ids, unresolved_failures)
+        # 되살릴 표시가 하나도 없으면 복구 미리보기조차 부르지 않는다.
+        blocked_order_ids: set[str] | None = None
+        if self.store.has_settled_signal_runs():
+            blocked_order_ids = self._unresolved_recovery_order_ids()
+            self.store.reopen_settled_signal_runs(blocked_order_ids)
 
         # 창을 두지 않는다 — 오래 기다린 승인이 밀려나면 그 카드는 영영
         # 갱신되지 않는다. 대신 끝난 run을 SQL에서 빼서, 매 poll 하는 일이
         # 운영 기간이 아니라 실제로 열려 있는 승인에 비례하게 만든다.
         rows = self.store.list_unsettled_pending_approvals()
         if not rows:
+            # 여기서 돌아가는 것이 중요하다. 아래의 이력 조회는 전부 열린
+            # 승인에 대한 것이므로, 열린 승인이 없으면 읽을 것도 없다.
             return
         envelopes = [
             (int(row["id"]), PendingApprovalEnvelope.model_validate(row["payload"]))
             for row in rows
         ]
+        # 이력 조회는 전부 열려 있는 승인으로 한정한다. 전체를 읽어 접으면
+        # 종결 인덱스로 줄인 비용이 그대로 돌아온다.
+        open_approval_ids = {envelope.approval_id for _, envelope in envelopes}
+        acks = self.store.latest_payloads_by_approval_id(
+            "telegram_approval_ack", open_approval_ids
+        )
+        completions = self.store.latest_payloads_by_approval_id(
+            "signal_approval_completed", open_approval_ids
+        )
+        if blocked_order_ids is None:
+            blocked_order_ids = self._unresolved_recovery_order_ids()
+        # 완료가 뒤따른 실패는 카드를 붙잡지 않는다 — 재개가 성공하면 완료가
+        # 남는다. 되살리기 쪽 판정은 SQL에 같은 규칙으로 들어가 있다.
+        unresolved_failures = (
+            self._resolution_failed_approval_ids(open_approval_ids) - completions.keys()
+        )
 
         stages: dict[str, str] = {}
         groups: dict[str, list[PendingApprovalEnvelope]] = defaultdict(list)
@@ -2309,31 +2324,20 @@ class TelegramOperatorCommandRouter:
         except Exception as record_exc:  # noqa: BLE001 - 저장까지 깨진 경우
             self._log_card_failure(record_exc)
 
-    def _latest_payloads_by_approval_id(self, event_type: str) -> dict[str, Mapping[str, Any]]:
-        """approval_id별 최신 페이로드. 이벤트는 DESC로 오므로 뒤집어 접는다."""
-        payloads: dict[str, Mapping[str, Any]] = {}
-        for row in reversed(self.store.list_system_events_by_type(event_type, limit=None)):
-            payload = row["payload"]
-            approval_id = payload.get("approval_id")
-            # approval_id 없는 구 이벤트는 어느 승인 그룹의 것인지 알 수 없다.
-            # 추측하면 한 그룹의 완료가 다른 그룹의 유실을 가린다.
-            if isinstance(approval_id, str) and approval_id:
-                payloads[approval_id] = payload
-        return payloads
-
-    def _resolution_failed_approval_ids(self) -> set[str]:
+    def _resolution_failed_approval_ids(self, approval_ids: Collection[str]) -> set[str]:
         """집행이 실패로 끝난 승인. 3a-1이 이미 남기고 있던 기록이다.
 
         완료가 뒤따랐는지는 호출부가 판단한다 — 재개가 성공하면 완료가 남으므로
         과거의 실패가 카드를 붙잡지 않는다.
+
+        묻는 승인으로 한정한다. 전체를 읽으면 이미 끝난 승인의 실패까지 매 poll
+        역직렬화하게 되는데, 그 답은 어차피 쓰이지 않는다.
         """
-        return {
-            str(row["payload"].get("approval_id"))
-            for row in self.store.list_system_events_by_type(
-                "telegram_approval_resolution_failed", limit=None
+        return set(
+            self.store.latest_payloads_by_approval_id(
+                "telegram_approval_resolution_failed", list(approval_ids)
             )
-            if row["payload"].get("approval_id")
-        }
+        )
 
     def _unresolved_recovery_order_ids(self) -> set[str]:
         """아직 종결되지 않은 복구 대상 주문. 승인과는 order_id로만 이어진다.

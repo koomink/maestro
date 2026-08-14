@@ -228,8 +228,18 @@ class CardLifecycleManager:
         Counted against the card's audience, not the configured chats: a chat
         that never held this card would otherwise gain a copy here, and that
         invented copy is what a later refresh would treat as a first send.
+
+        The audience is written first, for the same reason deliver writes it
+        first. A card whose renderer fails from the start never reaches
+        refresh, so this is the only place its audience gets recorded -- and a
+        crash partway down this loop would otherwise leave the chats it had
+        not reached looking like chats added later, never to be sent to.
         """
-        for chat_id in self.audience(card_key, self.copies(card_key)):
+        recorded = self.store.load_card_audience(card_key)
+        audience = self._resolve_audience(recorded, self.copies(card_key))
+        if not recorded:
+            self.store.record_card_audience(card_key, audience)
+        for chat_id in audience:
             self.store.record_card_event(
                 run_id,
                 card_failure_event(card_key, chat_id, stage, "", new_operation_id(), error),

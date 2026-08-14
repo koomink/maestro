@@ -133,7 +133,7 @@ def test_a_database_that_predates_the_terminal_index_gains_it(tmp_path):
         "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=7
     )
 
-    assert store.reopen_settled_signal_runs(["ord_1"], []) == 1
+    assert store.reopen_settled_signal_runs(["ord_1"]) == 1
 
 
 def test_an_unknown_recovery_does_not_disturb_settled_runs(tmp_path):
@@ -143,9 +143,36 @@ def test_an_unknown_recovery_does_not_disturb_settled_runs(tmp_path):
         "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=7
     )
 
-    assert store.reopen_settled_signal_runs(["ord_other"], ["appr_other"]) == 0
-    assert store.reopen_settled_signal_runs([], []) == 0
-    assert store.reopen_settled_signal_runs([], ["appr_1"]) == 1
+    assert store.reopen_settled_signal_runs(["ord_other"]) == 0
+    assert store.reopen_settled_signal_runs([]) == 0
+    assert store.reopen_settled_signal_runs(["ord_1"]) == 1
+
+
+def test_an_unresolved_resolution_failure_reopens_its_run(tmp_path):
+    """실패 쪽 판정은 SQL 안에 있다 — 완료가 없는 실패만 되살린다."""
+    store = StateStore(tmp_path / "state.db", 0.0)
+    store.mark_signal_run_cards_settled(
+        "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=7
+    )
+    store.save_system_event(
+        "run_1", "telegram_approval_resolution_failed", {"approval_id": "appr_1"}
+    )
+
+    assert store.reopen_settled_signal_runs([]) == 1
+
+
+def test_a_resolution_failure_that_completed_does_not_reopen_its_run(tmp_path):
+    """재개가 성공한 run까지 되살리면 매 poll 표시를 지웠다 다시 쓰게 된다."""
+    store = StateStore(tmp_path / "state.db", 0.0)
+    store.mark_signal_run_cards_settled(
+        "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=7
+    )
+    store.save_system_event(
+        "run_1", "telegram_approval_resolution_failed", {"approval_id": "appr_1"}
+    )
+    store.save_system_event("run_1", "signal_approval_completed", {"approval_id": "appr_1"})
+
+    assert store.reopen_settled_signal_runs([]) == 0
 
 
 def test_a_database_that_predates_the_audience_table_gains_it(tmp_path):

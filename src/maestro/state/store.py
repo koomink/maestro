@@ -1749,33 +1749,49 @@ class StateStore:
                     ),
                 )
 
-    def reopen_settled_signal_runs(
-        self, order_ids: Iterable[str], approval_ids: Iterable[str]
-    ) -> int:
+    def has_settled_signal_runs(self) -> bool:
+        """Whether anything could need reopening at all."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT 1 FROM telegram_ui_settled_run LIMIT 1").fetchone()
+        return row is not None
+
+    def reopen_settled_signal_runs(self, order_ids: Iterable[str]) -> int:
         """Un-settle runs touched by an unresolved recovery or a failed resolution.
 
         "done" is terminal for progress but not for attention: a recovery
         raised days after a rotation completed has to reach that rotation's
         card. Dropping the row is what puts the run back in the sweep's scan,
         and the card's stage is then recomputed from scratch as always.
+
+        The failed-resolution half is decided here rather than passed in.
+        Finding it in Python means deserialising every resolution failure and
+        every completion ever recorded, on every poll, to answer a question
+        about a handful of settled rows -- which is the cost the terminal index
+        exists to remove. A failure that a later completion resolved is not a
+        reason to reopen: doing so deletes and rewrites the row on every poll
+        forever, for exactly the runs that once went wrong.
         """
         order_id_list = sorted({str(value) for value in order_ids})
-        approval_id_list = sorted({str(value) for value in approval_ids})
-        if not order_id_list and not approval_id_list:
-            return 0
-        clauses: list[str] = []
+        clauses = [
+            "EXISTS ("
+            "  SELECT 1 FROM json_each(telegram_ui_settled_run.approval_ids) AS wanted "
+            "  JOIN system_events AS failure "
+            "    ON failure.event_type = 'telegram_approval_resolution_failed' "
+            "   AND json_extract(failure.payload, '$.approval_id') = wanted.value "
+            "  WHERE NOT EXISTS ("
+            "    SELECT 1 FROM system_events AS completion "
+            "    WHERE completion.event_type = 'signal_approval_completed' "
+            "      AND json_extract(completion.payload, '$.approval_id') = wanted.value"
+            "  )"
+            ")"
+        ]
         values: list[Any] = []
-        for column, wanted in (
-            ("order_ids", order_id_list),
-            ("approval_ids", approval_id_list),
-        ):
-            if not wanted:
-                continue
+        if order_id_list:
             clauses.append(
-                f"EXISTS (SELECT 1 FROM json_each(telegram_ui_settled_run.{column}) "
-                f"WHERE json_each.value IN ({','.join('?' * len(wanted))}))"
+                "EXISTS (SELECT 1 FROM json_each(telegram_ui_settled_run.order_ids) "
+                f"WHERE json_each.value IN ({','.join('?' * len(order_id_list))}))"
             )
-            values.extend(wanted)
+            values.extend(order_id_list)
         with self.writer_lock("reopen_settled_signal_runs"):
             with self._connect() as conn:
                 cursor = conn.execute(
@@ -1783,6 +1799,35 @@ class StateStore:
                     values,
                 )
                 return int(cursor.rowcount)
+
+    def latest_payloads_by_approval_id(
+        self, event_type: str, approval_ids: Sequence[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Latest payload per approval, for the approvals asked about.
+
+        Scoped in SQL rather than by folding the whole event type in Python:
+        the card sweep only ever needs the approvals still open, and reading
+        the rest is work that grows with every operating day.
+        """
+        wanted = sorted({str(value) for value in approval_ids})
+        if not wanted:
+            return {}
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT payload FROM system_events "
+                "WHERE event_type = ? "
+                f"AND json_extract(payload, '$.approval_id') IN ({','.join('?' * len(wanted))}) "
+                "ORDER BY id",
+                [event_type, *wanted],
+            ).fetchall()
+        # Ascending, so the last write for an approval is the one that stands.
+        payloads: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            payload = json.loads(row[0])
+            approval_id = payload.get("approval_id")
+            if isinstance(approval_id, str) and approval_id:
+                payloads[approval_id] = payload
+        return payloads
 
     def load_fill_watermarks(self) -> dict[str, tuple[float, float]]:
         with self._connect() as conn:
