@@ -1575,9 +1575,11 @@ sweep이 첫 전송까지 하는 모양이었지만, orchestrator의
 신규 전송된다 — 없는 복사본과 처음 보내는 카드는 구분되지 않는다. 그렇다고
 복사본이 있는 채팅으로 되짚으면 이번엔 **전송 도중의 중단**을 못 읽는다: chat 100까지
 기록하고 죽으면 chat 200은 "나중에 추가된 채팅"과 똑같이 보여 영영 전송되지 않는다.
-그래서 `telegram_ui_card_audience`에 첫 API 호출 전에 남긴다. 복사본으로 되짚는
-경로는 이 기록이 생기기 전에 만들어진 카드용 fallback으로만 남아 있고, 그마저도
-refresh가 한 번 보면 그때의 답으로 고정된다. 읽을 때는 항상 현재 설정과 교집합을
+그래서 `telegram_ui_card_audience`에 첫 API 호출 전에 남긴다 — `deliver`뿐 아니라
+`record_render_failure`도 그렇다. 렌더가 처음부터 실패하는 카드는 refresh에 닿지
+못하므로 그 경로가 수신자를 남기는 유일한 곳이다. 복사본으로 되짚는 경로는 이
+기록이 생기기 전에 만들어진 카드용 fallback으로만 남아 있고, 그마저도 한 번 보면
+그때의 답으로 고정된다. 읽을 때는 항상 현재 설정과 교집합을
 취한다 — 뺀 채팅으로는 다시 성공할 수 없으므로 갱신은 실패만 쌓는다. 종결
 판정(`_card_is_settled`)과 렌더 실패 기록도 같은 기준을 쓴다.
 
@@ -1594,6 +1596,16 @@ polling 지연으로 쌓인다. `telegram_ui_settled_run`이 terminal 인덱스�
 done이므로 이 경로는 죽은 코드가 아니다 — 종결 뒤에 붙은 집행 실패가 실제로 있다.
 표시는 카드가 done에 닿은 **다음** sweep에 남는다(그 pass의 판정은 갱신 전 상태로
 내려지므로).
+
+이력 조회도 같이 좁혔다. 인덱스만 두고 ack·completion·resolution failure를 전체
+읽어 접으면 답은 같아도 비용은 그대로다. 그래서 (1) unsettled가 하나도 없으면
+`list_unsettled_pending_approvals()` 직후 돌아가고, (2) 그 뒤의 조회는 열려 있는
+approval_id로 SQL에서 한정하며, (3) 되살리기의 실패 판정은 아예 SQL 안에 있다 —
+Python으로 하려면 전체 실패·완료를 역직렬화해야 하는데 그것이 없애려던 비용이다.
+남는 것은 복구 미리보기(`WorkflowRecoveryService.preview()`)의 조회인데, 이것은
+`_sweep_recovery_notifications`가 매 poll 이미 치르는 비용이고 blocker 판정을
+SQL로 옮기면 그 로직이 두 벌이 된다. 되살릴 표시가 하나도 없으면 그마저 부르지
+않는다.
 
 **telegram_ui health는 현재 허용 채팅만 본다.** 설정에서 뺀 채팅의 복사본은 다시
 성공할 기회가 없어 카운터가 0으로 돌아올 길이 없고, 그러면 자가 치유를 전제로 한
