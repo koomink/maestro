@@ -201,3 +201,102 @@ def test_recording_the_audience_again_keeps_the_chats_already_there(tmp_path):
     store.record_card_audience("approval:appr_1", [100, 300])
 
     assert store.load_card_audience("approval:appr_1") == [100, 200, 300]
+
+
+def _trace(store, call):
+    """실제로 실행된 SELECT를 잡아낸다.
+
+    테스트가 손으로 쓴 SQL의 계획을 보면, 메서드가 인덱스를 안 타는 형태로
+    돌아가도 테스트는 계속 통과한다 — 비용 계약이 아니라 테스트 문자열을
+    검증하게 된다.
+    """
+    statements: list[str] = []
+    real_connect = store._connect
+
+    def traced():
+        conn = real_connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    store._connect = traced
+    try:
+        call()
+    finally:
+        store._connect = real_connect
+    return [sql for sql in statements if sql.lstrip().upper().startswith(("SELECT", "WITH"))]
+
+
+def _plan(store, sql):
+    with sqlite3.connect(store.path) as conn:
+        rows = conn.execute(f"EXPLAIN QUERY PLAN {sql}").fetchall()
+    return " | ".join(str(row[3]) for row in rows)
+
+
+def test_the_approval_lookup_seeks_an_index_instead_of_scanning(tmp_path):
+    """비용 계약은 동작 테스트로 보이지 않으므로 쿼리 계획으로 고정한다.
+
+    인덱스가 없으면 SQLite는 그 event type의 모든 행을 훑으며 json_extract를
+    돌린다 — poll 하나의 비용이 지금까지 받은 승인 수에 비례하게 된다.
+    """
+    store = StateStore(tmp_path / "state.db", 0.0)
+
+    executed = _trace(
+        store,
+        lambda: store.latest_payloads_by_approval_id("signal_approval_completed", ["appr_1"]),
+    )
+
+    assert len(executed) == 1
+    plan = _plan(store, executed[0])
+    assert "idx_system_events_type_approval" in plan
+    assert "SCAN" not in plan
+
+
+def test_the_settled_scan_seeks_the_signal_run_index(tmp_path):
+    store = StateStore(tmp_path / "state.db", 0.0)
+    store.mark_signal_run_cards_settled(
+        "signal_1", approval_ids=["appr_1"], order_ids=["ord_1"], max_event_id=1
+    )
+
+    executed = _trace(store, store.list_unsettled_pending_approvals)
+
+    assert len(executed) == 1
+    plan = _plan(store, executed[0])
+    assert "idx_system_events_type_signal_run" in plan
+
+
+def test_the_projected_columns_follow_the_payload_whatever_wrote_it(tmp_path):
+    """생성 컬럼이라 INSERT 경로마다 채워 줄 필요가 없다.
+
+    system_events에 넣는 자리는 일곱 군데인데 order_id 투영을 채우는 곳은 셋뿐이다.
+    한 군데만 빠뜨려도 그 승인은 sweep에서 조용히 사라진다 — 느려지는 것이 아니라
+    틀려진다.
+    """
+    store = StateStore(tmp_path / "state.db", 0.0)
+    store.save_system_event(
+        "run_1", "telegram_approval_pending", {"approval_id": "appr_1", "signal_run_id": "sig_1"}
+    )
+
+    with sqlite3.connect(store.path) as conn:
+        row = conn.execute(
+            "SELECT approval_id, signal_run_id FROM system_events WHERE event_type = ?",
+            ("telegram_approval_pending",),
+        ).fetchone()
+
+    assert row == ("appr_1", "sig_1")
+
+
+def test_a_database_that_predates_the_projected_columns_gains_them(tmp_path):
+    """PRAGMA table_info는 VIRTUAL 생성 컬럼을 보여주지 않는다.
+
+    그것으로 존재 여부를 판단하면 두 번째 열 때 "duplicate column name"으로 죽는다.
+    """
+    path = _old_schema_db(tmp_path)
+    StateStore(path, 0.0).save_system_event(
+        "run_1", "telegram_approval_pending", {"approval_id": "appr_1", "signal_run_id": "sig_1"}
+    )
+
+    reopened = StateStore(path, 0.0)
+
+    assert set(
+        reopened.latest_payloads_by_approval_id("telegram_approval_pending", ["appr_1"])
+    ) == {"appr_1"}

@@ -195,9 +195,44 @@ class StateStore:
                 # come back NULL, which is exactly the "no batch provenance"
                 # signal the replay check below relies on.
                 conn.execute("ALTER TABLE system_events ADD COLUMN batch_fingerprint TEXT")
+            # table_info omits VIRTUAL generated columns; table_xinfo lists
+            # them. Checking the wrong one makes the migration fail with
+            # "duplicate column name" the second time a database is opened.
+            system_event_all_columns = {
+                row[1] for row in conn.execute("PRAGMA table_xinfo(system_events)").fetchall()
+            }
+            if "approval_id" not in system_event_all_columns:
+                # Generated rather than written by each INSERT. Seven call
+                # sites insert into this table and only three set the
+                # order_id/broker_order_id projections; a card-sweep lookup
+                # that missed one would silently drop an approval instead of
+                # merely being slow. A virtual column cannot disagree with the
+                # payload it is computed from, and CREATE INDEX below covers
+                # the rows already written, so there is nothing to backfill.
+                conn.execute(
+                    "ALTER TABLE system_events ADD COLUMN approval_id TEXT "
+                    "GENERATED ALWAYS AS (json_extract(payload, '$.approval_id')) VIRTUAL"
+                )
+            if "signal_run_id" not in system_event_all_columns:
+                conn.execute(
+                    "ALTER TABLE system_events ADD COLUMN signal_run_id TEXT "
+                    "GENERATED ALWAYS AS (json_extract(payload, '$.signal_run_id')) VIRTUAL"
+                )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_system_events_type_created "
                 "ON system_events(event_type, created_at)"
+            )
+            conn.execute(
+                # The card sweep asks "this event type, these approvals" on
+                # every poll. Without this it walks every event of the type and
+                # runs json_extract on each, so the cost of one poll grows with
+                # every approval the operator has ever been sent.
+                "CREATE INDEX IF NOT EXISTS idx_system_events_type_approval "
+                "ON system_events(event_type, approval_id) WHERE approval_id IS NOT NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_system_events_type_signal_run "
+                "ON system_events(event_type, signal_run_id) WHERE signal_run_id IS NOT NULL"
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_system_events_duplicate_key "
@@ -1707,13 +1742,13 @@ class StateStore:
                 "  SELECT settled.signal_run_id AS signal_run_id "
                 "  FROM telegram_ui_settled_run AS settled "
                 "  JOIN system_events AS newer "
-                "    ON json_extract(newer.payload, '$.signal_run_id') = settled.signal_run_id "
+                "    ON newer.signal_run_id = settled.signal_run_id "
                 "  WHERE newer.event_type = 'telegram_approval_pending' "
                 "    AND newer.id > settled.max_event_id"
                 ") "
                 "SELECT events.id AS id, events.payload AS payload FROM system_events AS events "
                 "LEFT JOIN telegram_ui_settled_run AS settled "
-                "ON settled.signal_run_id = json_extract(events.payload, '$.signal_run_id') "
+                "ON settled.signal_run_id = events.signal_run_id "
                 "WHERE events.event_type = 'telegram_approval_pending' "
                 "AND (settled.signal_run_id IS NULL "
                 "     OR settled.signal_run_id IN (SELECT signal_run_id FROM reopened)) "
@@ -1777,11 +1812,11 @@ class StateStore:
             "  SELECT 1 FROM json_each(telegram_ui_settled_run.approval_ids) AS wanted "
             "  JOIN system_events AS failure "
             "    ON failure.event_type = 'telegram_approval_resolution_failed' "
-            "   AND json_extract(failure.payload, '$.approval_id') = wanted.value "
+            "   AND failure.approval_id = wanted.value "
             "  WHERE NOT EXISTS ("
             "    SELECT 1 FROM system_events AS completion "
             "    WHERE completion.event_type = 'signal_approval_completed' "
-            "      AND json_extract(completion.payload, '$.approval_id') = wanted.value"
+            "      AND completion.approval_id = wanted.value"
             "  )"
             ")"
         ]
@@ -1816,7 +1851,7 @@ class StateStore:
             rows = conn.execute(
                 "SELECT payload FROM system_events "
                 "WHERE event_type = ? "
-                f"AND json_extract(payload, '$.approval_id') IN ({','.join('?' * len(wanted))}) "
+                f"AND approval_id IN ({','.join('?' * len(wanted))}) "
                 "ORDER BY id",
                 [event_type, *wanted],
             ).fetchall()
