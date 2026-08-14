@@ -55,7 +55,8 @@ class StateStore:
         self.live_order_lock_path = self.path.with_suffix(self.path.suffix + ".live.lock")
         self.initial_cash = float(initial_cash or 0.0)
         self.initial_cash_by_currency = dict(initial_cash_by_currency or {})
-        self._init_db()
+        with self.writer_lock("init_db"):
+            self._init_db()
         if config_identity is not None:
             self.validate_config_identity(config_identity)
 

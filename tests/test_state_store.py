@@ -21,6 +21,16 @@ def _hold_writer_lock(db_path, hold_seconds, ready, done):
     done.set()
 
 
+def _open_state_store(db_path, ready, result):
+    ready.set()
+    try:
+        StateStore(db_path, 0)
+    except Exception as exc:  # pragma: no cover - asserted through child result
+        result.put((type(exc).__name__, str(exc)))
+    else:
+        result.put(None)
+
+
 def _race_workflow_head(db_path, attempt, ready, results):
     from maestro.state.store import StateStore
 
@@ -212,18 +222,39 @@ def test_list_system_events_by_type_includes_boundary_second(tmp_path):
 def test_writer_lock_is_exclusive_across_processes(tmp_path):
     db = str(tmp_path / "state.db")
     StateStore(db, 0)  # create schema
+    store = StateStore(db, 0)
     ready = multiprocessing.Event()
     done = multiprocessing.Event()
     proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 2.0, ready, done))
     proc.start()
     try:
         assert ready.wait(timeout=10)
-        store = StateStore(db, 0)
         with pytest.raises(TimeoutError, match="State writer lock is busy"):
             with store.writer_lock("waiter", timeout_seconds=0.3):
                 pass
     finally:
         proc.join(timeout=10)
+
+
+def test_constructor_waits_for_the_state_writer_lock(tmp_path):
+    db = str(tmp_path / "state.db")
+    StateStore(db, 0)
+    lock_path = Path(f"{db}.lock")
+    ready = multiprocessing.Event()
+    result = multiprocessing.Queue()
+
+    with lock_path.open("a+", encoding="utf-8") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = multiprocessing.Process(target=_open_state_store, args=(db, ready, result))
+        proc.start()
+        assert ready.wait(timeout=10)
+        time.sleep(0.3)
+        assert proc.is_alive()
+        fcntl.flock(held, fcntl.LOCK_UN)
+
+    proc.join(timeout=10)
+    assert proc.exitcode == 0
+    assert result.get(timeout=2) is None
 
 
 def test_writer_lock_is_reentrant_in_the_same_thread(tmp_path):
@@ -289,13 +320,13 @@ def test_live_order_lock_records_its_own_holder(tmp_path):
 def test_timeout_message_names_the_holder(tmp_path):
     db = str(tmp_path / "state.db")
     StateStore(db, 0)
+    store = StateStore(db, 0)
     ready = multiprocessing.Event()
     done = multiprocessing.Event()
     proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 3.0, ready, done))
     proc.start()
     try:
         assert ready.wait(timeout=10)
-        store = StateStore(db, 0)
         with pytest.raises(TimeoutError) as exc_info:
             with store.writer_lock("victim", timeout_seconds=0.3):
                 pass
@@ -436,6 +467,7 @@ def test_writer_timeout_message_names_the_live_order_holder_and_the_waiter(tmp_p
     section."""
     db = str(tmp_path / "state.db")
     StateStore(db, 0)
+    store = StateStore(db, 0)
     writer_ready = multiprocessing.Event()
     writer_done = multiprocessing.Event()
     writer_proc = multiprocessing.Process(
@@ -446,12 +478,11 @@ def test_writer_timeout_message_names_the_live_order_holder_and_the_waiter(tmp_p
     live_proc = multiprocessing.Process(
         target=_hold_live_order_lock, args=(db, 3.0, live_ready, live_done)
     )
-    writer_proc.start()
     live_proc.start()
     try:
-        assert writer_ready.wait(timeout=10)
         assert live_ready.wait(timeout=10)
-        store = StateStore(db, 0)
+        writer_proc.start()
+        assert writer_ready.wait(timeout=10)
         with pytest.raises(TimeoutError) as exc_info:
             with store.writer_lock("victim", timeout_seconds=0.3):
                 pass
@@ -474,6 +505,7 @@ def test_timeout_message_names_both_holders_without_a_cycle_claim(tmp_path):
     host pressure) and leaves interpretation to a human."""
     db = str(tmp_path / "state.db")
     StateStore(db, 0)
+    store = StateStore(db, 0)
     writer_ready, writer_done = multiprocessing.Event(), multiprocessing.Event()
     live_ready, live_done = multiprocessing.Event(), multiprocessing.Event()
     writer_proc = multiprocessing.Process(
@@ -482,12 +514,11 @@ def test_timeout_message_names_both_holders_without_a_cycle_claim(tmp_path):
     live_proc = multiprocessing.Process(
         target=_hold_live_order_lock, args=(db, 3.0, live_ready, live_done)
     )
-    writer_proc.start()
     live_proc.start()
     try:
-        assert writer_ready.wait(timeout=10)
         assert live_ready.wait(timeout=10)
-        store = StateStore(db, 0)
+        writer_proc.start()
+        assert writer_ready.wait(timeout=10)
         with pytest.raises(TimeoutError) as exc_info:
             with store.writer_lock("victim", timeout_seconds=0.5):
                 pass
@@ -509,12 +540,12 @@ def test_timeout_message_for_fill_reconciliation_pattern_makes_no_cycle_claim(tm
     the removed cycle detector used to mislabel as WAIT-FOR CYCLE."""
     db = str(tmp_path / "state.db")
     StateStore(db, 0)
+    store = StateStore(db, 0)
     ready, done = multiprocessing.Event(), multiprocessing.Event()
     proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 2.0, ready, done))
     proc.start()
     try:
         assert ready.wait(timeout=10)
-        store = StateStore(db, 0)
         with store.live_order_lock("victim"):
             with pytest.raises(TimeoutError) as exc_info:
                 with store.writer_lock("victim", timeout_seconds=0.3):
@@ -532,12 +563,12 @@ def test_timeout_message_carries_hold_and_pressure_signals(tmp_path):
     lock next to how long the waiter waited, plus a cheap host-pressure read."""
     db = str(tmp_path / "state.db")
     StateStore(db, 0)
+    store = StateStore(db, 0)
     ready, done = multiprocessing.Event(), multiprocessing.Event()
     proc = multiprocessing.Process(target=_hold_writer_lock, args=(db, 3.0, ready, done))
     proc.start()
     try:
         assert ready.wait(timeout=10)
-        store = StateStore(db, 0)
         with pytest.raises(TimeoutError) as exc_info:
             with store.writer_lock("victim", timeout_seconds=0.5):
                 pass

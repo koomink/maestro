@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS는 이미 있는 테이블에 컬럼을 더하지 않
 없으면 카드 전송과 헬스체크가 'no such column'으로 죽는다.
 """
 
+import multiprocessing
 import sqlite3
 
 from maestro.integrations.telegram.ui.card_state import card_failure_event
@@ -37,6 +38,16 @@ def _old_schema_db(tmp_path, *, rows=()):
                 row,
             )
     return path
+
+
+def _open_legacy_store_together(path, start, results):
+    start.wait(timeout=10)
+    try:
+        StateStore(path, 0.0)
+    except Exception as exc:  # pragma: no cover - asserted through child result
+        results.put((type(exc).__name__, str(exc)))
+    else:
+        results.put(None)
 
 
 def _columns(path):
@@ -118,6 +129,32 @@ def test_the_database_stays_intact_through_the_upgrade(tmp_path):
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+
+
+def test_concurrent_constructors_migrate_one_legacy_database(tmp_path):
+    path = _old_schema_db(tmp_path)
+    start = multiprocessing.Event()
+    results = multiprocessing.Queue()
+    processes = [
+        multiprocessing.Process(target=_open_legacy_store_together, args=(path, start, results))
+        for _ in range(4)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=15)
+
+    assert [process.exitcode for process in processes] == [0, 0, 0, 0]
+    assert [results.get(timeout=2) for _ in processes] == [None, None, None, None]
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_xinfo(system_events)")}
+        indexes = {row[1] for row in conn.execute("PRAGMA index_list(system_events)")}
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+
+    assert {"approval_id", "signal_run_id"} <= columns
+    assert {"idx_system_events_type_approval", "idx_system_events_type_signal_run"} <= indexes
+    assert integrity == "ok"
 
 
 def test_a_database_that_predates_the_terminal_index_gains_it(tmp_path):
