@@ -825,9 +825,10 @@
       event payloads on separate progress/attention axes, a read-only daily
       parent card for multi-group signal runs, a one-line no-action notice, and
       a plain-text fallback plus `telegram_ui` health degrade after three
-      consecutive failures. Recipients are fixed at first delivery so widening
-      the allowed-chat list resends nothing, and settled signal runs leave the
-      sweep's scan through a terminal index. See
+      consecutive failures. Recipients are recorded before the first send so
+      widening the allowed-chat list resends nothing while an interrupted send
+      still finishes, and settled signal runs leave the sweep's scan through a
+      terminal index. See
       [specs/2026-08-09-telegram-ux-redesign-design.md](superpowers/specs/2026-08-09-telegram-ux-redesign-design.md)
       stage 2; the legacy notification paths stay in parallel until stage 5
 - [ ] Price rotation orders off the Toss order book (`/api/v1/orderbook`), walking

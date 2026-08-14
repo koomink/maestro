@@ -591,8 +591,9 @@ Delivered:
   as its stage changes, a read-only daily parent card appears when a signal run
   has more than one approval group, quiet days get a one-line notice, and three
   consecutive failures fall back to plain text and degrade the `telegram_ui`
-  health check. A card's recipients are fixed the first time it goes out, so
-  widening the allowed-chat list never resends past cards; a second table
+  health check. A card's recipients are recorded (`telegram_ui_card_audience`)
+  before its first send, so widening the allowed-chat list never resends past
+  cards while a send interrupted partway still finishes; a third table
   (`telegram_ui_settled_run`) records signal runs whose cards are finished so
   the poll sweep's cost tracks open approvals rather than operating days.
 - Stages 3a-1 and 3a-2 (consistency groundwork, taken out of order after
