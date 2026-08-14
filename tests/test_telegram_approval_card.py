@@ -8,6 +8,7 @@ import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 import yaml
 
 from maestro.approval.models import ApprovalRequest, PendingApprovalEnvelope
@@ -34,6 +35,10 @@ def _telegram_config_path(tmp_path, *, chat_ids=(100,)) -> Path:
     config_path = tmp_path / "telegram_operator.yaml"
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
+
+
+class ProcessDied(BaseException):
+    """프로세스가 죽은 것. Exception이 아니므로 격리 코드가 삼키지 않는다."""
 
 
 class FakeTelegramClient:
@@ -918,3 +923,154 @@ def test_adding_a_chat_does_not_reopen_every_settled_run(tmp_path):
     wider_store.load_card_delivery_state = real_load
 
     assert read == []
+
+
+def test_a_crash_mid_delivery_does_not_orphan_the_remaining_chats(tmp_path):
+    """수신자를 '복사본이 있는 채팅'으로 되짚으면 전송 도중의 중단을 못 읽는다.
+
+    chat 100까지 기록하고 죽으면, 재시작한 sweep에게 chat 200은 "나중에 추가된
+    채팅"과 똑같이 보인다 — 그래서 영영 전송되지 않는다. 수신자는 첫 API 호출
+    **전에** 남아 있어야 구분할 수 있다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    envelope = _save_pending_envelope(store, approval_id="appr_1", card_delivery_version=1)
+    # 죽는 지점은 chat 200을 **시작하기 전**이다. 호출 도중에 죽으면 intent가
+    # 이미 남아 unknown 복사본이 되고, 그것은 재전송하지 않는 것이 맞다.
+    real_deliver_one = router._card_manager._deliver_one
+
+    def die_before_the_second_chat(run_id, card_key, stage, rendered, render_hash, chat_id):
+        if chat_id == 200:
+            raise ProcessDied("died between chats")
+        return real_deliver_one(run_id, card_key, stage, rendered, render_hash, chat_id)
+
+    router._card_manager._deliver_one = die_before_the_second_chat
+    with pytest.raises(ProcessDied):
+        router._card_manager.deliver(
+            envelope.run_id,
+            "approval:appr_1",
+            "pending",
+            render_approval_stage_card(envelope.request, "pending"),
+        )
+    assert [row["chat_id"] for row in store.load_card_delivery_state("approval:appr_1")] == [100]
+
+    resumed, _, resumed_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    resumed._sweep_lifecycle_cards()
+
+    assert [message["chat_id"] for message in resumed_client.sent] == [200]
+
+
+def test_a_group_added_to_a_settled_run_still_gets_a_parent_card(tmp_path):
+    """되살아난 run은 새 승인만이 아니라 그 run 전체를 다시 봐야 한다.
+
+    새 이벤트만 돌려주면 그룹이 하나로 보여 부모 카드 조건(2개 이상)에 닿지
+    못한다 — 종결 전에는 있었을 부모 카드가 종결 뒤에는 생기지 않는다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_first", signal_run_id="signal_shared")
+    _save_ack(store, approval_id="appr_first")
+    _save_completed(store, approval_id="appr_first")
+    router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
+
+    _dispatch_approval(router, approval_id="appr_second", signal_run_id="signal_shared")
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "daily:signal_shared") is not None
+
+
+def test_a_resolution_failure_that_completed_stops_reopening_its_run(tmp_path):
+    """되살릴 대상은 아직 안 끝난 실패뿐이다.
+
+    과거 실패를 무조건 되살리면, 재개가 성공해 완료된 run도 매 poll 표시가
+    지워지고 다시 쓰인다 — 종결 인덱스가 없애려던 조회·쓰기가 그대로 남는다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1")
+    _save_resolution_failed(store, approval_id="appr_1")
+    router._sweep_lifecycle_cards()
+    assert _stage_of(store, "approval:appr_1") == "attention"
+
+    _save_completed(store, approval_id="appr_1")
+    router._sweep_lifecycle_cards()  # done으로 편집
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
+
+    read: list[str] = []
+    real_load = store.load_card_delivery_state
+    store.load_card_delivery_state = lambda card_key: (
+        read.append(card_key) or real_load(card_key)
+    )
+    router._sweep_lifecycle_cards()
+    store.load_card_delivery_state = real_load
+
+    assert read == []
+
+
+def test_the_audience_is_not_rewritten_on_every_poll(tmp_path):
+    """수신자는 변하지 않는 사실이다. 매 poll 다시 쓰면 열린 승인마다 초당 한 번씩
+    쓰기 트랜잭션이 도는데, 종결 인덱스로 줄이려던 것이 바로 그 비용이다."""
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1")
+    router._sweep_lifecycle_cards()
+
+    writes: list[str] = []
+    real_record = store.record_card_audience
+    store.record_card_audience = lambda card_key, chat_ids: (
+        writes.append(card_key) or real_record(card_key, chat_ids)
+    )
+    router._sweep_lifecycle_cards()
+    store.record_card_audience = real_record
+
+    assert writes == []
+
+
+def test_a_card_from_before_the_audience_table_keeps_its_own_chats(tmp_path):
+    """기록이 없는 옛 카드는 지금 가진 복사본이 수신자다 — 그리고 그것으로 고정된다."""
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100,))
+    _dispatch_approval(router, approval_id="appr_old")
+    with sqlite3.connect(store.path) as conn:
+        conn.execute("DELETE FROM telegram_ui_card_audience")
+
+    wider, wider_store, wider_client = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    _save_ack(wider_store, approval_id="appr_old")
+    wider._sweep_lifecycle_cards()
+
+    assert wider_client.sent == []
+    assert wider_store.load_card_audience("approval:appr_old") == [100]
+
+
+def test_a_removed_chat_stops_receiving_edits(tmp_path):
+    """기록된 수신자라도 지금 설정에 없으면 건드리지 않는다.
+
+    그 채팅으로는 다시 성공할 수 없으므로, 계속 갱신을 시도하면 실패만 쌓여
+    fallback과 health degrade를 부른다.
+    """
+    router, store, _ = _router_with_cards(tmp_path, chat_ids=(100, 200))
+    _dispatch_approval(router, approval_id="appr_1")
+    assert store.load_card_audience("approval:appr_1") == [100, 200]
+
+    narrowed, narrowed_store, narrowed_client = _router_with_cards(tmp_path, chat_ids=(100,))
+    _save_ack(narrowed_store, approval_id="appr_1")
+    narrowed._sweep_lifecycle_cards()
+
+    assert [message["chat_id"] for message in narrowed_client.edited] == [100]
+
+
+def test_a_resolution_failure_after_a_run_settles_still_reaches_the_card(tmp_path):
+    """거절은 완료 이벤트 없이도 done이다 — 그 뒤에 붙은 집행 실패가 문제다.
+
+    run이 이미 종결된 뒤라면 스캔에서 빠져 있으므로, 실패 쪽 되살리기가 없으면
+    카드는 "거절 처리됨"에 멈춘 채 실패를 영영 알리지 못한다.
+    """
+    router, store, _ = _router_with_cards(tmp_path)
+    _dispatch_approval(router, approval_id="appr_1")
+    _save_ack(store, approval_id="appr_1", status="rejected")
+    router._sweep_lifecycle_cards()
+    router._sweep_lifecycle_cards()  # 종결 표시가 남는 시점
+    assert _stage_of(store, "approval:appr_1") == "done"
+
+    _save_resolution_failed(store, approval_id="appr_1", status="rejected")
+    router._sweep_lifecycle_cards()
+
+    assert _stage_of(store, "approval:appr_1") == "attention"

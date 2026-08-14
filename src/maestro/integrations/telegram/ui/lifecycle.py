@@ -50,6 +50,9 @@ class CardLifecycleManager:
         rendered: RenderedCard,
     ) -> dict[str, Any]:
         """Send this card to every chat, one delivery copy at a time."""
+        # Before the first call, so a crash partway down the list still leaves
+        # the chats we never reached on the record.
+        self.store.record_card_audience(card_key, self.chat_ids)
         render_hash = self.render_hash(rendered)
         sent: list[int] = []
         failed: list[int] = []
@@ -127,7 +130,17 @@ class CardLifecycleManager:
         sent: list[int] = []
         failed: list[int] = []
         ambiguous: list[int] = []
-        for chat_id in self.audience(card_key, copies):
+        recorded = self.store.load_card_audience(card_key)
+        audience = self._resolve_audience(recorded, copies)
+        if not recorded:
+            # Same reason as deliver's, and it also backfills cards that
+            # predate the record: their audience is pinned to today's answer
+            # rather than re-derived, so a chat added tomorrow still gets
+            # nothing. Only when it is missing -- the sweep runs every poll,
+            # and writing this on each pass is a transaction per second per
+            # open approval for a fact that never changes.
+            self.store.record_card_audience(card_key, audience)
+        for chat_id in audience:
             copy = copies.get((card_key, chat_id))
             if (
                 copy is not None
@@ -234,20 +247,32 @@ class CardLifecycleManager:
     def audience(self, card_key: str, copies: Mapping[tuple[str, int], CardCopy]) -> list[int]:
         """The chats this card is addressed to -- fixed the first time it went out.
 
-        Not ``self.chat_ids``. The configured list is the audience only for a
-        card that has never been delivered; after that it is the set of chats
-        that already hold a copy, narrowed to the ones still configured.
+        Not ``self.chat_ids``. Reading the current configuration on every
+        refresh is how adding one allowed chat resends every card Maestro has
+        ever produced: each past card looks like it is missing a copy, and a
+        missing copy is indistinguishable from a first send.
 
-        Reading the current configuration on every refresh instead is how
-        adding one allowed chat resends every card Maestro has ever produced:
-        each past card looks like it is missing a copy, and a missing copy is
-        indistinguishable from a first send. Narrowing to configured chats is
-        the other half -- a copy in a chat the operator removed can never
-        succeed again, so refreshing it only accumulates failures.
+        The recorded audience is the answer when there is one, because it is
+        written before the first API call. Falling back to the chats that
+        already hold a copy cannot tell a chat added later from one the
+        process died before reaching -- both look like a missing copy -- so
+        that fallback exists only for cards created before this was recorded.
+        A card with neither is being born now, and its audience is the
+        configured list.
+
+        Always narrowed to the configured chats: a copy in a chat the operator
+        removed can never succeed again, so refreshing it only accumulates
+        failures.
         """
-        if not copies:
-            return list(self.chat_ids)
-        return [chat_id for chat_id in self.chat_ids if (card_key, chat_id) in copies]
+        return self._resolve_audience(self.store.load_card_audience(card_key), copies)
+
+    def _resolve_audience(
+        self, recorded: Sequence[int], copies: Mapping[tuple[str, int], CardCopy]
+    ) -> list[int]:
+        wanted = set(recorded)
+        if not wanted:
+            wanted = {chat_id for _, chat_id in copies} if copies else set(self.chat_ids)
+        return [chat_id for chat_id in self.chat_ids if chat_id in wanted]
 
     def consecutive_failures(self, card_key: str, chat_id: int) -> int:
         copy = self.copies(card_key).get((card_key, chat_id))

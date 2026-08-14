@@ -2134,11 +2134,16 @@ class TelegramOperatorCommandRouter:
         기존 알림 경로와 **병행**해서 돈다. 카드 전달이 프로덕션에서 증명되기
         전에 구 경로를 떼는 것은 단계 5다.
         """
+        acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
+        completions = self._latest_payloads_by_approval_id("signal_approval_completed")
         blocked_order_ids = self._unresolved_recovery_order_ids()
-        failed_approval_ids = self._resolution_failed_approval_ids()
+        # 완료가 뒤따른 실패는 되살릴 이유가 없다. 재개가 성공한 run까지 매 poll
+        # 표시를 지웠다 다시 쓰면, 종결 인덱스가 없애려던 조회·쓰기가 그 run에는
+        # 영구히 남는다. 카드 단계를 정할 때 쓰는 판정과 같은 기준이다.
+        unresolved_failures = self._resolution_failed_approval_ids() - completions.keys()
         # 종결 표시를 먼저 걷어낸다. attention은 종점이 아니므로, 완료된 지
         # 한참 지난 회전에 복구가 붙으면 그 run은 다시 스캔에 들어와야 한다.
-        self.store.reopen_settled_signal_runs(blocked_order_ids, failed_approval_ids)
+        self.store.reopen_settled_signal_runs(blocked_order_ids, unresolved_failures)
 
         # 창을 두지 않는다 — 오래 기다린 승인이 밀려나면 그 카드는 영영
         # 갱신되지 않는다. 대신 끝난 run을 SQL에서 빼서, 매 poll 하는 일이
@@ -2150,8 +2155,6 @@ class TelegramOperatorCommandRouter:
             (int(row["id"]), PendingApprovalEnvelope.model_validate(row["payload"]))
             for row in rows
         ]
-        acks = self._latest_payloads_by_approval_id("telegram_approval_ack")
-        completions = self._latest_payloads_by_approval_id("signal_approval_completed")
 
         stages: dict[str, str] = {}
         groups: dict[str, list[PendingApprovalEnvelope]] = defaultdict(list)
@@ -2195,10 +2198,7 @@ class TelegramOperatorCommandRouter:
                     unresolved_recovery=bool(
                         blocked_order_ids & self._envelope_order_ids(envelope)
                     ),
-                    unresolved_failure=(
-                        approval_id in failed_approval_ids
-                        and completions.get(approval_id) is None
-                    ),
+                    unresolved_failure=approval_id in unresolved_failures,
                 ),
             )
             stages[approval_id] = stage

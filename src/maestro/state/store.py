@@ -254,6 +254,21 @@ class StateStore:
                     "ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"
                 )
             conn.execute(
+                # Who a card is addressed to, written before its first send.
+                # Derived from the copies that exist otherwise, and a copy only
+                # exists once a chat has been attempted -- so a process that
+                # died halfway through the chat list would leave the untried
+                # chats indistinguishable from chats added later, and they
+                # would never be sent to.
+                "CREATE TABLE IF NOT EXISTS telegram_ui_card_audience "
+                "("
+                "card_key TEXT NOT NULL, "
+                "chat_id INTEGER NOT NULL, "
+                "recorded_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "PRIMARY KEY (card_key, chat_id)"
+                ")"
+            )
+            conn.execute(
                 # The terminal index for card sweeping. A signal run whose cards
                 # have all reached a confirmed "done" is recorded here so the
                 # sweep can exclude it in SQL instead of loading and re-deciding
@@ -1639,6 +1654,34 @@ class StateStore:
             for row in rows
         ]
 
+    def record_card_audience(self, card_key: str, chat_ids: Iterable[int]) -> None:
+        """Note the chats a card is addressed to. First writer wins.
+
+        Called before the first send, so a crash partway through the chat list
+        leaves a record of who was still owed a copy. Existing rows are left
+        alone: the audience is a property of the card at creation, and later
+        changes to the configured chats must not rewrite it.
+        """
+        values = [(str(card_key), int(chat_id)) for chat_id in chat_ids]
+        if not values:
+            return
+        with self.writer_lock("record_card_audience"):
+            with self._connect() as conn:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO telegram_ui_card_audience (card_key, chat_id) "
+                    "VALUES (?, ?)",
+                    values,
+                )
+
+    def load_card_audience(self, card_key: str) -> list[int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT chat_id FROM telegram_ui_card_audience "
+                "WHERE card_key = ? ORDER BY chat_id",
+                (str(card_key),),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
     def list_unsettled_pending_approvals(self) -> list[dict[str, Any]]:
         """Pending-approval events whose cards may still need work.
 
@@ -1651,18 +1694,29 @@ class StateStore:
 
         A run comes back on its own when a *later* approval joins it: the new
         event's id is above the ``max_event_id`` recorded when the run
-        settled, so the row no longer covers it. Recovery and resolution
-        failures carry no such id and are handled by
-        ``reopen_settled_signal_runs`` instead.
+        settled. It comes back **whole** -- returning only the new event would
+        leave the sweep seeing a one-group run, and the daily parent card
+        needs two, so a run that gained its second group after settling would
+        never get one. Recovery and resolution failures carry no such id and
+        are handled by ``reopen_settled_signal_runs`` instead.
         """
         with self._connect() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
+                "WITH reopened AS ("
+                "  SELECT settled.signal_run_id AS signal_run_id "
+                "  FROM telegram_ui_settled_run AS settled "
+                "  JOIN system_events AS newer "
+                "    ON json_extract(newer.payload, '$.signal_run_id') = settled.signal_run_id "
+                "  WHERE newer.event_type = 'telegram_approval_pending' "
+                "    AND newer.id > settled.max_event_id"
+                ") "
                 "SELECT events.id AS id, events.payload AS payload FROM system_events AS events "
                 "LEFT JOIN telegram_ui_settled_run AS settled "
                 "ON settled.signal_run_id = json_extract(events.payload, '$.signal_run_id') "
                 "WHERE events.event_type = 'telegram_approval_pending' "
-                "AND (settled.signal_run_id IS NULL OR settled.max_event_id < events.id) "
+                "AND (settled.signal_run_id IS NULL "
+                "     OR settled.signal_run_id IN (SELECT signal_run_id FROM reopened)) "
                 "ORDER BY events.id DESC"
             ).fetchall()
         return [{"id": int(row["id"]), "payload": json.loads(row["payload"])} for row in rows]

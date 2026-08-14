@@ -146,3 +146,31 @@ def test_an_unknown_recovery_does_not_disturb_settled_runs(tmp_path):
     assert store.reopen_settled_signal_runs(["ord_other"], ["appr_other"]) == 0
     assert store.reopen_settled_signal_runs([], []) == 0
     assert store.reopen_settled_signal_runs([], ["appr_1"]) == 1
+
+
+def test_a_database_that_predates_the_audience_table_gains_it(tmp_path):
+    """수신자 테이블도 앞선 커밋이 만든 DB에는 없다.
+
+    없으면 카드 전송의 첫 쓰기가 'no such table'로 죽는다 — dispatch가 카드를
+    보내는 경로이므로 승인 요청 자체가 나가지 못한다.
+    """
+    path = _old_schema_db(tmp_path)
+    store = StateStore(path, 0.0)
+
+    store.record_card_audience("approval:appr_1", [100, 200])
+
+    assert store.load_card_audience("approval:appr_1") == [100, 200]
+
+
+def test_recording_the_audience_again_keeps_the_chats_already_there(tmp_path):
+    """이미 적힌 채팅은 지워지지 않는다.
+
+    수신자는 카드가 태어날 때의 사실이므로, 나중 설정이 그것을 덮어쓰면
+    "이 카드는 저 채팅에 갔었다"는 기록이 사라진다.
+    """
+    store = StateStore(tmp_path / "state.db", 0.0)
+    store.record_card_audience("approval:appr_1", [100, 200])
+
+    store.record_card_audience("approval:appr_1", [100, 300])
+
+    assert store.load_card_audience("approval:appr_1") == [100, 200, 300]
