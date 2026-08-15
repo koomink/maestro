@@ -108,6 +108,7 @@ from maestro.orchestration.data_quality import (
 from maestro.orchestration.data_quality import (
     prices_from_bundle,
 )
+from maestro.orchestration.dispatch_group import dispatch_group_id
 from maestro.orchestration.live_gates import LiveExecutionGateService
 from maestro.plugins.registry import PluginRegistry
 from maestro.portfolio.account_attribution import (
@@ -991,41 +992,53 @@ class MaestroOrchestrator:
             approval_orders,
             package,
         ):
-            request = self.approval_manager.create_request(
-                run_id,
-                group_orders,
-                risk_violations,
-                source_strategy_ids,
-            )
-            if request is None:
-                raise ValueError("live_approval mode requires an approval request")
+            group_id = dispatch_group_id(signal_run_id, source_strategy_ids)
+            # 이 그룹의 승인이 이미 있으면 그것이 권위다. 새로 만들면
+            # create_request가 새 approval_id와 utc_now 기준 만료시각을
+            # 발급하므로(approval/manager.py), 같은 주문에 버튼 달린 카드가
+            # 두 장 생기고 마감 시한이 재개마다 연장된다.
+            stored = self.state_store.load_system_event_payload_by_duplicate_key(group_id)
+            if stored is None:
+                request = self.approval_manager.create_request(
+                    run_id,
+                    group_orders,
+                    risk_violations,
+                    source_strategy_ids,
+                )
+                if request is None:
+                    raise ValueError("live_approval mode requires an approval request")
+                candidate = PendingApprovalEnvelope(
+                    approval_id=request.approval_id,
+                    run_id=run_id,
+                    signal_run_id=signal_run_id,
+                    request=request,
+                    orders=[order.model_dump(mode="json") for order in group_orders],
+                    message=render_approval_stage_card(request, "pending").text,
+                    source_strategy_ids=list(source_strategy_ids),
+                    account_ids=sorted(
+                        {order.account_id for order in group_orders if order.account_id}
+                    ),
+                    reminder_seconds=self.config.approval.telegram_reminder_seconds,
+                    created_at=request.created_at,
+                    expires_at=request.expires_at,
+                    duplicate_key=group_id,
+                    # 카드 전송은 바로 아래에서 lifecycle이 한다. 이 표시가 있어야
+                    # sweep이 "전송 전에 죽은 승인"을 "구 코드가 이미 보낸 승인"과
+                    # 구분해 살려낼 수 있다.
+                    card_delivery_version=1,
+                )
+                stored, created = self.state_store.insert_or_load_system_event(
+                    run_id,
+                    "telegram_approval_pending",
+                    candidate.model_dump(mode="json"),
+                    group_id,
+                )
+                if created:
+                    self.audit.log(run_id, "telegram_approval_pending", stored)
+            envelope = PendingApprovalEnvelope.model_validate(stored)
+            self._verify_reused_envelope(envelope, signal_run_id, source_strategy_ids)
+            request = envelope.request
             card = render_approval_stage_card(request, "pending")
-            message = card.text
-            envelope = PendingApprovalEnvelope(
-                approval_id=request.approval_id,
-                run_id=run_id,
-                signal_run_id=signal_run_id,
-                request=request,
-                orders=[order.model_dump(mode="json") for order in group_orders],
-                message=message,
-                source_strategy_ids=list(source_strategy_ids),
-                account_ids=sorted(
-                    {order.account_id for order in group_orders if order.account_id}
-                ),
-                reminder_seconds=self.config.approval.telegram_reminder_seconds,
-                created_at=request.created_at,
-                expires_at=request.expires_at,
-                duplicate_key=f"telegram-approval-pending:{request.approval_id}",
-                # 카드 전송은 바로 아래에서 lifecycle이 한다. 이 표시가 있어야
-                # sweep이 "전송 전에 죽은 승인"을 "구 코드가 이미 보낸 승인"과
-                # 구분해 살려낼 수 있다.
-                card_delivery_version=1,
-            )
-            self._record_event(
-                run_id,
-                "telegram_approval_pending",
-                envelope.model_dump(mode="json"),
-            )
             # 카드는 태어날 때부터 lifecycle이 소유한다. 여기서 직접 보내면
             # message_id가 어디에도 남지 않아 이후 단계 변화를 그 메시지에
             # 반영할 수 없고, sweep이 두 번째 카드를 새로 보내게 된다 — 한
@@ -1954,6 +1967,31 @@ class MaestroOrchestrator:
             for account_id in sorted(expected_account_ids)
             if account_id in refs_by_account
         ]
+
+    def _verify_reused_envelope(
+        self,
+        envelope: PendingApprovalEnvelope,
+        signal_run_id: str,
+        source_strategy_ids: list[str],
+    ) -> None:
+        """Refuse an envelope that is not the one this group wrote.
+
+        The dispatch group id is the whole scope rather than a digest, so two
+        unrelated groups cannot collide by accident. This checks the case that
+        remains: a key written by something other than this code path, or a
+        record altered by hand. Adopting such an envelope would send the
+        operator a card for orders they were never shown and bind the approval
+        buttons to it, so stop instead of continuing on a guess.
+        """
+        expected = sorted(set(source_strategy_ids))
+        recorded = sorted(set(envelope.source_strategy_ids))
+        if envelope.signal_run_id == signal_run_id and recorded == expected:
+            return
+        raise ValueError(
+            "Stored approval envelope does not match the group it was loaded for: "
+            f"expected signal_run_id={signal_run_id} strategies={expected}, "
+            f"found signal_run_id={envelope.signal_run_id} strategies={recorded}"
+        )
 
     def _approval_order_groups(
         self,

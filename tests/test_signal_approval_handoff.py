@@ -6,7 +6,11 @@ import yaml
 from sample_static_allocation.strategy import SampleStaticAllocationStrategy
 from typer.testing import CliRunner
 
-from maestro.approval.models import ApprovalDecision, ApprovalRequest
+from maestro.approval.models import (
+    ApprovalDecision,
+    ApprovalRequest,
+    PendingApprovalEnvelope,
+)
 from maestro.cli import _run_daily_signal_approval, _send_signal_funding_request_notifications, app
 from maestro.config.loader import load_config, load_config_with_identity
 from maestro.core.clock import utc_now
@@ -27,6 +31,7 @@ from maestro.execution.live_orders import (
 )
 from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
 from maestro.integrations.telegram.bot import TelegramApiRejected
+from maestro.orchestration.dispatch_group import dispatch_group_id
 from maestro.orchestration.orchestrator import (
     MaestroOrchestrator,
     signal_contract_fingerprint_diff,
@@ -268,6 +273,156 @@ def test_dispatch_signal_approval_returns_pending_without_polling(monkeypatch, t
     assert client.sent_messages[0]["reply_markup"]["inline_keyboard"][0][0][
         "callback_data"
     ].startswith("operator:appr:a:")
+
+
+def test_dispatch_files_the_envelope_under_its_group_id(monkeypatch, tmp_path):
+    # The old key was telegram-approval-pending:<approval_id>. Because the id
+    # is random it could never collide, so it made the envelope impossible to
+    # find again -- a resume had no way to recognize a group it had already
+    # dispatched, and minted a second approval for the same orders.
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _live_signal_config(tmp_path, "expired")
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    config.approval.whitelisted_user_ids = [100]
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    MaestroOrchestrator(
+        config,
+        telegram_client=FakeTelegramClient(),
+        order_capacity_lookup=lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=10_000_000,
+            max_buy_quantity=100_000,
+            source="fake",
+        ),
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    expected_key = dispatch_group_id(
+        signal_summary.signal_run_id,
+        pending[0]["payload"]["source_strategy_ids"],
+    )
+    assert pending[0]["payload"]["duplicate_key"] == expected_key
+    assert store.load_system_event_payload_by_duplicate_key(expected_key) is not None
+
+
+def test_each_approval_group_gets_its_own_envelope_key(monkeypatch, tmp_path):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _live_signal_config(tmp_path, "expired")
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    config.approval.whitelisted_user_ids = [100]
+    # A second account doubles the portfolio, so the per-order cap the single
+    # account fixture sets would block the run before grouping matters.
+    config.execution.live_order_limits.max_order_notional = 100_000_000
+    config.execution.live_order_limits.max_daily_notional = 200_000_000
+    # Two strategies on one account merge into a single order group, so the
+    # second one needs its own account for two groups to exist at all.
+    config.accounts.append(
+        config.accounts[0].model_copy(update={"id": "kis_paper_b", "account_id": "MOCK-LIVE-B"})
+    )
+    config.strategies.append(
+        config.strategies[0].model_copy(
+            update={
+                "id": "second_static",
+                "entrypoint": f"{__name__}:SecondStaticAllocationStrategy",
+                "account_id": "kis_paper_b",
+                "weight": 1.0,
+                "config": {"allocations": {"MOCK_ETF_B": 1.0}},
+            }
+        )
+    )
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    MaestroOrchestrator(
+        config,
+        telegram_client=FakeTelegramClient(),
+        order_capacity_lookup=lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=10_000_000,
+            max_buy_quantity=100_000,
+            source="fake",
+        ),
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    keys = {row["payload"]["duplicate_key"] for row in pending}
+    assert len(pending) == 2
+    assert len(keys) == 2
+
+
+def test_an_envelope_from_another_group_is_refused_rather_than_adopted(tmp_path):
+    # Adopting it would show the operator a card for orders they were never
+    # sent, with the approval buttons bound to it.
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    envelope = PendingApprovalEnvelope(
+        approval_id="a1",
+        run_id="run-1",
+        signal_run_id="signal-other",
+        request=ApprovalRequest(
+            approval_id="a1",
+            run_id="run-1",
+            profile_name="p",
+            created_at=utc_now(),
+            expires_at=utc_now(),
+            channel="telegram",
+            source_strategy_ids=["other"],
+            order_count=0,
+            estimated_notional=0.0,
+            proposed_orders=[],
+            risk_violations=[],
+        ),
+        orders=[],
+        message="m",
+        source_strategy_ids=["other"],
+        account_ids=[],
+        reminder_seconds=[],
+        created_at=utc_now(),
+        expires_at=utc_now(),
+        duplicate_key="dispatch-group:signal-1:[\"mine\"]",
+    )
+
+    with pytest.raises(ValueError, match="does not match the group"):
+        orchestrator._verify_reused_envelope(envelope, "signal-1", ["mine"])
+
+
+def test_a_matching_envelope_passes_verification_whatever_order_it_records(tmp_path):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    envelope = PendingApprovalEnvelope(
+        approval_id="a1",
+        run_id="run-1",
+        signal_run_id="signal-1",
+        request=ApprovalRequest(
+            approval_id="a1",
+            run_id="run-1",
+            profile_name="p",
+            created_at=utc_now(),
+            expires_at=utc_now(),
+            channel="telegram",
+            source_strategy_ids=["b", "a"],
+            order_count=0,
+            estimated_notional=0.0,
+            proposed_orders=[],
+            risk_violations=[],
+        ),
+        orders=[],
+        message="m",
+        source_strategy_ids=["b", "a"],
+        account_ids=[],
+        reminder_seconds=[],
+        created_at=utc_now(),
+        expires_at=utc_now(),
+        duplicate_key="k",
+    )
+
+    orchestrator._verify_reused_envelope(envelope, "signal-1", ["a", "b"])
 
 
 def test_approve_signal_propagates_signal_run_id_to_live_order_events(monkeypatch, tmp_path):
