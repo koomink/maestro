@@ -1698,6 +1698,12 @@ class TelegramOperatorCommandRouter:
             payload = row["payload"]
             # 한 건의 손상된 payload가 나머지 통지를 막으면 안 된다.
             try:
+                if payload.get("settled_by"):
+                    # An operator settlement writes this same event but ran no
+                    # orders. Announcing it would tell the operator the system
+                    # handled what they just closed by hand, and they may then
+                    # skip the replacement trade they settled it in order to do.
+                    continue
                 if int(payload.get("attempt") or 1) < 2:
                     continue
                 approval_id = str(payload.get("approval_id"))

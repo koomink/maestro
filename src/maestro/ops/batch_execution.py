@@ -23,7 +23,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from maestro.core.clock import utc_now
 from maestro.execution.live_order_tracking import TERMINAL_ORDER_STATUSES
+from maestro.monitoring.audit_logger import AuditLogger
+from maestro.state.events import save_audited_system_event
+from maestro.state.store import StateStore
 
 OrderOutcome = Literal[
     "not_sent",
@@ -158,9 +162,94 @@ def summarize_batch(approval_id: str, evidence: list[OrderEvidence]) -> BatchOut
     )
 
 
+class SettlementRefused(Exception):
+    """Settlement was refused because the batch cannot be described honestly."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
+def settle_approval(
+    store: StateStore,
+    audit: AuditLogger,
+    approval_id: str,
+    *,
+    reason: str,
+    reconciled_with_broker: bool = False,
+) -> BatchOutcome:
+    """Close a half-executed approval on the operator's word.
+
+    This is the only way to close an approval whose execution stopped part
+    way, and it is the last word: preflight, the resume sweep and the card
+    sweep all read `telegram_approval_resolution_completed` as terminal.
+
+    Two things it deliberately does not do. It does not place orders --
+    recalculating and re-sending is stage 4b, and settling is what makes that
+    safe rather than a substitute for it. And it does not write `attempt`,
+    because the deployed `_deliver_resume_completion_notices` treats a
+    resolution event with `attempt >= 2` as a resume worth telling the
+    operator about; nothing executed here, so claiming an attempt would be
+    false and would send exactly the wrong message.
+    """
+    evidence = store.load_approval_execution_evidence(approval_id)
+    ack = evidence["ack"]
+    if ack is None:
+        raise SettlementRefused("no_ack", f"{approval_id} has no ack to settle")
+    schema_version = ack.get("schema_version")
+    if not isinstance(schema_version, int) or schema_version < 2:
+        # Pre-3a acks never had a resolution event, so they are already
+        # terminal everywhere that reads them. Settling one would invent a
+        # closure for something that was never open.
+        raise SettlementRefused(
+            "legacy_ack", f"{approval_id} predates two-phase persistence"
+        )
+    if evidence["resolution_completed"] is not None:
+        raise SettlementRefused("already_settled", f"{approval_id} is already closed")
+
+    outcome = summarize_batch(approval_id, build_order_evidence(evidence))
+    if outcome.has_unknown and not reconciled_with_broker:
+        unknown = [line.symbol for line in outcome.orders if line.outcome == "unknown"]
+        raise SettlementRefused(
+            "unknown_orders",
+            f"{approval_id} has orders that may be live at the broker: "
+            f"{', '.join(unknown)}. Check the broker, then pass "
+            "--i-have-reconciled-with-broker.",
+        )
+
+    envelope = evidence["envelope"] or {}
+    duplicate_key = f"telegram-approval-settled:{approval_id}"
+    payload = {
+        "approval_id": approval_id,
+        "signal_run_id": ack.get("signal_run_id") or envelope.get("signal_run_id"),
+        "status": ack.get("status"),
+        "settled_by": "operator",
+        "reason": reason,
+        "reconciled_with_broker": reconciled_with_broker,
+        "outcome": outcome.model_dump(mode="json"),
+        "settled_at": utc_now().isoformat(),
+        "duplicate_key": duplicate_key,
+    }
+    # Same convention as the sibling records: check and write under one lock,
+    # so a concurrent settle loses the insert rather than the check.
+    with store.writer_lock("telegram_approval_settlement"):
+        if store.duplicate_key_exists(duplicate_key):
+            raise SettlementRefused("already_settled", f"{approval_id} is already closed")
+        save_audited_system_event(
+            store,
+            audit,
+            str(envelope.get("run_id") or f"run_{approval_id}"),
+            "telegram_approval_resolution_completed",
+            payload,
+        )
+    return outcome
+
+
 __all__ = [
     "BatchOutcome",
+    "SettlementRefused",
     "build_order_evidence",
+    "settle_approval",
     "OrderEvidence",
     "OrderLine",
     "OrderOutcome",

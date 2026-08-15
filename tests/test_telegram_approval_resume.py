@@ -976,3 +976,37 @@ def test_malformed_old_envelope_does_not_block_a_newer_resume(tmp_path):
         )
         == 1
     )
+
+
+def test_an_operator_settled_approval_gets_no_resume_notice(tmp_path):
+    """A settlement is not an execution, so it must not announce one.
+
+    The notice loop uses `telegram_approval_resolution_completed` as its
+    outbox. A settlement writes that same event, so without a guard the
+    operator who just closed a half-executed rotation by hand is told the
+    system "handled it" -- and may then not do the replacement trade they
+    settled it in order to do.
+    """
+    router, store = _router(tmp_path)
+    store.save_system_event(
+        "run_appr_settled",
+        "telegram_approval_resolution_completed",
+        {
+            "approval_id": "appr_settled",
+            "status": "approved",
+            "settled_by": "operator",
+            "reason": "handled at next open",
+            # An attempt count high enough that only `settled_by` can stop it.
+            "attempt": 2,
+            "orders_submitted": 0,
+            "orders_failed": 0,
+        },
+    )
+
+    router._deliver_resume_completion_notices()
+
+    assert router.client.sent_messages == []
+    assert (
+        store.list_system_events_by_type("telegram_approval_resume_notice", limit=None)
+        == []
+    )
