@@ -19,7 +19,7 @@ lets the card reuse it unchanged.
 from __future__ import annotations
 
 from collections import Counter
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -85,6 +85,65 @@ def classify_order(evidence: OrderEvidence) -> OrderOutcome:
     return "still_open"
 
 
+def build_order_evidence(evidence: dict[str, Any]) -> list[OrderEvidence]:
+    """Turn `StateStore.load_approval_execution_evidence` into per-order facts.
+
+    The roster is the envelope's proposed orders, so an order that was never
+    submitted -- and therefore has no event anywhere -- still appears in its
+    own batch.
+    """
+    envelope = evidence.get("envelope") or {}
+    request = envelope.get("request") if isinstance(envelope, dict) else None
+    proposed = (request or {}).get("proposed_orders") or []
+    intents = evidence.get("intents") or {}
+    results = evidence.get("results") or {}
+    fills = evidence.get("fills") or {}
+    final_statuses = evidence.get("final_statuses") or {}
+
+    lines: list[OrderEvidence] = []
+    for order in proposed:
+        order_id = str(order.get("order_id"))
+        result = results.get(order_id)
+        broker_order_id = _broker_order_id(result)
+        lines.append(
+            OrderEvidence(
+                order_id=order_id,
+                symbol=str(order.get("symbol") or ""),
+                side=str(order.get("side") or ""),
+                ordered_quantity=float(order.get("quantity") or 0.0),
+                has_intent=order_id in intents,
+                has_result=result is not None,
+                filled_quantity=_filled_quantity(result, fills, broker_order_id),
+                final_status=final_statuses.get(order_id),
+                broker_order_id=broker_order_id,
+            )
+        )
+    return lines
+
+
+def _broker_order_id(result: dict[str, Any] | None) -> str | None:
+    broker_order = ((result or {}).get("result") or {}).get("broker_order") or {}
+    value = broker_order.get("broker_order_id")
+    return str(value) if value else None
+
+
+def _filled_quantity(
+    result: dict[str, Any] | None,
+    fills: dict[str, float],
+    broker_order_id: str | None,
+) -> float:
+    """The largest fill any record attests to.
+
+    The result event holds the fill known at submit time, which is normally
+    zero; the watermark holds the reconciled cumulative fill and lands later.
+    Both are lower bounds on what filled, so the larger is the honest answer
+    and neither being missing can talk the other down.
+    """
+    at_submit = float(((result or {}).get("result") or {}).get("filled_quantity") or 0.0)
+    reconciled = float(fills.get(broker_order_id or "", 0.0))
+    return max(at_submit, reconciled)
+
+
 def summarize_batch(approval_id: str, evidence: list[OrderEvidence]) -> BatchOutcome:
     """Classify every order of a batch and summarize the batch as a whole."""
     lines = [
@@ -101,6 +160,7 @@ def summarize_batch(approval_id: str, evidence: list[OrderEvidence]) -> BatchOut
 
 __all__ = [
     "BatchOutcome",
+    "build_order_evidence",
     "OrderEvidence",
     "OrderLine",
     "OrderOutcome",

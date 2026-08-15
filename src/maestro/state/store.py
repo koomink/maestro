@@ -2440,6 +2440,101 @@ class StateStore:
         rows = self.list_system_events_by_type(event_type, limit=1)
         return rows[0] if rows else None
 
+    def load_approval_execution_evidence(self, approval_id: str) -> dict[str, Any]:
+        """Everything on record about how one approval's orders actually went.
+
+        Order events carry their approval at ``$.request.approval_id``, not at
+        the top level, so the generated ``approval_id`` column is NULL for
+        them. Matching on that column returns nothing and every order then
+        classifies as "never sent" -- which is the one outcome that makes a
+        re-order look safe. Match on the nested path.
+
+        The roster comes from the approval envelope rather than from the order
+        events, because an order that was never submitted has no event of its
+        own and would otherwise disappear from its own batch.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+
+            def _payloads(event_type: str) -> list[dict[str, Any]]:
+                rows = conn.execute(
+                    "SELECT payload FROM system_events "
+                    "WHERE event_type = ? "
+                    "AND json_extract(payload, '$.request.approval_id') = ? "
+                    "ORDER BY id",
+                    (event_type, approval_id),
+                ).fetchall()
+                return [json.loads(row["payload"]) for row in rows]
+
+            def _by_approval_id(event_type: str) -> dict[str, Any] | None:
+                row = conn.execute(
+                    "SELECT payload FROM system_events "
+                    "WHERE event_type = ? AND approval_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (event_type, approval_id),
+                ).fetchone()
+                return json.loads(row["payload"]) if row else None
+
+            intents = {
+                str(payload["request"]["order_id"]): payload
+                for payload in _payloads("live_order_submit_intent")
+            }
+            results = {
+                str(payload["request"]["order_id"]): payload
+                for payload in _payloads("live_order_result")
+            }
+
+            order_ids = set(intents) | set(results)
+            final_statuses: dict[str, str] = {}
+            if order_ids:
+                placeholders = ",".join("?" * len(order_ids))
+                # Both event types record the status an order ended on; the
+                # tracking sweep writes the second when the bounded poll loop
+                # gave up before the order settled.
+                rows = conn.execute(
+                    "SELECT json_extract(payload, '$.order_id') AS order_id, "
+                    "json_extract(payload, '$.final_status') AS final_status "
+                    "FROM system_events "
+                    "WHERE event_type IN ('live_order_lifecycle', 'live_order_tracking_resolved') "
+                    f"AND json_extract(payload, '$.order_id') IN ({placeholders}) "
+                    "ORDER BY id",
+                    tuple(order_ids),
+                ).fetchall()
+                for row in rows:
+                    if row["final_status"]:
+                        final_statuses[str(row["order_id"])] = str(row["final_status"])
+
+            broker_order_ids = {
+                broker_order_id
+                for payload in results.values()
+                if (broker_order_id := _system_event_broker_order_id(payload))
+            }
+            fills: dict[str, float] = {}
+            if broker_order_ids:
+                placeholders = ",".join("?" * len(broker_order_ids))
+                rows = conn.execute(
+                    "SELECT broker_order_id, cumulative_quantity FROM fill_watermarks "
+                    f"WHERE broker_order_id IN ({placeholders})",
+                    tuple(broker_order_ids),
+                ).fetchall()
+                fills = {
+                    str(row["broker_order_id"]): float(row["cumulative_quantity"])
+                    for row in rows
+                }
+
+            return {
+                "approval_id": approval_id,
+                "envelope": _by_approval_id("telegram_approval_pending"),
+                "ack": _by_approval_id("telegram_approval_ack"),
+                "resolution_completed": _by_approval_id(
+                    "telegram_approval_resolution_completed"
+                ),
+                "intents": intents,
+                "results": results,
+                "fills": fills,
+                "final_statuses": final_statuses,
+            }
+
     def list_approvals(self, limit: int = 10) -> list[dict[str, Any]]:
         return self._list_rows("approvals", limit)
 
