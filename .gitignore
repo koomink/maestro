@@ -8,3 +8,6 @@ node_modules/
 .superpowers/
 .worktrees/
 var/
+
+# StateStore(":memory:") 가 cwd에 만드는 잠금 파일 (테스트 부산물)
+:memory:.lock
