@@ -891,8 +891,15 @@ class MaestroOrchestrator:
         package = self.state_store.load_signal_package(signal_run_id)
         if package is None:
             raise ValueError(f"Unknown signal_run_id: {signal_run_id}")
-        if package.get("approval_consumed"):
+        already_consumed = bool(package.get("approval_consumed"))
+        if already_consumed and self.state_store.signal_dispatch_settled(signal_run_id):
             raise ValueError(f"Signal package already consumed: {signal_run_id}")
+        # Consumed but never settled means a dispatch died inside the group
+        # loop below. Refusing here -- which is what used to happen -- left the
+        # run stranded forever: some groups had approvals and the rest never
+        # would. Fall through and re-enter instead. Every group is now filed
+        # under a stable key, so the ones already dispatched are adopted rather
+        # than duplicated.
         orders = [
             OrderIntent.model_validate(order_payload)
             for order_payload in package.get("orders_preview", [])
@@ -901,7 +908,10 @@ class MaestroOrchestrator:
         run_id = new_run_id()
         self._record_run_provenance(run_id, "approval_dispatch", signal_run_id=signal_run_id)
         if not approval_orders:
-            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+            if not already_consumed:
+                # A resume re-enters this method; marking again would stack
+                # a second consumed row for the same package.
+                self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
             self.state_store.save_system_event(
                 run_id,
                 "signal_approval_completed",
@@ -960,7 +970,10 @@ class MaestroOrchestrator:
             package=package,
         )
         if not approval_orders:
-            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+            if not already_consumed:
+                # A resume re-enters this method; marking again would stack
+                # a second consumed row for the same package.
+                self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
             self.state_store.save_system_event(
                 run_id,
                 "signal_approval_completed",
@@ -980,7 +993,10 @@ class MaestroOrchestrator:
                 approval_status="capacity_blocked",
             )
         self._validate_signal_approval_gates(run_id, approval_orders, package)
-        self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
+        if not already_consumed:
+            # A resume re-enters this method; marking again would stack
+            # a second consumed row for the same package.
+            self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
 
         client = self.telegram_client or TelegramBotAPIClient(
             token_env=self.config.approval.telegram_bot_token_env,

@@ -1,3 +1,4 @@
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -354,6 +355,160 @@ def test_each_approval_group_gets_its_own_envelope_key(monkeypatch, tmp_path):
     keys = {row["payload"]["duplicate_key"] for row in pending}
     assert len(pending) == 2
     assert len(keys) == 2
+
+
+def _dispatch_orchestrator(config, client):
+    return MaestroOrchestrator(
+        config,
+        telegram_client=client,
+        order_capacity_lookup=lambda order: BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=10_000_000,
+            max_buy_quantity=100_000,
+            source="fake",
+        ),
+    )
+
+
+def _telegram_dispatch_config(tmp_path):
+    config = _live_signal_config(tmp_path, "expired")
+    config.approval.provider = "telegram"
+    config.approval.telegram_allowed_chat_ids = [100]
+    config.approval.whitelisted_user_ids = [100]
+    config.approval.timeout_seconds = 600
+    return config
+
+
+def test_a_dispatch_that_died_before_reporting_is_resumed_not_refused(monkeypatch, tmp_path):
+    # The package is consumed before the group loop runs, so a crash inside
+    # that loop used to strand the run: re-dispatching raised "already
+    # consumed" and the approvals that were never created never would be.
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    store.mark_signal_package_consumed(signal_summary.signal_run_id, new_run_id())
+    assert store.list_incomplete_signal_dispatches() == [signal_summary.signal_run_id]
+
+    client = FakeTelegramClient()
+    result = _dispatch_orchestrator(config, client).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+
+    assert result.approval_status == "pending"
+    assert client.sent_messages
+    assert store.list_incomplete_signal_dispatches() == []
+
+
+def test_a_settled_dispatch_is_still_refused(monkeypatch, tmp_path):
+    # Reopening a run that finished would send a second card for orders the
+    # operator has already been asked about.
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+
+    with pytest.raises(ValueError, match="already consumed"):
+        _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+            signal_summary.signal_run_id
+        )
+
+
+def test_resuming_reuses_the_approval_and_its_original_deadline(monkeypatch, tmp_path):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    first = store.list_system_events_by_type("telegram_approval_pending")[0]["payload"]
+    # Reopen the run the way a crash between the last group and the settled
+    # event would have left it.
+    with sqlite3.connect(config.state.sqlite_path) as conn:
+        conn.execute("DELETE FROM system_events WHERE event_type = 'signal_approval_pending'")
+
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    assert pending[0]["payload"]["approval_id"] == first["approval_id"]
+    assert pending[0]["payload"]["expires_at"] == first["expires_at"]
+
+
+def test_a_resume_survives_a_message_template_change(monkeypatch, tmp_path):
+    # The stored envelope is authoritative. Comparing it against a fresh
+    # render -- which is what save_system_events_atomic would do -- would turn
+    # any copy change between releases into a permanently stuck run.
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    with sqlite3.connect(config.state.sqlite_path) as conn:
+        conn.execute("DELETE FROM system_events WHERE event_type = 'signal_approval_pending'")
+    config.approval.telegram_reminder_seconds = [1, 2, 3]
+
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    # The record wins: the reminder schedule stays what it was sent with.
+    assert pending[0]["payload"]["reminder_seconds"] != [1, 2, 3]
+
+
+def test_a_resume_creates_only_the_group_that_was_missing(monkeypatch, tmp_path):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    config.execution.live_order_limits.max_order_notional = 100_000_000
+    config.execution.live_order_limits.max_daily_notional = 200_000_000
+    config.accounts.append(
+        config.accounts[0].model_copy(update={"id": "kis_paper_b", "account_id": "MOCK-LIVE-B"})
+    )
+    config.strategies.append(
+        config.strategies[0].model_copy(
+            update={
+                "id": "second_static",
+                "entrypoint": f"{__name__}:SecondStaticAllocationStrategy",
+                "account_id": "kis_paper_b",
+                "weight": 1.0,
+                "config": {"allocations": {"MOCK_ETF_B": 1.0}},
+            }
+        )
+    )
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    surviving = store.list_system_events_by_type("telegram_approval_pending")[0]["payload"]
+    # Leave one group's envelope behind and drop the other, the shape a crash
+    # partway through the loop produces.
+    with sqlite3.connect(config.state.sqlite_path) as conn:
+        conn.execute("DELETE FROM system_events WHERE event_type = 'signal_approval_pending'")
+        conn.execute(
+            "DELETE FROM system_events WHERE event_type = 'telegram_approval_pending' "
+            "AND duplicate_key != ?",
+            (surviving["duplicate_key"],),
+        )
+
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    by_key = {row["payload"]["duplicate_key"]: row["payload"] for row in pending}
+    assert len(pending) == 2
+    assert by_key[surviving["duplicate_key"]]["approval_id"] == surviving["approval_id"]
 
 
 def test_an_envelope_from_another_group_is_refused_rather_than_adopted(tmp_path):

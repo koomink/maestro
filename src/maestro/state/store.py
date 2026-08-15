@@ -1970,6 +1970,49 @@ class StateStore:
             },
         )
 
+    #: Written once a dispatch has placed every approval it intended to. Either
+    #: marks the package settled; ``signal_approval_completed`` covers the runs
+    #: that needed no approval or were blocked before one was created.
+    _DISPATCH_SETTLED_EVENTS = ("signal_approval_pending", "signal_approval_completed")
+
+    def signal_dispatch_settled(self, signal_run_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM system_events "
+                f"WHERE event_type IN ({','.join('?' * len(self._DISPATCH_SETTLED_EVENTS))}) "
+                "AND signal_run_id = ? LIMIT 1",
+                (*self._DISPATCH_SETTLED_EVENTS, signal_run_id),
+            ).fetchone()
+        return row is not None
+
+    def list_incomplete_signal_dispatches(self, limit: int = 50) -> list[str]:
+        """Signal runs marked consumed whose dispatch never reported finishing.
+
+        ``mark_signal_package_consumed`` runs before the loop that creates and
+        sends each group's approval, so a crash inside that loop leaves the
+        package consumed with only some of its approvals in existence -- and
+        re-dispatching used to be refused outright, which stranded the run.
+
+        No backfill is needed to start reading this: the settled events have
+        been written at the end of every dispatch since long before this
+        query existed, so an older completed run already has one.  A run that
+        turns up here really is unfinished.
+        """
+        placeholders = ",".join("?" * len(self._DISPATCH_SETTLED_EVENTS))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT consumed.signal_run_id FROM system_events AS consumed "
+                "WHERE consumed.event_type = 'signal_package_consumed' "
+                "AND consumed.signal_run_id IS NOT NULL "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM system_events AS settled "
+                f"  WHERE settled.event_type IN ({placeholders}) "
+                "  AND settled.signal_run_id = consumed.signal_run_id"
+                ") ORDER BY consumed.id LIMIT ?",
+                (*self._DISPATCH_SETTLED_EVENTS, limit),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
     def load_signal_package(self, signal_run_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             package_row = conn.execute(
