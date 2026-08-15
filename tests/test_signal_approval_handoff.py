@@ -511,6 +511,91 @@ def test_a_resume_creates_only_the_group_that_was_missing(monkeypatch, tmp_path)
     assert by_key[surviving["duplicate_key"]]["approval_id"] == surviving["approval_id"]
 
 
+def test_a_dispatch_telegram_refused_stays_resumable(monkeypatch, tmp_path):
+    # The approval card reached nobody, so the run must not look finished.
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    with pytest.raises(RuntimeError, match="refused the approval card"):
+        _dispatch_orchestrator(config, RefusingTelegramClient()).dispatch_signal_approval(
+            signal_summary.signal_run_id
+        )
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    assert store.list_incomplete_signal_dispatches() == [signal_summary.signal_run_id]
+    assert store.signal_dispatch_settled(signal_summary.signal_run_id) is False
+
+    # And the retry reuses the approval rather than minting a second one.
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    assert store.list_incomplete_signal_dispatches() == []
+
+
+def test_a_dispatch_interrupted_between_groups_is_not_recorded_as_settled(monkeypatch, tmp_path):
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _telegram_dispatch_config(tmp_path)
+    config.execution.live_order_limits.max_order_notional = 100_000_000
+    config.execution.live_order_limits.max_daily_notional = 200_000_000
+    config.accounts.append(
+        config.accounts[0].model_copy(update={"id": "kis_paper_b", "account_id": "MOCK-LIVE-B"})
+    )
+    config.strategies.append(
+        config.strategies[0].model_copy(
+            update={
+                "id": "second_static",
+                "entrypoint": f"{__name__}:SecondStaticAllocationStrategy",
+                "account_id": "kis_paper_b",
+                "weight": 1.0,
+                "config": {"allocations": {"MOCK_ETF_B": 1.0}},
+            }
+        )
+    )
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    # Fail while building the second group's card, after the first group is
+    # fully persisted and delivered. A send-time exception would not do: the
+    # lifecycle classifies those as delivery-unknown by design and carries on.
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    real_render = orchestrator_module.render_approval_stage_card
+    calls = {"n": 0}
+
+    def die_on_second(request, stage):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("process died between groups")
+        return real_render(request, stage)
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_on_second)
+
+    with pytest.raises(RuntimeError, match="died between groups"):
+        _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+            signal_summary.signal_run_id
+        )
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", real_render)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    # One group made it. The settled event must not be written until both are
+    # done, or the sweep would treat a half-dispatched run as finished.
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 1
+    assert store.list_incomplete_signal_dispatches() == [signal_summary.signal_run_id]
+
+    first = store.list_system_events_by_type("telegram_approval_pending")[0]["payload"]
+    _dispatch_orchestrator(config, FakeTelegramClient()).dispatch_signal_approval(
+        signal_summary.signal_run_id
+    )
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    by_key = {row["payload"]["duplicate_key"]: row["payload"] for row in pending}
+    assert len(pending) == 2
+    assert by_key[first["duplicate_key"]]["approval_id"] == first["approval_id"]
+    assert store.list_incomplete_signal_dispatches() == []
+
+
 def test_an_envelope_from_another_group_is_refused_rather_than_adopted(tmp_path):
     # Adopting it would show the operator a card for orders they were never
     # sent, with the approval buttons bound to it.
