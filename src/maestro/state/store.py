@@ -2246,6 +2246,71 @@ class StateStore:
             output.append(item)
         return output
 
+    def insert_or_load_system_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        duplicate_key: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """Write this event, or return the one already filed under its key.
+
+        Returns ``(payload, created)``.  When ``created`` is False the stored
+        payload wins and the caller must continue with it, not with what it
+        was about to write.
+
+        This is deliberately not ``save_system_events_atomic``.  That method
+        refuses a key whose stored content differs from what is being
+        submitted, which is correct when several events only mean something
+        as a set.  Here the payload is an approval envelope carrying an
+        approval_id, timestamps and rendered text, so a resumed dispatch's
+        recomputation differs from the record practically every time -- a
+        changed message template or reminder interval between releases is
+        enough.  Refusing there would strand the signal run that the resume
+        exists to unstick.  The record is authoritative; recomputation is
+        only how the caller finds it.
+
+        The INSERT and the re-read share one ``BEGIN IMMEDIATE``
+        transaction.  ``writer_lock`` is an advisory flock, and the callers
+        that matter here -- a recovery script, a process running a different
+        release, the sqlite3 CLI -- have no reason to hold it, so the race
+        has to be resolved by the database rather than assumed away.
+        """
+        payload_json = json.dumps(payload, default=str)
+        with self.writer_lock("insert_or_load_system_event"):
+            with self._connect() as conn:
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute(
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key) "
+                        "VALUES (?, ?, ?, ?)",
+                        (run_id, event_type, payload_json, duplicate_key),
+                    )
+                except sqlite3.IntegrityError:
+                    stored = conn.execute(
+                        "SELECT payload FROM system_events WHERE duplicate_key = ?",
+                        (duplicate_key,),
+                    ).fetchone()
+                    if stored is None:
+                        # The unique index on duplicate_key is the only
+                        # constraint this INSERT can violate, so a missing row
+                        # means something else is wrong; do not paper over it.
+                        raise
+                    return json.loads(stored[0]), False
+                return payload, True
+
+    def load_system_event_payload_by_duplicate_key(
+        self, duplicate_key: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload FROM system_events WHERE duplicate_key = ?",
+                (duplicate_key,),
+            ).fetchone()
+        return None if row is None else json.loads(row[0])
+
     def duplicate_key_exists(self, duplicate_key: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(
