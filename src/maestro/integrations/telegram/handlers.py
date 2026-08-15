@@ -178,6 +178,9 @@ TELEGRAM_EMERGENCY_COMMANDS: tuple[tuple[str, str], ...] = (
 #: 최초 콜백(attempt 1)도 실제 집행 시도이므로 예산에 포함된다 — 자동 재개는
 #: attempt 2·3·4까지만 이어진다.
 _MAX_RESUME_ATTEMPT = 4
+#: Dispatch resume has no interactive first attempt to charge, so the whole
+#: budget is automatic retries.
+_MAX_DISPATCH_RESUME_ATTEMPT = 3
 #: claim 후 이 시간이 지나도록 종료 기록이 없으면 버려진 시도로 보고 회수한다.
 #: 운영자 봇 poll 간격(초 단위)과 resolution 소요(브로커 폴링 포함)를 고려한 값.
 _RESUME_LEASE_SECONDS = 900
@@ -1613,6 +1616,7 @@ class TelegramOperatorCommandRouter:
         key_prefix: str,
         text: str,
         extra: Mapping[str, Any] | None = None,
+        subject_field: str = "approval_id",
     ) -> None:
         """운영자 채팅에 승인 관련 알림을 채팅 단위로 1회씩 보낸다.
 
@@ -1636,7 +1640,10 @@ class TelegramOperatorCommandRouter:
                     run_id or f"run_{approval_id}",
                     event_type,
                     {
-                        "approval_id": approval_id,
+                        # A dispatch notice is about a signal run, not an
+                        # approval; writing it under approval_id would put a
+                        # signal_run_id in a column the card sweep reads.
+                        subject_field: approval_id,
                         "chat_id": int(chat_id),
                         **(dict(extra) if extra else {}),
                         "duplicate_key": duplicate_key,
@@ -1716,6 +1723,112 @@ class TelegramOperatorCommandRouter:
                 )
             except Exception as exc:
                 self._record_update_failure(None, exc)
+
+    def _resume_incomplete_dispatches(self) -> None:
+        """Finish a dispatch that was consumed but never reported settling.
+
+        The orchestrator refuses to re-enter a settled package, so this only
+        ever reaches runs whose approvals are genuinely incomplete. Each group
+        is filed under a stable key, so re-entering adopts the approvals
+        already created and makes only the missing ones.
+
+        The attempt budget is what keeps a run that cannot be dispatched --
+        a stale broker snapshot, a config that no longer loads -- from
+        retrying on every poll forever. When it runs out the run goes to the
+        operator instead, once.
+        """
+        if self.approval_config_path is None:
+            return
+        for signal_run_id in self.store.list_incomplete_signal_dispatches():
+            attempt = self._next_dispatch_resume_attempt(signal_run_id)
+            if attempt > _MAX_DISPATCH_RESUME_ATTEMPT:
+                self._notify_dispatch_needs_attention(signal_run_id)
+                continue
+            if not self._claim_dispatch_resume(signal_run_id, attempt):
+                continue
+            outcome = "failed"
+            try:
+                self._run_dispatch(signal_run_id)
+                outcome = "completed"
+            # One stuck run must not starve the others, and the failure is
+            # recorded either way so the budget advances.
+            except Exception as exc:
+                self._record_update_failure(None, exc)
+            finally:
+                self._record_dispatch_resume_finished(signal_run_id, attempt, outcome)
+
+    def _run_dispatch(self, signal_run_id: str) -> None:
+        """Seam: the orchestrator call the resume sweep drives."""
+        approval_config, approval_identity = load_config_with_identity(
+            self.approval_config_path
+        )
+        MaestroOrchestrator(
+            approval_config,
+            telegram_client=self.client,
+            config_identity=approval_identity,
+        ).dispatch_signal_approval(signal_run_id)
+
+    def _dispatch_resume_finished_attempts(self, signal_run_id: str) -> list[int]:
+        return [
+            int(row["payload"].get("attempt", 0))
+            for row in self.store.list_system_events_by_type(
+                "telegram_dispatch_resume_finished", limit=None
+            )
+            if str(row["payload"].get("signal_run_id")) == signal_run_id
+        ]
+
+    def _next_dispatch_resume_attempt(self, signal_run_id: str) -> int:
+        return len(self._dispatch_resume_finished_attempts(signal_run_id)) + 1
+
+    def _claim_dispatch_resume(self, signal_run_id: str, attempt: int) -> bool:
+        duplicate_key = f"telegram-dispatch-resume:{signal_run_id}:a{attempt}"
+        with self.store.writer_lock("telegram_dispatch_resume_claim"):
+            if self.store.duplicate_key_exists(duplicate_key):
+                return False
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                signal_run_id,
+                "telegram_dispatch_resume_claim",
+                {
+                    "signal_run_id": signal_run_id,
+                    "attempt": attempt,
+                    "claimed_at": utc_now().isoformat(),
+                    "duplicate_key": duplicate_key,
+                },
+            )
+        return True
+
+    def _record_dispatch_resume_finished(
+        self, signal_run_id: str, attempt: int, outcome: str
+    ) -> None:
+        duplicate_key = f"telegram-dispatch-resume-finished:{signal_run_id}:a{attempt}"
+        with self.store.writer_lock("telegram_dispatch_resume_finished"):
+            if self.store.duplicate_key_exists(duplicate_key):
+                return
+            save_audited_system_event(
+                self.store,
+                self.audit,
+                signal_run_id,
+                "telegram_dispatch_resume_finished",
+                {
+                    "signal_run_id": signal_run_id,
+                    "attempt": attempt,
+                    "outcome": outcome,
+                    "finished_at": utc_now().isoformat(),
+                    "duplicate_key": duplicate_key,
+                },
+            )
+
+    def _notify_dispatch_needs_attention(self, signal_run_id: str) -> None:
+        self._notify_operator_chats(
+            run_id=signal_run_id,
+            approval_id=signal_run_id,
+            event_type="telegram_dispatch_needs_attention",
+            key_prefix="telegram-dispatch-attention",
+            text=ui_catalog.APPROVAL_NEEDS_ATTENTION,
+            subject_field="signal_run_id",
+        )
 
     def _resume_unresolved_approvals(self) -> None:
         """결정은 기록됐지만 집행이 끝나지 않은 승인을 기록된 결정으로 재개한다."""
@@ -2040,6 +2153,7 @@ class TelegramOperatorCommandRouter:
         return completed
 
     def _sweep_pending_approvals(self) -> None:
+        self._resume_incomplete_dispatches()
         self._resume_unresolved_approvals()
         self._notify_legacy_unresolved_approvals()
         acked = self._terminal_approval_ids()
