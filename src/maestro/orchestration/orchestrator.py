@@ -1972,7 +1972,11 @@ class MaestroOrchestrator:
             if not key:
                 key = ("unknown",)
             groups.setdefault(key, []).append(order)
-        return [(list(key), group_orders) for key, group_orders in groups.items()]
+        # Sorted, not insertion-ordered. A resumed dispatch has to rebuild the
+        # same groups the interrupted one built, and dict insertion order here
+        # follows the order of `orders` -- which nothing pins. Sorting makes
+        # the grouping a function of the package alone.
+        return [(list(key), groups[key]) for key in sorted(groups)]
 
     def _validate_signal_package_for_approval(self, package: dict[str, Any]) -> None:
         if self.config.mode != RunMode.LIVE_APPROVAL:
