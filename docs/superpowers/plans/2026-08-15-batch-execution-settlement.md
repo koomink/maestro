@@ -179,3 +179,86 @@ cd /home/symphony/maestro
   검증 표면이 장부 전체로 넓어진다.
 - **자동 종결.** 종결은 항상 운영자의 명시적 행위다. sweep이 스스로 닫으면
   반쯤 실행된 로테이션이 조용히 사라진다.
+
+---
+
+## 구현에서 달라진 점
+
+1. **`classify_order`에 `final_status`를 추가했다.** 계획의 시그니처
+   (`intent, result, filled_quantity, ordered_quantity`)로는 스펙 「C-1」
+   표의 마지막 두 행(`0, 주문 종료됨` vs `0, 주문 열림`)을 구분할 수 없다.
+   종료 여부는 추론할 것이 아니라 기록된 증거이며,
+   `live_order_lifecycle`·`live_order_tracking_resolved`의 `final_status`가
+   그 증거다. 판정 집합은 새로 만들지 않고
+   `live_order_tracking.TERMINAL_ORDER_STATUSES`를 그대로 쓴다.
+   08-11 SSO가 `cancelled_unfilled`인 근거가 바로 이 값이다(event 17800,
+   `final_status=canceled`).
+
+2. **`summarize_batch`를 순수 함수로 좁히고 `build_order_evidence`를 나눴다.**
+   계획은 `summarize_batch(envelope, intents, results, fills)`였지만, 그러면
+   분류기가 payload 형태를 알아야 한다. `build_order_evidence(evidence)`가
+   저장 형태 → `OrderEvidence`를 맡고 `summarize_batch(approval_id, evidence)`는
+   값만 다룬다. 4b의 카드는 후자만 쓰면 된다.
+
+3. **체결량은 result와 watermark 중 큰 값을 쓴다.** result의
+   `filled_quantity`는 제출 시점 값이라 보통 0이고, 정산된 누적은
+   `fill_watermarks`에 나중에 들어온다. 둘 다 체결량의 하한이므로 큰 쪽이
+   사실에 가깝고, 한쪽이 비어도 다른 쪽을 끌어내리지 않는다.
+
+4. **종결 이벤트에 `attempt`를 쓰지 않는 것이 배포 호환성 조건이다.**
+   계획은 `settled_by` 건너뛰기만 적었지만,
+   `_deliver_resume_completion_notices`는 **이미 main에 있고 지금 돌고 있다**
+   (`40f0def`, 3a-3이 아니라 그 이전). 즉 종결 이벤트는 구코드가 읽는다.
+   구코드에는 `settled_by` 가드가 없고 `attempt >= 2`만 본다. 그래서
+   `attempt`를 쓰지 않는 것이 "운영자가 손으로 닫은 건에 «처리했어요»가
+   가지 않는다"를 **배포 전에** 보장하는 유일한 수단이다. `settled_by`
+   건너뛰기는 같은 불변식을 필드 부재에 기대지 않고 직접 적는 것이다.
+   두 가지 모두 테스트로 고정했다.
+
+5. **거부를 예외(`SettlementRefused`)로 표현했다.** 코드(`no_ack`,
+   `legacy_ack`, `already_settled`, `unknown_orders`)를 갖고 있어 CLI가
+   그대로 출력하고 exit 1 한다.
+
+## 검증 결과
+
+- **1582 passed, 9 skipped** (기준선 1533 → 새 테스트 49개), ruff 통과
+- `test_signal_approval_handoff.py` CLI 5건은 여전히 실패한다 — root 소유
+  `/tmp/maestro-symphony-signal.lock` 문제이며 이 작업과 무관하다
+  (운영은 `MAESTRO_SIGNAL_LOCK_PATH`를 쓰므로 영향 없음)
+- 모든 하중 테스트를 뮤테이션으로 검증했다: `unknown`→`not_sent` 접기,
+  종료 판정 제거, `$.request.approval_id`→최상위 컬럼, `has_unknown` 거부
+  제거, `settled_by` 건너뛰기 제거, `--confirm` 게이트 제거, `not_found`
+  종료 제거 — 각각 해당 테스트만 정확히 FAIL
+
+## Task 4 실행 결과 (2026-08-15)
+
+운영 DB 스냅샷으로 먼저 예행한 뒤(분류·종결·멱등성·preflight 전부 일치)
+실제로 집행했다.
+
+`appr_1589437a40424cd7a4e7141dbdf96e17` — **종결 완료** (event id 20345):
+
+| 종목 | 주문 | 체결 | 분류 |
+|---|---|---|---|
+| PDBC | 366 | — | `not_sent` |
+| SPY | 6 | — | `not_sent` |
+| BIL | 15 | — | `not_sent` |
+| SSO | 20 | 0 | `cancelled_unfilled` |
+| TIP | 23 | 23 | `filled` |
+
+계획의 검증 표와 정확히 일치한다. 종결 사유에 "운영자가 다음 정규장에
+`/rebalancing`으로 대체 수행"을 남겼다.
+
+- `approval-rollback-preflight` → **`status=safe unresolved=0`** (was unsafe)
+- 재실행은 `already_settled`로 거부된다
+- 종결 이벤트에 `attempt` 없음, `telegram_approval_resume_notice` 0건 —
+  운영자에게 잘못된 "처리했어요"가 가지 않았다
+- 종결 후 telegram-operator 서비스 정상(`status=ok`), 이상 로그 없음
+
+**08-12 건(`appr_f898a63b75bb40c9a0ebd2566bfc500c`)은 조치가 필요 없다.**
+`approval-outcome`으로 보니 이미 `resolution_completed`가 있다 — 집행기가
+루프를 끝까지 돌고 종결을 기록했고, `orders_failed=1`은 그 안의 실패였다.
+분류는 08-11과 같은 모양(SSO `cancelled_unfilled`, 매수 3건 `not_sent`)
+이지만 승인 자체는 닫혀 있어 preflight의 미완 목록에 없다. 종결을 시도하면
+`already_settled`로 거부되며, 그게 맞다.
+
+즉 **preflight 미완 승인은 이제 0건이다.**
