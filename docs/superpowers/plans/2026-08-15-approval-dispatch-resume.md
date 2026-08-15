@@ -1,5 +1,18 @@
 # 승인 dispatch idempotent resume (단계 3a-3, 범위 A)
 
+> **상태: 구현 완료 (2026-08-15).** Task 0~3 전부
+> `feat/approval-dispatch-resume`에 반영됐다 (`19228c0`..`441329b`).
+> 계획과 달라진 점은 아래 「구현에서 달라진 점」에 적었다.
+>
+> 테스트: **1533 passed, 9 skipped**. 별도로 `test_signal_approval_handoff.py`의
+> CLI 테스트 5건이 실패하는데, **이 작업과 무관한 환경 문제**다 —
+> `/tmp/maestro-symphony-signal.lock`이 root 시절(2026-07-21)에 `root:root`로
+> 만들어져 남아 있고, CLI 기본 `--lock-path`(`cli.py:318`)가 그 경로라
+> symphony 유저가 열지 못한다. 깨끗한 트리에서도 동일하게 실패함을 확인했다.
+> **운영은 영향 없다**: `/etc/maestro/maestro.env`가
+> `MAESTRO_SIGNAL_LOCK_PATH`를 설정하고, 08-14 22:40 US 사이클이 정상
+> 완료됐다. 해소하려면 root가 그 파일을 지워야 한다(/tmp sticky bit).
+
 **Spec:** `docs/superpowers/specs/2026-08-09-telegram-ux-redesign-design.md`
 (「카드 체계 A」, 데이터 흐름 6항 "승인 dispatch의 idempotent resume")
 **선행:** 3a-1 (`docs/superpowers/plans/2026-08-10-approval-two-phase-persistence.md`),
@@ -264,3 +277,44 @@ cd /home/symphony/maestro
   "consumed-without-dispatch-completion"이 3a-5 preflight에서 **조회 가능한
   상태가 된다** (지금은 아무도 읽지 않아 검출 자체가 불가능하다).
 - **구 알림 경로 제거** — 단계 5.
+
+---
+
+## 구현에서 달라진 점
+
+1. **테스트 파일 위치.** 계획은 `tests/test_approval_dispatch_resume.py` 신규를
+   적었지만, dispatch 테스트에 필요한 픽스처(KIS 스냅샷 목, live signal config,
+   FakeTelegramClient)가 전부 `tests/test_signal_approval_handoff.py`에 있고 이
+   리포에는 테스트 모듈 간 import 관례가 없다. 기존 dispatch 테스트 바로 옆에
+   놓는 편이 픽스처를 복제하는 것보다 낫다고 판단했다. 새 파일은 순수 단위
+   테스트 쪽에만 만들었다: `test_dispatch_group_id.py`,
+   `test_state_store_insert_or_load.py`, `test_state_store_incomplete_dispatch.py`,
+   `test_telegram_dispatch_resume.py`.
+
+2. **`_run_dispatch` 시임을 추가했다.** 계획에 없던 것이다. sweep이 orchestrator를
+   직접 만들면 sweep 테스트가 실주문 설정 전체를 세워야 한다. 바로 옆
+   `_run_resolution`이 이미 같은 목적의 시임이라 그 모양을 따랐다.
+
+3. **`_notify_operator_chats`에 `subject_field`를 추가했다.** dispatch 알림은
+   승인이 아니라 signal run에 대한 것인데, 기존 함수는 payload에 무조건
+   `approval_id`를 쓴다. `approval_id`는 카드 sweep이 조회하는 생성 컬럼이라
+   (`store.py:213-216`) signal_run_id를 그 자리에 넣으면 조회를 오염시킨다.
+
+4. **중단 주입 방법.** 계획은 "각 채팅 전송 전후" 중단을 적었지만, 전송 예외는
+   orchestrator에 도달하지 않는다 — lifecycle이 단계 2 설계대로 delivery-unknown
+   으로 분류하고 진행한다(그리고 그게 옳다). 그래서 그룹 2의 카드를 만드는
+   지점에서 중단시켰다. 전송 경계 자체는 단계 2 테스트가 이미 덮는다.
+
+5. **`mark_signal_package_consumed` 멱등화가 필요했다.** 계획에 없었다. 재개가
+   같은 메서드로 재진입하므로 가드를 넣지 않으면 consumed 행이 매 재개마다
+   쌓인다.
+
+## 배포 전 확인 결과 (2026-08-15)
+
+운영 DB(`/home/symphony/maestro-operator/var/symphony_state.db`, 읽기 전용 조회)
+기준 **미완 dispatch 0건** — consumed 패키지 23건, settled 이벤트 31건. 새 sweep은
+배포 직후 아무것도 재개하지 않는다. 이는 "backfill이 필요 없다"는 근거이기도
+하다: 모든 consumed 패키지가 이미 settled 이벤트를 갖고 있다.
+
+남은 배포 확인은 계획의 「검증」 절 2·3번(첫 KR·US 사이클에서 카드가 그룹당
+한 장, `telegram_ui` 헬스체크 정상)이다.
