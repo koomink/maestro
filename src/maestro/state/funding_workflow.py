@@ -179,10 +179,69 @@ def publish_contribution_request(
     }
 
 
+def claim_workflow_attempt(
+    store: StateStore,
+    run_id: str,
+    *,
+    workflow_id: str,
+    request_id: str,
+    phase: str,
+    attempt: int = 1,
+    expected_version: int | None = None,
+) -> dict[str, Any]:
+    """이 요청이 이 전이에 진입해도 되는지를 원자적으로 결정한다.
+
+    head 조회와 claim 삽입을 따로 하면 그 사이에 예약/수동 run이 새 head를
+    원자 커밋하는 TOCTOU가 생겨, 이미 superseded된 구 callback이 유효한
+    claim을 얻는다. 그래서 "그 버전이 있고(require) 다음 버전은 아직
+    없다(forbid)"를 삽입과 같은 트랜잭션에서 건다 — head는 단조 증가하므로
+    존재 검사만으로는 교체를 감지할 수 없다.
+    """
+    _require_phase(phase)
+    head = store.load_funding_workflow_head(workflow_id)
+    if head is None:
+        return {"claimed": False, "reason": "no_head", "attempt": attempt, "head_version": 0}
+    version = int(expected_version if expected_version is not None else head.get("version") or 0)
+    if str(head.get("request_id") or "") != request_id:
+        return {
+            "claimed": False,
+            "reason": "not_head",
+            "attempt": attempt,
+            "head_version": int(head.get("version") or 0),
+        }
+    outcome = store.save_system_events_atomic(
+        run_id,
+        [
+            {
+                "event_type": "funding_workflow_claim",
+                "payload": {
+                    "duplicate_key": claim_key(workflow_id, phase, request_id, attempt),
+                    "workflow_id": workflow_id,
+                    "request_id": request_id,
+                    "phase": phase,
+                    "attempt": attempt,
+                    "head_version": version,
+                },
+            }
+        ],
+        require_duplicate_keys=(head_key(workflow_id, version),),
+        forbid_duplicate_keys=(head_key(workflow_id, version + 1),),
+    )
+    if outcome["committed"]:
+        return {"claimed": True, "reason": None, "attempt": attempt, "head_version": version}
+    reason = {
+        "already_committed": "already_claimed",
+        "precondition_present": "head_moved",
+        "precondition_missing": "head_moved",
+    }.get(str(outcome["conflict"]), "head_moved")
+    return {"claimed": False, "reason": reason, "attempt": attempt, "head_version": version}
+
+
 __all__ = [
     "PHASES",
     "child_key",
     "claim_key",
+    "claim_workflow_attempt",
     "completed_key",
     "funding_workflow_id",
     "head_key",
