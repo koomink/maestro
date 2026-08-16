@@ -262,3 +262,46 @@ cd /home/symphony/maestro
 `already_settled`로 거부되며, 그게 맞다.
 
 즉 **preflight 미완 승인은 이제 0건이다.**
+
+## 적대적 리뷰 반영 (2026-08-16)
+
+리뷰가 짚은 것: 종결이 **재개 경로와 원자적이지 않다.** 계획의
+`duplicate_key=telegram-approval-settled:` 규약은 종결끼리의 중복만 막는다.
+재개는 같은 이벤트를 `telegram-approval-completed:`로 쓰므로 서로의 키를 보지
+못하고, 읽는 쪽(`load_approval_execution_evidence`)은 승인당 **가장 최근 행**을
+집는다. 두 번째 행은 중복이 아니라 그 배치에 대한 권위 있는 설명을 바꿔치기한다.
+게다가 종결은 증거를 락 **밖에서** 읽었으므로, 재개가 집행하는 동안 찍은
+스냅샷으로 "나가지 않았다"를 그 배치의 최종 기록으로 남길 수 있었다.
+
+6. **종결의 유일성은 키가 아니라 승인 단위 CAS다.**
+   `StateStore.insert_approval_resolution`이 `BEGIN IMMEDIATE` 안에서
+   "이 승인에 이미 종결이 있는가"를 확인하고 넣는다. `writer_lock`은 복구
+   스크립트·다른 릴리스·sqlite3 CLI가 쥘 이유가 없는 advisory flock이므로,
+   경합은 DB가 풀어야 한다. 두 경로 모두 이 하나의 통로로만 쓴다.
+
+7. **종결과 집행이 같은 직렬화 경계를 공유한다.** `settle_approval`은
+   `live_order_lock` → `writer_lock` 순으로 잡고 그 **안에서** 증거를 읽는다.
+   재개 쪽도 집행과 종결 기록을 하나의 `live_order_lock` 구간에 넣었다
+   (`_resolve_async_approval`). 집행 직후 락을 놓고 기록만 따로 하면 그 사이가
+   정확히 위의 창이다.
+
+8. **claim을 이미 잡은 재개는 락만으로 막을 수 없다.** 그래서
+   `resolve_pending_signal_approval`이 락 진입 직후,
+   `save_approval`(모든 제출에 선행한다)보다 먼저 종결 여부를 확인하고
+   거부한다. 운영자가 닫았다고 들은 배치에 주문이 나가는 것을 막는 마지막
+   방어선이다.
+
+9. **종결 기록에서 진 재개는 조용히 돌아서지 않는다.** 기록은 "운영자가 손으로
+   닫았다"고 말하는데 진 쪽은 방금 집행했다. `telegram_approval_resolution_conflict`로
+   남기고 "브로커 대조가 필요하다"로 통지한다. 단, 같은 재개의 멱등 재시도
+   (자기 키가 이미 있는 경우)는 충돌이 아니므로 조용히 넘어간다.
+   CLI는 `live_order_lock` 대기 실패를 `status=busy`로 보고한다 —
+   지금 집행 중이라 종결 대상 자체가 확정되지 않았다는 뜻이다.
+
+- **1596 passed, 9 skipped**, ruff 통과. 새 테스트 14건
+  (`test_approval_resolution_is_terminal.py` 9, 재개 4, CLI 1).
+- `test_signal_approval_handoff.py` CLI 5건은 이 변경 전후 모두 동일하게
+  실패한다(위의 `/tmp` lock 문제, `git stash`로 확인).
+- 기존 규약과 데이터는 그대로다: 종결은 여전히
+  `telegram-approval-settled:`를, 재개는 `telegram-approval-completed:`를
+  키로 쓴다. 바뀐 것은 유일성의 근거뿐이므로 마이그레이션이 없다.
