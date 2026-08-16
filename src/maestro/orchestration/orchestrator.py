@@ -338,7 +338,13 @@ class MaestroOrchestrator:
         """Rebuild a summary for a child that already exists, without running
         run_signal's side effects (a new signal package, a new approval flow)
         a second time."""
-        package = self.state_store.load_signal_package(signal_run_id) or {}
+        package = self.state_store.load_signal_package(signal_run_id)
+        if package is None:
+            # Lineage named this run, so a missing package is an
+            # inconsistency, not an empty result. Reporting it as "nothing
+            # required" would let a resumed transition silently skip work
+            # the original run had queued.
+            raise ValueError(f"Child signal run has no package: {signal_run_id}")
         return SignalRunSummary(
             signal_run_id=signal_run_id,
             loaded_strategies=list(package.get("loaded_strategies") or []),

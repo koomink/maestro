@@ -1,4 +1,7 @@
+import pytest
+
 from maestro.state.funding_workflow import (
+    child_key,
     claim_workflow_attempt,
     head_key,
     load_workflow_child,
@@ -200,3 +203,33 @@ def test_a_different_source_request_gets_its_own_child(funding_orchestrator):
         source_phase="funding",
     )
     assert second.signal_run_id != first.signal_run_id
+
+
+def test_a_child_pointing_at_a_missing_package_fails_loudly(funding_orchestrator):
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+    # Lineage already names this signal_run_id but no signal_package was ever
+    # written for it -- corruption, a retention purge, a race with a delete
+    # path. That must surface as a loud failure, not as a phantom "nothing
+    # required" summary.
+    store.save_system_events_atomic(
+        "run-missing-package",
+        [
+            {
+                "event_type": "funding_workflow_child_created",
+                "payload": {
+                    "duplicate_key": child_key("req-1", "funding"),
+                    "workflow_id": "wf-a",
+                    "request_id": "req-1",
+                    "phase": "funding",
+                    "signal_run_id": "signal-does-not-exist",
+                },
+            }
+        ],
+    )
+    with pytest.raises(ValueError, match="signal-does-not-exist"):
+        orchestrator.run_signal(
+            strategy_ids=["tranquillo"],
+            source_request_id="req-1",
+            source_workflow_id="wf-a",
+            source_phase="funding",
+        )
