@@ -1542,23 +1542,29 @@ class TelegramOperatorCommandRouter:
                         "schema_version": 2,
                     },
                 )
-        try:
-            summary = self._run_resolution(envelope, decision)
-        except Exception as exc:
-            save_audited_system_event(
-                self.store,
-                self.audit,
-                envelope.run_id,
-                "telegram_approval_resolution_failed",
-                {
-                    "approval_id": envelope.approval_id,
-                    "status": status,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                },
-            )
-            raise
-        self._record_resolution_completed(envelope, decision, summary, attempt=attempt)
+        # 집행과 그 종결 기록은 하나의 임계구역이다. 운영자 정산(settle_approval)은
+        # live_order_lock을 쥔 채 증거를 읽고 종결을 쓴다. 여기서 집행 직후 락을
+        # 놓고 기록만 따로 하면 그 사이에 정산이 끼어들어, 방금 나간 주문을 두고
+        # "나가지 않았다"는 종결을 남길 수 있다. orchestrator가 같은 락을 재진입으로
+        # 다시 잡으므로 순서(live_order_lock -> writer_lock)는 그대로다.
+        with self.store.live_order_lock("telegram_approval_resolution"):
+            try:
+                summary = self._run_resolution(envelope, decision)
+            except Exception as exc:
+                save_audited_system_event(
+                    self.store,
+                    self.audit,
+                    envelope.run_id,
+                    "telegram_approval_resolution_failed",
+                    {
+                        "approval_id": envelope.approval_id,
+                        "status": status,
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc),
+                    },
+                )
+                raise
+            self._record_resolution_completed(envelope, decision, summary, attempt=attempt)
         return summary
 
     def _run_resolution(
@@ -1584,28 +1590,73 @@ class TelegramOperatorCommandRouter:
         *,
         attempt: int,
     ) -> None:
-        duplicate_key = f"telegram-approval-completed:{envelope.approval_id}"
-        # 형제 기록(_claim_resume·_record_resume_finished)과 같은 규약으로 쓴다.
-        # 락 밖에서 확인하면 경합 시 IntegrityError가 **주문이 나간 뒤에** 터진다.
-        with self.store.writer_lock("telegram_approval_resolution_completed"):
-            if self.store.duplicate_key_exists(duplicate_key):
-                return
-            save_audited_system_event(
-                self.store,
-                self.audit,
-                envelope.run_id,
-                "telegram_approval_resolution_completed",
-                {
-                    "approval_id": envelope.approval_id,
-                    "signal_run_id": envelope.signal_run_id,
-                    "status": decision.status,
-                    "orders_submitted": summary.orders_submitted,
-                    "orders_failed": summary.orders_failed,
-                    "resolved_at": utc_now().isoformat(),
-                    "attempt": attempt,
-                    "duplicate_key": duplicate_key,
-                },
+        payload = {
+            "approval_id": envelope.approval_id,
+            "signal_run_id": envelope.signal_run_id,
+            "status": decision.status,
+            "orders_submitted": summary.orders_submitted,
+            "orders_failed": summary.orders_failed,
+            "resolved_at": utc_now().isoformat(),
+            "attempt": attempt,
+            "duplicate_key": f"telegram-approval-completed:{envelope.approval_id}",
+        }
+        # duplicate_key 가드로는 부족하다. 운영자 정산은 같은 이벤트를
+        # `telegram-approval-settled:`로 쓰므로 서로의 키를 보지 못하고, 읽는 쪽은
+        # 승인당 가장 최근 행을 집는다 — 두 번째 행은 중복이 아니라 그 배치에 대한
+        # 권위 있는 설명을 바꿔치기한다. 유일성은 키가 아니라 승인 단위여야 한다.
+        stored, created = self.store.insert_approval_resolution(envelope.run_id, payload)
+        if created:
+            self.audit.log(
+                envelope.run_id, "telegram_approval_resolution_completed", payload
             )
+            return
+        if stored.get("duplicate_key") == payload["duplicate_key"]:
+            # 이 재개가 남긴 기록이 이미 있다. 종결 기록 직후 죽었다가 다시 온
+            # 경우이므로 멱등하게 넘어간다 — 다른 이야기가 끼어든 것이 아니다.
+            return
+        self._record_resolution_conflict(envelope, payload, stored)
+
+    def _record_resolution_conflict(
+        self,
+        envelope: PendingApprovalEnvelope,
+        payload: Mapping[str, Any],
+        stored: Mapping[str, Any],
+    ) -> None:
+        """종결 기록에서 졌다는 사실이 집행을 되돌리지는 않는다.
+
+        기록에 남은 종결은 "운영자가 손으로 닫았다"고 말하는데, 진 쪽은 방금 그
+        배치를 실제로 집행했다. 조용히 돌아서면 운영자는 첫 번째 이야기를 믿고
+        움직이고 — 정산해 둔 자리를 손으로 다시 채우고 — 계좌의 실제 상태는 두
+        번째 이야기다. 내구 기록으로 남기고 운영자에게 넘긴다.
+        """
+        try:
+            duplicate_key = f"telegram-approval-resolution-conflict:{envelope.approval_id}"
+            with self.store.writer_lock("telegram_approval_resolution_conflict"):
+                if not self.store.duplicate_key_exists(duplicate_key):
+                    save_audited_system_event(
+                        self.store,
+                        self.audit,
+                        envelope.run_id,
+                        "telegram_approval_resolution_conflict",
+                        {
+                            "approval_id": envelope.approval_id,
+                            "signal_run_id": envelope.signal_run_id,
+                            "orders_submitted": payload.get("orders_submitted"),
+                            "orders_failed": payload.get("orders_failed"),
+                            "attempt": payload.get("attempt"),
+                            "settled_by": stored.get("settled_by"),
+                            "recorded_closure": stored.get("duplicate_key"),
+                            "duplicate_key": duplicate_key,
+                        },
+                    )
+            # 주문이 브로커에 있을 수 있다는 문구로 알린다. 정산된 배치를 두고
+            # 운영자가 확인해야 하는 것이 정확히 그것이다.
+            self._notify_approval_needs_attention(
+                envelope.approval_id, envelope.run_id, partial=True
+            )
+        # 충돌 보고가 재개 sweep을 멈추면 보고의 존재 이유가 사라진다.
+        except Exception as exc:
+            self._record_update_failure(None, exc)
 
     def _notify_operator_chats(
         self,
@@ -1698,6 +1749,12 @@ class TelegramOperatorCommandRouter:
             payload = row["payload"]
             # 한 건의 손상된 payload가 나머지 통지를 막으면 안 된다.
             try:
+                if payload.get("settled_by"):
+                    # An operator settlement writes this same event but ran no
+                    # orders. Announcing it would tell the operator the system
+                    # handled what they just closed by hand, and they may then
+                    # skip the replacement trade they settled it in order to do.
+                    continue
                 if int(payload.get("attempt") or 1) < 2:
                     continue
                 approval_id = str(payload.get("approval_id"))

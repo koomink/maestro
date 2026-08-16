@@ -63,6 +63,12 @@ from maestro.integrations.telegram.ui import catalog as ui_catalog
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
+from maestro.ops.batch_execution import (
+    SettlementRefused,
+    build_order_evidence,
+    settle_approval,
+    summarize_batch,
+)
 from maestro.ops.evidence import build_operator_evidence
 from maestro.ops.preflight import private_beta_failures
 from maestro.ops.readonly_refresh import latest_snapshot_for_account, refresh_readonly_accounts
@@ -1600,6 +1606,94 @@ def approval_rollback_preflight(
         typer.echo(f"approval_rollback_preflight status=unsafe approval_id={approval_id}")
     typer.echo(f"approval_rollback_preflight status=unsafe unresolved={len(unresolved)}")
     raise typer.Exit(1)
+
+
+@app.command("approval-outcome")
+def approval_outcome(
+    config: Path | None = CONFIG_OPTION,
+    approval_id: str = typer.Option(..., "--approval-id"),
+) -> None:
+    """한 승인의 주문들이 실제로 어디까지 갔는지 증거로 분류해 보여준다.
+
+    아무것도 쓰지 않는다. `approval-settle`로 무엇을 닫는지 먼저 보는
+    용도이며, 단계 4b의 카드가 렌더할 데이터와 같다.
+    """
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    evidence = store.load_approval_execution_evidence(approval_id)
+    if evidence["envelope"] is None:
+        typer.echo(f"approval_outcome status=not_found approval_id={approval_id}")
+        raise typer.Exit(1)
+    outcome = summarize_batch(approval_id, build_order_evidence(evidence))
+    audit.log(
+        str(evidence["envelope"].get("run_id") or f"run_{approval_id}"),
+        "approval_outcome_inspected",
+        {"approval_id": approval_id, "counts": outcome.counts},
+    )
+    settled = evidence["resolution_completed"] is not None
+    typer.echo(
+        f"approval_outcome approval_id={approval_id} orders={len(outcome.orders)} "
+        f"has_unknown={outcome.has_unknown} settled={settled}"
+    )
+    for line in outcome.orders:
+        typer.echo(
+            f"  {line.symbol} {line.side} {line.ordered_quantity:g} "
+            f"filled={line.filled_quantity:g} -> {line.outcome}"
+        )
+    for name, count in sorted(outcome.counts.items()):
+        typer.echo(f"  count {name}={count}")
+    if outcome.has_unknown:
+        typer.echo(
+            "  주의: 브로커에 닿았는지 알 수 없는 주문이 있다. "
+            "증권사 앱에서 먼저 확인할 것."
+        )
+
+
+@app.command("approval-settle")
+def approval_settle(
+    config: Path | None = CONFIG_OPTION,
+    approval_id: str = typer.Option(..., "--approval-id"),
+    reason: str = typer.Option(..., "--reason"),
+    confirm: str = typer.Option("", "--confirm"),
+    reconciled_with_broker: bool = typer.Option(
+        False,
+        "--i-have-reconciled-with-broker",
+        help=(
+            "Settle even though an order's fate is unknown. Only after "
+            "checking the broker yourself; the override is recorded."
+        ),
+    ),
+) -> None:
+    """반쯤 집행된 승인을 사실대로 종결한다.
+
+    주문을 내지 않는다. 미체결·미발주분의 재수행은 운영자가 `/rebalancing`
+    으로 하거나 단계 4b가 맡는다.
+    """
+    if confirm != "SETTLE":
+        raise typer.BadParameter("approval-settle requires --confirm SETTLE")
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    audit = AuditLogger(maestro_config.audit.jsonl_path)
+    try:
+        outcome = settle_approval(
+            store,
+            audit,
+            approval_id,
+            reason=reason,
+            reconciled_with_broker=reconciled_with_broker,
+        )
+    except SettlementRefused as exc:
+        typer.echo(f"approval_settle status=refused reason={exc}")
+        raise typer.Exit(1) from exc
+    except TimeoutError as exc:
+        # 정산은 live_order_lock을 쥐고 증거를 읽는다. 그 락을 다른 쪽이 쥐고
+        # 있다는 것은 이 승인이 지금 집행되고 있을 수 있다는 뜻이므로, 지금은
+        # 종결할 대상 자체가 확정되지 않았다. 다시 시도하라고 말한다.
+        typer.echo(f"approval_settle status=busy reason={exc}")
+        raise typer.Exit(1) from exc
+    counts = " ".join(f"{name}={count}" for name, count in sorted(outcome.counts.items()))
+    typer.echo(f"approval_settle status=settled approval_id={approval_id} {counts}")
 
 
 @app.command("release-kill")
