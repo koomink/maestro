@@ -625,6 +625,20 @@ class MaestroOrchestrator:
                 )
             )
         approval_orders = self._signal_orders_requiring_approval(orders)
+        # Publish before the package is built, and keep only what landed. A
+        # request that lost the head CAS is not in the event log, so a package
+        # that still listed it would promise an operator a funding or budget
+        # decision with no workflow behind it to act on.
+        funding_requests = [
+            request
+            for request in funding_requests
+            if self._publish_contribution_request(signal_run_id, request, phase="funding")
+        ]
+        budget_requests = [
+            request
+            for request in budget_requests
+            if self._publish_contribution_request(signal_run_id, request, phase="budget")
+        ]
         if budget_requests:
             status = "budget_required"
         elif approval_orders:
@@ -669,10 +683,6 @@ class MaestroOrchestrator:
             payload["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
         self.state_store.save_signal_package(signal_run_id, payload)
         self.audit.log(signal_run_id, "signal_package", payload)
-        for request in funding_requests:
-            self._publish_contribution_request(signal_run_id, request, phase="funding")
-        for request in budget_requests:
-            self._publish_contribution_request(signal_run_id, request, phase="budget")
         self.state_store.save_system_event(
             signal_run_id,
             "signal_run_completed",
@@ -1734,7 +1744,7 @@ class MaestroOrchestrator:
         request: Any,
         *,
         phase: str,
-    ) -> None:
+    ) -> bool:
         """Record the request and its workflow head as one transaction.
 
         Losing the head CAS means another run already established the active
@@ -1742,14 +1752,21 @@ class MaestroOrchestrator:
         all: a request with no head pointing at it is exactly the orphan the
         workflow head exists to prevent, and the convergence sweep would
         later have to guess whether it was ever meant to be live.
+
+        Returns whether the request landed, so the caller can keep the signal
+        package, its status, and the run summary describing only requests that
+        actually exist.
         """
         payload = request.model_dump(mode="json")
         outcome = publish_contribution_request(
             self.state_store, signal_run_id, payload, phase=phase
         )
         if outcome["committed"]:
-            self.audit.log(signal_run_id, f"contribution_{phase}_request", payload)
-            return
+            # The stored payload, not ours: it carries the funding_workflow_id,
+            # without which the audit trail cannot say which workflow this
+            # request belonged to.
+            self.audit.log(signal_run_id, f"contribution_{phase}_request", outcome["payload"])
+            return True
         self.audit.log(
             signal_run_id,
             "funding_workflow_head_conflict",
@@ -1761,6 +1778,7 @@ class MaestroOrchestrator:
                 "conflict": outcome["conflict"],
             },
         )
+        return False
 
     def _record_run_provenance(
         self,

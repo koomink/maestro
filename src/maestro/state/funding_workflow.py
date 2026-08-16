@@ -171,6 +171,11 @@ def publish_contribution_request(
         "conflict": outcome["conflict"],
         "workflow_id": workflow_id,
         "version": version,
+        # The stored payload, not the caller's: this one carries the
+        # funding_workflow_id and duplicate_key that were added here. A caller
+        # that audit-logs its own copy would leave the audit trail unable to
+        # say which workflow an event belonged to.
+        "payload": payload,
     }
 
 

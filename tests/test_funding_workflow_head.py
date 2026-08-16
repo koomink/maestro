@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from maestro.state.funding_workflow import head_key, publish_contribution_request
@@ -173,3 +175,49 @@ def test_a_signal_run_that_asks_for_funding_also_publishes_a_head(funding_orches
     head = store.load_funding_workflow_head(payload["funding_workflow_id"])
     assert head["request_id"] == payload["request_id"]
     assert head["version"] == 1
+
+
+def test_the_audit_entry_names_the_workflow_the_request_belongs_to(funding_orchestrator):
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+
+    orchestrator.run_signal(strategy_ids=["tranquillo"])
+
+    payload = store.list_system_events_by_type("contribution_funding_request", limit=None)[0][
+        "payload"
+    ]
+    audited = [
+        entry
+        for entry in _audit_entries(orchestrator)
+        if entry["event_type"] == "contribution_funding_request"
+    ]
+    assert [entry["details"]["funding_workflow_id"] for entry in audited] == [
+        payload["funding_workflow_id"]
+    ]
+
+
+def test_a_request_that_loses_the_head_cas_is_absent_from_the_package(
+    funding_orchestrator, monkeypatch
+):
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+    monkeypatch.setattr(
+        orchestrator,
+        "_publish_contribution_request",
+        lambda *args, **kwargs: False,
+    )
+
+    summary = orchestrator.run_signal(strategy_ids=["tranquillo"])
+
+    package = store.load_signal_package(summary.signal_run_id)
+    # Nothing landed in the event log, so the package must not advertise one.
+    assert package["funding_requests"] == []
+    assert package["funding_requests_count"] == 0
+    assert package["status"] != "funding_required"
+
+
+def _audit_entries(orchestrator):
+    """The tamper-evident audit trail as parsed records."""
+    return [
+        json.loads(line)
+        for line in orchestrator.audit.path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
