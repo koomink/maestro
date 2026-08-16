@@ -128,7 +128,11 @@ from maestro.sdk import (
 from maestro.signals.converter import normalize_strategy_result
 from maestro.signals.validator import SignalValidator
 from maestro.state.events import SystemEventType, save_audited_system_event
-from maestro.state.funding_workflow import publish_contribution_request
+from maestro.state.funding_workflow import (
+    child_key,
+    load_workflow_child,
+    publish_contribution_request,
+)
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 from maestro.universe.dynamic import DynamicUniverseService, InstrumentResolver
@@ -285,12 +289,64 @@ class MaestroOrchestrator:
         strategy_ids: list[str] | None = None,
         *,
         contribution_override: bool = False,
+        source_request_id: str | None = None,
+        source_workflow_id: str | None = None,
+        source_phase: str | None = None,
     ) -> SignalRunSummary:
+        # Fencing (claim_workflow_attempt) only refuses a late *event commit*;
+        # it does nothing to stop a stalled attempt that is still inside
+        # _run_signal_locked from finishing and building its own signal
+        # package and approval flow. If lineage were looked up before this
+        # lock, a stalled first attempt and a resumed second attempt could
+        # both observe "no child yet" and both build one. So the lookup and
+        # the child-creation write must happen inside the same lock
+        # acquisition, and the child event is committed under a unique
+        # duplicate_key so the database itself caps it at one, even if two
+        # threads both got past the in-process check.
         with self.state_store.writer_lock("run_signal"):
-            return self._run_signal_locked(
+            if source_request_id is not None:
+                existing = load_workflow_child(
+                    self.state_store, source_request_id, source_phase or "funding"
+                )
+                if existing is not None:
+                    return self._reload_signal_summary(existing)
+            summary = self._run_signal_locked(
                 strategy_ids=strategy_ids,
                 contribution_override=contribution_override,
             )
+            if source_request_id is not None:
+                self.state_store.save_system_events_atomic(
+                    summary.signal_run_id,
+                    [
+                        {
+                            "event_type": "funding_workflow_child_created",
+                            "payload": {
+                                "duplicate_key": child_key(
+                                    source_request_id, source_phase or "funding"
+                                ),
+                                "workflow_id": source_workflow_id,
+                                "request_id": source_request_id,
+                                "phase": source_phase or "funding",
+                                "signal_run_id": summary.signal_run_id,
+                            },
+                        }
+                    ],
+                )
+            return summary
+
+    def _reload_signal_summary(self, signal_run_id: str) -> SignalRunSummary:
+        """Rebuild a summary for a child that already exists, without running
+        run_signal's side effects (a new signal package, a new approval flow)
+        a second time."""
+        package = self.state_store.load_signal_package(signal_run_id) or {}
+        return SignalRunSummary(
+            signal_run_id=signal_run_id,
+            loaded_strategies=list(package.get("loaded_strategies") or []),
+            action_required=bool(package.get("action_required")),
+            orders_preview_count=int(package.get("orders_preview_count") or 0),
+            contribution_override=bool(package.get("contribution_override")),
+            no_order_reasons=list(package.get("no_order_reasons") or []),
+        )
 
     def approve_signal(self, signal_run_id: str) -> SignalApprovalSummary:
         # live_order_lock outermost: _approve_signal_locked can reach

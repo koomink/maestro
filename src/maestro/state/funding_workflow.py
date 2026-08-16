@@ -70,6 +70,23 @@ def child_key(request_id: str, phase: str) -> str:
     return f"child:{request_id}:{phase}"
 
 
+def load_workflow_child(store: StateStore, request_id: str, phase: str) -> str | None:
+    """The signal_run_id already produced for this source request, if any.
+
+    Lookup is purely by the recorded ``child:<request_id>:<phase>`` key,
+    never by matching strategy or scope: an inferential match would let two
+    unrelated runs that happen to share scope be mistaken for the same
+    lineage, silently dropping one of them.
+    """
+    key = child_key(request_id, phase)
+    for row in store.list_system_events_by_type("funding_workflow_child_created", limit=None):
+        payload = row.get("payload") or {}
+        if payload.get("duplicate_key") == key:
+            signal_run_id = payload.get("signal_run_id")
+            return str(signal_run_id) if signal_run_id else None
+    return None
+
+
 def completed_key(workflow_id: str, request_id: str, phase: str) -> str:
     return f"wf-completed:{workflow_id}:{request_id}:{phase}"
 
@@ -245,6 +262,7 @@ __all__ = [
     "completed_key",
     "funding_workflow_id",
     "head_key",
+    "load_workflow_child",
     "publish_contribution_request",
     "superseded_key",
     "workflow_id_from_request",
