@@ -3174,7 +3174,27 @@ class TelegramOperatorCommandRouter:
             self._record("/budget", chat_id, user_id, username, "stale_callback")
             return True
         if transition == "cancel":
-            self._save_budget_decision(request, "canceled", user_id, username)
+            try:
+                self._cancel_budget_request(request, user_id=user_id, username=username)
+            except WorkflowClaimRefused as exc:
+                answer_text, status = _funding_claim_refusal_response(
+                    exc.reason, request_noun="budget"
+                )
+                self._answer(callback, answer_text)
+                self._record("/budget_cancel", chat_id, user_id, username, status)
+                return True
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                self._answer(callback, "Budget cancellation failed.")
+                text = "\n".join(
+                    [
+                        "Budget cancellation failed",
+                        f"request_id: {request_id}",
+                        f"message: {exc}",
+                    ]
+                )
+                self._record("/budget_cancel", chat_id, user_id, username, "failed")
+                self._edit_callback_message(callback, text)
+                return True
             self._answer(callback, "Budget request canceled.")
             self._edit_callback_message(callback, "Budget request canceled.")
             self._record("/budget_cancel", chat_id, user_id, username, "canceled")
@@ -3188,6 +3208,21 @@ class TelegramOperatorCommandRouter:
                 user_id=user_id,
                 username=username,
             )
+        except WorkflowClaimRefused as exc:
+            # Same distinction the funding path draws: "already_claimed"
+            # means an earlier attempt on this request is stuck mid-flight,
+            # not superseded -- see _funding_claim_refusal_response.
+            confirm_text, status = _funding_claim_refusal_response(
+                exc.reason, request_noun="budget"
+            )
+            text = "\n".join(
+                [
+                    confirm_text,
+                    f"request_id: {request_id}",
+                ]
+            )
+            self._answer(callback, "Budget selection failed.")
+            self._record("/budget_select", chat_id, user_id, username, status)
         except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
             self._answer(callback, "Budget selection failed.")
             text = "\n".join(
@@ -3246,38 +3281,93 @@ class TelegramOperatorCommandRouter:
         chat_id: int,
         user_id: int,
         username: str | None,
+        attempt: int = 1,
     ) -> str:
+        """Selecting a budget amount is an input to the transition, not its
+        terminal state: it rides in the claim (via ``extra``) and the legacy
+        ``contribution_budget_request_decision`` event is written only by
+        ``complete_workflow``, in the same atomic batch as
+        ``funding_workflow_completed``. If the config load or run_signal()
+        below raises, no terminal event exists yet, so the workflow stays
+        claimed-but-incomplete -- recoverable, not silently closed.
+        """
         validate_selected_budget(request, selected_budget)
-        self._save_budget_decision(
-            request,
-            "selected",
-            user_id,
-            username,
-            selected_budget=selected_budget,
+        workflow_id = workflow_id_from_request(request)
+        request_id = str(request["request_id"])
+        # The claim (carrying selected_budget) has to land before any side
+        # effect -- the portfolio refresh, run_signal(), the decision -- for
+        # the same reason as the funding path: two callbacks racing on the
+        # same request must not both regenerate a signal.
+        claim = claim_workflow_attempt(
+            self.store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="budget",
+            attempt=attempt,
+            extra={"selected_budget": selected_budget},
         )
+        if not claim["claimed"]:
+            raise WorkflowClaimRefused(str(claim["reason"]))
         lines = [
             "Budget selected",
             f"request_id: {request['request_id']}",
             f"selected_budget: {selected_budget:,.0f} {request.get('currency') or ''}".rstrip(),
         ]
+        # Carrying the same request_id into both legs of complete_workflow is
+        # what keeps the workflow log and the legacy decision log pointed at
+        # the same request; a mismatch here would close one request in one
+        # log and a different one in the other.
+        legacy_payload = {
+            "request_id": request_id,
+            "status": "selected",
+            "strategy_ids": list(request.get("strategy_ids") or []),
+            "contribution_group_id": request.get("contribution_group_id"),
+            "account_id": request.get("account_id"),
+            "execution_sleeve": request.get("execution_sleeve"),
+            "currency": request.get("currency"),
+            "month_key": request.get("month_key"),
+            "decided_by": username or str(user_id),
+            "selected_budget": selected_budget,
+        }
         if self.signal_config_path is None:
+            # No signal config wired up (e.g. a readonly-only operator): the
+            # selection itself is still a complete transition on its own --
+            # nothing downstream needs a child run to exist.
+            complete_workflow(
+                self.store,
+                new_run_id(),
+                workflow_id=workflow_id,
+                request_id=request_id,
+                phase="budget",
+                attempt=attempt,
+                legacy_payload=legacy_payload,
+            )
             return "\n".join(lines)
         try:
             self._refresh_portfolio_from_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError):
             if self._has_readonly_broker_accounts():
                 raise
-        signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
         strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
         if not strategy_ids:
             raise ValueError("Budget request is missing strategy_ids")
         # A user-selected budget is an explicit instruction to invest now, so the
         # regenerated signal bypasses the contribution buy_day schedule (the
         # already-executed-this-month guard still applies).
-        signal_summary = MaestroOrchestrator(
-            signal_config,
-            config_identity=signal_identity,
-        ).run_signal(strategy_ids=strategy_ids, contribution_override=True)
+        signal_summary = self._run_child_signal(
+            request, workflow_id, attempt=attempt, phase="budget"
+        )
+        legacy_payload["new_signal_run_id"] = signal_summary.signal_run_id
+        complete_workflow(
+            self.store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="budget",
+            attempt=attempt,
+            legacy_payload=legacy_payload,
+        )
         lines.append(f"new_signal_run_id: {signal_summary.signal_run_id}")
         lines.append(f"orders_preview_count: {signal_summary.orders_preview_count}")
         if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
@@ -3462,6 +3552,7 @@ class TelegramOperatorCommandRouter:
         workflow_id: str,
         *,
         attempt: int,
+        phase: str = "funding",
     ) -> SignalRunSummary:
         """Create this request's child run, or return the one it already has.
 
@@ -3469,7 +3560,9 @@ class TelegramOperatorCommandRouter:
         lets a resumed attempt land here a second time without building a
         second signal package: run_signal() looks up the child by
         source_request_id before doing any work, inside the same lock it
-        would use to create one.
+        would use to create one. ``phase`` defaults to "funding" so the
+        existing funding call sites and tests need no change; the budget
+        path passes "budget" explicitly.
         """
         signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
         return MaestroOrchestrator(
@@ -3480,7 +3573,7 @@ class TelegramOperatorCommandRouter:
             contribution_override=True,
             source_request_id=str(request["request_id"]),
             source_workflow_id=workflow_id,
-            source_phase="funding",
+            source_phase=phase,
         )
 
     def _record_account_cash_flow_from_funding_request(
@@ -3975,34 +4068,48 @@ class TelegramOperatorCommandRouter:
                 return payload
         return None
 
-    def _save_budget_decision(
+    def _cancel_budget_request(
         self,
         request: dict[str, Any],
-        status: str,
+        *,
         user_id: int,
         username: str | None,
-        *,
-        selected_budget: float | None = None,
+        attempt: int = 1,
     ) -> None:
-        payload = {
-            "request_id": request.get("request_id"),
-            "status": status,
-            "strategy_ids": list(request.get("strategy_ids") or []),
-            "contribution_group_id": request.get("contribution_group_id"),
-            "account_id": request.get("account_id"),
-            "execution_sleeve": request.get("execution_sleeve"),
-            "currency": request.get("currency"),
-            "month_key": request.get("month_key"),
-            "decided_by": username or str(user_id),
-        }
-        if selected_budget is not None:
-            payload["selected_budget"] = selected_budget
-        save_audited_system_event(
+        """Mirrors ``_cancel_funding_request``: cancel is a terminal
+        transition too, so it goes through claim-then-complete rather than
+        writing the legacy decision on its own.
+        """
+        workflow_id = workflow_id_from_request(request)
+        request_id = str(request["request_id"])
+        claim = claim_workflow_attempt(
             self.store,
-            self.audit,
             new_run_id(),
-            "contribution_budget_request_decision",
-            payload,
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="budget",
+            attempt=attempt,
+        )
+        if not claim["claimed"]:
+            raise WorkflowClaimRefused(str(claim["reason"]))
+        complete_workflow(
+            self.store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="budget",
+            attempt=attempt,
+            legacy_payload={
+                "request_id": request_id,
+                "status": "canceled",
+                "strategy_ids": list(request.get("strategy_ids") or []),
+                "contribution_group_id": request.get("contribution_group_id"),
+                "account_id": request.get("account_id"),
+                "execution_sleeve": request.get("execution_sleeve"),
+                "currency": request.get("currency"),
+                "month_key": request.get("month_key"),
+                "decided_by": username or str(user_id),
+            },
         )
 
     def _load_pending_funding_request(self, request_id: str) -> dict[str, Any] | None:
@@ -5214,7 +5321,9 @@ def _daily_card_stage(group_stages: list[str]) -> str:
     return "pending"
 
 
-def _funding_claim_refusal_response(reason: str) -> tuple[str, str]:
+def _funding_claim_refusal_response(
+    reason: str, *, request_noun: str = "funding"
+) -> tuple[str, str]:
     """Map a claim refusal reason to operator-facing text and an audit status.
 
     ``already_claimed`` means an earlier attempt on this exact request
@@ -5224,15 +5333,19 @@ def _funding_claim_refusal_response(reason: str) -> tuple[str, str]:
     normal, harmless outcome. Conflating the two would tell an operator
     retrying a genuinely stuck request that it was "already processed",
     which is false and would stop them from investigating.
+
+    ``request_noun`` is phase-agnostic wording only ("funding" vs "budget");
+    the claim/complete plumbing this describes is identical for both phases,
+    so this helper is shared rather than duplicated per phase.
     """
     if reason == "already_claimed":
         return (
-            "This funding request is already being processed -- an earlier "
+            f"This {request_noun} request is already being processed -- an earlier "
             "attempt did not finish. Check its status before tapping again.",
             "claim_in_flight",
         )
     return (
-        "This funding request was already processed or superseded.",
+        f"This {request_noun} request was already processed or superseded.",
         "claim_superseded",
     )
 

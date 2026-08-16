@@ -911,9 +911,14 @@ def test_telegram_operator_funding_callback_rejects_unauthorized_user(tmp_path):
 def test_telegram_operator_budget_callback_records_selected_budget(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    store.save_system_event(
+    # Confirming a budget request now claims a workflow head before doing
+    # anything else (Task 9, mirroring Task 8's funding fix):
+    # publish_contribution_request is what production signal generation
+    # already calls to create one, so the fixture has to do the same instead
+    # of writing the bare legacy event directly.
+    publish_contribution_request(
+        store,
         "signal_old",
-        "contribution_budget_request",
         {
             "request_id": "budget_req_1",
             "source_signal_run_id": "signal_old",
@@ -928,6 +933,7 @@ def test_telegram_operator_budget_callback_records_selected_budget(tmp_path):
             "month_key": "2026-06",
             "status": "pending",
         },
+        phase="budget",
     )
     client = FakeTelegramClient()
     router = TelegramOperatorCommandRouter(
@@ -950,9 +956,11 @@ def test_telegram_operator_budget_callback_records_selected_budget(tmp_path):
 def test_telegram_operator_budget_callback_accepts_legacy_select_format(tmp_path):
     config = load_config(_telegram_config_path(tmp_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    store.save_system_event(
+    # See test_telegram_operator_budget_callback_records_selected_budget: a
+    # bare legacy event has no workflow head, so the claim would refuse it.
+    publish_contribution_request(
+        store,
         "signal_old",
-        "contribution_budget_request",
         {
             "request_id": "budget_req_1",
             "source_signal_run_id": "signal_old",
@@ -967,6 +975,7 @@ def test_telegram_operator_budget_callback_accepts_legacy_select_format(tmp_path
             "month_key": "2026-06",
             "status": "pending",
         },
+        phase="budget",
     )
     client = FakeTelegramClient()
     router = TelegramOperatorCommandRouter(

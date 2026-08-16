@@ -233,6 +233,7 @@ def claim_workflow_attempt(
     phase: str,
     attempt: int = 1,
     expected_version: int | None = None,
+    extra: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """이 요청이 이 전이에 진입해도 되는지를 원자적으로 결정한다.
 
@@ -254,19 +255,28 @@ def claim_workflow_attempt(
             "attempt": attempt,
             "head_version": int(head.get("version") or 0),
         }
+    claim_payload = {
+        "duplicate_key": claim_key(workflow_id, phase, request_id, attempt),
+        "workflow_id": workflow_id,
+        "request_id": request_id,
+        "phase": phase,
+        "attempt": attempt,
+        "head_version": version,
+    }
+    if extra:
+        # Lets a resumed attempt (Task 10) reuse the operator's original
+        # input -- e.g. the selected budget amount -- without asking again.
+        # duplicate_key must identify the claim's content, so only
+        # deterministic values may ride along here: never a timestamp or a
+        # random id, or a legitimate retry would fail to replay byte-for-byte
+        # and would be mistaken for a conflicting overlap instead.
+        claim_payload.update(dict(extra))
     outcome = store.save_system_events_atomic(
         run_id,
         [
             {
                 "event_type": "funding_workflow_claim",
-                "payload": {
-                    "duplicate_key": claim_key(workflow_id, phase, request_id, attempt),
-                    "workflow_id": workflow_id,
-                    "request_id": request_id,
-                    "phase": phase,
-                    "attempt": attempt,
-                    "head_version": version,
-                },
+                "payload": claim_payload,
             }
         ],
         require_duplicate_keys=(head_key(workflow_id, version),),

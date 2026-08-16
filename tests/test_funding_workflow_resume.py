@@ -251,6 +251,28 @@ def _workflow_id_of(request_id: str) -> str:
     return workflow_id_from_request(_request(request_id))
 
 
+def _budget_request(request_id: str) -> dict[str, Any]:
+    # Mirrors the field set build_contribution_budget_request produces
+    # (src/maestro/execution/budget_requests.py), not the funding shape:
+    # validate_selected_budget and selected_budget_from_request read
+    # min_monthly_budget/recommended_budget/selectable_max_budget.
+    return {
+        "request_id": request_id,
+        "source_signal_run_id": "signal-old",
+        "contribution_group_id": "core",
+        "account_id": "paper_cash",
+        "execution_sleeve": "krw_contribution",
+        "currency": "KRW",
+        "available_cash": 2_000_000.0,
+        "min_monthly_budget": 200_000.0,
+        "recommended_budget": 400_000.0,
+        "selectable_max_budget": 1_000_000.0,
+        "month_key": "2026-08",
+        "status": "pending",
+        "strategy_ids": ["tranquillo"],
+    }
+
+
 def test_a_confirmed_funding_request_records_claim_child_and_completed(operator_bot):
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
@@ -476,3 +498,59 @@ def test_the_cancel_branch_answers_the_callback_on_a_generic_error(operator_bot,
     assert "Funding cancellation failed" in text
     assert "boom" in text
     assert _funding_cancel_statuses(store) == ["failed"]
+
+
+def test_a_budget_decision_alone_does_not_close_the_workflow(operator_bot, monkeypatch):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(operator_bot, "_run_child_signal", boom)
+    with pytest.raises(RuntimeError, match="config load failed"):
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=500000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+    # The workflow must still be recoverable: no terminal event was written.
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert (
+        store.list_system_events_by_type("contribution_budget_request_decision", limit=None) == []
+    )
+    # But the claim did land, carrying the amount for a future resume.
+    claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    assert claims[0]["payload"]["selected_budget"] == 500000.0
+
+
+def test_a_completed_budget_workflow_writes_the_legacy_decision(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+    operator_bot._confirm_budget_request(
+        _budget_request("req-1"), selected_budget=500000.0, chat_id=1, user_id=2, username="op"
+    )
+    decisions = store.list_system_events_by_type(
+        "contribution_budget_request_decision", limit=None
+    )
+    assert decisions[0]["payload"]["selected_budget"] == 500000.0
+    assert operator_bot._load_pending_budget_request("req-1") is None
+
+
+def test_resuming_a_budget_workflow_reuses_the_stored_amount(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+    operator_bot._confirm_budget_request(
+        _budget_request("req-1"),
+        selected_budget=500000.0,
+        chat_id=1,
+        user_id=2,
+        username="op",
+        attempt=1,
+    )
+    # list_system_events_by_type orders newest-first (ORDER BY id DESC); this
+    # request only ever gets one claim (attempt=1), so index 0 is it.
+    claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    assert claims[0]["payload"]["selected_budget"] == 500000.0
