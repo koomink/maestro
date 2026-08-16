@@ -271,6 +271,38 @@ cd /home/symphony/maestro
 - **재개 backoff·스냅샷 재채택 (이월 2번)** 과 **G1~G3 위생 항목 (이월 3·4번:
   아웃박스 상한, 도달 불가 채팅 이벤트 증식, dedup `IntegrityError`,
   `str(None)` 키)** — 이번 범위 밖. 3a-3 후속 웨이브로 남긴다.
+- **재개 시 capacity 필터가 이미 배달된 그룹을 조용히 지우는 문제 (이월 5번,
+  2026-08-16 적대적 리뷰)** — 3a-3 후속 웨이브. Task 2는 "재개 시 검증을 그대로
+  다시 실행한다"고 정하면서 `_validate_signal_broker_baseline`·readonly
+  preflight·`_validate_signal_approval_gates`를 열거했는데, **전부 실패 시
+  raise하는** 검증이다. sweep이 시도 예산으로 받아 ⚠️ 알림으로 넘기므로 아무것도
+  유실되지 않는다. 그런데 `_partition_orders_by_capacity`
+  (`orchestrator.py:978`)는 그 목록에 없고 **유일하게 조용히 거른다** — 그리고
+  그룹 루프보다 **먼저** 돈다. 그래서 중단 전에 카드가 이미 나간 그룹이라도
+  재개 시점에 capacity에 걸리면 루프에 닿지 못하고 재검토되지 않는다. 전부
+  걸리면 `signal_approval_completed / capacity_blocked / orders_created=0`을
+  쓰고 반환하며(`orchestrator.py:984-1004`), 그 순간 `signal_dispatch_settled`가
+  참이 되어 `list_incomplete_signal_dispatches`에서 빠진다 — 다시는 재개되지
+  않는다. 일부만 걸리면 기록된 `approval_count`·`approval_statuses`가 그 그룹을
+  누락한다.
+
+  **남는 결함은 집행이 아니라 기록 불일치다.** 방치된 카드를 눌러도 승인
+  시점에 capacity를 다시 검사해 거부하고(`orchestrator.py:332-339`),
+  `signal_max_age_seconds`(`orchestrator.py:2050-2057`)와 만료 스윕
+  (`handlers.py:2253-2262`)이 더 있다. 실제 집행까지 가려면 중단 → capacity
+  차단 → 재회복 → 만료·신선도 이내 승인이 모두 겹쳐야 하고, 그 조건이면 그
+  시점 게이트를 통과한 주문이므로 집행 자체는 오히려 맞다. 문제는 살아 있는
+  승인 카드가 있는데 시그널은 "차단됨, 생성 0"으로 종결 기록된다는 것이다.
+
+  **아래 3a-5 항목과 정면으로 충돌한다**: 이 계획은
+  "consumed-without-dispatch-completion"이 3a-5 preflight에서 조회 가능해진다고
+  적었지만, 이 경로는 `signal_approval_completed`를 쓰므로 **정확히 그 preflight에
+  잡히지 않는다.**
+
+  고칠 방향에는 판단이 필요하다 — 누락된 그룹을 계속 배달할 것인가, 아니면
+  원자적으로 종결 거부하고 카드를 무력화한 뒤 settled를 기록할 것인가. 그래서
+  착수 시 별도 소규모 계획서로 뺀다. 재현 테스트(첫 카드 이후 중단 →
+  capacity가 전부/일부를 막도록 바꾼 뒤 sweep)가 먼저다.
 - **funding/budget workflow head·CAS** — 3a-4.
 - **업그레이드 backfill·전체 롤백 preflight CLI** — 3a-5. 다만 이 계획이
   `signal_approval_pending`을 실제 완료 표지로 만들므로,
