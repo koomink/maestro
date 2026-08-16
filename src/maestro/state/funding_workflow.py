@@ -100,6 +100,21 @@ _REQUEST_EVENT = {
     "budget": "contribution_budget_request",
 }
 
+# The pre-CAS handler (_load_pending_funding_request in
+# telegram/handlers.py) decides a request is finished by looking for one of
+# these legacy event types, never funding_workflow_completed. Exported (not
+# underscore-prefixed) because stage 3a-5's upgrade backfill needs the same
+# phase->event mapping to interpret history written before this module
+# existed.
+LEGACY_TERMINAL_EVENT = {
+    "funding": "contribution_funding_request_ack",
+    "budget": "contribution_budget_request_decision",
+}
+_LEGACY_TERMINAL_KEY_PREFIX = {
+    "funding": "funding-ack",
+    "budget": "budget-decision",
+}
+
 
 def _require_phase(phase: str) -> str:
     if phase not in PHASES:
@@ -254,11 +269,61 @@ def claim_workflow_attempt(
     return {"claimed": False, "reason": reason, "attempt": attempt, "head_version": version}
 
 
+def complete_workflow(
+    store: StateStore,
+    run_id: str,
+    *,
+    workflow_id: str,
+    request_id: str,
+    phase: str,
+    attempt: int,
+    legacy_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Close out the transition and, in the same batch, write its legacy twin.
+
+    The pre-CAS handler never learns about ``funding_workflow_completed`` --
+    it only recognizes the legacy ack/decision event. If ``completed`` landed
+    on its own and a rollback followed, that old handler would still see the
+    request as pending, and would call ``run_signal()`` and re-record the
+    cash flow a second time. Writing both in one ``save_system_events_atomic``
+    call means either a rollback sees neither (still pending, correctly) or
+    both (finished, correctly) -- never the split state that makes the old
+    code re-run work that already happened.
+
+    ``legacy_payload`` must carry no timestamp or other non-deterministic
+    field: its ``duplicate_key`` is derived only from ``request_id`` and
+    ``phase``, so a legitimate retry has to reproduce byte-identical content
+    to be recognized as a replay rather than fail as a conflicting overlap.
+    """
+    _require_phase(phase)
+    legacy = dict(legacy_payload)
+    legacy["duplicate_key"] = f"{_LEGACY_TERMINAL_KEY_PREFIX[phase]}:{request_id}"
+    outcome = store.save_system_events_atomic(
+        run_id,
+        [
+            {
+                "event_type": "funding_workflow_completed",
+                "payload": {
+                    "duplicate_key": completed_key(workflow_id, request_id, phase),
+                    "workflow_id": workflow_id,
+                    "request_id": request_id,
+                    "phase": phase,
+                    "attempt": attempt,
+                },
+            },
+            {"event_type": LEGACY_TERMINAL_EVENT[phase], "payload": legacy},
+        ],
+    )
+    return {"committed": bool(outcome["committed"]), "conflict": outcome["conflict"]}
+
+
 __all__ = [
+    "LEGACY_TERMINAL_EVENT",
     "PHASES",
     "child_key",
     "claim_key",
     "claim_workflow_attempt",
+    "complete_workflow",
     "completed_key",
     "funding_workflow_id",
     "head_key",

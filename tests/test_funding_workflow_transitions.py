@@ -3,6 +3,7 @@ import pytest
 from maestro.state.funding_workflow import (
     child_key,
     claim_workflow_attempt,
+    complete_workflow,
     head_key,
     load_workflow_child,
     publish_contribution_request,
@@ -233,3 +234,88 @@ def test_a_child_pointing_at_a_missing_package_fails_loudly(funding_orchestrator
             source_workflow_id="wf-a",
             source_phase="funding",
         )
+
+
+def test_completing_a_funding_workflow_also_writes_the_legacy_ack(tmp_path):
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    result = complete_workflow(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed", "decided_by": "op"},
+    )
+    assert result["committed"] is True
+    acks = store.list_system_events_by_type("contribution_funding_request_ack", limit=None)
+    assert [row["payload"]["request_id"] for row in acks] == ["req-1"]
+
+
+def test_the_completed_event_and_the_legacy_ack_land_together(tmp_path):
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    complete_workflow(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed", "decided_by": "op"},
+    )
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    acks = store.list_system_events_by_type("contribution_funding_request_ack", limit=None)
+    assert len(completed) == len(acks) == 1
+
+
+def test_a_budget_workflow_dual_writes_the_decision_event(tmp_path):
+    store = _store(tmp_path)
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="budget"
+    )["workflow_id"]
+    complete_workflow(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="budget",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "selected", "selected_budget": 500000.0},
+    )
+    decisions = store.list_system_events_by_type(
+        "contribution_budget_request_decision", limit=None
+    )
+    assert decisions[0]["payload"]["selected_budget"] == 500000.0
+
+
+def test_completing_twice_is_an_idempotent_replay(tmp_path):
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    payload = {"request_id": "req-1", "status": "confirmed", "decided_by": "op"}
+    complete_workflow(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload=payload,
+    )
+    again = complete_workflow(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload=payload,
+    )
+    assert again["committed"] is False
+    assert again["conflict"] == "already_committed"
+    acks = store.list_system_events_by_type("contribution_funding_request_ack", limit=None)
+    assert len(acks) == 1
