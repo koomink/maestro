@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from maestro.config.loader import load_config
+from maestro.core.ids import new_run_id
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.sdk import (
@@ -30,6 +31,7 @@ from maestro.sdk import (
 )
 from maestro.state.funding_workflow import (
     WorkflowClaimRefused,
+    claim_workflow_attempt,
     load_workflow_child,
     publish_contribution_request,
     workflow_id_from_request,
@@ -78,6 +80,8 @@ class _FundingWorkflowStrategy(BaseStrategyPlugin):
 class FakeTelegramClient:
     def __init__(self) -> None:
         self.sent_messages: list[dict] = []
+        self.answered_callbacks: list[dict] = []
+        self.edited_messages: list[dict] = []
 
     def send_message(self, chat_id, text, reply_markup=None):
         self.sent_messages.append({"chat_id": chat_id, "text": text})
@@ -87,10 +91,34 @@ class FakeTelegramClient:
         return {"ok": True, "result": []}
 
     def answer_callback_query(self, callback_query_id, text=""):
+        self.answered_callbacks.append({"callback_query_id": callback_query_id, "text": text})
         return {"ok": True}
 
     def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+        self.edited_messages.append({"chat_id": chat_id, "message_id": message_id, "text": text})
         return {"ok": True}
+
+
+def callback_update(
+    data: str,
+    *,
+    update_id: int = 2,
+    chat_id: int = 100,
+    user_id: int = 100,
+) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "callback_query": {
+            "id": f"callback-{update_id}",
+            "data": data,
+            "message": {
+                "chat": {"id": chat_id},
+                "message_id": 10,
+                "text": "Confirm operator command",
+            },
+            "from": {"id": user_id, "username": "operator"},
+        },
+    }
 
 
 def _readonly_config_path(tmp_path) -> Path:
@@ -360,3 +388,91 @@ def test_the_cash_flow_record_is_not_duplicated_on_resume(operator_bot):
 
     flows = store.list_system_events_by_type("account_cash_flow", limit=None)
     assert len(flows) == 1
+
+
+def _funding_complete_statuses(store) -> list[str]:
+    return [
+        row["payload"]["status"]
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+        if row["payload"].get("command") == "/funding_complete"
+    ]
+
+
+def _funding_cancel_statuses(store) -> list[str]:
+    return [
+        row["payload"]["status"]
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+        if row["payload"].get("command") == "/funding_cancel"
+    ]
+
+
+def test_a_retry_after_a_stuck_claim_reports_in_flight_not_superseded(operator_bot):
+    """Fix round 1, finding 1+2.
+
+    The router always claims at attempt=1 (no resume mechanism yet -- that's
+    Task 10), so a claim that commits and is then followed by a failure
+    (exactly what test_telegram_operator_funding_complete_fails_when_readonly_refresh_fails
+    exercises) leaves a claim on record. Retrying must not tell the operator
+    the request was "already processed or superseded" -- it wasn't processed,
+    it's stuck -- so the message and audit status have to say "in flight",
+    not "superseded".
+    """
+    store = operator_bot.store
+    request = _request("req-1")
+    publish_contribution_request(store, "run-1", request, phase="funding")
+    workflow_id = workflow_id_from_request(request)
+    claim = claim_workflow_attempt(
+        store,
+        new_run_id(),
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+    )
+    assert claim["claimed"]
+
+    assert operator_bot.process_update(callback_update("operator:funding:complete:req-1"))
+
+    text = operator_bot.client.edited_messages[-1]["text"]
+    assert "already being processed" in text
+    assert "superseded" not in text
+    assert _funding_complete_statuses(store) == ["claim_in_flight"]
+
+
+def test_a_retry_of_a_genuinely_superseded_request_still_reports_superseded(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+
+    assert operator_bot.process_update(callback_update("operator:funding:complete:req-1"))
+
+    text = operator_bot.client.edited_messages[-1]["text"]
+    assert "already processed or superseded" in text
+    assert _funding_complete_statuses(store) == ["claim_superseded"]
+
+
+def test_the_cancel_branch_answers_the_callback_on_a_generic_error(operator_bot, monkeypatch):
+    """Fix round 1, finding 3.
+
+    Before this fix, _process_funding_callback's cancel branch caught only
+    WorkflowClaimRefused; any other exception (e.g. a ValueError raised by
+    workflow_id_from_request on a malformed month_key, or a complete_workflow
+    content mismatch) escaped uncaught and would leave the callback
+    unanswered instead of reporting a failure to the operator.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+
+    def failing_cancel(request, *, user_id, username, attempt=1):
+        del request, user_id, username, attempt
+        raise ValueError("boom")
+
+    monkeypatch.setattr(operator_bot, "_cancel_funding_request", failing_cancel)
+
+    assert operator_bot.process_update(callback_update("operator:funding:cancel:req-1"))
+
+    assert operator_bot.client.answered_callbacks[-1]["text"] == "Funding cancellation failed."
+    text = operator_bot.client.edited_messages[-1]["text"]
+    assert "Funding cancellation failed" in text
+    assert "boom" in text
+    assert _funding_cancel_statuses(store) == ["failed"]

@@ -3085,9 +3085,22 @@ class TelegramOperatorCommandRouter:
         if transition == "cancel":
             try:
                 self._cancel_funding_request(request, user_id=user_id, username=username)
-            except WorkflowClaimRefused:
-                self._answer(callback, "This funding request was already processed.")
-                self._record("/funding_cancel", chat_id, user_id, username, "claim_refused")
+            except WorkflowClaimRefused as exc:
+                answer_text, status = _funding_claim_refusal_response(exc.reason)
+                self._answer(callback, answer_text)
+                self._record("/funding_cancel", chat_id, user_id, username, status)
+                return True
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                self._answer(callback, "Funding cancellation failed.")
+                text = "\n".join(
+                    [
+                        "Funding cancellation failed",
+                        f"request_id: {request_id}",
+                        f"message: {exc}",
+                    ]
+                )
+                self._record("/funding_cancel", chat_id, user_id, username, "failed")
+                self._edit_callback_message(callback, text)
                 return True
             self._answer(callback, "Funding request canceled.")
             self._edit_callback_message(callback, "Funding request canceled.")
@@ -3101,18 +3114,25 @@ class TelegramOperatorCommandRouter:
                 user_id=user_id,
                 username=username,
             )
-        except WorkflowClaimRefused:
-            # The claim (not run_signal or the ack write) is what refuses this:
-            # a duplicate callback or one superseded by a newer request never
-            # reaches cash-flow recording or run_signal() in the first place.
+        except WorkflowClaimRefused as exc:
+            # The claim (not run_signal or the ack write) is what refuses this,
+            # and exc.reason says which of two very different situations this
+            # is: "not_head"/"no_head"/"head_moved" means a newer request
+            # replaced this one -- nothing is wrong. "already_claimed" means an
+            # earlier attempt on *this* request claimed and never finished
+            # (e.g. it died between the claim and the ack, the scenario this
+            # retry is walking into): the claim key already exists, so
+            # reporting "already processed" here would be false -- the
+            # request is stuck, not done, and a human needs to look at it
+            # rather than keep tapping the button.
+            confirm_text, status = _funding_claim_refusal_response(exc.reason)
             text = "\n".join(
                 [
-                    "Funding confirmation skipped",
+                    confirm_text,
                     f"request_id: {request_id}",
-                    "message: this request was already processed or superseded",
                 ]
             )
-            self._record("/funding_complete", chat_id, user_id, username, "claim_refused")
+            self._record("/funding_complete", chat_id, user_id, username, status)
         except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
             text = "\n".join(
                 [
@@ -4010,6 +4030,7 @@ class TelegramOperatorCommandRouter:
         *,
         user_id: int,
         username: str | None,
+        attempt: int = 1,
     ) -> None:
         """Cancel is a terminal transition too, so it goes through the same
         claim-then-complete shape as confirm: a canceled request still has to
@@ -4017,6 +4038,11 @@ class TelegramOperatorCommandRouter:
         ack still has to land in the same atomic batch as the workflow's own
         completed event, or a rollback would see a canceled request as still
         pending and let it be re-confirmed later.
+
+        ``attempt`` mirrors ``_confirm_funding_request``'s parameter of the
+        same name so a future resume mechanism (Task 10) can drive either
+        transition without another signature change; this task does not
+        build that mechanism, it only keeps the two transitions symmetric.
         """
         workflow_id = workflow_id_from_request(request)
         request_id = str(request["request_id"])
@@ -4026,7 +4052,7 @@ class TelegramOperatorCommandRouter:
             workflow_id=workflow_id,
             request_id=request_id,
             phase="funding",
-            attempt=1,
+            attempt=attempt,
         )
         if not claim["claimed"]:
             raise WorkflowClaimRefused(str(claim["reason"]))
@@ -4036,7 +4062,7 @@ class TelegramOperatorCommandRouter:
             workflow_id=workflow_id,
             request_id=request_id,
             phase="funding",
-            attempt=1,
+            attempt=attempt,
             legacy_payload={
                 "request_id": request_id,
                 "status": "canceled",
@@ -5186,6 +5212,29 @@ def _daily_card_stage(group_stages: list[str]) -> str:
     if any(stage == "in_progress" for stage in group_stages):
         return "in_progress"
     return "pending"
+
+
+def _funding_claim_refusal_response(reason: str) -> tuple[str, str]:
+    """Map a claim refusal reason to operator-facing text and an audit status.
+
+    ``already_claimed`` means an earlier attempt on this exact request
+    already committed a claim and never reached completion -- the request is
+    stuck, not done. Every other reason (``no_head``, ``not_head``,
+    ``head_moved``) means a newer request replaced this one, which is a
+    normal, harmless outcome. Conflating the two would tell an operator
+    retrying a genuinely stuck request that it was "already processed",
+    which is false and would stop them from investigating.
+    """
+    if reason == "already_claimed":
+        return (
+            "This funding request is already being processed -- an earlier "
+            "attempt did not finish. Check its status before tapping again.",
+            "claim_in_flight",
+        )
+    return (
+        "This funding request was already processed or superseded.",
+        "claim_superseded",
+    )
 
 
 def _command_name(text: str) -> str:
