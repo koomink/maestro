@@ -2261,6 +2261,37 @@ class StateStore:
             output.append(item)
         return output
 
+    def load_funding_workflow_head(self, workflow_id: str) -> dict[str, Any] | None:
+        """이 워크플로우의 현재 활성 요청. 없으면 None.
+
+        head는 버전마다 새 행이므로 "최신"은 id가 아니라 version으로
+        판정한다 — 다른 워크플로우의 head가 사이에 끼어들어도, 백필이
+        옛 버전을 나중에 써도 결과가 달라지지 않는다.
+        """
+        best: dict[str, Any] | None = None
+        for row in self.list_system_events_by_type("funding_workflow_head", limit=None):
+            payload = row.get("payload") or {}
+            if payload.get("workflow_id") != workflow_id:
+                continue
+            if best is None or int(payload.get("version") or 0) > int(best.get("version") or 0):
+                best = dict(payload)
+        return best
+
+    def list_funding_workflow_heads(self) -> list[dict[str, Any]]:
+        """워크플로우별 최신 head 목록. 수렴 sweep과 backfill이 쓴다."""
+        latest: dict[str, dict[str, Any]] = {}
+        for row in self.list_system_events_by_type("funding_workflow_head", limit=None):
+            payload = row.get("payload") or {}
+            workflow_id = payload.get("workflow_id")
+            if not workflow_id:
+                continue
+            current = latest.get(str(workflow_id))
+            if current is None or int(payload.get("version") or 0) > int(
+                current.get("version") or 0
+            ):
+                latest[str(workflow_id)] = dict(payload)
+        return list(latest.values())
+
     def list_system_events_in_range(
         self,
         event_type: str,
