@@ -1,10 +1,10 @@
 import pytest
 import yaml
+from contribution_fixtures import _multi_account_config, _multi_account_raw
 from pydantic import ValidationError
 
 from maestro.config.loader import load_config
 from maestro.core.clock import utc_now
-from tests.contribution_fixtures import _multi_account_config, _multi_account_raw
 
 
 def test_multi_account_contribution_config_loads_group(tmp_path):

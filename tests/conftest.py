@@ -138,9 +138,10 @@ def funding_orchestrator(tmp_path):
     the one scenario that yields exactly one contribution_funding_request.
     Callers override the kwargs for the budget-request and fee-buffer variants.
     """
+    from contribution_fixtures import _multi_account_config, _save_account_snapshot
+
     from maestro.orchestration.orchestrator import MaestroOrchestrator
     from maestro.state.store import StateStore
-    from tests.contribution_fixtures import _multi_account_config, _save_account_snapshot
 
     def build(
         *,
