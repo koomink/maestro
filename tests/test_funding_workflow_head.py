@@ -160,3 +160,16 @@ def test_an_unknown_phase_is_refused(tmp_path):
     store = _store(tmp_path)
     with pytest.raises(ValueError, match="phase"):
         publish_contribution_request(store, "run-1", _request("req-1"), phase="rebate")
+
+
+def test_a_signal_run_that_asks_for_funding_also_publishes_a_head(funding_orchestrator):
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+
+    orchestrator.run_signal(strategy_ids=["tranquillo"])
+
+    requests = store.list_system_events_by_type("contribution_funding_request", limit=None)
+    assert len(requests) == 1
+    payload = requests[0]["payload"]
+    head = store.load_funding_workflow_head(payload["funding_workflow_id"])
+    assert head["request_id"] == payload["request_id"]
+    assert head["version"] == 1

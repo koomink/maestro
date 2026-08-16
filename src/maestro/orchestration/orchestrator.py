@@ -128,6 +128,7 @@ from maestro.sdk import (
 from maestro.signals.converter import normalize_strategy_result
 from maestro.signals.validator import SignalValidator
 from maestro.state.events import SystemEventType, save_audited_system_event
+from maestro.state.funding_workflow import publish_contribution_request
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 from maestro.universe.dynamic import DynamicUniverseService, InstrumentResolver
@@ -669,17 +670,9 @@ class MaestroOrchestrator:
         self.state_store.save_signal_package(signal_run_id, payload)
         self.audit.log(signal_run_id, "signal_package", payload)
         for request in funding_requests:
-            self._record_event(
-                signal_run_id,
-                "contribution_funding_request",
-                request.model_dump(mode="json"),
-            )
+            self._publish_contribution_request(signal_run_id, request, phase="funding")
         for request in budget_requests:
-            self._record_event(
-                signal_run_id,
-                "contribution_budget_request",
-                request.model_dump(mode="json"),
-            )
+            self._publish_contribution_request(signal_run_id, request, phase="budget")
         self.state_store.save_system_event(
             signal_run_id,
             "signal_run_completed",
@@ -1734,6 +1727,40 @@ class MaestroOrchestrator:
         payload: dict[str, Any],
     ) -> None:
         save_audited_system_event(self.state_store, self.audit, run_id, event_type, payload)
+
+    def _publish_contribution_request(
+        self,
+        signal_run_id: str,
+        request: Any,
+        *,
+        phase: str,
+    ) -> None:
+        """Record the request and its workflow head as one transaction.
+
+        Losing the head CAS means another run already established the active
+        request for this scope and month. This run's request is not saved at
+        all: a request with no head pointing at it is exactly the orphan the
+        workflow head exists to prevent, and the convergence sweep would
+        later have to guess whether it was ever meant to be live.
+        """
+        payload = request.model_dump(mode="json")
+        outcome = publish_contribution_request(
+            self.state_store, signal_run_id, payload, phase=phase
+        )
+        if outcome["committed"]:
+            self.audit.log(signal_run_id, f"contribution_{phase}_request", payload)
+            return
+        self.audit.log(
+            signal_run_id,
+            "funding_workflow_head_conflict",
+            {
+                "signal_run_id": signal_run_id,
+                "workflow_id": outcome["workflow_id"],
+                "request_id": payload.get("request_id"),
+                "phase": phase,
+                "conflict": outcome["conflict"],
+            },
+        )
 
     def _record_run_provenance(
         self,

@@ -128,3 +128,39 @@ _patch_starlette_testclient_anyio_portal_deadlock()
 @pytest.fixture(autouse=True)
 def _isolate_default_operator_env_file(monkeypatch, tmp_path):
     monkeypatch.setenv("MAESTRO_ENV_FILE", str(tmp_path / "missing_maestro.env"))
+
+
+@pytest.fixture
+def funding_orchestrator(tmp_path):
+    """Build an orchestrator whose run_signal() emits a contribution funding request.
+
+    Defaults put the ISA sleeve's cash below its min_monthly_budget, which is
+    the one scenario that yields exactly one contribution_funding_request.
+    Callers override the kwargs for the budget-request and fee-buffer variants.
+    """
+    from maestro.orchestration.orchestrator import MaestroOrchestrator
+    from maestro.state.store import StateStore
+    from tests.contribution_fixtures import _multi_account_config, _save_account_snapshot
+
+    def build(
+        *,
+        isa_cash=1_000_000,
+        ps_cash=500_000,
+        isa_budget_request=False,
+        fee_buffer_pct=0.0,
+        isa_positions=None,
+        ps_positions=None,
+    ):
+        config = _multi_account_config(
+            tmp_path,
+            isa_cash=isa_cash,
+            ps_cash=ps_cash,
+            isa_budget_request=isa_budget_request,
+            fee_buffer_pct=fee_buffer_pct,
+        )
+        store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+        _save_account_snapshot(store, "kis_ps", cash=ps_cash, positions=ps_positions or [])
+        _save_account_snapshot(store, "kis_isa", cash=isa_cash, positions=isa_positions or [])
+        return MaestroOrchestrator(config), store
+
+    return build
