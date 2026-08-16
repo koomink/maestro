@@ -274,6 +274,28 @@ def test_settle_makes_rollback_preflight_safe(tmp_path):
     assert "status=safe unresolved=0" in after.stdout
 
 
+def test_settle_reports_a_batch_that_is_being_executed_right_now(tmp_path, monkeypatch):
+    """Settlement waits on live_order_lock, and a resume can be holding it.
+
+    The operator asked to close a batch the system is in the middle of
+    executing. A traceback tells them the command broke; what is true is that
+    the batch is moving under them and there is nothing to settle yet.
+    """
+    config_path = _config_path(tmp_path)
+    store = _seed(config_path)
+
+    def _busy(*args, **kwargs):
+        raise TimeoutError("Live order lock is busy: /tmp/state.db.live-order.lock")
+
+    monkeypatch.setattr("maestro.cli.settle_approval", _busy)
+
+    result = _settle(config_path, "--confirm", "SETTLE")
+
+    assert result.exit_code == 1
+    assert "status=busy" in result.stdout
+    assert _completed(store) == []
+
+
 # --- audit -----------------------------------------------------------------
 
 

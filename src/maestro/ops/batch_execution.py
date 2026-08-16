@@ -26,7 +26,6 @@ from pydantic import BaseModel
 from maestro.core.clock import utc_now
 from maestro.execution.live_order_tracking import TERMINAL_ORDER_STATUSES
 from maestro.monitoring.audit_logger import AuditLogger
-from maestro.state.events import save_audited_system_event
 from maestro.state.store import StateStore
 
 OrderOutcome = Literal[
@@ -192,6 +191,32 @@ def settle_approval(
     operator about; nothing executed here, so claiming an attempt would be
     false and would send exactly the wrong message.
     """
+    # live_order_lock outermost, then writer_lock under it: the agreed order,
+    # and both are needed. A resume executing this same approval submits its
+    # orders under live_order_lock, so holding it is the only thing that stops
+    # the evidence from changing between being read and being written down as
+    # this batch's final word -- settling from a snapshot taken while orders
+    # were going out records "not_sent" about orders that went out.
+    with store.live_order_lock("telegram_approval_settlement"):
+        with store.writer_lock("telegram_approval_settlement"):
+            return _settle_approval_locked(
+                store,
+                audit,
+                approval_id,
+                reason=reason,
+                reconciled_with_broker=reconciled_with_broker,
+            )
+
+
+def _settle_approval_locked(
+    store: StateStore,
+    audit: AuditLogger,
+    approval_id: str,
+    *,
+    reason: str,
+    reconciled_with_broker: bool,
+) -> BatchOutcome:
+    """The settlement decision itself. Callers hold both locks."""
     evidence = store.load_approval_execution_evidence(approval_id)
     ack = evidence["ack"]
     if ack is None:
@@ -218,7 +243,7 @@ def settle_approval(
         )
 
     envelope = evidence["envelope"] or {}
-    duplicate_key = f"telegram-approval-settled:{approval_id}"
+    run_id = str(envelope.get("run_id") or f"run_{approval_id}")
     payload = {
         "approval_id": approval_id,
         "signal_run_id": ack.get("signal_run_id") or envelope.get("signal_run_id"),
@@ -228,20 +253,14 @@ def settle_approval(
         "reconciled_with_broker": reconciled_with_broker,
         "outcome": outcome.model_dump(mode="json"),
         "settled_at": utc_now().isoformat(),
-        "duplicate_key": duplicate_key,
+        "duplicate_key": f"telegram-approval-settled:{approval_id}",
     }
-    # Same convention as the sibling records: check and write under one lock,
-    # so a concurrent settle loses the insert rather than the check.
-    with store.writer_lock("telegram_approval_settlement"):
-        if store.duplicate_key_exists(duplicate_key):
-            raise SettlementRefused("already_settled", f"{approval_id} is already closed")
-        save_audited_system_event(
-            store,
-            audit,
-            str(envelope.get("run_id") or f"run_{approval_id}"),
-            "telegram_approval_resolution_completed",
-            payload,
-        )
+    # Not a duplicate_key guard: the resume path keys its closure differently,
+    # so only a per-approval compare-and-set can see it.
+    _, created = store.insert_approval_resolution(run_id, payload)
+    if not created:
+        raise SettlementRefused("already_settled", f"{approval_id} is already closed")
+    audit.log(run_id, "telegram_approval_resolution_completed", payload)
     return outcome
 
 

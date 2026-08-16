@@ -1,15 +1,20 @@
 import sqlite3
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
 
-from maestro.approval.models import ApprovalRequest, PendingApprovalEnvelope
+from maestro.approval.models import (
+    ApprovalDecision,
+    ApprovalRequest,
+    PendingApprovalEnvelope,
+)
 from maestro.config.loader import load_config
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.monitoring.audit_logger import AuditLogger
-from maestro.orchestration.orchestrator import SignalApprovalSummary
+from maestro.orchestration.orchestrator import MaestroOrchestrator, SignalApprovalSummary
 from maestro.state.store import StateStore
 
 
@@ -178,6 +183,21 @@ def _save_completed(store, *, approval_id):
             "status": "approved",
             "attempt": 1,
             "duplicate_key": f"telegram-approval-completed:{approval_id}",
+        },
+    )
+
+
+def _save_settled(store, *, approval_id):
+    """An operator settlement: the same terminal event under a different key."""
+    store.save_system_event(
+        f"run_{approval_id}",
+        "telegram_approval_resolution_completed",
+        {
+            "approval_id": approval_id,
+            "status": "approved",
+            "settled_by": "operator",
+            "reason": "closed by hand",
+            "duplicate_key": f"telegram-approval-settled:{approval_id}",
         },
     )
 
@@ -869,25 +889,49 @@ def test_v2_ack_with_missing_pending_envelope_is_surfaced(tmp_path):
     assert notified == {"appr_orphan"}
 
 
-def test_record_resolution_completed_checks_and_writes_under_the_writer_lock(tmp_path):
-    """F5: 형제 기록들과 달리 락 밖에서 check-then-write 하면, 경합 시
-    IntegrityError가 **주문이 나간 뒤에** 터진다."""
+def test_recording_the_same_closure_again_is_idempotent_and_silent(tmp_path):
+    """F5: 종결 기록은 check-then-write 경합에서 IntegrityError를 **주문이 나간
+    뒤에** 터뜨리면 안 된다.
+
+    같은 재개가 기록 직후 죽었다가 다시 오는 것은 정상적인 멱등 재시도다.
+    다른 이야기가 끼어든 것이 아니므로 충돌로 신고해서도 안 된다.
+    """
     router, store = _router(tmp_path)
     envelope = _save_pending_envelope(store, approval_id="appr_1")
-    observed: list[bool] = []
-    original = store.duplicate_key_exists
-
-    def _spy(duplicate_key):
-        if duplicate_key.startswith("telegram-approval-completed:"):
-            observed.append(store.holds_writer_lock())
-        return original(duplicate_key)
-
-    store.duplicate_key_exists = _spy
-    router._resolve_async_approval(
-        envelope, status="approved", decided_by="telegram:tester", reason="test"
+    decision = ApprovalDecision(
+        approval_id=envelope.approval_id,
+        run_id=envelope.run_id,
+        status="approved",
+        decided_at=datetime.now(UTC),
+        decided_by="telegram:tester",
+        reason="test",
+    )
+    summary = SignalApprovalSummary(
+        signal_run_id=envelope.signal_run_id,
+        run_id=envelope.run_id,
+        orders_created=1,
+        orders_submitted=1,
+        approval_status="approved",
     )
 
-    assert observed == [True]
+    router._record_resolution_completed(envelope, decision, summary, attempt=2)
+    router._record_resolution_completed(envelope, decision, summary, attempt=2)
+
+    assert (
+        len(
+            store.list_system_events_by_type(
+                "telegram_approval_resolution_completed", limit=None
+            )
+        )
+        == 1
+    )
+    assert (
+        store.list_system_events_by_type(
+            "telegram_approval_resolution_conflict", limit=None
+        )
+        == []
+    )
+    assert router.client.sent_messages == []
 
 
 def test_resume_notice_is_retried_for_the_chat_that_failed(tmp_path):
@@ -1010,3 +1054,144 @@ def test_an_operator_settled_approval_gets_no_resume_notice(tmp_path):
         store.list_system_events_by_type("telegram_approval_resume_notice", limit=None)
         == []
     )
+
+
+# --- a settlement and a resume must not both close one approval ------------
+
+
+def test_an_approval_closed_by_an_operator_is_not_executed_by_a_resume(tmp_path):
+    """The window a settlement cannot close by holding locks alone.
+
+    A resume that already claimed its attempt is committed to executing. If a
+    settlement wins the terminal record while that resume is between its claim
+    and its orders, nothing downstream stops the orders from going out --
+    against a batch the operator has been told is closed, and is by now
+    replacing by hand. The check has to sit inside the execution path's own
+    lock, before it writes the approvals row that precedes submission.
+    """
+    config = load_config(_telegram_config_path(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    envelope = _save_pending_envelope(store, approval_id="appr_raced")
+    _save_settled(store, approval_id="appr_raced")
+    decision = ApprovalDecision(
+        approval_id=envelope.approval_id,
+        run_id=envelope.run_id,
+        status="approved",
+        decided_at=datetime.now(UTC),
+        decided_by="telegram:tester",
+        reason="Resumed from recorded approval decision.",
+    )
+
+    with pytest.raises(ValueError, match="already closed"):
+        MaestroOrchestrator(
+            config, telegram_client=FakeTelegramClient()
+        ).resolve_pending_signal_approval(envelope, decision)
+
+    # The approvals row is written before any order is submitted, so its
+    # absence is what says nothing went out.
+    assert store.approval_exists("appr_raced") is False
+
+
+def test_a_resume_does_not_write_a_second_closure_over_a_settlement(tmp_path):
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_raced")
+    _save_settled(store, approval_id="appr_raced")
+    decision = ApprovalDecision(
+        approval_id=envelope.approval_id,
+        run_id=envelope.run_id,
+        status="approved",
+        decided_at=datetime.now(UTC),
+        decided_by="telegram:tester",
+        reason="Resumed from recorded approval decision.",
+    )
+    summary = SignalApprovalSummary(
+        signal_run_id=envelope.signal_run_id,
+        run_id=envelope.run_id,
+        orders_created=1,
+        orders_submitted=1,
+        approval_status="approved",
+    )
+
+    router._record_resolution_completed(envelope, decision, summary, attempt=2)
+
+    resolutions = store.list_system_events_by_type(
+        "telegram_approval_resolution_completed", limit=None
+    )
+    assert len(resolutions) == 1
+    assert resolutions[0]["payload"]["settled_by"] == "operator"
+
+
+def test_a_resume_that_loses_to_a_settlement_does_not_lose_the_execution_quietly(tmp_path):
+    """Losing the terminal record does not un-submit the orders.
+
+    The settlement on record says the operator closed this batch by hand; the
+    resume that lost had just executed it. Returning quietly leaves the
+    operator acting on the first story while the second one is the true state
+    of their account.
+    """
+    router, store = _router(tmp_path)
+    envelope = _save_pending_envelope(store, approval_id="appr_raced")
+    _save_settled(store, approval_id="appr_raced")
+    decision = ApprovalDecision(
+        approval_id=envelope.approval_id,
+        run_id=envelope.run_id,
+        status="approved",
+        decided_at=datetime.now(UTC),
+        decided_by="telegram:tester",
+        reason="Resumed from recorded approval decision.",
+    )
+    summary = SignalApprovalSummary(
+        signal_run_id=envelope.signal_run_id,
+        run_id=envelope.run_id,
+        orders_created=1,
+        orders_submitted=1,
+        approval_status="approved",
+    )
+
+    router._record_resolution_completed(envelope, decision, summary, attempt=2)
+
+    conflicts = store.list_system_events_by_type(
+        "telegram_approval_resolution_conflict", limit=None
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0]["payload"]["approval_id"] == "appr_raced"
+    assert conflicts[0]["payload"]["orders_submitted"] == 1
+    # The operator hears about it in the terms that matter: orders may be at
+    # the broker for a batch they were told was closed.
+    assert router.client.sent_messages != []
+
+
+def test_a_resume_holds_the_live_order_lock_until_its_closure_is_recorded(tmp_path):
+    """Execution and its terminal record are one critical section.
+
+    Settlement holds live_order_lock while it reads the evidence and writes
+    its closure. If the resume drops that lock after submitting and before
+    recording, a settlement can slot in between and describe a batch whose
+    orders had just gone out.
+    """
+    router, store = _router(tmp_path)
+    _save_pending_envelope(store, approval_id="appr_held")
+    _save_ack(store, approval_id="appr_held", status="approved", schema_version=2)
+    refused: list[BaseException] = []
+    original = router._record_resolution_completed
+
+    def observing(*args, **kwargs):
+        def compete() -> None:
+            try:
+                # A separate thread means a separate fd, so this contends for
+                # the flock rather than re-entering it.
+                with store.live_order_lock("competing_settlement", timeout_seconds=0.3):
+                    pass
+            except BaseException as exc:  # noqa: BLE001 - asserted below
+                refused.append(exc)
+
+        thread = threading.Thread(target=compete)
+        thread.start()
+        thread.join(timeout=10)
+        return original(*args, **kwargs)
+
+    router._record_resolution_completed = observing
+    router._resume_unresolved_approvals()
+
+    assert len(refused) == 1
+    assert isinstance(refused[0], TimeoutError)

@@ -1686,6 +1686,12 @@ def approval_settle(
     except SettlementRefused as exc:
         typer.echo(f"approval_settle status=refused reason={exc}")
         raise typer.Exit(1) from exc
+    except TimeoutError as exc:
+        # 정산은 live_order_lock을 쥐고 증거를 읽는다. 그 락을 다른 쪽이 쥐고
+        # 있다는 것은 이 승인이 지금 집행되고 있을 수 있다는 뜻이므로, 지금은
+        # 종결할 대상 자체가 확정되지 않았다. 다시 시도하라고 말한다.
+        typer.echo(f"approval_settle status=busy reason={exc}")
+        raise typer.Exit(1) from exc
     counts = " ".join(f"{name}={count}" for name, count in sorted(outcome.counts.items()))
     typer.echo(f"approval_settle status=settled approval_id={approval_id} {counts}")
 

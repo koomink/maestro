@@ -310,6 +310,18 @@ class MaestroOrchestrator:
     ) -> SignalApprovalSummary:
         """Apply one terminal decision loaded by the long-running Telegram operator."""
         with self.state_store.live_order_lock("resolve_pending_signal_approval"):
+            if self.state_store.approval_resolution_exists(envelope.approval_id):
+                # Somebody already closed this approval -- in practice an
+                # operator settling a half-executed batch by hand. A resume
+                # that claimed its attempt before that settlement landed is
+                # otherwise committed to executing, and would send orders
+                # against a batch the operator has been told is closed and is
+                # by now replacing themselves. Read under the lock settlement
+                # also holds, and before save_approval, which is what precedes
+                # every submission.
+                raise ValueError(
+                    f"Approval {envelope.approval_id} is already closed; not executing"
+                )
             package = self.state_store.load_signal_package(envelope.signal_run_id)
             if package is None:
                 raise ValueError(f"Unknown signal_run_id: {envelope.signal_run_id}")

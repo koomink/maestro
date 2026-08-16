@@ -2344,6 +2344,77 @@ class StateStore:
                     return json.loads(stored[0]), False
                 return payload, True
 
+    def insert_approval_resolution(
+        self,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], bool]:
+        """Write this approval's one terminal resolution, or return the one on record.
+
+        Returns ``(payload, created)``.  When ``created`` is False the stored
+        resolution wins and the caller must continue with it.
+
+        Two paths close an approval: the resume path once it has executed, and
+        an operator settlement closing a half-executed batch by hand. They key
+        their rows differently -- ``telegram-approval-completed:`` and
+        ``telegram-approval-settled:`` -- so the unique index on
+        ``duplicate_key`` cannot see across them and each path's own guard
+        happily writes past the other's row. Readers take the newest
+        resolution for the approval, so a second row does not merely duplicate
+        a record: it replaces which account of the batch is authoritative, and
+        a settlement written from evidence gathered before a concurrent resume
+        says "nothing went out" about orders that did.
+
+        Uniqueness therefore has to be per approval rather than per key, and
+        the check has to share a transaction with the insert. ``writer_lock``
+        is an advisory flock that a recovery script, a process on a different
+        release, or the sqlite3 CLI has no reason to hold, so ``BEGIN
+        IMMEDIATE`` is what actually makes this a compare-and-set.
+        """
+        approval_id = str(payload["approval_id"])
+        payload_json = json.dumps(payload, default=str)
+        with self.writer_lock("insert_approval_resolution"):
+            with self._connect() as conn:
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                stored = conn.execute(
+                    "SELECT payload FROM system_events "
+                    "WHERE event_type = 'telegram_approval_resolution_completed' "
+                    "AND approval_id = ? ORDER BY id DESC LIMIT 1",
+                    (approval_id,),
+                ).fetchone()
+                if stored is not None:
+                    return json.loads(stored[0]), False
+                conn.execute(
+                    "INSERT INTO system_events "
+                    "(run_id, event_type, payload, duplicate_key) "
+                    "VALUES (?, ?, ?, ?)",
+                    (
+                        run_id,
+                        "telegram_approval_resolution_completed",
+                        payload_json,
+                        payload.get("duplicate_key"),
+                    ),
+                )
+                return payload, True
+
+    def approval_resolution_exists(self, approval_id: str) -> bool:
+        """Whether this approval already has a terminal resolution on record.
+
+        Read with no lock held, so a False can be stale the moment it returns.
+        It is a cheap pre-check for callers that must not begin work on an
+        approval somebody else has closed; the transition itself is still
+        decided by ``insert_approval_resolution``.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM system_events "
+                "WHERE event_type = 'telegram_approval_resolution_completed' "
+                "AND approval_id = ? LIMIT 1",
+                (approval_id,),
+            ).fetchone()
+        return row is not None
+
     def load_system_event_payload_by_duplicate_key(
         self, duplicate_key: str
     ) -> dict[str, Any] | None:
