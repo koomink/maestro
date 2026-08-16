@@ -105,37 +105,30 @@ def test_the_request_event_and_the_head_land_together_or_not_at_all(tmp_path):
     assert len(heads) == 1
 
 
-def test_two_publishers_racing_the_same_version_yield_exactly_one_commit(tmp_path):
-    import threading
-
+def test_a_publisher_working_from_a_stale_head_cannot_take_a_taken_version(tmp_path, monkeypatch):
     store = _store(tmp_path)
-    results: list[dict] = []
-    barrier = threading.Barrier(2)
+    first = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    workflow_id = first["workflow_id"]
+    # A rival advances the head to v2 in the window between our read and our write.
+    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    stale_view = {
+        "workflow_id": workflow_id,
+        "version": 1,
+        "request_id": "req-1",
+        "phase": "funding",
+        "status": "pending",
+    }
+    monkeypatch.setattr(store, "load_funding_workflow_head", lambda _workflow_id: stale_view)
 
-    def publish(request_id: str) -> None:
-        barrier.wait()
-        results.append(
-            publish_contribution_request(store, "run-1", _request(request_id), phase="funding")
-        )
+    result = publish_contribution_request(store, "run-3", _request("req-3"), phase="funding")
+    monkeypatch.undo()  # stop shadowing load_funding_workflow_head before reading the real head
 
-    threads = [
-        threading.Thread(target=publish, args=(request_id,))
-        for request_id in ("req-a", "req-b")
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    committed = [row for row in results if row["committed"]]
-    refused = [row for row in results if not row["committed"]]
-    assert len(committed) == 1
-    assert [row["conflict"] for row in refused] == ["precondition_present"]
-    head = store.load_funding_workflow_head(committed[0]["workflow_id"])
-    assert head["version"] == 1
-    # The loser must not leave a request event behind with nothing pointing at it.
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_present"
+    # The loser must leave nothing behind: no request event, no supersede marker.
     requests = store.list_system_events_by_type("contribution_funding_request", limit=None)
-    assert [row["payload"]["request_id"] for row in requests] == [head["request_id"]]
+    assert [row["payload"]["request_id"] for row in requests] == ["req-2", "req-1"]
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-2"
 
 
 def test_republishing_the_same_request_is_a_replay_not_a_new_version(tmp_path):
