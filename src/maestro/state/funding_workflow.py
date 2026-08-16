@@ -90,23 +90,6 @@ def _require_phase(phase: str) -> str:
     return phase
 
 
-def _count_published_requests(store: StateStore, workflow_id: str) -> int:
-    """이 워크플로우 앞으로 실제로 커밋된 요청 이벤트 수.
-
-    head row 개수가 아니라 이 값을 버전의 기준으로 삼는다: head는 요청
-    이벤트 없이도 (예: 복구 스크립트, 손상, 또는 이 함수를 우회한 어떤
-    경로에 의해) 존재할 수 있는 dangling row다. 그런 head의 version을
-    그대로 믿고 +1 하면 요청 이벤트가 없는 슬롯을 뛰어넘어버려서, 그
-    슬롯을 실제로 노리고 있던 다른 쓰기와의 충돌을 놓친다.
-    """
-    count = 0
-    for event_type in _REQUEST_EVENT.values():
-        for row in store.list_system_events_by_type(event_type, limit=None):
-            if (row.get("payload") or {}).get("funding_workflow_id") == workflow_id:
-                count += 1
-    return count
-
-
 def publish_contribution_request(
     store: StateStore,
     run_id: str,
@@ -125,15 +108,20 @@ def publish_contribution_request(
     request_id = str(request["request_id"])
     head = store.load_funding_workflow_head(workflow_id)
     previous_request_id = str(head.get("request_id") or "") if head else ""
-    published = _count_published_requests(store, workflow_id)
     # A resubmission of the request already at head is the same transition,
     # not a new one: target the same version so the batch matches byte for
     # byte what already landed and the atomic call reports a plain replay
-    # instead of a same-request partial overlap with itself.
+    # instead of a same-request partial overlap with itself. Any other case
+    # -- a new request, or a head that changed underneath us -- always
+    # targets the version right after whatever head currently says: trusting
+    # a head we didn't write ourselves (e.g. one Task 11's convergence sweep
+    # wrote to repair a dangling head) is intentional here, not a gap. The
+    # protection against a genuine race for that slot is
+    # ``forbid_duplicate_keys`` below, not second-guessing head's version.
     if head and previous_request_id == request_id:
-        version = int(head.get("version") or published or 1)
+        version = int(head.get("version") or 1)
     else:
-        version = published + 1
+        version = int(head.get("version") or 0) + 1 if head else 1
     payload = dict(request)
     payload["funding_workflow_id"] = workflow_id
     payload["duplicate_key"] = f"{_REQUEST_EVENT[phase]}:{request_id}"
