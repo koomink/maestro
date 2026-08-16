@@ -211,6 +211,19 @@ def publish_contribution_request(
     }
 
 
+class WorkflowClaimRefused(RuntimeError):
+    """This request may not enter this transition -- already claimed or superseded.
+
+    Raised instead of returning a falsy claim so a caller cannot forget to
+    check it and fall through into cash-flow recording or ``run_signal()``
+    anyway; the exception forces the caller to stop before any side effect.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"funding workflow claim refused: {reason}")
+        self.reason = reason
+
+
 def claim_workflow_attempt(
     store: StateStore,
     run_id: str,
@@ -320,6 +333,7 @@ def complete_workflow(
 __all__ = [
     "LEGACY_TERMINAL_EVENT",
     "PHASES",
+    "WorkflowClaimRefused",
     "child_key",
     "claim_key",
     "claim_workflow_attempt",

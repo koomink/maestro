@@ -38,6 +38,7 @@ from maestro.sdk import (
     StrategyManifest,
     TargetAllocationResult,
 )
+from maestro.state.funding_workflow import publish_contribution_request
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -353,9 +354,13 @@ def test_telegram_operator_funding_complete_regenerates_signal_and_creates_appro
     )
     config = load_config(readonly_config_path)
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    store.save_system_event(
+    # Confirming a funding request now claims a workflow head before doing
+    # anything else (Task 8): publish_contribution_request is what production
+    # signal generation already calls to create one, so the fixture has to
+    # do the same instead of writing the bare legacy event directly.
+    publish_contribution_request(
+        store,
         "signal_old",
-        "contribution_funding_request",
         {
             "request_id": "fund_req_1",
             "source_signal_run_id": "signal_old",
@@ -369,6 +374,7 @@ def test_telegram_operator_funding_complete_regenerates_signal_and_creates_appro
             "month_key": "2026-05",
             "status": "pending",
         },
+        phase="funding",
     )
     store.save_portfolio_snapshot(
         "manual_deposit",
@@ -417,9 +423,11 @@ def test_telegram_operator_funding_complete_fails_when_readonly_refresh_fails(
     )
     config = _multi_readonly_config(load_config(readonly_config_path))
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    store.save_system_event(
+    # See the comment in the sibling test above: a head has to exist before
+    # the confirm path's claim will let this request through.
+    publish_contribution_request(
+        store,
         "signal_old",
-        "contribution_funding_request",
         {
             "request_id": "fund_req_refresh_failure",
             "source_signal_run_id": "signal_old",
@@ -433,6 +441,7 @@ def test_telegram_operator_funding_complete_fails_when_readonly_refresh_fails(
             "month_key": "2026-05",
             "status": "pending",
         },
+        phase="funding",
     )
     audit = AuditLogger(config.audit.jsonl_path)
     client = FakeTelegramClient()

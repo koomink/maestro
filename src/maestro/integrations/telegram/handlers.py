@@ -102,7 +102,11 @@ from maestro.monitoring.health import HealthService
 from maestro.ops.readonly_refresh import refresh_readonly_accounts
 from maestro.ops.workflow_recovery import WorkflowRecoveryService
 from maestro.orchestration.live_gates import LiveExecutionGateService
-from maestro.orchestration.orchestrator import MaestroOrchestrator, SignalApprovalSummary
+from maestro.orchestration.orchestrator import (
+    MaestroOrchestrator,
+    SignalApprovalSummary,
+    SignalRunSummary,
+)
 from maestro.portfolio.account_attribution import AccountAttributionReconciliationService
 from maestro.safety.controls import SafetyControlService
 from maestro.state.events import (
@@ -110,6 +114,12 @@ from maestro.state.events import (
     SystemEventType,
     flow_class_for_cash_suspense,
     save_audited_system_event,
+)
+from maestro.state.funding_workflow import (
+    WorkflowClaimRefused,
+    claim_workflow_attempt,
+    complete_workflow,
+    workflow_id_from_request,
 )
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -3073,7 +3083,12 @@ class TelegramOperatorCommandRouter:
             self._record("/funding", chat_id, user_id, username, "stale_callback")
             return True
         if transition == "cancel":
-            self._save_funding_ack(request_id, "canceled", user_id, username)
+            try:
+                self._cancel_funding_request(request, user_id=user_id, username=username)
+            except WorkflowClaimRefused:
+                self._answer(callback, "This funding request was already processed.")
+                self._record("/funding_cancel", chat_id, user_id, username, "claim_refused")
+                return True
             self._answer(callback, "Funding request canceled.")
             self._edit_callback_message(callback, "Funding request canceled.")
             self._record("/funding_cancel", chat_id, user_id, username, "canceled")
@@ -3086,6 +3101,18 @@ class TelegramOperatorCommandRouter:
                 user_id=user_id,
                 username=username,
             )
+        except WorkflowClaimRefused:
+            # The claim (not run_signal or the ack write) is what refuses this:
+            # a duplicate callback or one superseded by a newer request never
+            # reaches cash-flow recording or run_signal() in the first place.
+            text = "\n".join(
+                [
+                    "Funding confirmation skipped",
+                    f"request_id: {request_id}",
+                    "message: this request was already processed or superseded",
+                ]
+            )
+            self._record("/funding_complete", chat_id, user_id, username, "claim_refused")
         except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
             text = "\n".join(
                 [
@@ -3292,15 +3319,33 @@ class TelegramOperatorCommandRouter:
         chat_id: int,
         user_id: int,
         username: str | None,
+        attempt: int = 1,
     ) -> str:
         if self.signal_config_path is None:
             raise ValueError("Funding confirmation requires telegram-operator --signal-config")
+        workflow_id = workflow_id_from_request(request)
+        request_id = str(request["request_id"])
+        # The claim has to land before any of this method's side effects --
+        # cash-flow recording, run_signal(), the ack -- or two callbacks racing
+        # on the same request (a fat-fingered double tap, a retried delivery)
+        # would both record cash and both regenerate a signal. Once the claim
+        # is committed a duplicate or superseded callback is refused for free,
+        # before it can touch anything.
+        claim = claim_workflow_attempt(
+            self.store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="funding",
+            attempt=attempt,
+        )
+        if not claim["claimed"]:
+            raise WorkflowClaimRefused(str(claim["reason"]))
         try:
             self._refresh_portfolio_from_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError):
             if self._has_readonly_broker_accounts():
                 raise
-        signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
         strategy_ids = [str(item) for item in request.get("strategy_ids") or []]
         if not strategy_ids:
             raise ValueError("Funding request is missing strategy_ids")
@@ -3317,16 +3362,24 @@ class TelegramOperatorCommandRouter:
         )
         # Funding was just confirmed by the operator; regenerate orders
         # immediately instead of waiting for the scheduled buy_day.
-        signal_summary = MaestroOrchestrator(
-            signal_config,
-            config_identity=signal_identity,
-        ).run_signal(strategy_ids=strategy_ids, contribution_override=True)
-        self._save_funding_ack(
-            str(request["request_id"]),
-            "confirmed",
-            user_id,
-            username,
-            new_signal_run_id=signal_summary.signal_run_id,
+        signal_summary = self._run_child_signal(request, workflow_id, attempt=attempt)
+        # Carrying the same request_id into both legs of complete_workflow is
+        # what keeps the workflow log and the legacy ack log pointed at the
+        # same request; a mismatch here would close one request in one log
+        # and a different one in the other.
+        complete_workflow(
+            self.store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="funding",
+            attempt=attempt,
+            legacy_payload={
+                "request_id": request_id,
+                "status": "confirmed",
+                "decided_by": username or str(user_id),
+                "new_signal_run_id": signal_summary.signal_run_id,
+            },
         )
         lines = [
             "Funding confirmed",
@@ -3382,6 +3435,33 @@ class TelegramOperatorCommandRouter:
         else:
             lines.append("approval_status: not_required")
         return "\n".join(lines)
+
+    def _run_child_signal(
+        self,
+        request: Mapping[str, Any],
+        workflow_id: str,
+        *,
+        attempt: int,
+    ) -> SignalRunSummary:
+        """Create this request's child run, or return the one it already has.
+
+        Lineage (source_request_id/source_workflow_id/source_phase) is what
+        lets a resumed attempt land here a second time without building a
+        second signal package: run_signal() looks up the child by
+        source_request_id before doing any work, inside the same lock it
+        would use to create one.
+        """
+        signal_config, signal_identity = load_config_with_identity(self.signal_config_path)
+        return MaestroOrchestrator(
+            signal_config,
+            config_identity=signal_identity,
+        ).run_signal(
+            strategy_ids=[str(item) for item in request.get("strategy_ids") or []],
+            contribution_override=True,
+            source_request_id=str(request["request_id"]),
+            source_workflow_id=workflow_id,
+            source_phase="funding",
+        )
 
     def _record_account_cash_flow_from_funding_request(
         self,
@@ -3924,28 +4004,44 @@ class TelegramOperatorCommandRouter:
                 return payload
         return None
 
-    def _save_funding_ack(
+    def _cancel_funding_request(
         self,
-        request_id: str,
-        status: str,
+        request: dict[str, Any],
+        *,
         user_id: int,
         username: str | None,
-        *,
-        new_signal_run_id: str | None = None,
     ) -> None:
-        payload = {
-            "request_id": request_id,
-            "status": status,
-            "decided_by": username or str(user_id),
-        }
-        if new_signal_run_id is not None:
-            payload["new_signal_run_id"] = new_signal_run_id
-        save_audited_system_event(
+        """Cancel is a terminal transition too, so it goes through the same
+        claim-then-complete shape as confirm: a canceled request still has to
+        be refused if it was already decided or superseded, and the legacy
+        ack still has to land in the same atomic batch as the workflow's own
+        completed event, or a rollback would see a canceled request as still
+        pending and let it be re-confirmed later.
+        """
+        workflow_id = workflow_id_from_request(request)
+        request_id = str(request["request_id"])
+        claim = claim_workflow_attempt(
             self.store,
-            self.audit,
             new_run_id(),
-            "contribution_funding_request_ack",
-            payload,
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="funding",
+            attempt=1,
+        )
+        if not claim["claimed"]:
+            raise WorkflowClaimRefused(str(claim["reason"]))
+        complete_workflow(
+            self.store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="funding",
+            attempt=1,
+            legacy_payload={
+                "request_id": request_id,
+                "status": "canceled",
+                "decided_by": username or str(user_id),
+            },
         )
 
     def _help(self, chat_id: int) -> None:
