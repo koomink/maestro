@@ -1,4 +1,6 @@
-from maestro.state.funding_workflow import head_key
+import pytest
+
+from maestro.state.funding_workflow import head_key, publish_contribution_request
 from maestro.state.store import StateStore
 
 
@@ -55,3 +57,93 @@ def test_listing_gives_one_row_per_workflow(tmp_path):
     heads = {row["workflow_id"]: row for row in store.list_funding_workflow_heads()}
     assert heads["wf-a"]["version"] == 2
     assert heads["wf-b"]["version"] == 1
+
+
+def _request(request_id, month_key="2026-08"):
+    return {
+        "request_id": request_id,
+        "contribution_group_id": "core",
+        "account_id": "acct-1",
+        "execution_sleeve": "krw",
+        "currency": "KRW",
+        "month_key": month_key,
+        "status": "pending",
+        "strategy_ids": ["s1"],
+    }
+
+
+def test_the_first_request_becomes_head_v1(tmp_path):
+    store = _store(tmp_path)
+    result = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    assert result["committed"] is True
+    assert result["version"] == 1
+    head = store.load_funding_workflow_head(result["workflow_id"])
+    assert head["request_id"] == "req-1"
+
+
+def test_a_replacement_request_supersedes_the_previous_one_atomically(tmp_path):
+    store = _store(tmp_path)
+    first = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    second = publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    assert second["committed"] is True
+    assert second["version"] == 2
+    head = store.load_funding_workflow_head(first["workflow_id"])
+    assert head["request_id"] == "req-2"
+    superseded = [
+        row["payload"]
+        for row in store.list_system_events_by_type("funding_workflow_superseded", limit=None)
+    ]
+    assert [row["request_id"] for row in superseded] == ["req-1"]
+
+
+def test_the_request_event_and_the_head_land_together_or_not_at_all(tmp_path):
+    store = _store(tmp_path)
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    requests = store.list_system_events_by_type("contribution_funding_request", limit=None)
+    heads = store.list_system_events_by_type("funding_workflow_head", limit=None)
+    assert len(requests) == 1
+    assert len(heads) == 1
+
+
+def test_losing_the_race_for_a_version_is_reported_not_raised(tmp_path):
+    store = _store(tmp_path)
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    # Another writer already took v2 while we were preparing our own v2.
+    _write_head(store, workflow_id, 2, "req-other")
+    result = publish_contribution_request(store, "run-3", _request("req-3"), phase="funding")
+    assert result["committed"] is False
+    assert result["conflict"] == "precondition_present"
+
+
+def test_republishing_the_same_request_is_a_replay_not_a_new_version(tmp_path):
+    store = _store(tmp_path)
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    again = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    assert again["committed"] is False
+    assert again["conflict"] == "already_committed"
+
+
+def test_different_scopes_in_the_same_month_do_not_supersede_each_other(tmp_path):
+    store = _store(tmp_path)
+    left = dict(_request("req-1"), execution_sleeve="krw")
+    right = dict(_request("req-2"), execution_sleeve="usd")
+    a = publish_contribution_request(store, "run-1", left, phase="funding")
+    b = publish_contribution_request(store, "run-1", right, phase="funding")
+    assert a["workflow_id"] != b["workflow_id"]
+    assert store.load_funding_workflow_head(a["workflow_id"])["request_id"] == "req-1"
+    assert store.load_funding_workflow_head(b["workflow_id"])["request_id"] == "req-2"
+
+
+def test_a_budget_request_uses_the_budget_event_type(tmp_path):
+    store = _store(tmp_path)
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="budget")
+    assert len(store.list_system_events_by_type("contribution_budget_request", limit=None)) == 1
+
+
+def test_an_unknown_phase_is_refused(tmp_path):
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="phase"):
+        publish_contribution_request(store, "run-1", _request("req-1"), phase="rebate")

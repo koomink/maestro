@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from maestro.state.store import StateStore
 
 PHASES: tuple[str, str] = ("funding", "budget")
 
@@ -75,6 +78,114 @@ def superseded_key(workflow_id: str, request_id: str) -> str:
     return f"wf-superseded:{workflow_id}:{request_id}"
 
 
+_REQUEST_EVENT = {
+    "funding": "contribution_funding_request",
+    "budget": "contribution_budget_request",
+}
+
+
+def _require_phase(phase: str) -> str:
+    if phase not in PHASES:
+        raise ValueError(f"unknown funding workflow phase: {phase}")
+    return phase
+
+
+def _count_published_requests(store: StateStore, workflow_id: str) -> int:
+    """이 워크플로우 앞으로 실제로 커밋된 요청 이벤트 수.
+
+    head row 개수가 아니라 이 값을 버전의 기준으로 삼는다: head는 요청
+    이벤트 없이도 (예: 복구 스크립트, 손상, 또는 이 함수를 우회한 어떤
+    경로에 의해) 존재할 수 있는 dangling row다. 그런 head의 version을
+    그대로 믿고 +1 하면 요청 이벤트가 없는 슬롯을 뛰어넘어버려서, 그
+    슬롯을 실제로 노리고 있던 다른 쓰기와의 충돌을 놓친다.
+    """
+    count = 0
+    for event_type in _REQUEST_EVENT.values():
+        for row in store.list_system_events_by_type(event_type, limit=None):
+            if (row.get("payload") or {}).get("funding_workflow_id") == workflow_id:
+                count += 1
+    return count
+
+
+def publish_contribution_request(
+    store: StateStore,
+    run_id: str,
+    request: Mapping[str, Any],
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """요청 저장·이전 요청 supersede·head 전환을 한 트랜잭션으로 커밋한다.
+
+    셋을 따로 쓰면 그 사이의 중단이 head가 가리키지 않는 orphan 요청이나
+    실체 없는 dangling head를 남긴다. 새 head 키를 forbid로도 선언하는
+    이유는 CAS 패배를 예외가 아니라 결과값으로 받기 위해서다.
+    """
+    _require_phase(phase)
+    workflow_id = workflow_id_from_request(request)
+    request_id = str(request["request_id"])
+    head = store.load_funding_workflow_head(workflow_id)
+    previous_request_id = str(head.get("request_id") or "") if head else ""
+    published = _count_published_requests(store, workflow_id)
+    # A resubmission of the request already at head is the same transition,
+    # not a new one: target the same version so the batch matches byte for
+    # byte what already landed and the atomic call reports a plain replay
+    # instead of a same-request partial overlap with itself.
+    if head and previous_request_id == request_id:
+        version = int(head.get("version") or published or 1)
+    else:
+        version = published + 1
+    payload = dict(request)
+    payload["funding_workflow_id"] = workflow_id
+    payload["duplicate_key"] = f"{_REQUEST_EVENT[phase]}:{request_id}"
+
+    events: list[dict[str, Any]] = [
+        {"event_type": _REQUEST_EVENT[phase], "payload": payload}
+    ]
+    if previous_request_id and previous_request_id != request_id:
+        events.append(
+            {
+                "event_type": "funding_workflow_superseded",
+                "payload": {
+                    "duplicate_key": superseded_key(workflow_id, previous_request_id),
+                    "workflow_id": workflow_id,
+                    "request_id": previous_request_id,
+                    "superseded_by": request_id,
+                },
+            }
+        )
+    new_head_key = head_key(workflow_id, version)
+    events.append(
+        {
+            "event_type": "funding_workflow_head",
+            "payload": {
+                "duplicate_key": new_head_key,
+                "workflow_id": workflow_id,
+                "version": version,
+                "request_id": request_id,
+                "phase": phase,
+                "status": "pending",
+                "scope": [
+                    request.get("contribution_group_id"),
+                    request.get("account_id"),
+                    request.get("execution_sleeve"),
+                    request.get("currency"),
+                ],
+            },
+        }
+    )
+    outcome = store.save_system_events_atomic(
+        run_id,
+        events,
+        forbid_duplicate_keys=(new_head_key,),
+    )
+    return {
+        "committed": bool(outcome["committed"]),
+        "conflict": outcome["conflict"],
+        "workflow_id": workflow_id,
+        "version": version,
+    }
+
+
 __all__ = [
     "PHASES",
     "child_key",
@@ -82,6 +193,7 @@ __all__ = [
     "completed_key",
     "funding_workflow_id",
     "head_key",
+    "publish_contribution_request",
     "superseded_key",
     "workflow_id_from_request",
 ]
