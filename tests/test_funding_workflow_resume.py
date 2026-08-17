@@ -1010,3 +1010,74 @@ def test_a_malformed_request_row_does_not_abort_the_sweep_for_others(operator_bo
     assert result["orphans_superseded"] == 1
     superseded = store.list_system_events_by_type("funding_workflow_superseded", limit=None)
     assert [row["payload"]["request_id"] for row in superseded] == ["good-1"]
+
+
+
+# --- final review fixes -------------------------------------------------
+
+
+def _budget_statuses_for(store, command: str) -> list[str]:
+    return [
+        row["payload"]["status"]
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+        if row["payload"].get("command") == command
+    ]
+
+
+def test_a_second_budget_amount_on_the_same_attempt_is_refused_not_raised(
+    operator_bot, monkeypatch
+):
+    """Final review F2.
+
+    The amount rides in the claim payload but not in claim_key, so a second
+    amount under the same attempt is a same-key/different-content collision.
+    That has to surface as a claim refusal, not as a raw store ValueError.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(operator_bot, "_run_child_signal", boom)
+    with pytest.raises(RuntimeError, match="config load failed"):
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=500_000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+
+    with pytest.raises(WorkflowClaimRefused) as excinfo:
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=1_000_000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+    assert excinfo.value.reason == "already_claimed"
+
+
+def test_changing_the_budget_amount_on_the_same_card_reports_in_flight(
+    operator_bot, monkeypatch
+):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(operator_bot, "_run_child_signal", boom)
+    assert operator_bot.process_update(callback_update("operator:budget:sel:req-1:r"))
+    assert operator_bot.process_update(
+        callback_update("operator:budget:sel:req-1:f", update_id=3)
+    )
+
+    text = operator_bot.client.edited_messages[-1]["text"]
+    assert "already being processed" in text
+    assert "different content" not in text
+    # list_system_events_by_type is newest-first: the second tap's refusal
+    # comes back before the first tap's failure.
+    assert _budget_statuses_for(store, "/budget_select") == ["claim_in_flight", "failed"]

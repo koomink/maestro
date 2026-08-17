@@ -274,17 +274,35 @@ def claim_workflow_attempt(
         # random id, or a legitimate retry would fail to replay byte-for-byte
         # and would be mistaken for a conflicting overlap instead.
         claim_payload.update(dict(extra))
-    outcome = store.save_system_events_atomic(
-        run_id,
-        [
-            {
-                "event_type": "funding_workflow_claim",
-                "payload": claim_payload,
-            }
-        ],
-        require_duplicate_keys=(head_key(workflow_id, version),),
-        forbid_duplicate_keys=(head_key(workflow_id, version + 1),),
-    )
+    try:
+        outcome = store.save_system_events_atomic(
+            run_id,
+            [
+                {
+                    "event_type": "funding_workflow_claim",
+                    "payload": claim_payload,
+                }
+            ],
+            require_duplicate_keys=(head_key(workflow_id, version),),
+            forbid_duplicate_keys=(head_key(workflow_id, version + 1),),
+        )
+    except ValueError as exc:
+        # 같은 attempt를 서로 다른 ``extra`` 내용으로 두 번 claim하면
+        # (예: 운영자가 같은 카드에서 50만을 눌렀다가 100만을 누름) 키는
+        # 같고 내용은 다른 충돌이 되어 store가 ValueError를 던진다. 그건
+        # 내부 오류가 아니라 "이 attempt는 이미 누군가 잡았다"는 뜻이므로,
+        # 다른 모든 거절과 같은 경로(WorkflowClaimRefused ->
+        # _funding_claim_refusal_response)로 흘려보낸다. 이 claim 자신의
+        # 키에 대한 content 충돌만 삼킨다 -- provenance 불일치나 다른
+        # 원인의 ValueError는 그대로 올려보내야 한다.
+        if not _is_own_key_content_conflict(exc, str(claim_payload["duplicate_key"])):
+            raise
+        return {
+            "claimed": False,
+            "reason": "already_claimed",
+            "attempt": attempt,
+            "head_version": version,
+        }
     if outcome["committed"]:
         return {"claimed": True, "reason": None, "attempt": attempt, "head_version": version}
     reason = {
@@ -293,6 +311,17 @@ def claim_workflow_attempt(
         "precondition_missing": "head_moved",
     }.get(str(outcome["conflict"]), "head_moved")
     return {"claimed": False, "reason": reason, "attempt": attempt, "head_version": version}
+
+
+def _is_own_key_content_conflict(exc: ValueError, duplicate_key: str) -> bool:
+    """``save_system_events_atomic``의 "같은 키, 다른 내용" 충돌인가.
+
+    store가 이 한 가지를 위한 예외 타입을 따로 두지 않으므로 메시지로
+    판별한다. 좁게 잡는 것이 핵심이다: provenance 불일치(다른 writer가
+    같은 키를 썼다)나 malformed batch는 진짜 오류이므로 삼키면 안 된다.
+    """
+    message = str(exc)
+    return "with different content" in message and repr(duplicate_key) in message
 
 
 def complete_workflow(
