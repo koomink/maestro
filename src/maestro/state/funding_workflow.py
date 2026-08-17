@@ -340,6 +340,42 @@ def complete_workflow(
     return {"committed": bool(outcome["committed"]), "conflict": outcome["conflict"]}
 
 
+def list_incomplete_workflows(store: StateStore) -> list[dict[str, Any]]:
+    """A claim exists for this (request_id, phase) but no completion followed.
+
+    This is only ever consumed by an operator-facing sweep (Task 10): it is
+    input to a recovery card, never to an automatic resume. A still-running
+    earlier attempt's ``run_signal()`` can be mid-flight in a process that
+    only *looks* dead, so nothing here may re-enter the transition on its
+    own -- entry happens solely through the operator's explicit [재개] tap,
+    which commits ``attempt + 1`` as its own fencing token.
+    """
+    completed = {
+        (
+            str((row.get("payload") or {}).get("request_id")),
+            str((row.get("payload") or {}).get("phase")),
+        )
+        for row in store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    }
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in store.list_system_events_by_type("funding_workflow_claim", limit=None):
+        payload = row.get("payload") or {}
+        key = (str(payload.get("request_id")), str(payload.get("phase")))
+        if key in completed:
+            continue
+        current = latest.get(key)
+        attempt = int(payload.get("attempt") or 0)
+        if current is None or attempt > int(current["attempt"]):
+            latest[key] = {
+                "workflow_id": str(payload.get("workflow_id")),
+                "request_id": key[0],
+                "phase": key[1],
+                "attempt": attempt,
+                "selected_budget": payload.get("selected_budget"),
+            }
+    return sorted(latest.values(), key=lambda row: (row["phase"], row["request_id"]))
+
+
 __all__ = [
     "LEGACY_TERMINAL_EVENT",
     "PHASES",
@@ -351,6 +387,7 @@ __all__ = [
     "completed_key",
     "funding_workflow_id",
     "head_key",
+    "list_incomplete_workflows",
     "load_workflow_child",
     "publish_contribution_request",
     "superseded_key",

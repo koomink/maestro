@@ -32,6 +32,7 @@ from maestro.sdk import (
 from maestro.state.funding_workflow import (
     WorkflowClaimRefused,
     claim_workflow_attempt,
+    list_incomplete_workflows,
     load_workflow_child,
     publish_contribution_request,
     workflow_id_from_request,
@@ -84,7 +85,9 @@ class FakeTelegramClient:
         self.edited_messages: list[dict] = []
 
     def send_message(self, chat_id, text, reply_markup=None):
-        self.sent_messages.append({"chat_id": chat_id, "text": text})
+        self.sent_messages.append(
+            {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+        )
         return {"result": {"message_id": len(self.sent_messages)}}
 
     def get_updates(self, *, offset=None, timeout_seconds=0, allowed_updates=None):
@@ -625,3 +628,230 @@ def test_a_stuck_budget_claim_via_text_command_reports_in_flight(operator_bot):
     assert "already being processed" in text
     assert "superseded" not in text
     assert _budget_statuses(store) == ["claim_in_flight"]
+
+
+def _wfresume_statuses(store) -> list[str]:
+    return [
+        row["payload"]["status"]
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+        if row["payload"].get("command") == "/wfresume"
+    ]
+
+
+def test_a_claim_without_completion_shows_up_as_incomplete(operator_bot):
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+
+def test_a_completed_workflow_is_not_incomplete(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    operator_bot._confirm_funding_request(
+        _request("req-1"), chat_id=1, user_id=2, username="op"
+    )
+    assert list_incomplete_workflows(store) == []
+
+
+def test_an_incomplete_workflow_is_never_resumed_automatically(operator_bot):
+    """The sweep only surfaces; it must never re-enter the transition itself."""
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    operator_bot._sweep_incomplete_workflows()
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert list_incomplete_workflows(store) == [
+        {
+            "workflow_id": workflow_id,
+            "request_id": "req-1",
+            "phase": "funding",
+            "attempt": 1,
+            "selected_budget": None,
+        }
+    ]
+
+
+def test_the_sweep_sends_a_resume_card_whose_button_fits_telegrams_limit(operator_bot):
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+
+    operator_bot._sweep_incomplete_workflows()
+
+    sent = operator_bot.client.sent_messages[-1]
+    markup = sent["reply_markup"]
+    callback_data = markup["inline_keyboard"][0][0]["callback_data"]
+    assert callback_data == "operator:wfresume:funding:req-1"
+    # Telegram callback_data is capped at 64 bytes -- a real request_id (e.g.
+    # new_budget_request_id()'s "budget_" + 32 hex chars) has to still fit.
+    assert len(callback_data.encode("utf-8")) <= 64
+
+
+def test_a_second_sweep_does_not_resend_the_same_attempts_notice(operator_bot):
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+
+    operator_bot._sweep_incomplete_workflows()
+    operator_bot._sweep_incomplete_workflows()
+
+    assert len(operator_bot.client.sent_messages) == 1
+
+
+def test_a_new_attempt_after_a_failed_resume_notifies_again(operator_bot, monkeypatch):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(operator_bot, "_run_child_signal", boom)
+    with pytest.raises(RuntimeError, match="config load failed"):
+        operator_bot._confirm_funding_request(
+            _request("req-1"), chat_id=1, user_id=2, username="op"
+        )
+
+    operator_bot._sweep_incomplete_workflows()
+    assert len(operator_bot.client.sent_messages) == 1
+
+    # A second attempt on the same request stalls again -- a *new* attempt
+    # number, so it must produce a fresh notice, not be swallowed by the
+    # first attempt's duplicate_key.
+    with pytest.raises(RuntimeError, match="config load failed"):
+        operator_bot._confirm_funding_request(
+            _request("req-1"), chat_id=1, user_id=2, username="op", attempt=2
+        )
+    operator_bot._sweep_incomplete_workflows()
+    assert len(operator_bot.client.sent_messages) == 2
+
+
+def test_the_operator_resume_button_enters_exactly_once(operator_bot):
+    import threading
+
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    entered: list[bool] = []
+    barrier = threading.Barrier(2)
+
+    def press() -> None:
+        barrier.wait()
+        entered.append(
+            claim_workflow_attempt(
+                store,
+                "run-1",
+                workflow_id=workflow_id,
+                request_id="req-1",
+                phase="funding",
+                attempt=2,
+            )["claimed"]
+        )
+
+    threads = [threading.Thread(target=press) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(entered) == [False, True]
+
+
+def test_a_double_tap_of_resume_enters_exactly_once_through_the_router(operator_bot):
+    """Real contention through process_update, not just the claim primitive.
+
+    Both taps hit the same stalled workflow, so both compute the same
+    ``attempt + 1``. Exactly one of the two concurrent
+    ``_process_workflow_resume_callback`` calls must win the claim; the
+    other must see ``claim_in_flight`` (its own resume attempt already
+    landed) rather than silently entering a second time.
+    """
+    import threading
+
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    barrier = threading.Barrier(2)
+
+    def press(update_id: int) -> None:
+        barrier.wait()
+        operator_bot.process_update(
+            callback_update("operator:wfresume:funding:req-1", update_id=update_id)
+        )
+
+    threads = [threading.Thread(target=press, args=(10 + i,)) for i in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert sorted(_wfresume_statuses(store)) == ["claim_in_flight", "resumed"]
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert len(completed) == 1
+    assert completed[0]["payload"]["attempt"] == 2
+
+
+def test_resuming_a_budget_workflow_reuses_the_stored_amount_without_asking_again(
+    operator_bot, monkeypatch
+):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("config load failed")
+
+    monkeypatch.setattr(operator_bot, "_run_child_signal", boom)
+    with pytest.raises(RuntimeError, match="config load failed"):
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=500000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+
+    monkeypatch.undo()
+    assert operator_bot.process_update(callback_update("operator:wfresume:budget:req-1"))
+
+    decisions = store.list_system_events_by_type(
+        "contribution_budget_request_decision", limit=None
+    )
+    assert decisions[0]["payload"]["selected_budget"] == 500000.0
+    assert _wfresume_statuses(store) == ["resumed"]
+
+
+def test_a_stale_resume_callback_for_a_non_stalled_workflow_is_refused(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+
+    assert operator_bot.process_update(
+        callback_update("operator:wfresume:funding:req-1")
+    )
+
+    text = operator_bot.client.answered_callbacks[-1]["text"]
+    assert "no longer stalled" in text
+    assert _wfresume_statuses(store) == ["stale_callback"]

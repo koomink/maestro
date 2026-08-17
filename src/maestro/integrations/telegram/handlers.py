@@ -116,9 +116,11 @@ from maestro.state.events import (
     save_audited_system_event,
 )
 from maestro.state.funding_workflow import (
+    PHASES,
     WorkflowClaimRefused,
     claim_workflow_attempt,
     complete_workflow,
+    list_incomplete_workflows,
     workflow_id_from_request,
 )
 from maestro.state.models import PortfolioState
@@ -329,6 +331,7 @@ class TelegramOperatorCommandRouter:
             self._sweep_pending_approvals,
             self._sweep_recovery_notifications,
             self._sweep_lifecycle_cards,
+            self._sweep_incomplete_workflows,
         ):
             try:
                 sweep()
@@ -460,6 +463,14 @@ class TelegramOperatorCommandRouter:
             )
         if action.startswith("budget:"):
             return self._process_budget_callback(
+                callback,
+                action,
+                chat_id,
+                user_id,
+                username,
+            )
+        if action.startswith("wfresume:"):
+            return self._process_workflow_resume_callback(
                 callback,
                 action,
                 chat_id,
@@ -1678,6 +1689,7 @@ class TelegramOperatorCommandRouter:
         text: str,
         extra: Mapping[str, Any] | None = None,
         subject_field: str = "approval_id",
+        reply_markup: Mapping[str, Any] | None = None,
     ) -> None:
         """운영자 채팅에 승인 관련 알림을 채팅 단위로 1회씩 보낸다.
 
@@ -1694,7 +1706,7 @@ class TelegramOperatorCommandRouter:
             try:
                 if self.store.duplicate_key_exists(duplicate_key):
                     continue
-                self._send(int(chat_id), text)
+                self._send(int(chat_id), text, reply_markup=reply_markup)
                 save_audited_system_event(
                     self.store,
                     self.audit,
@@ -2308,6 +2320,52 @@ class TelegramOperatorCommandRouter:
                         },
                     )
                     chat_reminders.add((*key, chat_id))
+
+    def _sweep_incomplete_workflows(self) -> None:
+        """중단된 funding/budget 전이를 운영자에게 노출한다. 재실행하지 않는다.
+
+        claim만 있고 completion이 없는 상태를 sweep이 자동으로 이어 달리면,
+        아직 살아 있을 수도 있는 이전 attempt의 run_signal()과 겹쳐 중복
+        부작용(이중 신호, 이중 현금흐름 기록)을 낸다. 그래서 이 메서드는
+        오직 [재개] 버튼을 위한 카드를 보낼 뿐이고, 진입은
+        ``_process_workflow_resume_callback``을 통한 명시적 attempt+1
+        커밋으로만 일어난다. 알림은 attempt당 채팅 하나에 정확히 한 번만
+        나가도록 ``_notify_operator_chats``의 채팅별 duplicate_key에 맡긴다
+        -- 새 attempt(재개 실패 후 다시 stall)는 새 키이므로 다시 알린다.
+        """
+        for row in list_incomplete_workflows(self.store):
+            self._notify_operator_chats(
+                run_id=f"run_{row['request_id']}",
+                approval_id=f"{row['phase']}:{row['request_id']}:a{row['attempt']}",
+                event_type="funding_workflow_stalled_notice",
+                key_prefix="funding-workflow-stalled",
+                subject_field="workflow_key",
+                text="\n".join(
+                    [
+                        "A previous step didn't finish.",
+                        f"request_id: {row['request_id']} ({row['phase']})",
+                        "Tap Resume below to continue.",
+                    ]
+                ),
+                extra={
+                    "workflow_id": row["workflow_id"],
+                    "request_id": row["request_id"],
+                    "phase": row["phase"],
+                    "attempt": row["attempt"],
+                },
+                reply_markup={
+                    "inline_keyboard": [
+                        [
+                            {
+                                "text": "Resume",
+                                "callback_data": (
+                                    f"operator:wfresume:{row['phase']}:{row['request_id']}"
+                                ),
+                            }
+                        ]
+                    ]
+                },
+            )
 
     def _sweep_lifecycle_cards(self) -> None:
         """승인 카드를 현재 단계로 맞춘다. 단계가 그대로면 아무것도 보내지 않는다.
@@ -3236,6 +3294,96 @@ class TelegramOperatorCommandRouter:
         else:
             self._answer(callback, "Budget selected.")
             self._record("/budget_select", chat_id, user_id, username, "selected")
+        self._edit_callback_message(callback, text)
+        return True
+
+    def _process_workflow_resume_callback(
+        self,
+        callback: Mapping[str, Any],
+        action: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        """[재개]는 하나의 콜백 안에서 attempt+1 claim을 커밋한다.
+
+        커밋 자체가 fencing token이다 -- 두 번 눌러도 동시에 들어오는 두
+        claim_workflow_attempt 중 하나만 이긴다 (attempt+1의 duplicate_key는
+        한 번만 존재할 수 있다). 이 메서드는 그 결과를 각 눌림에 보여줄 뿐,
+        스스로 재시도하거나 다른 attempt를 대신 골라주지 않는다.
+        """
+        parts = action.split(":", 2)
+        if len(parts) != 3 or parts[0] != "wfresume" or parts[1] not in PHASES:
+            self._answer(callback, "This resume card is no longer active.")
+            self._record("/wfresume", chat_id, user_id, username, "stale_callback")
+            return True
+        phase, request_id = parts[1], parts[2]
+        stalled = next(
+            (
+                row
+                for row in list_incomplete_workflows(self.store)
+                if row["phase"] == phase and row["request_id"] == request_id
+            ),
+            None,
+        )
+        if stalled is None:
+            self._answer(callback, "This workflow is no longer stalled.")
+            self._record("/wfresume", chat_id, user_id, username, "stale_callback")
+            return True
+        request = (
+            self._load_pending_funding_request(request_id)
+            if phase == "funding"
+            else self._load_pending_budget_request(request_id)
+        )
+        if request is None:
+            self._answer(callback, "This request is no longer active.")
+            self._record("/wfresume", chat_id, user_id, username, "stale_callback")
+            return True
+        next_attempt = stalled["attempt"] + 1
+        self._answer(callback, "Resuming...")
+        try:
+            if phase == "funding":
+                text = self._confirm_funding_request(
+                    request,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                    attempt=next_attempt,
+                )
+            else:
+                # A resumed budget workflow must not ask the operator again --
+                # it replays the amount that was already recorded in the
+                # stalled claim.
+                selected_budget = stalled.get("selected_budget")
+                if selected_budget is None:
+                    raise ValueError(
+                        "stalled budget workflow has no stored selected_budget"
+                    )
+                text = self._confirm_budget_request(
+                    request,
+                    selected_budget=float(selected_budget),
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                    attempt=next_attempt,
+                )
+        except WorkflowClaimRefused as exc:
+            confirm_text, status = _funding_claim_refusal_response(
+                exc.reason, request_noun=phase
+            )
+            text = "\n".join([confirm_text, f"request_id: {request_id}"])
+            self._record("/wfresume", chat_id, user_id, username, status)
+        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+            text = "\n".join(
+                [
+                    "Resume failed",
+                    f"request_id: {request_id}",
+                    f"message: {exc}",
+                ]
+            )
+            self._record("/wfresume", chat_id, user_id, username, "failed")
+        else:
+            self._record("/wfresume", chat_id, user_id, username, "resumed")
         self._edit_callback_message(callback, text)
         return True
 
