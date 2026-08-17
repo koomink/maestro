@@ -961,3 +961,52 @@ def test_converging_twice_changes_nothing_the_second_time(operator_bot):
     store.save_system_event("run-1", "contribution_funding_request", dict(_request("orphan-1")))
     converge_workflow_invariants(store, cutoff=0)
     assert converge_workflow_invariants(store, cutoff=0)["orphans_superseded"] == 0
+
+
+def test_a_normal_replacement_is_not_treated_as_an_orphan_by_the_sweep(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    result = converge_workflow_invariants(store, cutoff=0)
+    assert result["orphans_superseded"] == 0
+    superseded = store.list_system_events_by_type("funding_workflow_superseded", limit=None)
+    assert [row["payload"]["request_id"] for row in superseded] == ["req-1"]
+
+
+def test_converging_a_rolled_back_head_twice_changes_nothing_the_second_time(operator_bot):
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    store.save_system_events_atomic(
+        "run-2",
+        [
+            {
+                "event_type": "funding_workflow_head",
+                "payload": {
+                    "duplicate_key": head_key(workflow_id, 2),
+                    "workflow_id": workflow_id,
+                    "version": 2,
+                    "request_id": "ghost-1",
+                    "phase": "funding",
+                    "status": "pending",
+                },
+            }
+        ],
+    )
+    first = converge_workflow_invariants(store, cutoff=0)
+    assert first["heads_rolled_back"] == 1
+    second = converge_workflow_invariants(store, cutoff=0)
+    assert second["heads_rolled_back"] == 0
+
+
+def test_a_malformed_request_row_does_not_abort_the_sweep_for_others(operator_bot):
+    store = operator_bot.store
+    bad_payload = dict(_request("bad-1"))
+    del bad_payload["month_key"]
+    store.save_system_event("run-1", "contribution_funding_request", bad_payload)
+    store.save_system_event("run-2", "contribution_funding_request", dict(_request("good-1")))
+    result = converge_workflow_invariants(store, cutoff=0)
+    assert result["orphans_superseded"] == 1
+    superseded = store.list_system_events_by_type("funding_workflow_superseded", limit=None)
+    assert [row["payload"]["request_id"] for row in superseded] == ["good-1"]

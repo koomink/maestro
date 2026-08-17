@@ -10,11 +10,14 @@ head로 합쳐 한쪽의 월간 투자를 조용히 supersede할 수 있다.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from maestro.state.store import StateStore
+
+logger = logging.getLogger(__name__)
 
 PHASES: tuple[str, str] = ("funding", "budget")
 
@@ -400,12 +403,42 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
     writer -- 를 위한 backstop이고, 전이를 재실행하지 않는다: orphan
     요청에는 supersede 마커만 붙이고, dangling head는 실제로 존재하는
     요청을 가리키던 직전 버전으로만 되돌린다.
+
+    **orphan의 정의**: cutoff 이후에 쓰였고, ``status == "pending"``이며,
+    어떤 head도 가리키지 않고(``live_request_ids``), *그리고* 이 요청이
+    이미 다른 방식으로 결말을 맺은 적도 없는 요청이다. "결말을 맺었다"는
+    ``funding_workflow_superseded`` 마커가 이미 있거나(정상적인 in-month
+    교체 -- ``publish_contribution_request``가 이미 썼다) 혹은
+    ``funding_workflow_completed``가 있는 경우다. head만 보고 판단하면
+    이 두 경우를 orphan으로 오판해 이미 존재하는 마커 위에 다른 내용을
+    다시 쓰려다 충돌로 예외를 던진다 -- 이는 매 poll 사이클마다 벌어지는
+    일상적인 교체이지, crash로 생긴 진짜 orphan이 아니다.
+
+    한 행이 손상돼(``month_key``도 ``funding_workflow_id``도 없는 등)
+    처리 중 예외를 던져도 그 행만 건너뛴다: 이 sweep은 여러 워크플로우에
+    걸쳐 도는 backstop이므로, 한 행의 결함이 나머지 전체를 막아서는
+    안 된다.
     """
     if cutoff is None:
         return {"orphans_superseded": 0, "heads_rolled_back": 0}
 
     heads = {row["workflow_id"]: row for row in store.list_funding_workflow_heads()}
     live_request_ids = {str(row.get("request_id")) for row in heads.values()}
+
+    accounted_superseded = set()
+    for row in store.list_system_events_by_type("funding_workflow_superseded", limit=None):
+        payload = row.get("payload") or {}
+        accounted_superseded.add((str(payload.get("workflow_id")), str(payload.get("request_id"))))
+    accounted_completed = set()
+    for row in store.list_system_events_by_type("funding_workflow_completed", limit=None):
+        payload = row.get("payload") or {}
+        accounted_completed.add(
+            (
+                str(payload.get("workflow_id")),
+                str(payload.get("request_id")),
+                str(payload.get("phase")),
+            )
+        )
 
     orphans_superseded = 0
     for phase, event_type in _REQUEST_EVENT.items():
@@ -422,52 +455,91 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
             request_id = str(payload.get("request_id") or "")
             if not request_id or request_id in live_request_ids:
                 continue
-            workflow_id = str(
-                payload.get("funding_workflow_id") or workflow_id_from_request(payload)
-            )
-            outcome = store.save_system_events_atomic(
-                str(row.get("run_id") or request_id),
-                [
-                    {
-                        "event_type": "funding_workflow_superseded",
-                        "payload": {
-                            "duplicate_key": superseded_key(workflow_id, request_id),
-                            "workflow_id": workflow_id,
-                            "request_id": request_id,
-                            "phase": phase,
-                            "reason": "orphan_no_head",
-                        },
-                    }
-                ],
-            )
+            try:
+                workflow_id = str(
+                    payload.get("funding_workflow_id") or workflow_id_from_request(payload)
+                )
+            except (ValueError, KeyError):
+                logger.warning(
+                    "converge_workflow_invariants: skipping malformed %s row id=%s "
+                    "request_id=%r -- cannot derive workflow_id",
+                    event_type,
+                    row.get("id"),
+                    request_id,
+                )
+                continue
+            if (workflow_id, request_id) in accounted_superseded:
+                continue
+            if (workflow_id, request_id, phase) in accounted_completed:
+                continue
+            try:
+                outcome = store.save_system_events_atomic(
+                    str(row.get("run_id") or request_id),
+                    [
+                        {
+                            "event_type": "funding_workflow_superseded",
+                            "payload": {
+                                "duplicate_key": superseded_key(workflow_id, request_id),
+                                "workflow_id": workflow_id,
+                                "request_id": request_id,
+                                "phase": phase,
+                                "reason": "orphan_no_head",
+                            },
+                        }
+                    ],
+                )
+            except ValueError:
+                logger.warning(
+                    "converge_workflow_invariants: skipping request_id=%r "
+                    "workflow_id=%r -- supersede write conflicted unexpectedly",
+                    request_id,
+                    workflow_id,
+                )
+                continue
             if outcome["committed"]:
                 orphans_superseded += 1
 
     heads_rolled_back = 0
     for workflow_id, head in heads.items():
         request_id = str(head.get("request_id") or "")
-        if _request_ever_recorded(store, request_id):
+        try:
+            if _request_ever_recorded(store, request_id):
+                continue
+            previous = _previous_head_with_a_real_request(store, workflow_id, head)
+        except (ValueError, KeyError):
+            logger.warning(
+                "converge_workflow_invariants: skipping dangling-head check for "
+                "workflow_id=%r -- malformed head history",
+                workflow_id,
+            )
             continue
-        previous = _previous_head_with_a_real_request(store, workflow_id, head)
         if previous is None:
             continue
         version = int(head.get("version") or 0) + 1
         new_key = head_key(workflow_id, version)
-        outcome = store.save_system_events_atomic(
-            workflow_id,
-            [
-                {
-                    "event_type": "funding_workflow_head",
-                    "payload": {
-                        **previous,
-                        "duplicate_key": new_key,
-                        "version": version,
-                        "reason": "dangling_head_rollback",
-                    },
-                }
-            ],
-            forbid_duplicate_keys=(new_key,),
-        )
+        try:
+            outcome = store.save_system_events_atomic(
+                workflow_id,
+                [
+                    {
+                        "event_type": "funding_workflow_head",
+                        "payload": {
+                            **previous,
+                            "duplicate_key": new_key,
+                            "version": version,
+                            "reason": "dangling_head_rollback",
+                        },
+                    }
+                ],
+                forbid_duplicate_keys=(new_key,),
+            )
+        except ValueError:
+            logger.warning(
+                "converge_workflow_invariants: skipping head rollback for "
+                "workflow_id=%r -- write conflicted unexpectedly",
+                workflow_id,
+            )
+            continue
         if outcome["committed"]:
             heads_rolled_back += 1
 
