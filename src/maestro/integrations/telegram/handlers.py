@@ -120,7 +120,9 @@ from maestro.state.funding_workflow import (
     WorkflowClaimRefused,
     claim_workflow_attempt,
     complete_workflow,
+    converge_workflow_invariants,
     list_incomplete_workflows,
+    load_migration_cutoff,
     workflow_id_from_request,
 )
 from maestro.state.models import PortfolioState
@@ -332,6 +334,7 @@ class TelegramOperatorCommandRouter:
             self._sweep_recovery_notifications,
             self._sweep_lifecycle_cards,
             self._sweep_incomplete_workflows,
+            self._converge_workflow_invariants,
         ):
             try:
                 sweep()
@@ -2366,6 +2369,16 @@ class TelegramOperatorCommandRouter:
                     ]
                 },
             )
+
+    def _converge_workflow_invariants(self) -> None:
+        """orphan 요청과 dangling head를 수렴시킨다 (Task 11의 backstop).
+
+        atomic publish가 정상 경로에서 이 상태들을 막지만, 마이그레이션
+        중단이나 수동 복구는 그 밖에서 일어날 수 있다. cutoff가 없으면
+        (3a-5가 아직 배포되지 않았으면) 아무것도 하지 않는다 -- 3a 이전
+        요청은 head가 원래 없었으므로 orphan으로 오판하면 안 된다.
+        """
+        converge_workflow_invariants(self.store, cutoff=load_migration_cutoff(self.store))
 
     def _sweep_lifecycle_cards(self) -> None:
         """승인 카드를 현재 단계로 맞춘다. 단계가 그대로면 아무것도 보내지 않는다.

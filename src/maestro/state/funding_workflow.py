@@ -376,6 +376,144 @@ def list_incomplete_workflows(store: StateStore) -> list[dict[str, Any]]:
     return sorted(latest.values(), key=lambda row: (row["phase"], row["request_id"]))
 
 
+def load_migration_cutoff(store: StateStore) -> int | None:
+    """3a 업그레이드 backfill이 고정한 경계. 3a-5가 이 이벤트를 기록한다.
+
+    이 이벤트가 없으면 ``None``을 돌려주고, 수렴 sweep은 켜지지 않는다.
+    3a 이전에 만들어진 요청은 head 개념 자체가 없던 시절의 것이라 head가
+    없는 게 정상이지 orphan이 아니다. 경계를 모른 채(혹은 0으로 지어내어)
+    쓸어담으면 그 요청들이 전부 orphan으로 오판되어 supersede되고, 이번
+    달 투자가 조용히 취소된다.
+    """
+    rows = store.list_system_events_by_type("funding_workflow_migration_started", limit=None)
+    if not rows:
+        return None
+    return min(int((row.get("payload") or {}).get("cutoff") or 0) for row in rows)
+
+
+def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> dict[str, int]:
+    """head 없는 요청과 실체 없는 head를 수렴시킨다.
+
+    atomic publish(``publish_contribution_request``)가 정상 경로에서 이
+    상태들을 만들지 않는다는 것이 1차 방어다. 이 sweep은 그 방어가 닿지
+    않는 경로 -- 마이그레이션 중단, 수동 복구 스크립트, 다른 버전의
+    writer -- 를 위한 backstop이고, 전이를 재실행하지 않는다: orphan
+    요청에는 supersede 마커만 붙이고, dangling head는 실제로 존재하는
+    요청을 가리키던 직전 버전으로만 되돌린다.
+    """
+    if cutoff is None:
+        return {"orphans_superseded": 0, "heads_rolled_back": 0}
+
+    heads = {row["workflow_id"]: row for row in store.list_funding_workflow_heads()}
+    live_request_ids = {str(row.get("request_id")) for row in heads.values()}
+
+    orphans_superseded = 0
+    for phase, event_type in _REQUEST_EVENT.items():
+        for row in store.list_system_events_by_type(event_type, limit=None):
+            # cutoff is a system_events.id, monotonically increasing: only
+            # requests written strictly after the migration marker are
+            # candidates. One written at or before it predates heads
+            # entirely and is left untouched.
+            if int(row.get("id") or 0) <= cutoff:
+                continue
+            payload = row.get("payload") or {}
+            if payload.get("status") != "pending":
+                continue
+            request_id = str(payload.get("request_id") or "")
+            if not request_id or request_id in live_request_ids:
+                continue
+            workflow_id = str(
+                payload.get("funding_workflow_id") or workflow_id_from_request(payload)
+            )
+            outcome = store.save_system_events_atomic(
+                str(row.get("run_id") or request_id),
+                [
+                    {
+                        "event_type": "funding_workflow_superseded",
+                        "payload": {
+                            "duplicate_key": superseded_key(workflow_id, request_id),
+                            "workflow_id": workflow_id,
+                            "request_id": request_id,
+                            "phase": phase,
+                            "reason": "orphan_no_head",
+                        },
+                    }
+                ],
+            )
+            if outcome["committed"]:
+                orphans_superseded += 1
+
+    heads_rolled_back = 0
+    for workflow_id, head in heads.items():
+        request_id = str(head.get("request_id") or "")
+        if _request_ever_recorded(store, request_id):
+            continue
+        previous = _previous_head_with_a_real_request(store, workflow_id, head)
+        if previous is None:
+            continue
+        version = int(head.get("version") or 0) + 1
+        new_key = head_key(workflow_id, version)
+        outcome = store.save_system_events_atomic(
+            workflow_id,
+            [
+                {
+                    "event_type": "funding_workflow_head",
+                    "payload": {
+                        **previous,
+                        "duplicate_key": new_key,
+                        "version": version,
+                        "reason": "dangling_head_rollback",
+                    },
+                }
+            ],
+            forbid_duplicate_keys=(new_key,),
+        )
+        if outcome["committed"]:
+            heads_rolled_back += 1
+
+    return {"orphans_superseded": orphans_superseded, "heads_rolled_back": heads_rolled_back}
+
+
+def _request_ever_recorded(store: StateStore, request_id: str) -> bool:
+    """Whether some ``contribution_*_request`` event names this request_id at all.
+
+    Used only to decide whether a head is dangling -- it deliberately does
+    not care about status, since a completed or superseded request is still
+    proof the head's target once existed.
+    """
+    if not request_id:
+        return False
+    for event_type in _REQUEST_EVENT.values():
+        for row in store.list_system_events_by_type(event_type, limit=None):
+            if str((row.get("payload") or {}).get("request_id") or "") == request_id:
+                return True
+    return False
+
+
+def _previous_head_with_a_real_request(
+    store: StateStore, workflow_id: str, head: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """The most recent version below ``head`` whose request actually exists.
+
+    Not merely ``head.version - 1``: a rollback that landed on another
+    dangling version would just move the problem back one slot instead of
+    converging it.
+    """
+    candidates = [
+        dict(row.get("payload") or {})
+        for row in store.list_system_events_by_type("funding_workflow_head", limit=None)
+        if (row.get("payload") or {}).get("workflow_id") == workflow_id
+    ]
+    candidates.sort(key=lambda row: int(row.get("version") or 0), reverse=True)
+    head_version = int(head.get("version") or 0)
+    for candidate in candidates:
+        if int(candidate.get("version") or 0) >= head_version:
+            continue
+        if _request_ever_recorded(store, str(candidate.get("request_id") or "")):
+            return candidate
+    return None
+
+
 __all__ = [
     "LEGACY_TERMINAL_EVENT",
     "PHASES",
@@ -385,9 +523,11 @@ __all__ = [
     "claim_workflow_attempt",
     "complete_workflow",
     "completed_key",
+    "converge_workflow_invariants",
     "funding_workflow_id",
     "head_key",
     "list_incomplete_workflows",
+    "load_migration_cutoff",
     "load_workflow_child",
     "publish_contribution_request",
     "superseded_key",

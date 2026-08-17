@@ -32,7 +32,10 @@ from maestro.sdk import (
 from maestro.state.funding_workflow import (
     WorkflowClaimRefused,
     claim_workflow_attempt,
+    converge_workflow_invariants,
+    head_key,
     list_incomplete_workflows,
+    load_migration_cutoff,
     load_workflow_child,
     publish_contribution_request,
     workflow_id_from_request,
@@ -894,3 +897,67 @@ def test_a_stale_resume_callback_for_a_non_stalled_workflow_is_refused(operator_
     text = operator_bot.client.answered_callbacks[-1]["text"]
     assert "no longer stalled" in text
     assert _wfresume_statuses(store) == ["stale_callback"]
+
+
+def test_without_a_migration_cutoff_the_sweep_does_nothing(operator_bot):
+    store = operator_bot.store
+    store.save_system_event("run-1", "contribution_funding_request", dict(_request("legacy-1")))
+    assert load_migration_cutoff(store) is None
+    assert converge_workflow_invariants(store, cutoff=None) == {
+        "orphans_superseded": 0,
+        "heads_rolled_back": 0,
+    }
+    assert store.list_system_events_by_type("funding_workflow_superseded", limit=None) == []
+
+
+def test_a_pending_request_after_the_cutoff_without_a_head_is_superseded(operator_bot):
+    store = operator_bot.store
+    cutoff = 0
+    store.save_system_event("run-1", "contribution_funding_request", dict(_request("orphan-1")))
+    result = converge_workflow_invariants(store, cutoff=cutoff)
+    assert result["orphans_superseded"] == 1
+    superseded = store.list_system_events_by_type("funding_workflow_superseded", limit=None)
+    assert [row["payload"]["request_id"] for row in superseded] == ["orphan-1"]
+
+
+def test_a_pending_request_before_the_cutoff_is_left_alone(operator_bot):
+    store = operator_bot.store
+    store.save_system_event("run-1", "contribution_funding_request", dict(_request("legacy-1")))
+    rows = store.list_system_events_by_type("contribution_funding_request", limit=None)
+    cutoff = int(rows[0]["id"])
+    assert converge_workflow_invariants(store, cutoff=cutoff)["orphans_superseded"] == 0
+
+
+def test_a_head_pointing_at_nothing_falls_back_to_the_previous_version(operator_bot):
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    store.save_system_events_atomic(
+        "run-2",
+        [
+            {
+                "event_type": "funding_workflow_head",
+                "payload": {
+                    "duplicate_key": head_key(workflow_id, 2),
+                    "workflow_id": workflow_id,
+                    "version": 2,
+                    "request_id": "ghost-1",
+                    "phase": "funding",
+                    "status": "pending",
+                },
+            }
+        ],
+    )
+    result = converge_workflow_invariants(store, cutoff=0)
+    assert result["heads_rolled_back"] == 1
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-1"
+    assert head["version"] == 3
+
+
+def test_converging_twice_changes_nothing_the_second_time(operator_bot):
+    store = operator_bot.store
+    store.save_system_event("run-1", "contribution_funding_request", dict(_request("orphan-1")))
+    converge_workflow_invariants(store, cutoff=0)
+    assert converge_workflow_invariants(store, cutoff=0)["orphans_superseded"] == 0
