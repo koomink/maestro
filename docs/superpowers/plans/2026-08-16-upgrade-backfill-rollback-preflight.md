@@ -16,6 +16,7 @@
 - **quiesce 장벽은 backfill과 preflight 양쪽 모두의 전제다.** 장벽 없이 실행하면 검사 통과가 무의미하다 — 검사 직후 callback·sweep·예약 run이 새 미완 상태를 만든다.
 - **`migration_started`의 cutoff는 immutable하다.** 재기동 시 미완 마이그레이션이 발견되면 새 cutoff를 만들지 않고 기존 것으로 재개한다.
 - **`migration_completed` 이전에는 어떤 프로세스도** 신규 스키마 write·수렴 sweep·funding/budget callback 처리를 시작하지 않는다.
+- **수렴 sweep을 켜기 전에 3a-4가 남긴 stale-snapshot 결함을 먼저 닫아야 한다.** `converge_workflow_invariants`는 `heads`/`live_request_ids`/`accounted_*`를 함수 진입 시점에 한 번 스냅샷하는데, orphan 루프의 per-row `save_system_events_atomic`은 precondition을 하나도 선언하지 않는다(`funding_workflow.py` orphan 쓰기 지점; 바로 아래 head 롤백 루프는 자기 target key를 forbid한다 — orphan 루프만 무방비다). sweep 도중에 예약 signal run이 `publish_contribution_request`로 새 요청을 커밋하면, 스냅샷에 없는 그 요청이 **살아 있는 head인 채로** `orphan_no_head` supersede 마커를 뒤집어쓴다. 돈은 움직이지 않지만(claim은 마커가 아니라 head를 본다) 이벤트 로그가 거짓을 주장하고, 이후 sweep은 그 행을 처리 완료로 취급한다. 3a-4에서는 `cutoff is None`이라 도달 불가여서 의도적으로 유예했다 — **3a-5가 sweep을 켜는 순간 도달 가능해진다.** 둘 중 하나로 닫는다: (a) sweep을 quiesce 장벽 안에서만 돌린다, 또는 (b) candidate 행마다 head를 다시 읽고 `require_duplicate_keys`로 "이 요청이 head가 아님"을 트랜잭션 안에서 재검증한 뒤 쓴다. 함께: orphan 루프의 per-row `except ValueError` skip 건수를 반환 dict에 집계해 두었으므로(3a-4 최종 리뷰 반영), sweep을 켠 뒤 이 값이 0이 아니면 위 경합이 실제로 발생했다는 신호로 읽는다.
 - **모호한 케이스는 자동 처리하지 않는다.** 같은 workflow에 pending 2건 이상, 증거 불충분 ack — 둘 다 운영자 검토로 격리한다.
 - **모든 backfill 쓰기는 결정적 duplicate_key**(workflow_id·approval_id 기반)로 멱등이다. payload에 실행 시각·난수를 넣지 않는다 — 넣으면 재개가 `ValueError`로 죽는다(`store.py:1103-1120`).
 - preflight는 읽기 전용이 원칙이다. 유일한 예외는 dual-write 누락의 legacy 이벤트 멱등 backfill이며, 이는 스펙이 명시적으로 지시한 것이다(741~742행).
@@ -897,6 +898,7 @@ git commit -m "feat(3a-5): add the upgrade-backfill command behind the quiesce b
 
 **Files:**
 - Modify: `src/maestro/integrations/telegram/handlers.py`
+- Modify: `src/maestro/state/funding_workflow.py` — `converge_workflow_invariants`의 orphan 루프 (설계 메모 2)
 - Test: `tests/test_upgrade_backfill_markers.py` (이어서)
 
 **Interfaces:**
@@ -904,6 +906,8 @@ git commit -m "feat(3a-5): add the upgrade-backfill command behind the quiesce b
 - Produces: 마커가 없으면 funding/budget callback은 안내 문구로 거절되고 수렴 sweep은 진입하지 않는다.
 
 **설계 메모:** 3a-4의 수렴 sweep은 이미 `load_migration_cutoff`가 `None`이면 비활성이다. 그런데 `started`만 있고 `completed`가 없는 **중간 상태**에서는 cutoff가 존재하므로 sweep이 켜진다 — backfill이 아직 head를 다 만들지 않은 상태에서 sweep이 돌면 legacy 요청을 orphan으로 오판한다. 그래서 게이트는 cutoff가 아니라 `completed` 마커여야 한다.
+
+**설계 메모 2 (3a-4 최종 리뷰 F5):** 이 게이트를 통과시켜 sweep을 처음으로 실제 가동시키는 것이 바로 이 태스크다. 따라서 Global Constraints의 stale-snapshot 항목을 닫는 책임도 여기에 있다. `completed` 게이트만 달고 끝내면, 게이트가 열린 뒤 정상 운영 중에 sweep과 예약 signal run이 겹치는 순간 살아 있는 요청이 `orphan_no_head`로 마킹된다 — 게이트는 마이그레이션 중간 상태만 막을 뿐 정상 운영 중의 경합은 막지 못한다. 구현자는 (a) sweep 호출을 quiesce 장벽 안으로 옮기거나 (b) orphan 루프에서 candidate마다 head를 재조회하고 `require_duplicate_keys`로 트랜잭션 안에서 재검증하도록 `converge_workflow_invariants`를 고친 뒤, "sweep 진입 후·orphan 쓰기 전에 새 요청이 publish되면 그 요청은 supersede되지 않는다"를 확인하는 테스트를 추가한다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
