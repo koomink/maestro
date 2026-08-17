@@ -466,9 +466,14 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
     처리 중 예외를 던져도 그 행만 건너뛴다: 이 sweep은 여러 워크플로우에
     걸쳐 도는 backstop이므로, 한 행의 결함이 나머지 전체를 막아서는
     안 된다.
+
+    다만 쓰기가 ValueError로 충돌해 건너뛴 행은 ``conflicts_skipped``로
+    세어 돌려준다. 그 충돌은 손상된 행이 아니라 *다른 writer가 이 sweep이
+    자기 것이라 믿은 키에 다른 내용을 썼다*는 뜻이고, 0이 아니면 사람이
+    봐야 하는 사건이다. 그래서 로그도 warning이 아니라 error다.
     """
     if cutoff is None:
-        return {"orphans_superseded": 0, "heads_rolled_back": 0}
+        return {"orphans_superseded": 0, "heads_rolled_back": 0, "conflicts_skipped": 0}
 
     heads = {row["workflow_id"]: row for row in store.list_funding_workflow_heads()}
     live_request_ids = {str(row.get("request_id")) for row in heads.values()}
@@ -489,6 +494,7 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
         )
 
     orphans_superseded = 0
+    conflicts_skipped = 0
     for phase, event_type in _REQUEST_EVENT.items():
         for row in store.list_system_events_by_type(event_type, limit=None):
             # cutoff is a system_events.id, monotonically increasing: only
@@ -537,12 +543,13 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
                     ],
                 )
             except ValueError:
-                logger.warning(
+                logger.error(
                     "converge_workflow_invariants: skipping request_id=%r "
                     "workflow_id=%r -- supersede write conflicted unexpectedly",
                     request_id,
                     workflow_id,
                 )
+                conflicts_skipped += 1
                 continue
             if outcome["committed"]:
                 orphans_superseded += 1
@@ -582,16 +589,21 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
                 forbid_duplicate_keys=(new_key,),
             )
         except ValueError:
-            logger.warning(
+            logger.error(
                 "converge_workflow_invariants: skipping head rollback for "
                 "workflow_id=%r -- write conflicted unexpectedly",
                 workflow_id,
             )
+            conflicts_skipped += 1
             continue
         if outcome["committed"]:
             heads_rolled_back += 1
 
-    return {"orphans_superseded": orphans_superseded, "heads_rolled_back": heads_rolled_back}
+    return {
+        "orphans_superseded": orphans_superseded,
+        "heads_rolled_back": heads_rolled_back,
+        "conflicts_skipped": conflicts_skipped,
+    }
 
 
 def _request_ever_recorded(store: StateStore, request_id: str) -> bool:

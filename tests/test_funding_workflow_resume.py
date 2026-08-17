@@ -914,6 +914,7 @@ def test_without_a_migration_cutoff_the_sweep_does_nothing(operator_bot):
     assert converge_workflow_invariants(store, cutoff=None) == {
         "orphans_superseded": 0,
         "heads_rolled_back": 0,
+        "conflicts_skipped": 0,
     }
     assert store.list_system_events_by_type("funding_workflow_superseded", limit=None) == []
 
@@ -1228,3 +1229,37 @@ def test_a_request_that_predates_the_workflow_upgrade_says_so(operator_bot):
     assert "already processed or superseded" not in text
     assert "predates" in text
     assert _funding_complete_statuses(store) == ["claim_no_head"]
+
+
+def test_an_unexpected_supersede_conflict_is_counted_and_logged_as_an_error(
+    operator_bot, caplog
+):
+    """Final review section (d): a content conflict on a key this sweep
+    believes it owns is a concurrent-writer disagreement, not routine noise."""
+    import logging
+
+    from maestro.state.funding_workflow import superseded_key
+
+    store = operator_bot.store
+    store.save_system_event("run-1", "contribution_funding_request", dict(_request("orphan-1")))
+    # Same duplicate_key, different content, and not attributable to this
+    # (workflow_id, request_id) pair -- so the sweep does not skip it as
+    # already accounted for and walks straight into the collision.
+    store.save_system_event(
+        "run-x",
+        "funding_workflow_superseded",
+        {
+            "duplicate_key": superseded_key(_workflow_id_of("orphan-1"), "orphan-1"),
+            "workflow_id": "some-other-workflow",
+            "request_id": "orphan-1",
+            "reason": "written_by_someone_else",
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="maestro.state.funding_workflow"):
+        result = converge_workflow_invariants(store, cutoff=0)
+
+    assert result["orphans_superseded"] == 0
+    assert result["conflicts_skipped"] == 1
+    levels = {record.levelno for record in caplog.records}
+    assert levels == {logging.ERROR}
