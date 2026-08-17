@@ -3353,9 +3353,32 @@ class TelegramOperatorCommandRouter:
             self._record("/wfresume", chat_id, user_id, username, "stale_callback")
             return True
         next_attempt = stalled["attempt"] + 1
+        intent = str(stalled["intent"])
         self._answer(callback, "Resuming...")
         try:
-            if phase == "funding":
+            # 재개는 phase가 아니라 claim에 기록된 intent로 갈라진다.
+            # phase만 보고 confirm으로 이어 달리면, 운영자가 취소한 요청이
+            # 재개 한 번으로 이번 달 투자로 뒤집힌다.
+            if intent not in {"confirm", "cancel"}:
+                raise ValueError(f"stalled workflow has an unknown intent: {intent!r}")
+            if intent == "cancel":
+                if phase == "funding":
+                    self._cancel_funding_request(
+                        request,
+                        user_id=user_id,
+                        username=username,
+                        attempt=next_attempt,
+                    )
+                    text = "Funding request canceled."
+                else:
+                    self._cancel_budget_request(
+                        request,
+                        user_id=user_id,
+                        username=username,
+                        attempt=next_attempt,
+                    )
+                    text = "Budget request canceled."
+            elif phase == "funding":
                 text = self._confirm_funding_request(
                     request,
                     chat_id=chat_id,
@@ -3364,9 +3387,10 @@ class TelegramOperatorCommandRouter:
                     attempt=next_attempt,
                 )
             else:
-                # A resumed budget workflow must not ask the operator again --
-                # it replays the amount that was already recorded in the
-                # stalled claim.
+                # A resumed budget confirmation must not ask the operator
+                # again -- it replays the amount that was already recorded in
+                # the stalled claim. Only a confirm needs one; a cancel never
+                # carried an amount and must not be blocked for lacking it.
                 selected_budget = stalled.get("selected_budget")
                 if selected_budget is None:
                     raise ValueError(
@@ -3475,7 +3499,9 @@ class TelegramOperatorCommandRouter:
             request_id=request_id,
             phase="budget",
             attempt=attempt,
-            extra={"selected_budget": selected_budget},
+            # intent는 재개가 confirm/cancel 중 무엇을 이어 달릴지 가르는
+            # 값이고, selected_budget은 그 confirm의 입력이다.
+            extra={"selected_budget": selected_budget, "intent": "confirm"},
         )
         if not claim["claimed"]:
             raise WorkflowClaimRefused(str(claim["reason"]))
@@ -3618,6 +3644,10 @@ class TelegramOperatorCommandRouter:
             request_id=request_id,
             phase="funding",
             attempt=attempt,
+            # 어떤 종단 전이를 요청받았는지를 claim에 남긴다 -- 재개는
+            # phase가 아니라 이 값으로 갈라진다. 결정론적인 값만 실을 수
+            # 있으므로(duplicate_key 규약) 리터럴 문자열이다.
+            extra={"intent": "confirm"},
         )
         if not claim["claimed"]:
             raise WorkflowClaimRefused(str(claim["reason"]))
@@ -4259,6 +4289,9 @@ class TelegramOperatorCommandRouter:
             request_id=request_id,
             phase="budget",
             attempt=attempt,
+            # cancel claim에는 selected_budget이 없다. 재개가 intent로
+            # 갈라지므로 없어야 맞고, 있어서도 안 된다.
+            extra={"intent": "cancel"},
         )
         if not claim["claimed"]:
             raise WorkflowClaimRefused(str(claim["reason"]))
@@ -4317,9 +4350,9 @@ class TelegramOperatorCommandRouter:
         pending and let it be re-confirmed later.
 
         ``attempt`` mirrors ``_confirm_funding_request``'s parameter of the
-        same name so a future resume mechanism (Task 10) can drive either
-        transition without another signature change; this task does not
-        build that mechanism, it only keeps the two transitions symmetric.
+        same name so the resume path (Task 10) can drive either transition:
+        without it a stalled cancel would be pinned at the attempt its own
+        stalled claim already holds, and the request could never be closed.
         """
         workflow_id = workflow_id_from_request(request)
         request_id = str(request["request_id"])
@@ -4330,6 +4363,9 @@ class TelegramOperatorCommandRouter:
             request_id=request_id,
             phase="funding",
             attempt=attempt,
+            # 재개가 confirm으로 새지 않도록, 운영자가 요청한 전이를
+            # claim 자체에 기록한다.
+            extra={"intent": "cancel"},
         )
         if not claim["claimed"]:
             raise WorkflowClaimRefused(str(claim["reason"]))

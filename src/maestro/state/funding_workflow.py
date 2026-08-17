@@ -381,7 +381,21 @@ def list_incomplete_workflows(store: StateStore) -> list[dict[str, Any]]:
     only *looks* dead, so nothing here may re-enter the transition on its
     own -- entry happens solely through the operator's explicit [재개] tap,
     which commits ``attempt + 1`` as its own fencing token.
+
+    head가 더 이상 가리키지 않는 요청은 제외한다: 그 요청의 claim은 무슨
+    수를 써도 다시 커밋될 수 없으므로([재개]는 ``not_head``로 거절된다)
+    attempt가 영원히 오르지 않고, 행은 "조치 필요" 목록에 영구히 남는다.
+
+    각 행의 ``intent``는 운영자가 요청한 종단 전이("confirm"/"cancel")다.
+    이 키가 없는 claim은 이 필드가 생기기 전 릴리스가 쓴 것이고, 그 시절
+    재개 경로가 수행할 수 있던 전이는 confirm 하나뿐이었으므로 confirm으로
+    읽는다. 알 수 없는 값은 confirm으로 뭉개지 않고 그대로 넘겨, 호출자가
+    조용히 잘못된 전이를 실행하는 대신 실패하게 한다.
     """
+    live = {
+        (str(row.get("workflow_id")), str(row.get("request_id")))
+        for row in store.list_funding_workflow_heads()
+    }
     completed = {
         (
             str((row.get("payload") or {}).get("request_id")),
@@ -395,14 +409,19 @@ def list_incomplete_workflows(store: StateStore) -> list[dict[str, Any]]:
         key = (str(payload.get("request_id")), str(payload.get("phase")))
         if key in completed:
             continue
+        workflow_id = str(payload.get("workflow_id"))
+        if (workflow_id, key[0]) not in live:
+            continue
         current = latest.get(key)
         attempt = int(payload.get("attempt") or 0)
         if current is None or attempt > int(current["attempt"]):
+            intent = payload.get("intent")
             latest[key] = {
-                "workflow_id": str(payload.get("workflow_id")),
+                "workflow_id": workflow_id,
                 "request_id": key[0],
                 "phase": key[1],
                 "attempt": attempt,
+                "intent": "confirm" if intent is None else str(intent),
                 "selected_budget": payload.get("selected_budget"),
             }
     return sorted(latest.values(), key=lambda row: (row["phase"], row["request_id"]))

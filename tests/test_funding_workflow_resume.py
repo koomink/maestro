@@ -678,6 +678,7 @@ def test_an_incomplete_workflow_is_never_resumed_automatically(operator_bot):
             "request_id": "req-1",
             "phase": "funding",
             "attempt": 1,
+            "intent": "confirm",
             "selected_budget": None,
         }
     ]
@@ -707,8 +708,15 @@ def test_the_sweep_sends_a_resume_card_whose_button_fits_telegrams_limit(operato
         request_id=funding_request_id,
         phase="funding",
     )
+    # A different month, so this budget request is its own workflow: funding
+    # and budget in the *same* scope share one head, and publishing the second
+    # would supersede the first -- which list_incomplete_workflows now filters
+    # out (a request that is no longer head can never be resumed).
     budget_workflow_id = publish_contribution_request(
-        store, "run-2", _budget_request(budget_request_id), phase="budget"
+        store,
+        "run-2",
+        {**_budget_request(budget_request_id), "month_key": "2026-09"},
+        phase="budget",
     )["workflow_id"]
     claim_workflow_attempt(
         store,
@@ -1081,3 +1089,129 @@ def test_changing_the_budget_amount_on_the_same_card_reports_in_flight(
     # list_system_events_by_type is newest-first: the second tap's refusal
     # comes back before the first tap's failure.
     assert _budget_statuses_for(store, "/budget_select") == ["claim_in_flight", "failed"]
+
+
+def test_resuming_a_stalled_cancel_cancels_instead_of_confirming(operator_bot, monkeypatch):
+    """Final review F1+F3.
+
+    The operator asked to cancel. The claim landed, complete_workflow did
+    not. Resume must finish the *cancel* -- it must not book the cash flow
+    or generate the orders the operator just declined.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    store.save_portfolio_snapshot(
+        "baseline",
+        PortfolioState(cash=0.0, cash_by_currency={"KRW": 0.0}, positions={}),
+        account_id="paper_cash",
+    )
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("crashed between claim and completion")
+
+    monkeypatch.setattr("maestro.integrations.telegram.handlers.complete_workflow", boom)
+    assert operator_bot.process_update(callback_update("operator:funding:cancel:req-1"))
+    assert _funding_cancel_statuses(store) == ["failed"]
+    monkeypatch.undo()
+
+    assert operator_bot.process_update(
+        callback_update("operator:wfresume:funding:req-1", update_id=3)
+    )
+
+    assert _wfresume_statuses(store) == ["resumed"]
+    assert store.list_system_events_by_type("account_cash_flow", limit=None) == []
+    assert store.list_system_events_by_type("signal_package", limit=None) == []
+    acks = store.list_system_events_by_type("contribution_funding_request_ack", limit=None)
+    assert [row["payload"]["status"] for row in acks] == ["canceled"]
+    # The resume had to fence itself with a new attempt, or cancel would be
+    # permanently pinned at the attempt the stalled claim already holds.
+    claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    assert sorted(row["payload"]["attempt"] for row in claims) == [1, 2]
+    assert {row["payload"]["intent"] for row in claims} == {"cancel"}
+
+
+def test_resuming_a_stalled_budget_cancel_needs_no_stored_amount(operator_bot, monkeypatch):
+    """Final review F1 (budget half) / deferred-minor #13.
+
+    A cancel claim carries no selected_budget, and it never needed one --
+    the resume must not demand it.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("crashed between claim and completion")
+
+    monkeypatch.setattr("maestro.integrations.telegram.handlers.complete_workflow", boom)
+    assert operator_bot.process_update(callback_update("operator:budget:cancel:req-1"))
+    monkeypatch.undo()
+
+    assert operator_bot.process_update(
+        callback_update("operator:wfresume:budget:req-1", update_id=3)
+    )
+
+    assert _wfresume_statuses(store) == ["resumed"]
+    decisions = store.list_system_events_by_type(
+        "contribution_budget_request_decision", limit=None
+    )
+    assert [row["payload"]["status"] for row in decisions] == ["canceled"]
+    assert store.list_system_events_by_type("signal_package", limit=None) == []
+
+
+def test_a_claim_recorded_before_intent_existed_resumes_as_confirm(operator_bot):
+    """Claims written by the previous release carry no intent key. Confirm is
+    the only transition the old resume path could perform, so that is what a
+    missing intent has to mean."""
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    assert list_incomplete_workflows(store)[0]["intent"] == "confirm"
+
+    assert operator_bot.process_update(callback_update("operator:wfresume:funding:req-1"))
+
+    assert _wfresume_statuses(store) == ["resumed"]
+    acks = store.list_system_events_by_type("contribution_funding_request_ack", limit=None)
+    assert [row["payload"]["status"] for row in acks] == ["confirmed"]
+
+
+def test_an_unknown_recorded_intent_is_not_silently_treated_as_confirm(operator_bot):
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        extra={"intent": "sideways"},
+    )
+
+    assert operator_bot.process_update(callback_update("operator:wfresume:funding:req-1"))
+
+    assert _wfresume_statuses(store) == ["failed"]
+    assert "sideways" in operator_bot.client.edited_messages[-1]["text"]
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert store.list_system_events_by_type("signal_package", limit=None) == []
+
+
+def test_a_stalled_claim_on_a_superseded_request_is_no_longer_incomplete(operator_bot):
+    """Final review F6: a request that is no longer head can never be resumed,
+    so it must not sit in the list that means "needs action" forever."""
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+
+    assert list_incomplete_workflows(store) == []
