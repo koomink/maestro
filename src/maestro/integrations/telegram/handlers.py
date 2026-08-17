@@ -3266,6 +3266,15 @@ class TelegramOperatorCommandRouter:
                 user_id=user_id,
                 username=username,
             )
+        except WorkflowClaimRefused as exc:
+            # WorkflowClaimRefused subclasses RuntimeError, so this branch
+            # must come before the generic except below -- otherwise a claim
+            # refusal (stuck-in-flight or superseded) is misreported as an
+            # invalid amount, same as the callback path this mirrors.
+            send_text, status = _funding_claim_refusal_response(exc.reason, request_noun="budget")
+            self._send(chat_id, send_text)
+            self._record("/budget", chat_id, user_id, username, status)
+            return
         except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
             self._send(chat_id, f"Budget amount out of range or invalid: {exc}")
             self._record("/budget", chat_id, user_id, username, "failed")

@@ -121,6 +121,23 @@ def callback_update(
     }
 
 
+def message_update(
+    text: str,
+    *,
+    update_id: int = 1,
+    chat_id: int = 100,
+    user_id: int = 100,
+) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "message": {
+            "chat": {"id": chat_id},
+            "from": {"id": user_id, "username": "operator"},
+            "text": text,
+        },
+    }
+
+
 def _readonly_config_path(tmp_path) -> Path:
     raw = yaml.safe_load(Path("configs/paper.yaml").read_text())
     raw["execution"]["market_session"] = {
@@ -554,3 +571,57 @@ def test_resuming_a_budget_workflow_reuses_the_stored_amount(operator_bot):
     # request only ever gets one claim (attempt=1), so index 0 is it.
     claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
     assert claims[0]["payload"]["selected_budget"] == 500000.0
+
+
+def _budget_statuses(store) -> list[str]:
+    return [
+        row["payload"]["status"]
+        for row in store.list_system_events_by_type("telegram_command", limit=None)
+        if row["payload"].get("command") == "/budget"
+    ]
+
+
+def test_a_superseded_budget_request_via_text_command_reports_superseded(operator_bot):
+    """Fix round 1.
+
+    _process_budget_command (the /budget <request_id> <amount> text entry
+    point) caught only the generic (RuntimeError, TimeoutError, TypeError,
+    ValueError) tuple, and WorkflowClaimRefused subclasses RuntimeError -- so
+    a genuinely superseded request was reported as an invalid amount instead
+    of "already processed or superseded", with audit status "failed" instead
+    of "claim_superseded".
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+    publish_contribution_request(store, "run-2", _budget_request("req-2"), phase="budget")
+
+    assert operator_bot.process_update(message_update("/budget req-1 500000"))
+
+    text = operator_bot.client.sent_messages[-1]["text"]
+    assert "already processed or superseded" in text
+    assert "out of range or invalid" not in text
+    assert _budget_statuses(store) == ["claim_superseded"]
+
+
+def test_a_stuck_budget_claim_via_text_command_reports_in_flight(operator_bot):
+    store = operator_bot.store
+    request = _budget_request("req-1")
+    publish_contribution_request(store, "run-1", request, phase="budget")
+    workflow_id = workflow_id_from_request(request)
+    claim = claim_workflow_attempt(
+        store,
+        new_run_id(),
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="budget",
+        attempt=1,
+        extra={"selected_budget": 500000.0},
+    )
+    assert claim["claimed"]
+
+    assert operator_bot.process_update(message_update("/budget req-1 500000"))
+
+    text = operator_bot.client.sent_messages[-1]["text"]
+    assert "already being processed" in text
+    assert "superseded" not in text
+    assert _budget_statuses(store) == ["claim_in_flight"]
