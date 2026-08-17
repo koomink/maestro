@@ -681,23 +681,62 @@ def test_an_incomplete_workflow_is_never_resumed_automatically(operator_bot):
 
 
 def test_the_sweep_sends_a_resume_card_whose_button_fits_telegrams_limit(operator_bot):
+    """Fix round 1 finding: the original version of this test asserted the
+    byte budget against the fixture id ``"req-1"`` (5 bytes) instead of a
+    real generated id, so it would have kept passing even if
+    new_budget_request_id() grew and pushed callback_data past Telegram's
+    64-byte cap -- exactly the boundary the length correction was about.
+    This version builds callback_data from real ids for both phases.
+    """
+    from maestro.core.ids import new_budget_request_id, new_funding_request_id
+
     store = operator_bot.store
+    funding_request_id = new_funding_request_id()
+    budget_request_id = new_budget_request_id()
+
     workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
+        store, "run-1", _request(funding_request_id), phase="funding"
     )["workflow_id"]
     claim_workflow_attempt(
-        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id=funding_request_id,
+        phase="funding",
+    )
+    budget_workflow_id = publish_contribution_request(
+        store, "run-2", _budget_request(budget_request_id), phase="budget"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store,
+        "run-2",
+        workflow_id=budget_workflow_id,
+        request_id=budget_request_id,
+        phase="budget",
     )
 
     operator_bot._sweep_incomplete_workflows()
 
-    sent = operator_bot.client.sent_messages[-1]
-    markup = sent["reply_markup"]
-    callback_data = markup["inline_keyboard"][0][0]["callback_data"]
-    assert callback_data == "operator:wfresume:funding:req-1"
-    # Telegram callback_data is capped at 64 bytes -- a real request_id (e.g.
-    # new_budget_request_id()'s "budget_" + 32 hex chars) has to still fit.
-    assert len(callback_data.encode("utf-8")) <= 64
+    callback_data_by_phase = {
+        markup_callback["callback_data"].split(":")[2]: markup_callback["callback_data"]
+        for sent in operator_bot.client.sent_messages
+        for markup_callback in [sent["reply_markup"]["inline_keyboard"][0][0]]
+    }
+    funding_callback_data = callback_data_by_phase["funding"]
+    budget_callback_data = callback_data_by_phase["budget"]
+    assert funding_callback_data == f"operator:wfresume:funding:{funding_request_id}"
+    assert budget_callback_data == f"operator:wfresume:budget:{budget_request_id}"
+
+    funding_bytes = len(funding_callback_data.encode("utf-8"))
+    budget_bytes = len(budget_callback_data.encode("utf-8"))
+    # Telegram rejects callback_data over 64 bytes outright -- if either of
+    # these ever exceeds it, the Resume button silently fails to send or
+    # route, with no other test catching it. The budget case (measured 64
+    # bytes: "operator:wfresume:budget:" + "budget_" + 32 hex chars) sits
+    # exactly at the cap with zero headroom -- a single extra character in
+    # new_budget_request_id() would break it.
+    assert funding_bytes <= 64, funding_bytes
+    assert budget_bytes <= 64, budget_bytes
 
 
 def test_a_second_sweep_does_not_resend_the_same_attempts_notice(operator_bot):
