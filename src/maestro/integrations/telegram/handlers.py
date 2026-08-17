@@ -5534,11 +5534,14 @@ def _funding_claim_refusal_response(
 
     ``already_claimed`` means an earlier attempt on this exact request
     already committed a claim and never reached completion -- the request is
-    stuck, not done. Every other reason (``no_head``, ``not_head``,
-    ``head_moved``) means a newer request replaced this one, which is a
-    normal, harmless outcome. Conflating the two would tell an operator
-    retrying a genuinely stuck request that it was "already processed",
-    which is false and would stop them from investigating.
+    stuck, not done. ``no_head`` means this request has no workflow head at
+    all, which for now can only mean it was published before this upgrade:
+    nothing processed or superseded it, so saying so would be false and would
+    send the operator looking for a replacement that does not exist. The
+    remaining reasons (``not_head``, ``head_moved``) do mean a newer request
+    replaced this one, which is a normal, harmless outcome. Conflating any of
+    the three would tell an operator something untrue about why the button
+    did nothing.
 
     ``request_noun`` is phase-agnostic wording only ("funding" vs "budget");
     the claim/complete plumbing this describes is identical for both phases,
@@ -5549,6 +5552,13 @@ def _funding_claim_refusal_response(
             f"This {request_noun} request is already being processed -- an earlier "
             "attempt did not finish. Check its status before tapping again.",
             "claim_in_flight",
+        )
+    if reason == "no_head":
+        return (
+            f"This {request_noun} request predates the workflow upgrade and can no "
+            "longer be actioned from this card. The next scheduled signal run will "
+            "publish an equivalent request.",
+            "claim_no_head",
         )
     return (
         f"This {request_noun} request was already processed or superseded.",

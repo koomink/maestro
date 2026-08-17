@@ -1215,3 +1215,16 @@ def test_a_stalled_claim_on_a_superseded_request_is_no_longer_incomplete(operato
     publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
 
     assert list_incomplete_workflows(store) == []
+
+
+def test_a_request_that_predates_the_workflow_upgrade_says_so(operator_bot):
+    """Final review F4: no head is not the same as superseded."""
+    store = operator_bot.store
+    store.save_system_event("run-1", "contribution_funding_request", dict(_request("legacy-1")))
+
+    assert operator_bot.process_update(callback_update("operator:funding:complete:legacy-1"))
+
+    text = operator_bot.client.edited_messages[-1]["text"]
+    assert "already processed or superseded" not in text
+    assert "predates" in text
+    assert _funding_complete_statuses(store) == ["claim_no_head"]
