@@ -633,8 +633,6 @@ def test_a_package_committed_in_a_batch_can_still_be_amended(funding_orchestrato
     assert store.load_signal_package(summary.signal_run_id)["orders_preview_count"] == 99
 
 
-# --- re-review round: completed guard, stale redelivery --------------------
-
 def test_a_late_redelivery_of_a_replaced_request_is_refused_not_raised(tmp_path):
     """Re-review Important 2: req1 -> req2 -> req3, then req2 arrives again.
 

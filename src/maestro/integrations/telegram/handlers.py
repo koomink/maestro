@@ -4255,17 +4255,55 @@ class TelegramOperatorCommandRouter:
 
     def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> None:
         request_id = str(request.get("request_id") or "")
-        self._send(
+        self._send_request_card(
             chat_id,
-            format_contribution_funding_request(request),
+            request_id,
+            phase="funding",
+            text=format_contribution_funding_request(request),
             reply_markup=funding_request_reply_markup(request_id),
         )
 
     def _send_budget_request(self, chat_id: int, request: dict[str, Any]) -> None:
-        self._send(
+        self._send_request_card(
             chat_id,
-            format_contribution_budget_request(request),
+            str(request.get("request_id") or ""),
+            phase="budget",
+            text=format_contribution_budget_request(request),
             reply_markup=budget_request_reply_markup(request),
+        )
+
+    def _send_request_card(
+        self,
+        chat_id: int,
+        request_id: str,
+        *,
+        phase: str,
+        text: str,
+        reply_markup: dict[str, Any] | None,
+    ) -> None:
+        """Deliver an actionable request card at most once per chat.
+
+        A request card is a live decision button, and the transition behind it
+        accepts exactly one decision. The delivery is reached again whenever
+        the workflow that produced it is resumed -- completion happens after
+        delivery, so a crash in between replays this -- and a plain send would
+        put a second button-bearing card for the same request in the chat.
+        Recording the intent before the call and the result after is what lets
+        the replay tell "already sent" from "never sent".
+
+        A request with no id cannot be keyed, so it falls back to a plain
+        send: an un-keyed card delivered twice is better than one that is
+        deduplicated against an unrelated card.
+        """
+        if not request_id:
+            self._send(chat_id, text, reply_markup=reply_markup)
+            return
+        self._card_manager.deliver_once(
+            new_run_id(),
+            f"{phase}-request:{request_id}",
+            "pending",
+            RenderedCard(text=text, reply_markup=reply_markup),
+            chat_id=chat_id,
         )
 
     def _load_pending_budget_request(self, request_id: str) -> dict[str, Any] | None:

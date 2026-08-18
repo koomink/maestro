@@ -115,6 +115,47 @@ class CardLifecycleManager:
         )
         return "sent"
 
+    def deliver_once(
+        self,
+        run_id: str,
+        card_key: str,
+        stage: str,
+        rendered: RenderedCard,
+        *,
+        chat_id: int,
+    ) -> str:
+        """Send this card to one chat unless that chat already has a copy.
+
+        ``deliver`` is for a card being created now, and sends unconditionally.
+        This is for a card whose creation may already have happened in a
+        process that died before it could say so -- the funding and budget
+        request cards a resumed workflow re-delivers. Re-sending one puts a
+        second live decision button in front of the operator for a request
+        that only accepts one decision; the second tap is then refused by the
+        claim, which looks like a malfunction rather than the duplicate it is.
+
+        The intent record written before the send is what makes this
+        answerable at all: without it, a crash mid-call is indistinguishable
+        from a card never sent. ``unknown`` is therefore never re-sent, the
+        same rule ``refresh`` follows -- Telegram gives no way to ask whether
+        it arrived, so staying silent is how a duplicate is avoided, and the
+        operator hears about it through the plain-text escalation instead.
+
+        Unlike ``deliver``, no audience is recorded: these cards go to the one
+        chat that acted and are never swept for refreshes, so an audience
+        would only pin a list nothing reads.
+        """
+        copy = self.copies(card_key).get((card_key, chat_id))
+        if copy is not None:
+            if copy.delivery == "confirmed":
+                return "skipped"
+            if copy.delivery == "unknown":
+                self._escalate_ambiguous(run_id, card_key, chat_id, stage)
+                return "ambiguous"
+        return self._deliver_one(
+            run_id, card_key, stage, rendered, self.render_hash(rendered), chat_id
+        )
+
     def refresh(
         self,
         run_id: str,

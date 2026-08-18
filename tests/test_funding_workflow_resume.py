@@ -1486,3 +1486,70 @@ def test_a_resumed_attempt_adopts_a_dispatch_that_already_settled(operator_bot, 
     assert operator_bot._dispatch_child_approval("signal-child") == [
         "approval_status: already_dispatched"
     ]
+
+
+def _request_cards(operator_bot, request_id: str) -> list[dict[str, Any]]:
+    return [
+        message
+        for message in operator_bot.client.sent_messages
+        if request_id in str(message.get("text") or "")
+        and message.get("reply_markup") is not None
+    ]
+
+def test_a_follow_up_request_card_is_delivered_once_per_chat(operator_bot):
+    """Re-review Important 3: the delivery is replayed, the card must not be.
+
+    Completion happens after delivery, so a crash in between means a resume
+    runs the delivery again. A plain send would leave two live decision
+    buttons in the chat for a request that accepts exactly one decision --
+    and the second tap is then refused by the claim, which reads as a
+    malfunction rather than as the duplicate card it is.
+    """
+    request = _request("req-1")
+
+    operator_bot._send_funding_request(100, request)
+    operator_bot._send_funding_request(100, request)
+
+    assert len(_request_cards(operator_bot, "req-1")) == 1
+
+def test_the_same_request_still_reaches_a_second_chat(operator_bot):
+    """Deduplicated per chat, not per request: a chat with no copy has not
+    been told anything yet."""
+    request = _request("req-1")
+
+    operator_bot._send_funding_request(100, request)
+    operator_bot._send_funding_request(200, request)
+
+    assert [card["chat_id"] for card in _request_cards(operator_bot, "req-1")] == [100, 200]
+
+def test_a_card_whose_delivery_is_unknown_is_not_sent_again(operator_bot):
+    """A send that died mid-call is not proof of non-delivery, and Telegram
+    offers no way to ask. Sending again is how the duplicate is created, so
+    the copy stays unknown and the operator is told in plain text instead."""
+    request = _request("req-1")
+    original_send = operator_bot.client.send_message
+
+    def die_mid_call(*args, **kwargs):
+        raise TimeoutError("connection dropped after Telegram accepted it")
+
+    operator_bot.client.send_message = die_mid_call
+    operator_bot._send_funding_request(100, request)
+    operator_bot.client.send_message = original_send
+
+    operator_bot._send_funding_request(100, request)
+
+    assert _request_cards(operator_bot, "req-1") == []
+    notices = [
+        message
+        for message in operator_bot.client.sent_messages
+        if message.get("reply_markup") is None
+    ]
+    assert notices, "the operator must hear about a copy we cannot account for"
+
+def test_a_budget_card_is_also_delivered_only_once(operator_bot):
+    request = _budget_request("req-1")
+
+    operator_bot._send_budget_request(100, request)
+    operator_bot._send_budget_request(100, request)
+
+    assert len(_request_cards(operator_bot, "req-1")) == 1
