@@ -549,3 +549,129 @@ def test_the_completed_guard_does_not_block_the_request_that_replaced_it(tmp_pat
         )["claimed"]
         is True
     )
+
+
+def _workflow_id(store) -> str:
+    return store.list_funding_workflow_heads()[0]["workflow_id"]
+
+def test_retrying_a_replacement_request_is_refused_not_a_conflict(tmp_path):
+    """Important 2: a redelivered replacement must not raise.
+
+    req-2 replaced req-1, so the batch that landed carried the supersede
+    marker too -- and, in a signal run, the package as well. A retry can
+    never reproduce that batch, so trying to replay it would fail as a
+    provenance mismatch. The request already exists, which is what the
+    caller wanted, so the retry is refused and nothing moves.
+    """
+    store = _store(tmp_path)
+    _published(store, "req-1")
+    first = publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    assert first["committed"] is True
+
+    retry = publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+
+    assert retry["committed"] is False
+    assert retry["conflict"] == "already_published"
+    assert retry["version"] == first["version"]
+    superseded = store.list_system_events_by_type("funding_workflow_superseded", limit=None)
+    assert [row["payload"]["request_id"] for row in superseded] == ["req-1"]
+
+def test_retrying_a_replacement_request_still_refuses_a_second_replacement(tmp_path):
+    """The rebuilt supersede event must not make a *different* later request
+    look like a replay of the one at head."""
+    store = _store(tmp_path)
+    _published(store, "req-1")
+    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+
+    third = publish_contribution_request(store, "run-3", _request("req-3"), phase="funding")
+
+    assert third["committed"] is True
+    assert third["version"] == 3
+    assert store.load_funding_workflow_head(_workflow_id(store))["request_id"] == "req-3"
+
+def test_a_child_runs_package_and_lineage_are_committed_as_one_batch(funding_orchestrator):
+    """Critical 1: there is no longer a moment between the two writes.
+
+    The lineage record is the only thing that tells a resumed attempt this
+    request already has a child. Written after the package, a crash in
+    between left a package nothing pointed at, and the resume built a second
+    one for the same month. A shared, non-null batch_fingerprint is the
+    store's own proof that a single transaction wrote both rows.
+    """
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+    summary = orchestrator.run_signal(
+        strategy_ids=["tranquillo"],
+        source_request_id="req-1",
+        source_workflow_id="wf-a",
+        source_phase="funding",
+    )
+
+    packages = store.list_system_events_by_type("signal_package", limit=None)
+    lineage = store.list_system_events_by_type("funding_workflow_child_created", limit=None)
+    assert len(packages) == len(lineage) == 1
+    assert packages[0]["payload"]["signal_run_id"] == summary.signal_run_id
+    assert packages[0]["batch_fingerprint"]
+    assert packages[0]["batch_fingerprint"] == lineage[0]["batch_fingerprint"]
+
+def test_a_package_committed_in_a_batch_can_still_be_amended(funding_orchestrator):
+    """A package is not a one-shot record: a correction appends a row that
+    load_signal_package then prefers. The batched write keys its row, so the
+    amendment has to drop that inherited key -- otherwise the second write
+    collides with the first under the unique index instead of superseding
+    it, and the correction is lost as an IntegrityError."""
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+    summary = orchestrator.run_signal(
+        strategy_ids=["tranquillo"],
+        source_request_id="req-1",
+        source_workflow_id="wf-a",
+        source_phase="funding",
+    )
+
+    package = store.load_signal_package(summary.signal_run_id)
+    store.save_signal_package(summary.signal_run_id, {**package, "orders_preview_count": 99})
+
+    assert store.load_signal_package(summary.signal_run_id)["orders_preview_count"] == 99
+
+
+# --- re-review round: completed guard, stale redelivery --------------------
+
+def test_a_late_redelivery_of_a_replaced_request_is_refused_not_raised(tmp_path):
+    """Re-review Important 2: req1 -> req2 -> req3, then req2 arrives again.
+
+    The immediate retry (req2 still at head) was already a clean replay. This
+    one is not: req2's own event exists but head has moved on twice, so
+    rebuilding it as a fresh transition submits one key that exists among
+    three that do not -- a partial overlap, which raises. That exception
+    escapes publish and takes down the entire signal run that carried it,
+    including every unrelated request in the same run.
+    """
+    store = _store(tmp_path)
+    _published(store, "req-1")
+    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    publish_contribution_request(store, "run-3", _request("req-3"), phase="funding")
+
+    late = publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+
+    assert late["committed"] is False
+    assert late["conflict"] == "already_published"
+    # Nothing moved: req-3 is still the active request for this month.
+    head = store.load_funding_workflow_head(late["workflow_id"])
+    assert head["request_id"] == "req-3"
+    assert head["version"] == 3
+
+def test_a_late_redelivery_does_not_stop_the_rest_of_its_signal_run(funding_orchestrator):
+    """The whole point of refusing rather than raising: one stale request must
+    not cost the run every other request in it."""
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+    first = orchestrator.run_signal(strategy_ids=["tranquillo"])
+    published = store.list_system_events_by_type("contribution_funding_request", limit=None)
+    assert published, "fixture must produce a funding request to redeliver"
+
+    # The same request object arrives again through publish, after its own
+    # signal run already recorded it.
+    outcome = publish_contribution_request(
+        store, first.signal_run_id, dict(published[0]["payload"]), phase="funding"
+    )
+
+    assert outcome["committed"] is False
+    assert outcome["conflict"] in {"already_committed", "already_published"}

@@ -1955,10 +1955,57 @@ class StateStore:
                     ),
                 )
 
-    def save_signal_package(self, signal_run_id: str, payload: dict[str, Any]) -> None:
+    def save_signal_package(
+        self,
+        signal_run_id: str,
+        payload: dict[str, Any],
+        *,
+        together_with: Sequence[Mapping[str, Any]] = (),
+        forbid_duplicate_keys: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Persist the package, optionally in one transaction with related events.
+
+        ``together_with`` carries everything that only means something
+        alongside this package: the funding workflow's child lineage, and the
+        contribution requests and workflow heads the package describes.
+
+        The lineage record is what stops a resumed attempt from building a
+        *second* package for the same source request, so writing it after the
+        package leaves a window where a crash loses the lineage but keeps the
+        package: the resume then sees no child, runs the signal again, and the
+        month gets two competing signal packages. The requests have the mirror
+        problem -- published first, a failure here strands a live request the
+        operator never gets a card for, because cards are built from the
+        package. Committed as one batch, a rollback loses all of it, which is
+        the only state the next run can cleanly rebuild from.
+
+        ``forbid_duplicate_keys`` is passed straight through so the requests'
+        head CAS still guards that same transaction; the caller reads
+        ``conflicting_keys`` off the result to learn which request lost.
+
+        Only the batched write keys the package row, and any key inherited
+        from a payload read back out of the store is dropped first. A package
+        is not a one-shot record: amending one (a corrected snapshot ref, a
+        fingerprint fixup) appends a new row that ``load_signal_package``
+        then prefers, and a stable key would make the second write collide
+        with the first instead. The batched row can be keyed safely because
+        ``signal_run_id`` is freshly generated for the run that writes it.
+        """
         payload_with_id = dict(payload)
         payload_with_id["signal_run_id"] = signal_run_id
-        self.save_system_event(signal_run_id, "signal_package", payload_with_id)
+        payload_with_id.pop("duplicate_key", None)
+        if not together_with:
+            self.save_system_event(signal_run_id, "signal_package", payload_with_id)
+            return {"committed": True, "conflict": None, "conflicting_keys": ()}
+        payload_with_id["duplicate_key"] = f"signal_package:{signal_run_id}"
+        return self.save_system_events_atomic(
+            signal_run_id,
+            [
+                {"event_type": "signal_package", "payload": payload_with_id},
+                *together_with,
+            ],
+            forbid_duplicate_keys=forbid_duplicate_keys,
+        )
 
     def mark_signal_package_consumed(self, signal_run_id: str, approval_run_id: str) -> None:
         self.save_system_event(

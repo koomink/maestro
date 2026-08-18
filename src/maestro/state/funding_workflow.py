@@ -143,26 +143,94 @@ def publish_contribution_request(
     셋을 따로 쓰면 그 사이의 중단이 head가 가리키지 않는 orphan 요청이나
     실체 없는 dangling head를 남긴다. 새 head 키를 forbid로도 선언하는
     이유는 CAS 패배를 예외가 아니라 결과값으로 받기 위해서다.
+
+    한 요청만 단독으로 커밋한다. 시그널 런처럼 여러 요청과 패키지를 함께
+    커밋해야 하는 호출자는 ``plan_contribution_request``로 이벤트만 받아
+    자기 트랜잭션에 실어야 한다.
+    """
+    plan = plan_contribution_request(store, request, phase=phase)
+    if plan["refusal"] is not None:
+        return {
+            "committed": False,
+            "conflict": plan["refusal"],
+            "workflow_id": plan["workflow_id"],
+            "version": plan["version"],
+            "payload": plan["payload"],
+        }
+    outcome = store.save_system_events_atomic(
+        run_id,
+        plan["events"],
+        forbid_duplicate_keys=(plan["head_key"],),
+    )
+    return {
+        "committed": bool(outcome["committed"]),
+        "conflict": outcome["conflict"],
+        "workflow_id": plan["workflow_id"],
+        "version": plan["version"],
+        # The stored payload, not the caller's: this one carries the
+        # funding_workflow_id and duplicate_key that were added here. A caller
+        # that audit-logs its own copy would leave the audit trail unable to
+        # say which workflow an event belonged to.
+        "payload": plan["payload"],
+    }
+
+
+def plan_contribution_request(
+    store: StateStore,
+    request: Mapping[str, Any],
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """The events that publishing this request would write, without writing them.
+
+    Split out so a signal run can put its requests, their heads, the package
+    describing them and the child lineage into a *single* transaction.
+    Publishing first and saving the package afterwards leaves a window where
+    a failure strands a live request nobody can see: the operator gets no
+    card for it (cards come from the package), and the next run generates a
+    new request id rather than adopting it.
+
+    ``refusal`` is set when the request must not be published at all, and is
+    the same vocabulary the commit path reports. ``head_key`` is the CAS
+    target the caller has to declare as forbidden -- it is what turns losing
+    the race for that slot into a result rather than an exception.
     """
     _require_phase(phase)
     workflow_id = workflow_id_from_request(request)
     request_id = str(request["request_id"])
     head = store.load_funding_workflow_head(workflow_id)
+    # A request that already exists is never published a second time. Request
+    # ids are minted per run and never reused, so a redelivery is always a
+    # message from a run that has already had its turn, not this one asking
+    # again -- and the only sound answer is to leave it exactly as it is.
+    #
+    # Rebuilding it instead is what used to break. Late (req1 -> req2 -> req3,
+    # then req2 arrives again) it becomes a fresh transition carrying one key
+    # that exists among three that do not: a partial overlap, which raises and
+    # takes down every other request in the signal run that carried it. Early
+    # (still at head) it would have to reproduce its original batch byte for
+    # byte, and it no longer can -- that batch also held the signal package
+    # and any supersede marker, so the fingerprint could never match and the
+    # store would refuse it as a provenance mismatch. Neither is an error
+    # worth raising: the request exists, which is all the caller wanted, so
+    # this is reported the same way a lost CAS is and the caller drops it
+    # from the package it is building.
+    if store.duplicate_key_exists(f"{_REQUEST_EVENT[phase]}:{request_id}"):
+        return {
+            "refusal": "already_published",
+            "events": [],
+            "head_key": "",
+            "workflow_id": workflow_id,
+            "version": int(head.get("version") or 0) if head else 0,
+            "payload": dict(request),
+        }
     previous_request_id = str(head.get("request_id") or "") if head else ""
-    # A resubmission of the request already at head is the same transition,
-    # not a new one: target the same version so the batch matches byte for
-    # byte what already landed and the atomic call reports a plain replay
-    # instead of a same-request partial overlap with itself. Any other case
-    # -- a new request, or a head that changed underneath us -- always
-    # targets the version right after whatever head currently says: trusting
-    # a head we didn't write ourselves (e.g. one Task 11's convergence sweep
+    # Always the version right after whatever head currently says: trusting a
+    # head we didn't write ourselves (e.g. one Task 11's convergence sweep
     # wrote to repair a dangling head) is intentional here, not a gap. The
     # protection against a genuine race for that slot is
-    # ``forbid_duplicate_keys`` below, not second-guessing head's version.
-    if head and previous_request_id == request_id:
-        version = int(head.get("version") or 1)
-    else:
-        version = int(head.get("version") or 0) + 1 if head else 1
+    # ``forbid_duplicate_keys``, not second-guessing head's version.
+    version = int(head.get("version") or 0) + 1 if head else 1
     payload = dict(request)
     payload["funding_workflow_id"] = workflow_id
     payload["duplicate_key"] = f"{_REQUEST_EVENT[phase]}:{request_id}"
@@ -202,20 +270,12 @@ def publish_contribution_request(
             },
         }
     )
-    outcome = store.save_system_events_atomic(
-        run_id,
-        events,
-        forbid_duplicate_keys=(new_head_key,),
-    )
     return {
-        "committed": bool(outcome["committed"]),
-        "conflict": outcome["conflict"],
+        "refusal": None,
+        "events": events,
+        "head_key": new_head_key,
         "workflow_id": workflow_id,
         "version": version,
-        # The stored payload, not the caller's: this one carries the
-        # funding_workflow_id and duplicate_key that were added here. A caller
-        # that audit-logs its own copy would leave the audit trail unable to
-        # say which workflow an event belonged to.
         "payload": payload,
     }
 
@@ -739,6 +799,7 @@ __all__ = [
     "list_incomplete_workflows",
     "load_migration_cutoff",
     "load_workflow_child",
+    "plan_contribution_request",
     "publish_contribution_request",
     "scope_prefix",
     "superseded_key",

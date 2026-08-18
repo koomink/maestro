@@ -1,6 +1,6 @@
 import json
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -131,7 +131,7 @@ from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.funding_workflow import (
     child_key,
     load_workflow_child,
-    publish_contribution_request,
+    plan_contribution_request,
 )
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -303,6 +303,13 @@ class MaestroOrchestrator:
         # acquisition, and the child event is committed under a unique
         # duplicate_key so the database itself caps it at one, even if two
         # threads both got past the in-process check.
+        #
+        # The lock does not survive a crash, though, and the lineage record is
+        # the only thing that tells the next process this request already has
+        # a child. That is why it is not written here after the run returns:
+        # it goes into the same transaction as the signal package itself (see
+        # save_signal_package), so no interruption can leave a package that
+        # nothing points at.
         with self.state_store.writer_lock("run_signal"):
             if source_request_id is not None:
                 existing = load_workflow_child(
@@ -310,29 +317,13 @@ class MaestroOrchestrator:
                 )
                 if existing is not None:
                     return self._reload_signal_summary(existing)
-            summary = self._run_signal_locked(
+            return self._run_signal_locked(
                 strategy_ids=strategy_ids,
                 contribution_override=contribution_override,
+                source_request_id=source_request_id,
+                source_workflow_id=source_workflow_id,
+                source_phase=source_phase,
             )
-            if source_request_id is not None:
-                self.state_store.save_system_events_atomic(
-                    summary.signal_run_id,
-                    [
-                        {
-                            "event_type": "funding_workflow_child_created",
-                            "payload": {
-                                "duplicate_key": child_key(
-                                    source_request_id, source_phase or "funding"
-                                ),
-                                "workflow_id": source_workflow_id,
-                                "request_id": source_request_id,
-                                "phase": source_phase or "funding",
-                                "signal_run_id": summary.signal_run_id,
-                            },
-                        }
-                    ],
-                )
-            return summary
 
     def _reload_signal_summary(self, signal_run_id: str) -> SignalRunSummary:
         """Rebuild a summary for a child that already exists, without running
@@ -528,6 +519,9 @@ class MaestroOrchestrator:
         *,
         strategy_ids: list[str] | None = None,
         contribution_override: bool = False,
+        source_request_id: str | None = None,
+        source_workflow_id: str | None = None,
+        source_phase: str | None = None,
     ) -> SignalRunSummary:
         signal_run_id = new_signal_run_id()
         self._record_run_provenance(signal_run_id, "signal")
@@ -687,63 +681,79 @@ class MaestroOrchestrator:
                 )
             )
         approval_orders = self._signal_orders_requiring_approval(orders)
-        # Publish before the package is built, and keep only what landed. A
-        # request that lost the head CAS is not in the event log, so a package
-        # that still listed it would promise an operator a funding or budget
-        # decision with no workflow behind it to act on.
-        funding_requests = [
-            request
-            for request in funding_requests
-            if self._publish_contribution_request(signal_run_id, request, phase="funding")
-        ]
-        budget_requests = [
-            request
-            for request in budget_requests
-            if self._publish_contribution_request(signal_run_id, request, phase="budget")
-        ]
-        if budget_requests:
-            status = "budget_required"
-        elif approval_orders:
-            status = "action_required"
-        elif funding_requests:
-            status = "funding_required"
-        else:
-            status = "no_action"
-        payload = {
-            "signal_run_id": signal_run_id,
-            "status": status,
-            "approval_consumed": False,
-            "generated_at": utc_now().isoformat(),
-            "loaded_strategies": [result.strategy_id for result in valid_results],
-            "strategy_account_mappings": self._strategy_account_mappings(),
-            "strategy_phase_controls": self._strategy_phase_controls(),
-            "data_requests": data_requests_by_strategy,
-            "data_quality_issues": data_quality_issues,
-            "datahub_evidence": self._datahub_evidence(
-                data_requests_by_strategy,
-                data_quality_issues,
-                prices,
-            ),
-            "broker_snapshot_refs": broker_snapshot_refs,
-            "required_account_ids": required_account_ids,
-            "prices": prices,
-            "strategy_results": [result.model_dump(mode="json") for result in valid_results],
-            "portfolio_target": target.model_dump(mode="json"),
-            "risk_decision": risk_decision.model_dump(mode="json"),
-            "orders_preview": [order.model_dump(mode="json") for order in orders],
-            "orders_preview_count": len(orders),
-            "funding_requests": [request.model_dump(mode="json") for request in funding_requests],
-            "funding_requests_count": len(funding_requests),
-            "budget_requests": [request.model_dump(mode="json") for request in budget_requests],
-            "budget_requests_count": len(budget_requests),
-            "action_required": bool(approval_orders) and not budget_requests,
-            "contribution_override": contribution_override,
-            "no_order_reasons": no_order_reasons,
-        }
-        payload["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(self.config)
-        if self.config_identity is not None:
-            payload["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
-        self.state_store.save_signal_package(signal_run_id, payload)
+        lineage_events: list[dict[str, Any]] = []
+        if source_request_id is not None:
+            lineage_events.append(
+                {
+                    "event_type": "funding_workflow_child_created",
+                    "payload": {
+                        "duplicate_key": child_key(source_request_id, source_phase or "funding"),
+                        "workflow_id": source_workflow_id,
+                        "request_id": source_request_id,
+                        "phase": source_phase or "funding",
+                        "signal_run_id": signal_run_id,
+                    },
+                }
+            )
+
+        def build_package_payload(
+            live_funding: list[ContributionFundingRequest],
+            live_budget: list[ContributionBudgetRequest],
+        ) -> dict[str, Any]:
+            if live_budget:
+                package_status = "budget_required"
+            elif approval_orders:
+                package_status = "action_required"
+            elif live_funding:
+                package_status = "funding_required"
+            else:
+                package_status = "no_action"
+            package = {
+                "signal_run_id": signal_run_id,
+                "status": package_status,
+                "approval_consumed": False,
+                "generated_at": utc_now().isoformat(),
+                "loaded_strategies": [result.strategy_id for result in valid_results],
+                "strategy_account_mappings": self._strategy_account_mappings(),
+                "strategy_phase_controls": self._strategy_phase_controls(),
+                "data_requests": data_requests_by_strategy,
+                "data_quality_issues": data_quality_issues,
+                "datahub_evidence": self._datahub_evidence(
+                    data_requests_by_strategy,
+                    data_quality_issues,
+                    prices,
+                ),
+                "broker_snapshot_refs": broker_snapshot_refs,
+                "required_account_ids": required_account_ids,
+                "prices": prices,
+                "strategy_results": [result.model_dump(mode="json") for result in valid_results],
+                "portfolio_target": target.model_dump(mode="json"),
+                "risk_decision": risk_decision.model_dump(mode="json"),
+                "orders_preview": [order.model_dump(mode="json") for order in orders],
+                "orders_preview_count": len(orders),
+                "funding_requests": [item.model_dump(mode="json") for item in live_funding],
+                "funding_requests_count": len(live_funding),
+                "budget_requests": [item.model_dump(mode="json") for item in live_budget],
+                "budget_requests_count": len(live_budget),
+                "action_required": bool(approval_orders) and not live_budget,
+                "contribution_override": contribution_override,
+                "no_order_reasons": no_order_reasons,
+            }
+            package["config_signal_contract_fingerprint"] = _signal_contract_fingerprint(
+                self.config
+            )
+            if self.config_identity is not None:
+                package["config_runtime_fingerprint"] = self.config_identity.runtime_fingerprint
+            return package
+
+        funding_requests, budget_requests, payload = self._commit_signal_package(
+            signal_run_id,
+            funding_requests,
+            budget_requests,
+            build_package_payload,
+            lineage_events,
+        )
+        status = str(payload["status"])
         self.audit.log(signal_run_id, "signal_package", payload)
         self.state_store.save_system_event(
             signal_run_id,
@@ -1800,47 +1810,103 @@ class MaestroOrchestrator:
     ) -> None:
         save_audited_system_event(self.state_store, self.audit, run_id, event_type, payload)
 
-    def _publish_contribution_request(
+    def _commit_signal_package(
         self,
         signal_run_id: str,
-        request: Any,
-        *,
-        phase: str,
-    ) -> bool:
-        """Record the request and its workflow head as one transaction.
+        funding_requests: list[ContributionFundingRequest],
+        budget_requests: list[ContributionBudgetRequest],
+        build_payload: Callable[[list[Any], list[Any]], dict[str, Any]],
+        lineage_events: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[Any], list[Any], dict[str, Any]]:
+        """Commit the requests, their heads, the package and the lineage together.
 
-        Losing the head CAS means another run already established the active
-        request for this scope and month. This run's request is not saved at
-        all: a request with no head pointing at it is exactly the orphan the
-        workflow head exists to prevent, and the convergence sweep would
-        later have to guess whether it was ever meant to be live.
+        These only mean anything as a set. A request published on its own is
+        live -- it is at the head of its workflow and can be claimed -- while
+        the package that would have put a card in front of the operator does
+        not exist, so nobody can act on it and the next run mints a new
+        request id instead of adopting it. A package written on its own would
+        advertise a decision with no workflow behind it. One transaction is
+        the only arrangement where neither can happen.
 
-        Returns whether the request landed, so the caller can keep the signal
-        package, its status, and the run summary describing only requests that
-        actually exist.
+        Losing the head CAS still drops just the one request rather than the
+        run: the conflict names the head slot that was taken, so the request
+        that wanted it is dropped, the package is rebuilt without it and the
+        batch is retried. Every pass drops at least one request, which is what
+        bounds the loop.
         """
-        payload = request.model_dump(mode="json")
-        outcome = publish_contribution_request(
-            self.state_store, signal_run_id, payload, phase=phase
-        )
-        if outcome["committed"]:
-            # The stored payload, not ours: it carries the funding_workflow_id,
-            # without which the audit trail cannot say which workflow this
-            # request belonged to.
-            self.audit.log(signal_run_id, f"contribution_{phase}_request", outcome["payload"])
-            return True
+        plans: list[tuple[str, Any, dict[str, Any]]] = []
+        for phase, requests in (("funding", funding_requests), ("budget", budget_requests)):
+            for request in requests:
+                plan = plan_contribution_request(
+                    self.state_store, request.model_dump(mode="json"), phase=phase
+                )
+                if plan["refusal"] is not None:
+                    self._audit_request_conflict(signal_run_id, phase, plan, plan["refusal"])
+                    continue
+                plans.append((phase, request, plan))
+
+        for _ in range(len(plans) + 1):
+            live_funding = [request for phase, request, _ in plans if phase == "funding"]
+            live_budget = [request for phase, request, _ in plans if phase == "budget"]
+            payload = build_payload(live_funding, live_budget)
+            outcome = self.state_store.save_signal_package(
+                signal_run_id,
+                payload,
+                together_with=[
+                    *(event for _, _, plan in plans for event in plan["events"]),
+                    *lineage_events,
+                ],
+                forbid_duplicate_keys=[plan["head_key"] for _, _, plan in plans],
+            )
+            if outcome["committed"]:
+                for phase, _, plan in plans:
+                    # The planned payload, not the caller's: it carries the
+                    # funding_workflow_id, without which the audit trail
+                    # cannot say which workflow this request belonged to.
+                    self.audit.log(
+                        signal_run_id, f"contribution_{phase}_request", plan["payload"]
+                    )
+                return live_funding, live_budget, payload
+            blocked = set(outcome.get("conflicting_keys") or ())
+            survivors = []
+            lost = False
+            for item in plans:
+                if item[2]["head_key"] in blocked:
+                    self._audit_request_conflict(
+                        signal_run_id, item[0], item[2], str(outcome["conflict"])
+                    )
+                    lost = True
+                    continue
+                survivors.append(item)
+            if not lost:
+                # Nothing in this batch explains the refusal, so retrying it
+                # would loop on the same answer. Fail loudly with nothing
+                # written rather than publish a package we cannot back.
+                raise ValueError(
+                    f"signal package {signal_run_id} was refused: {outcome['conflict']} "
+                    f"on {sorted(blocked)}"
+                )
+            plans = survivors
+        raise ValueError(f"signal package {signal_run_id} could not be committed")
+
+    def _audit_request_conflict(
+        self,
+        signal_run_id: str,
+        phase: str,
+        plan: Mapping[str, Any],
+        conflict: str,
+    ) -> None:
         self.audit.log(
             signal_run_id,
             "funding_workflow_head_conflict",
             {
                 "signal_run_id": signal_run_id,
-                "workflow_id": outcome["workflow_id"],
-                "request_id": payload.get("request_id"),
+                "workflow_id": plan["workflow_id"],
+                "request_id": (plan["payload"] or {}).get("request_id"),
                 "phase": phase,
-                "conflict": outcome["conflict"],
+                "conflict": conflict,
             },
         )
-        return False
 
     def _record_run_provenance(
         self,

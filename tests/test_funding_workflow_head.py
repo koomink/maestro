@@ -133,12 +133,20 @@ def test_a_publisher_working_from_a_stale_head_cannot_take_a_taken_version(tmp_p
     assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-2"
 
 
-def test_republishing_the_same_request_is_a_replay_not_a_new_version(tmp_path):
+def test_republishing_the_same_request_is_refused_not_given_a_new_version(tmp_path):
+    """A request that exists is left exactly as it is: no second event, no
+    second head version, and no exception either -- the caller just learns it
+    did not publish this one."""
     store = _store(tmp_path)
-    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
     again = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
     assert again["committed"] is False
-    assert again["conflict"] == "already_committed"
+    assert again["conflict"] == "already_published"
+    assert store.load_funding_workflow_head(workflow_id)["version"] == 1
+    requests = store.list_system_events_by_type("contribution_funding_request", limit=None)
+    assert [row["payload"]["request_id"] for row in requests] == ["req-1"]
 
 
 def test_different_scopes_in_the_same_month_do_not_supersede_each_other(tmp_path):
@@ -198,11 +206,33 @@ def test_the_audit_entry_names_the_workflow_the_request_belongs_to(funding_orche
 def test_a_request_that_loses_the_head_cas_is_absent_from_the_package(
     funding_orchestrator, monkeypatch
 ):
+    """The real race, not a stubbed return: another writer takes the head slot
+    this request planned for, between the plan and the commit."""
+    from maestro.state import funding_workflow
+
     orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+    real_plan = funding_workflow.plan_contribution_request
+
+    def plan_then_lose_the_slot(plan_store, request, *, phase):
+        plan = real_plan(plan_store, request, phase=phase)
+        if plan["refusal"] is None:
+            plan_store.save_system_event(
+                "someone-else",
+                "funding_workflow_head",
+                {
+                    "duplicate_key": plan["head_key"],
+                    "workflow_id": plan["workflow_id"],
+                    "version": plan["version"],
+                    "request_id": "someone-elses-request",
+                    "phase": phase,
+                    "status": "pending",
+                },
+            )
+        return plan
+
     monkeypatch.setattr(
-        orchestrator,
-        "_publish_contribution_request",
-        lambda *args, **kwargs: False,
+        "maestro.orchestration.orchestrator.plan_contribution_request",
+        plan_then_lose_the_slot,
     )
 
     summary = orchestrator.run_signal(strategy_ids=["tranquillo"])
@@ -212,6 +242,7 @@ def test_a_request_that_loses_the_head_cas_is_absent_from_the_package(
     assert package["funding_requests"] == []
     assert package["funding_requests_count"] == 0
     assert package["status"] != "funding_required"
+    assert store.list_system_events_by_type("contribution_funding_request", limit=None) == []
 
 
 def _audit_entries(orchestrator):
@@ -221,3 +252,47 @@ def _audit_entries(orchestrator):
         for line in orchestrator.audit.path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+def test_a_package_that_cannot_be_saved_leaves_no_live_request(
+    funding_orchestrator, monkeypatch
+):
+    """Re-review Important 4: the request must not outlive the run that made it.
+
+    Published on its own, the request is live -- at the head of its workflow
+    and claimable -- while the package that would have put a card in front of
+    the operator does not exist. Nobody can act on it, and the next run mints
+    a new request id rather than adopting it. One transaction means a failure
+    here leaves nothing at all, which is the only state the next run can
+    cleanly rebuild from.
+    """
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("package write failed")
+
+    monkeypatch.setattr(orchestrator.state_store, "save_system_events_atomic", boom)
+
+    with pytest.raises(RuntimeError, match="package write failed"):
+        orchestrator.run_signal(strategy_ids=["tranquillo"])
+
+    assert store.list_system_events_by_type("contribution_funding_request", limit=None) == []
+    assert store.list_system_events_by_type("funding_workflow_head", limit=None) == []
+    assert store.list_system_events_by_type("signal_package", limit=None) == []
+
+def test_the_request_and_the_package_that_advertises_it_land_together(funding_orchestrator):
+    """The positive half: one batch, so the package and the request it lists
+    cannot disagree about whether that request exists."""
+    orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
+
+    summary = orchestrator.run_signal(strategy_ids=["tranquillo"])
+
+    package = store.list_system_events_by_type("signal_package", limit=None)[0]
+    requests = store.list_system_events_by_type("contribution_funding_request", limit=None)
+    heads = store.list_system_events_by_type("funding_workflow_head", limit=None)
+    assert package["payload"]["signal_run_id"] == summary.signal_run_id
+    assert requests and heads
+    assert package["batch_fingerprint"]
+    assert {row["batch_fingerprint"] for row in (*requests, *heads)} == {
+        package["batch_fingerprint"]
+    }
