@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -38,12 +38,18 @@ def funding_workflow_id(
     """
     if not month_key:
         raise ValueError("funding workflow id requires a month_key")
-    scope = json.dumps(
-        [contribution_group_id, account_id, execution_sleeve, currency],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    return f"funding:{scope}:{month_key}"
+    prefix = scope_prefix([contribution_group_id, account_id, execution_sleeve, currency])
+    return f"{prefix}{month_key}"
+
+
+def scope_prefix(scope: Sequence[Any]) -> str:
+    """The ``funding:<canonical scope>:`` prefix every id in this scope shares.
+
+    Shared with the head validation in ``claim_workflow_attempt`` so the two
+    can never disagree about what canonical serialization means.
+    """
+    serialized = json.dumps(list(scope), ensure_ascii=False, separators=(",", ":"))
+    return f"funding:{serialized}:"
 
 
 def workflow_id_from_request(request: Mapping[str, Any]) -> str:
@@ -245,6 +251,18 @@ def claim_workflow_attempt(
     claim을 얻는다. 그래서 "그 버전이 있고(require) 다음 버전은 아직
     없다(forbid)"를 삽입과 같은 트랜잭션에서 건다 — head는 단조 증가하므로
     존재 검사만으로는 교체를 감지할 수 없다.
+
+    request id와 version이 맞아도 head 자체를 무조건 믿지는 않는다: head가
+    말하는 scope나 phase가 이 전이의 것과 다르면 손상됐거나 잘못 backfill된
+    기록이고, 그런 head를 근거로 claim을 내주면 엉뚱한 전이를 — 예컨대
+    budget 결정을 funding 확정으로 — 승인해 버린다. 다만 그 필드가 *없는*
+    head는 필드가 생기기 전 릴리스가 쓴 것이므로 판정하지 않고 통과시킨다:
+    검증할 수 없는 것과 어긋나는 것은 다르다.
+
+    끝난 워크플로우도 거절한다(``already_completed``). head는 완료됐다고
+    내려가지 않으므로 head 검사만으로는 종결을 알 수 없고, 종결된 요청에
+    새 attempt를 내주면 그 attempt가 child run과 cash flow를 다시 밟은 뒤
+    맨 마지막에야 거절당한다.
     """
     _require_phase(phase)
     head = store.load_funding_workflow_head(workflow_id)
@@ -255,6 +273,13 @@ def claim_workflow_attempt(
         return {
             "claimed": False,
             "reason": "not_head",
+            "attempt": attempt,
+            "head_version": int(head.get("version") or 0),
+        }
+    if _head_contradicts_transition(head, workflow_id=workflow_id, phase=phase):
+        return {
+            "claimed": False,
+            "reason": "head_corrupt",
             "attempt": attempt,
             "head_version": int(head.get("version") or 0),
         }
@@ -274,6 +299,13 @@ def claim_workflow_attempt(
         # random id, or a legitimate retry would fail to replay byte-for-byte
         # and would be mistaken for a conflicting overlap instead.
         claim_payload.update(dict(extra))
+    # head가 움직이지 않았어도 이 전이가 이미 끝났을 수 있다. head는 완료로
+    # 내려가지 않고 다음 요청이 올 때까지 그대로이므로, completed 키를 함께
+    # 금지하지 않으면 종결된 워크플로우에 attempt N+1이 그대로 진입한다 --
+    # 그리고 그 attempt는 cash flow와 child run을 다시 밟은 뒤에야
+    # complete_workflow의 replay 판정에 걸린다.
+    finished_key = completed_key(workflow_id, request_id, phase)
+    next_head_key = head_key(workflow_id, version + 1)
     try:
         outcome = store.save_system_events_atomic(
             run_id,
@@ -284,7 +316,7 @@ def claim_workflow_attempt(
                 }
             ],
             require_duplicate_keys=(head_key(workflow_id, version),),
-            forbid_duplicate_keys=(head_key(workflow_id, version + 1),),
+            forbid_duplicate_keys=(next_head_key, finished_key),
         )
     except ValueError as exc:
         # 같은 attempt를 서로 다른 ``extra`` 내용으로 두 번 claim하면
@@ -305,12 +337,37 @@ def claim_workflow_attempt(
         }
     if outcome["committed"]:
         return {"claimed": True, "reason": None, "attempt": attempt, "head_version": version}
-    reason = {
-        "already_committed": "already_claimed",
-        "precondition_present": "head_moved",
-        "precondition_missing": "head_moved",
-    }.get(str(outcome["conflict"]), "head_moved")
+    conflict = str(outcome["conflict"])
+    if conflict == "already_committed":
+        reason = "already_claimed"
+    elif finished_key in set(outcome.get("conflicting_keys") or ()):
+        reason = "already_completed"
+    else:
+        reason = "head_moved"
     return {"claimed": False, "reason": reason, "attempt": attempt, "head_version": version}
+
+
+def _head_contradicts_transition(
+    head: Mapping[str, Any], *, workflow_id: str, phase: str
+) -> bool:
+    """Whether this head describes a different workflow than the one claimed.
+
+    ``load_funding_workflow_head`` selects by ``workflow_id``, so agreement is
+    supposed to be structural -- which is exactly why a disagreement here is
+    worth refusing on rather than ignoring: it can only come from a record
+    that was corrupted or backfilled with a scope or phase that never matched
+    its own key. Absent fields are not a disagreement (see the docstring in
+    ``claim_workflow_attempt``); only a value that is present and wrong is.
+    """
+    head_phase = head.get("phase")
+    if head_phase is not None and str(head_phase) != phase:
+        return True
+    scope = head.get("scope")
+    if scope is None:
+        return False
+    if not isinstance(scope, (list, tuple)):
+        return True
+    return not workflow_id.startswith(scope_prefix(scope))
 
 
 def _is_own_key_content_conflict(exc: ValueError, duplicate_key: str) -> bool:
@@ -349,6 +406,20 @@ def complete_workflow(
     field: its ``duplicate_key`` is derived only from ``request_id`` and
     ``phase``, so a legitimate retry has to reproduce byte-identical content
     to be recognized as a replay rather than fail as a conflicting overlap.
+
+    ``attempt`` is the fencing token, and it is only a token if it is checked
+    here rather than merely recorded. The attempt's own claim must exist
+    (this caller really did enter the transition) and the next attempt's must
+    not (nobody has taken it over since). Without both, an attempt 1 that
+    stalled long enough for the operator to resume as attempt 2 could still
+    surface afterwards -- inside ``run_signal`` on a process that only looked
+    dead -- and write the completion for a transition attempt 2 now owns,
+    closing the workflow under attempt 2's feet.
+
+    A fenced-out completion raises ``WorkflowClaimRefused`` rather than
+    returning falsy: every caller here has already done the transition's side
+    effects by the time it gets to this call, so a return value it could
+    ignore would let it report success for a completion that never landed.
     """
     _require_phase(phase)
     legacy = dict(legacy_payload)
@@ -368,7 +439,14 @@ def complete_workflow(
             },
             {"event_type": LEGACY_TERMINAL_EVENT[phase], "payload": legacy},
         ],
+        require_duplicate_keys=(claim_key(workflow_id, phase, request_id, attempt),),
+        forbid_duplicate_keys=(claim_key(workflow_id, phase, request_id, attempt + 1),),
     )
+    conflict = str(outcome["conflict"] or "")
+    if conflict == "precondition_missing":
+        raise WorkflowClaimRefused("unclaimed_attempt")
+    if conflict == "precondition_present":
+        raise WorkflowClaimRefused("attempt_superseded")
     return {"committed": bool(outcome["committed"]), "conflict": outcome["conflict"]}
 
 
@@ -662,6 +740,7 @@ __all__ = [
     "load_migration_cutoff",
     "load_workflow_child",
     "publish_contribution_request",
+    "scope_prefix",
     "superseded_key",
     "workflow_id_from_request",
 ]
