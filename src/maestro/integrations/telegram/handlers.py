@@ -3485,6 +3485,16 @@ class TelegramOperatorCommandRouter:
         below raises, no terminal event exists yet, so the workflow stays
         claimed-but-incomplete -- recoverable, not silently closed.
         """
+        if self.signal_config_path is None:
+            # Same refusal as _confirm_funding_request, and for the same
+            # reason. A selection with no signal config behind it cannot
+            # produce the child run the amount exists to feed, so completing
+            # the workflow anyway would make the decision terminal -- the one
+            # thing this transition is defined not to be -- and would answer
+            # "Budget selected" to an operator whose month then quietly never
+            # gets invested. Raising before the claim leaves nothing behind
+            # to recover, because nothing was entered.
+            raise ValueError("Budget selection requires telegram-operator --signal-config")
         validate_selected_budget(request, selected_budget)
         workflow_id = workflow_id_from_request(request)
         request_id = str(request["request_id"])
@@ -3526,20 +3536,6 @@ class TelegramOperatorCommandRouter:
             "decided_by": username or str(user_id),
             "selected_budget": selected_budget,
         }
-        if self.signal_config_path is None:
-            # No signal config wired up (e.g. a readonly-only operator): the
-            # selection itself is still a complete transition on its own --
-            # nothing downstream needs a child run to exist.
-            complete_workflow(
-                self.store,
-                new_run_id(),
-                workflow_id=workflow_id,
-                request_id=request_id,
-                phase="budget",
-                attempt=attempt,
-                legacy_payload=legacy_payload,
-            )
-            return "\n".join(lines)
         try:
             self._refresh_portfolio_from_broker_snapshot()
         except (RuntimeError, TimeoutError, ValueError):
@@ -3555,6 +3551,12 @@ class TelegramOperatorCommandRouter:
             request, workflow_id, attempt=attempt, phase="budget"
         )
         legacy_payload["new_signal_run_id"] = signal_summary.signal_run_id
+        lines.append(f"new_signal_run_id: {signal_summary.signal_run_id}")
+        lines.append(f"orders_preview_count: {signal_summary.orders_preview_count}")
+        if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
+            lines.append("no orders were generated because:")
+            lines.extend(f"- {reason}" for reason in signal_summary.no_order_reasons)
+        follow_up = self._deliver_child_signal_outcome(chat_id, signal_summary)
         complete_workflow(
             self.store,
             new_run_id(),
@@ -3564,58 +3566,7 @@ class TelegramOperatorCommandRouter:
             attempt=attempt,
             legacy_payload=legacy_payload,
         )
-        lines.append(f"new_signal_run_id: {signal_summary.signal_run_id}")
-        lines.append(f"orders_preview_count: {signal_summary.orders_preview_count}")
-        if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
-            lines.append("no orders were generated because:")
-            lines.extend(f"- {reason}" for reason in signal_summary.no_order_reasons)
-        if signal_summary.action_required:
-            if self.approval_config_path is None:
-                lines.append("approval_status: not_created_missing_approval_config")
-                return "\n".join(lines)
-            approval_config, approval_identity = load_config_with_identity(
-                self.approval_config_path
-            )
-            approval_orchestrator = MaestroOrchestrator(
-                approval_config,
-                telegram_client=self.client,
-                config_identity=approval_identity,
-            )
-            if (
-                approval_config.mode == RunMode.LIVE_APPROVAL
-                and approval_config.approval.provider == "telegram"
-            ):
-                approval_summary = approval_orchestrator.dispatch_signal_approval(
-                    signal_summary.signal_run_id
-                )
-                order_line = f"orders_planned: {approval_summary.orders_planned}"
-                pending_line = f"approvals_pending: {approval_summary.approvals_pending}"
-            else:
-                approval_summary = approval_orchestrator.approve_signal(
-                    signal_summary.signal_run_id
-                )
-                order_line = f"orders_created: {approval_summary.orders_created}"
-                pending_line = "approvals_pending: 0"
-            lines.extend(
-                [
-                    f"approval_run_id: {approval_summary.run_id}",
-                    f"approval_status: {approval_summary.approval_status}",
-                    order_line,
-                    pending_line,
-                ]
-            )
-            return "\n".join(lines)
-        signal = self.store.load_signal_package(signal_summary.signal_run_id) or {}
-        for budget_request in signal.get("budget_requests") or []:
-            self._send_budget_request(chat_id, budget_request)
-        for funding_request in signal.get("funding_requests") or []:
-            self._send_funding_request(chat_id, funding_request)
-        if signal.get("budget_requests"):
-            lines.append("approval_status: budget_still_required")
-        elif signal.get("funding_requests"):
-            lines.append("approval_status: funding_still_required")
-        else:
-            lines.append("approval_status: not_required")
+        lines.extend(follow_up)
         return "\n".join(lines)
 
     def _confirm_funding_request(
@@ -3673,6 +3624,16 @@ class TelegramOperatorCommandRouter:
         # Funding was just confirmed by the operator; regenerate orders
         # immediately instead of waiting for the scheduled buy_day.
         signal_summary = self._run_child_signal(request, workflow_id, attempt=attempt)
+        lines = [
+            "Funding confirmed",
+            f"request_id: {request['request_id']}",
+            f"new_signal_run_id: {signal_summary.signal_run_id}",
+            f"orders_preview_count: {signal_summary.orders_preview_count}",
+        ]
+        if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
+            lines.append("no orders were generated because:")
+            lines.extend(f"- {reason}" for reason in signal_summary.no_order_reasons)
+        follow_up = self._deliver_child_signal_outcome(chat_id, signal_summary)
         # Carrying the same request_id into both legs of complete_workflow is
         # what keeps the workflow log and the legacy ack log pointed at the
         # same request; a mismatch here would close one request in one log
@@ -3691,60 +3652,118 @@ class TelegramOperatorCommandRouter:
                 "new_signal_run_id": signal_summary.signal_run_id,
             },
         )
-        lines = [
-            "Funding confirmed",
-            f"request_id: {request['request_id']}",
-            f"new_signal_run_id: {signal_summary.signal_run_id}",
-            f"orders_preview_count: {signal_summary.orders_preview_count}",
-        ]
-        if signal_summary.orders_preview_count == 0 and signal_summary.no_order_reasons:
-            lines.append("no orders were generated because:")
-            lines.extend(f"- {reason}" for reason in signal_summary.no_order_reasons)
-        if signal_summary.action_required:
-            if self.approval_config_path is None:
-                lines.append("approval_status: not_created_missing_approval_config")
-                return "\n".join(lines)
-            approval_config, approval_identity = load_config_with_identity(
-                self.approval_config_path
-            )
-            approval_orchestrator = MaestroOrchestrator(
-                approval_config,
-                telegram_client=self.client,
-                config_identity=approval_identity,
-            )
-            if (
-                approval_config.mode == RunMode.LIVE_APPROVAL
-                and approval_config.approval.provider == "telegram"
-            ):
-                approval_summary = approval_orchestrator.dispatch_signal_approval(
-                    signal_summary.signal_run_id
-                )
-                order_line = f"orders_planned: {approval_summary.orders_planned}"
-                pending_line = f"approvals_pending: {approval_summary.approvals_pending}"
-            else:
-                approval_summary = approval_orchestrator.approve_signal(
-                    signal_summary.signal_run_id
-                )
-                order_line = f"orders_created: {approval_summary.orders_created}"
-                pending_line = "approvals_pending: 0"
-            lines.extend(
-                [
-                    f"approval_run_id: {approval_summary.run_id}",
-                    f"approval_status: {approval_summary.approval_status}",
-                    order_line,
-                    pending_line,
-                ]
-            )
-            return "\n".join(lines)
-        signal = self.store.load_signal_package(signal_summary.signal_run_id) or {}
-        funding_requests = signal.get("funding_requests") or []
-        if funding_requests:
-            lines.append("approval_status: funding_still_required")
-            for funding_request in funding_requests:
-                self._send_funding_request(chat_id, funding_request)
-        else:
-            lines.append("approval_status: not_required")
+        lines.extend(follow_up)
         return "\n".join(lines)
+
+    def _deliver_child_signal_outcome(
+        self,
+        chat_id: int,
+        signal_summary: SignalRunSummary,
+    ) -> list[str]:
+        """Hand the operator whatever the child run still owes them.
+
+        Called *before* ``complete_workflow``, and the order is the point.
+        Completing first drops the workflow out of
+        ``list_incomplete_workflows``, so a crash in here would leave the
+        decision on record, a child run nobody is watching, no approval card
+        and no resume card -- the month's investment stops with nothing
+        saying so. Delivering first means such a crash leaves the workflow
+        claimed-but-incomplete, which is exactly what the resume sweep
+        surfaces.
+
+        The cost is that a resume reaches this a second time, so everything
+        here has to tolerate being repeated: the approval is adopted rather
+        than duplicated (see ``_dispatch_child_approval``), and a re-sent
+        funding or budget card is harmless -- the request behind it has its
+        own head and claim, so only one decision on it can ever land.
+        """
+        if signal_summary.action_required:
+            return self._dispatch_child_approval(signal_summary.signal_run_id)
+        signal = self.store.load_signal_package(signal_summary.signal_run_id) or {}
+        budget_requests = signal.get("budget_requests") or []
+        funding_requests = signal.get("funding_requests") or []
+        for budget_request in budget_requests:
+            self._send_budget_request(chat_id, budget_request)
+        for funding_request in funding_requests:
+            self._send_funding_request(chat_id, funding_request)
+        if budget_requests:
+            return ["approval_status: budget_still_required"]
+        if funding_requests:
+            return ["approval_status: funding_still_required"]
+        return ["approval_status: not_required"]
+
+    def _dispatch_child_approval(self, signal_run_id: str) -> list[str]:
+        """Put an approval card in front of the operator for this child run.
+
+        Every path out of here either creates the approval or raises. A
+        status string the caller treats as success is not available: the
+        caller completes the workflow on return, and a completed workflow
+        with no approval card is the silent stall this whole ordering exists
+        to prevent. Raising instead keeps the workflow claimed-but-incomplete,
+        so once the missing configuration is supplied the operator can resume
+        it rather than having to reconstruct the month by hand.
+
+        The "already done" checks exist for that resume. A crash between the
+        dispatch and ``complete_workflow`` leaves the workflow incomplete, so
+        the resume runs this again against a child run whose approval already
+        exists -- and both entry points refuse that outright
+        (``dispatch_signal_approval`` on a settled package, ``approve_signal``
+        on a consumed one). Without the checks the resume could never get
+        past this line, and the workflow would stay stalled forever over work
+        that was in fact already finished.
+
+        The state is read through the approval orchestrator's own store
+        rather than ``self.store``: it is the one that wrote the events being
+        asked about, so the two cannot disagree even if the operator and the
+        approval config are pointed at different databases.
+        """
+        if self.approval_config_path is None:
+            raise ValueError(
+                "Signal approval requires telegram-operator --approval-config; "
+                f"child run {signal_run_id} needs an approval and cannot be given one"
+            )
+        approval_config, approval_identity = load_config_with_identity(self.approval_config_path)
+        approval_orchestrator = MaestroOrchestrator(
+            approval_config,
+            telegram_client=self.client,
+            config_identity=approval_identity,
+        )
+        approval_store = approval_orchestrator.state_store
+        if (
+            approval_config.mode == RunMode.LIVE_APPROVAL
+            and approval_config.approval.provider == "telegram"
+        ):
+            if approval_store.signal_dispatch_settled(signal_run_id):
+                return ["approval_status: already_dispatched"]
+            approval_summary = approval_orchestrator.dispatch_signal_approval(signal_run_id)
+            order_line = f"orders_planned: {approval_summary.orders_planned}"
+            pending_line = f"approvals_pending: {approval_summary.approvals_pending}"
+        else:
+            if approval_store.signal_approval_run_completed(signal_run_id):
+                return ["approval_status: already_approved"]
+            package = approval_store.load_signal_package(signal_run_id) or {}
+            if package.get("approval_consumed"):
+                # approve_signal marks the package consumed *before* it starts
+                # placing orders and only writes signal_approval_completed at
+                # the very end, so consumed-without-completed means an
+                # approval run died somewhere in between -- possibly with
+                # some of its orders already at the broker. Adopting that as
+                # success would close the funding workflow over a half-filled
+                # batch. It cannot be re-run either (approve_signal refuses a
+                # consumed package), so a human has to settle it.
+                raise ValueError(
+                    f"Signal package {signal_run_id} was consumed by an approval run that "
+                    "never reported completion; settle it by hand before resuming"
+                )
+            approval_summary = approval_orchestrator.approve_signal(signal_run_id)
+            order_line = f"orders_created: {approval_summary.orders_created}"
+            pending_line = "approvals_pending: 0"
+        return [
+            f"approval_run_id: {approval_summary.run_id}",
+            f"approval_status: {approval_summary.approval_status}",
+            order_line,
+            pending_line,
+        ]
 
     def _run_child_signal(
         self,
@@ -5543,10 +5562,36 @@ def _funding_claim_refusal_response(
     the three would tell an operator something untrue about why the button
     did nothing.
 
+    ``attempt_superseded``/``unclaimed_attempt`` come from the fencing check
+    in ``complete_workflow``, not from the claim: this attempt got as far as
+    doing the work and was then refused the completion because a later
+    attempt owns the transition (or because this one never held it). The work
+    itself is not lost -- the child run and the cash flow are keyed by
+    request id, so whoever does own the transition adopts them -- but the
+    operator has to be told this tap is not the one that finished it, rather
+    than being shown a success or a "superseded request" that is not true of
+    the request at all. ``head_corrupt`` is the one reason that means neither
+    "done" nor "replaced": the workflow record itself disagrees with the
+    transition being asked for, which no amount of tapping can resolve.
+
     ``request_noun`` is phase-agnostic wording only ("funding" vs "budget");
     the claim/complete plumbing this describes is identical for both phases,
     so this helper is shared rather than duplicated per phase.
     """
+    if reason in {"attempt_superseded", "unclaimed_attempt"}:
+        return (
+            f"This {request_noun} request was taken over by a newer resume attempt, "
+            "so this one did not finish it. Check its current status before acting "
+            "again.",
+            "claim_fenced",
+        )
+    if reason == "head_corrupt":
+        return (
+            f"This {request_noun} request's workflow record does not match the "
+            "action requested, so it was not applied. This needs to be looked at "
+            "by hand.",
+            "claim_head_corrupt",
+        )
     if reason == "already_claimed":
         return (
             f"This {request_noun} request is already being processed -- an earlier "

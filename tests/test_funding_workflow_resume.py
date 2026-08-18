@@ -21,6 +21,7 @@ from maestro.config.loader import load_config
 from maestro.core.ids import new_run_id
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.orchestrator import SignalRunSummary
 from maestro.sdk import (
     BaseStrategyPlugin,
     DataBundle,
@@ -1263,3 +1264,225 @@ def test_an_unexpected_supersede_conflict_is_counted_and_logged_as_an_error(
     assert result["conflicts_skipped"] == 1
     levels = {record.levelno for record in caplog.records}
     assert levels == {logging.ERROR}
+
+
+def _live_approval_config_path(tmp_path) -> Path:
+    raw = yaml.safe_load(_signal_config_path(tmp_path).read_text())
+    raw["mode"] = "live_approval"
+    # live_approval takes cash from the broker snapshot, so the config is
+    # rejected outright if it still declares a starting balance.
+    raw["portfolio"].pop("initial_cash", None)
+    raw["approval"] = {**raw["approval"], "enabled": True, "require_approval": True}
+    config_path = tmp_path / "live_approval.yaml"
+    config_path.write_text(yaml.safe_dump(raw))
+    return config_path
+
+def test_a_crash_before_the_next_card_leaves_the_funding_workflow_recoverable(
+    operator_bot, monkeypatch
+):
+    """Critical 2: completing first hid the failure from the recovery sweep.
+
+    The workflow used to be closed the moment the child run existed, and only
+    then was the approval dispatched or the next request sent. A crash in
+    that gap left a request marked done, a child run nobody was looking at,
+    and no card for the operator -- the month's investment stopped with
+    nothing on record saying so, because a completed workflow is exactly what
+    list_incomplete_workflows filters out.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("crashed before the operator got a card")
+
+    monkeypatch.setattr(operator_bot, "_deliver_child_signal_outcome", boom)
+    with pytest.raises(RuntimeError, match="crashed before the operator got a card"):
+        operator_bot._confirm_funding_request(
+            _request("req-1"), chat_id=1, user_id=2, username="op"
+        )
+
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert store.list_system_events_by_type("contribution_funding_request_ack", limit=None) == []
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+    monkeypatch.undo()
+    assert operator_bot.process_update(callback_update("operator:wfresume:funding:req-1"))
+
+    assert _wfresume_statuses(store) == ["resumed"]
+    assert list_incomplete_workflows(store) == []
+    # The resume reuses the child the crashed attempt already built.
+    assert len(store.list_system_events_by_type("signal_package", limit=None)) == 1
+
+def test_a_crash_before_the_next_card_leaves_the_budget_workflow_recoverable(
+    operator_bot, monkeypatch
+):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("crashed before the operator got a card")
+
+    monkeypatch.setattr(operator_bot, "_deliver_child_signal_outcome", boom)
+    with pytest.raises(RuntimeError, match="crashed before the operator got a card"):
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=500_000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+    monkeypatch.undo()
+    assert operator_bot.process_update(callback_update("operator:wfresume:budget:req-1"))
+
+    decisions = store.list_system_events_by_type(
+        "contribution_budget_request_decision", limit=None
+    )
+    assert [row["payload"]["selected_budget"] for row in decisions] == [500_000.0]
+    assert list_incomplete_workflows(store) == []
+
+def test_the_next_request_card_is_sent_before_the_workflow_is_closed(operator_bot, monkeypatch):
+    """The ordering itself, not just its consequence under a crash."""
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    completed_when_delivering: list[int] = []
+    original = operator_bot._deliver_child_signal_outcome
+
+    def recording(*args, **kwargs):
+        completed_when_delivering.append(
+            len(store.list_system_events_by_type("funding_workflow_completed", limit=None))
+        )
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(operator_bot, "_deliver_child_signal_outcome", recording)
+    operator_bot._confirm_funding_request(
+        _request("req-1"), chat_id=1, user_id=2, username="op"
+    )
+
+    assert completed_when_delivering == [0]
+    assert len(store.list_system_events_by_type("funding_workflow_completed", limit=None)) == 1
+
+def test_a_budget_selection_without_a_signal_config_is_refused_not_completed(operator_bot):
+    """Critical 3: the selection is an input, so it cannot stand alone.
+
+    Without a signal config there is no child run to feed the amount to.
+    Completing anyway made the decision terminal -- the one thing this
+    transition is defined not to be -- and told the operator their budget was
+    selected while the month quietly went uninvested.
+    """
+    store = operator_bot.store
+    operator_bot.signal_config_path = None
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+
+    with pytest.raises(ValueError, match="signal-config"):
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=500_000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert (
+        store.list_system_events_by_type("contribution_budget_request_decision", limit=None) == []
+    )
+    # Refused before the claim, so there is no half-entered transition to
+    # recover either -- the request is simply still pending.
+    assert store.list_system_events_by_type("funding_workflow_claim", limit=None) == []
+    assert operator_bot._load_pending_budget_request("req-1") is not None
+
+def test_a_resumed_attempt_adopts_an_approval_run_that_reported_completion(
+    operator_bot, tmp_path
+):
+    """A resume re-enters the delivery step, and approve_signal refuses a
+    package it already consumed. Without adopting the finished outcome the
+    resume could never finish, and the workflow would stay stalled over work
+    that was in fact complete."""
+    store = operator_bot.store
+    operator_bot.approval_config_path = _signal_config_path(tmp_path)
+    store.save_signal_package("signal-child", {"orders_preview": []})
+    store.mark_signal_package_consumed("signal-child", "approval-run-1")
+    store.save_system_event(
+        "approval-run-1",
+        "signal_approval_completed",
+        {"signal_run_id": "signal-child", "orders_created": 1},
+    )
+
+    assert operator_bot._dispatch_child_approval("signal-child") == [
+        "approval_status: already_approved"
+    ]
+
+def test_a_consumed_approval_that_never_completed_is_not_adopted_as_success(
+    operator_bot, tmp_path
+):
+    """Re-review Critical 2: consumed is not completed.
+
+    approve_signal marks the package consumed before placing a single order
+    and writes signal_approval_completed only after the last one. A crash in
+    between can leave part of a batch at the broker. Treating that as
+    "already approved" would close the funding workflow over a half-filled
+    batch and drop it from the recovery list -- and it cannot simply be
+    re-run either, so it has to surface.
+    """
+    store = operator_bot.store
+    operator_bot.approval_config_path = _signal_config_path(tmp_path)
+    store.save_signal_package("signal-child", {"orders_preview": []})
+    store.mark_signal_package_consumed("signal-child", "approval-run-1")
+
+    with pytest.raises(ValueError, match="never reported completion"):
+        operator_bot._dispatch_child_approval("signal-child")
+
+def test_a_child_needing_approval_without_an_approval_config_stays_recoverable(
+    operator_bot, monkeypatch
+):
+    """Re-review Critical 1: a status string the caller reads as success.
+
+    An action-required child with no approval config used to return
+    "not_created_missing_approval_config", and the caller completed the
+    workflow on that. The month then had a decision on record, a child run
+    needing approval, no approval card and no resume card. Raising keeps the
+    workflow claimed-but-incomplete so it can be resumed once the config is
+    supplied.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    assert operator_bot.approval_config_path is None
+    monkeypatch.setattr(
+        operator_bot,
+        "_run_child_signal",
+        lambda *args, **kwargs: SignalRunSummary(
+            signal_run_id="signal-child",
+            loaded_strategies=["tranquillo"],
+            action_required=True,
+            orders_preview_count=3,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="--approval-config"):
+        operator_bot._confirm_funding_request(
+            _request("req-1"), chat_id=1, user_id=2, username="op"
+        )
+
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+def test_a_resumed_attempt_adopts_a_dispatch_that_already_settled(operator_bot, tmp_path):
+    """The same adoption for the live_approval/Telegram path, where
+    dispatch_signal_approval is what refuses a package whose approvals were
+    already sent."""
+    store = operator_bot.store
+    operator_bot.approval_config_path = _live_approval_config_path(tmp_path)
+    store.save_signal_package("signal-child", {"orders_preview": []})
+    store.mark_signal_package_consumed("signal-child", "approval-run-1")
+    store.save_system_event(
+        "approval-run-1", "signal_approval_pending", {"signal_run_id": "signal-child"}
+    )
+    assert store.signal_dispatch_settled("signal-child")
+
+    assert operator_bot._dispatch_child_approval("signal-child") == [
+        "approval_status: already_dispatched"
+    ]

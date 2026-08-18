@@ -2032,6 +2032,25 @@ class StateStore:
             ).fetchone()
         return row is not None
 
+    def signal_approval_run_completed(self, signal_run_id: str) -> bool:
+        """Whether an approval run for this package reported finishing.
+
+        Narrower than ``signal_dispatch_settled`` on purpose, and not the same
+        question as ``approval_consumed``. ``approve_signal`` marks the
+        package consumed before it places a single order and writes
+        ``signal_approval_completed`` only after the last one, so consumed is
+        proof that an approval run *started*, never that it finished. A
+        caller adopting consumed as "already approved" would call a
+        half-executed batch done.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM system_events "
+                "WHERE event_type = 'signal_approval_completed' AND signal_run_id = ? LIMIT 1",
+                (signal_run_id,),
+            ).fetchone()
+        return row is not None
+
     def list_incomplete_signal_dispatches(self, limit: int = 50) -> list[str]:
         """Signal runs marked consumed whose dispatch never reported finishing.
 
