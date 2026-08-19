@@ -195,6 +195,12 @@ _MAX_RESUME_ATTEMPT = 4
 #: Dispatch resume has no interactive first attempt to charge, so the whole
 #: budget is automatic retries.
 _MAX_DISPATCH_RESUME_ATTEMPT = 3
+#: funding/budget 전이의 재개 상한. 승인 재개와 같은 값에서 출발한다 --
+#: attempt 1은 운영자의 최초 탭이므로 실제 재개 예산은 2·3·4의 세 번이다.
+#: 상한이 없으면 매번 실패하는 재개를 무한히 권하게 된다: 탭할 때마다
+#: attempt가 오르고, stall 알림의 duplicate_key에 attempt가 들어 있어 그때마다
+#: 새 카드가 나간다.
+_MAX_WORKFLOW_RESUME_ATTEMPT = 4
 #: claim 후 이 시간이 지나도록 종료 기록이 없으면 버려진 시도로 보고 회수한다.
 #: 운영자 봇 poll 간격(초 단위)과 resolution 소요(브로커 폴링 포함)를 고려한 값.
 _RESUME_LEASE_SECONDS = 900
@@ -2337,6 +2343,9 @@ class TelegramOperatorCommandRouter:
         -- 새 attempt(재개 실패 후 다시 stall)는 새 키이므로 다시 알린다.
         """
         for row in list_incomplete_workflows(self.store):
+            if int(row["attempt"]) >= _MAX_WORKFLOW_RESUME_ATTEMPT:
+                self._notify_workflow_needs_attention(row)
+                continue
             self._notify_operator_chats(
                 run_id=f"run_{row['request_id']}",
                 approval_id=f"{row['phase']}:{row['request_id']}:a{row['attempt']}",
@@ -2369,6 +2378,37 @@ class TelegramOperatorCommandRouter:
                     ]
                 },
             )
+
+    def _notify_workflow_needs_attention(self, row: Mapping[str, Any]) -> None:
+        """Stop offering a Resume that keeps failing, and say so once.
+
+        The Resume card is not free to re-offer. Every tap commits a new
+        attempt, and the stall notice is deduplicated per attempt -- so an
+        attempt that always fails the same way (an undeliverable card, a
+        config that no longer loads) produces a fresh card after every tap,
+        forever. Past the budget the transition needs a person, not another
+        identical tap.
+
+        Deduplicated per (phase, request) with no attempt in the key, unlike
+        the stall notice: this one is about the request having exhausted its
+        budget, which does not become newly true on the next attempt.
+        """
+        self._notify_operator_chats(
+            run_id=f"run_{row['request_id']}",
+            approval_id=f"{row['phase']}:{row['request_id']}",
+            event_type="funding_workflow_needs_attention",
+            key_prefix="funding-workflow-attention",
+            subject_field="workflow_key",
+            text=ui_catalog.WORKFLOW_NEEDS_ATTENTION_TEMPLATE.format(
+                request_id=row["request_id"], phase=row["phase"]
+            ),
+            extra={
+                "workflow_id": row["workflow_id"],
+                "request_id": row["request_id"],
+                "phase": row["phase"],
+                "attempt": row["attempt"],
+            },
+        )
 
     def _converge_workflow_invariants(self) -> None:
         """orphan 요청과 dangling head를 수렴시킨다 (Task 11의 backstop).
@@ -3353,6 +3393,26 @@ class TelegramOperatorCommandRouter:
             self._record("/wfresume", chat_id, user_id, username, "stale_callback")
             return True
         next_attempt = stalled["attempt"] + 1
+        if next_attempt > _MAX_WORKFLOW_RESUME_ATTEMPT:
+            # An old Resume card is still sitting in the chat after the sweep
+            # stopped offering new ones. Without this the operator can keep
+            # burning attempts from it, and each one writes a claim that
+            # nothing will ever complete.
+            self._answer(callback, "This workflow needs manual attention.")
+            self._notify_workflow_needs_attention(stalled)
+            self._record("/wfresume", chat_id, user_id, username, "resume_budget_exhausted")
+            self._edit_callback_message(
+                callback,
+                "\n".join(
+                    [
+                        ui_catalog.WORKFLOW_NEEDS_ATTENTION_TEMPLATE.format(
+                            request_id=request_id, phase=phase
+                        ),
+                        f"request_id: {request_id}",
+                    ]
+                ),
+            )
+            return True
         intent = str(stalled["intent"])
         self._answer(callback, "Resuming...")
         try:

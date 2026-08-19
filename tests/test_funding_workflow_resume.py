@@ -1771,3 +1771,76 @@ def test_a_follow_up_already_replaced_is_not_re_delivered(operator_bot, monkeypa
     assert operator_bot.client.sent_messages[before:] == []
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     assert "req-1" in [row["payload"]["request_id"] for row in completed]
+
+
+def _stall_at_attempt(store, request_id: str, attempt: int) -> str:
+    """Leave a claim at ``attempt`` with no completion, the way a resume that
+    died between claim and completion does."""
+    workflow_id = _workflow_id_of(request_id)
+    for number in range(1, attempt + 1):
+        claim = claim_workflow_attempt(
+            store,
+            new_run_id(),
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="funding",
+            attempt=number,
+            extra={"intent": "confirm"},
+        )
+        assert claim["claimed"], number
+    return workflow_id
+
+
+def test_the_sweep_stops_offering_resume_once_the_budget_is_spent(operator_bot):
+    """A resume that always fails the same way produced a fresh Resume card
+    after every tap: each tap commits a new attempt, and the stall notice is
+    keyed per attempt. Past the budget the transition needs a person."""
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    _stall_at_attempt(store, "req-1", 4)
+
+    operator_bot._sweep_incomplete_workflows()
+
+    assert len(operator_bot.client.sent_messages) == 1
+    message = operator_bot.client.sent_messages[0]
+    assert "재개를 여러 번 시도했지만" in message["text"]
+    # No Resume button: tapping again is exactly what stopped working.
+    assert message["reply_markup"] is None
+    assert _wfresume_statuses(store) == []
+
+
+def test_the_needs_attention_notice_is_sent_once_not_per_sweep(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    _stall_at_attempt(store, "req-1", 4)
+
+    operator_bot._sweep_incomplete_workflows()
+    operator_bot._sweep_incomplete_workflows()
+
+    assert len(operator_bot.client.sent_messages) == 1
+
+
+def test_a_stale_resume_card_cannot_burn_more_attempts(operator_bot):
+    """The sweep stops sending Resume cards, but the ones already in the chat
+    still carry a button. Tapping one must not commit another claim."""
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    _stall_at_attempt(store, "req-1", 4)
+
+    assert operator_bot.process_update(callback_update("operator:wfresume:funding:req-1"))
+
+    assert _wfresume_statuses(store) == ["resume_budget_exhausted"]
+    claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    assert sorted(row["payload"]["attempt"] for row in claims) == [1, 2, 3, 4]
+    assert "재개를 여러 번 시도했지만" in operator_bot.client.edited_messages[-1]["text"]
+
+
+def test_a_workflow_inside_the_budget_is_still_offered_resume(operator_bot):
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    _stall_at_attempt(store, "req-1", 3)
+
+    operator_bot._sweep_incomplete_workflows()
+
+    message = operator_bot.client.sent_messages[-1]
+    assert message["reply_markup"]["inline_keyboard"][0][0]["text"] == "Resume"
