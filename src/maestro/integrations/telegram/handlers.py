@@ -3683,10 +3683,14 @@ class TelegramOperatorCommandRouter:
         budget_requests = signal.get("budget_requests") or []
         funding_requests = signal.get("funding_requests") or []
         for budget_request in budget_requests:
+            if not self._request_still_needs_a_card(budget_request, phase="budget"):
+                continue
             self._require_card_delivered(
                 self._send_budget_request(chat_id, budget_request), "budget", budget_request
             )
         for funding_request in funding_requests:
+            if not self._request_still_needs_a_card(funding_request, phase="funding"):
+                continue
             self._require_card_delivered(
                 self._send_funding_request(chat_id, funding_request), "funding", funding_request
             )
@@ -3696,8 +3700,51 @@ class TelegramOperatorCommandRouter:
             return ["approval_status: funding_still_required"]
         return ["approval_status: not_required"]
 
-    @staticmethod
-    def _require_card_delivered(outcome: str, phase: str, request: dict[str, Any]) -> None:
+    def _request_still_needs_a_card(self, request: Mapping[str, Any], *, phase: str) -> bool:
+        """Whether putting this request in front of the operator still means anything.
+
+        A resume reaches the delivery step again, and by then the card it
+        could not confirm may well have arrived and been acted on -- that is
+        the ordinary outcome, not the rare one. Demanding delivery of a
+        request that is already decided, or that a later run has replaced,
+        makes the parent workflow permanently uncompletable: the card is
+        never re-sent (an unaccountable copy must not be), so the delivery
+        can never be confirmed, so completion can never proceed, and the
+        operator is offered a Resume button that fails the same way every
+        time.
+
+        Both questions are about the request's own lifecycle, not the
+        card's. Decided is what the pre-CAS loaders already answer (they
+        return None once the legacy terminal event exists); replaced is
+        whether the workflow head still names it.
+
+        The first delivery is unaffected: the child run's request was just
+        published, so it is pending and at head.
+        """
+        request_id = str(request.get("request_id") or "")
+        if not request_id:
+            return True
+        loader = (
+            self._load_pending_funding_request
+            if phase == "funding"
+            else self._load_pending_budget_request
+        )
+        if loader(request_id) is None:
+            return False
+        try:
+            head = self.store.load_funding_workflow_head(workflow_id_from_request(request))
+        except (ValueError, KeyError):
+            # A request we cannot derive a workflow id for predates the head
+            # convention or is malformed. It has no head to have been
+            # replaced by, so the delivery obligation stands.
+            return True
+        if head is None:
+            return True
+        return str(head.get("request_id") or "") == request_id
+
+    def _require_card_delivered(
+        self, outcome: str, phase: str, request: Mapping[str, Any]
+    ) -> None:
         """Refuse to let a caller treat an unconfirmed card as delivered.
 
         "sent" and "skipped" (the operator already holds a confirmed copy)
@@ -3705,16 +3752,77 @@ class TelegramOperatorCommandRouter:
         "failed" means Telegram explicitly refused every chat; "unknown"
         means a timeout or dropped connection left delivery unaccountable --
         raising either keeps the caller (``_deliver_child_signal_outcome``)
-        from reaching ``complete_workflow``, so the workflow stays
-        claimed-but-incomplete and the resume sweep picks it back up instead
-        of the request silently having no card in front of anyone.
+        from reaching ``complete_workflow``.
+
+        Leaving the parent workflow incomplete is not, on its own, enough to
+        get anyone's attention. Publishing a follow-up request supersedes the
+        parent in the same scope, and ``list_incomplete_workflows`` drops a
+        request that is no longer head -- so in exactly the case that has a
+        card to deliver, the parent is invisible to the resume sweep. The
+        request that has no card is invisible too: nobody could tap it, so
+        it has no claim to be stalled on. The notice below is therefore the
+        operator's only account of it, and it names the request rather than
+        the workflow for the same reason.
+
+        It is deduplicated per (phase, request) rather than per attempt: the
+        fact being reported is "this request has no card", which stays true
+        however many times delivery is retried.
         """
         if outcome in ("sent", "skipped"):
             return
-        request_id = request.get("request_id")
+        request_id = str(request.get("request_id") or "")
+        self._record_undelivered_request_card(request_id, phase=phase, delivery=outcome)
+        # Best effort, and deliberately after the record above: this message
+        # travels the same channel that just failed to carry the card, so it
+        # may well not arrive either. _notify_operator_chats swallows a failed
+        # chat, so a dead channel costs nothing here.
+        self._notify_operator_chats(
+            run_id=f"run_{request_id}",
+            approval_id=f"{phase}:{request_id}",
+            event_type="funding_request_card_undelivered_notice",
+            key_prefix="funding-request-card-undelivered-notice",
+            subject_field="request_key",
+            text=ui_catalog.REQUEST_CARD_UNDELIVERED_TEMPLATE.format(
+                request_id=request_id, phase=phase
+            ),
+            extra={"request_id": request_id, "phase": phase, "delivery": outcome},
+        )
         raise RuntimeError(
             f"{phase} request card delivery is {outcome!r} for request {request_id!r}; "
             "refusing to complete the workflow until delivery is confirmed"
+        )
+
+    def _record_undelivered_request_card(
+        self, request_id: str, *, phase: str, delivery: str
+    ) -> None:
+        """Write down that this request has no card, before trying to say so.
+
+        The record has to be independent of the telling. The notice goes out
+        over the channel that just failed to carry the card, and
+        ``_notify_operator_chats`` only writes its event for chats it
+        actually reached -- so on a dead channel, making the record a
+        side effect of the notice means no record at all, in precisely the
+        case that most needs one.
+
+        Keyed by (phase, request) with no attempt or timestamp: the fact is
+        "this request has no card", which does not change however many times
+        delivery is retried, and a key that changed per retry would grow one
+        row per tap.
+        """
+        duplicate_key = f"funding-request-card-undelivered:{phase}:{request_id}"
+        if self.store.duplicate_key_exists(duplicate_key):
+            return
+        save_audited_system_event(
+            self.store,
+            self.audit,
+            f"run_{request_id}",
+            "funding_request_card_undelivered",
+            {
+                "request_id": request_id,
+                "phase": phase,
+                "delivery": delivery,
+                "duplicate_key": duplicate_key,
+            },
         )
 
     def _dispatch_child_approval(self, signal_run_id: str) -> list[str]:

@@ -1569,26 +1569,40 @@ def test_a_budget_card_is_also_delivered_only_once(operator_bot):
 
 
 def _stub_child_signal(monkeypatch, operator_bot, *, funding_requests=None, budget_requests=None):
-    """Skip the real strategy run: hand back a settled child whose signal
-    package already carries the follow-up request(s) under test."""
-    monkeypatch.setattr(
-        operator_bot,
-        "_run_child_signal",
-        lambda *args, **kwargs: SignalRunSummary(
+    """Skip the real strategy run, but keep everything it publishes.
+
+    The child run does two things the delivery step depends on: it writes
+    the signal package, and it publishes the follow-up requests that package
+    advertises. Both happen *inside* the stub rather than at setup time
+    because ordering matters -- publishing a follow-up request supersedes
+    the parent request in the same scope, so doing it before the parent
+    claims would make the parent's own claim fail as not_head.
+    """
+    store = operator_bot.store
+    funding_requests = funding_requests or []
+    budget_requests = budget_requests or []
+
+    def run_child(*args, **kwargs):
+        for request in budget_requests:
+            publish_contribution_request(store, "run-child", request, phase="budget")
+        for request in funding_requests:
+            publish_contribution_request(store, "run-child", request, phase="funding")
+        store.save_signal_package(
+            "signal-child",
+            {
+                "orders_preview": [],
+                "funding_requests": funding_requests,
+                "budget_requests": budget_requests,
+            },
+        )
+        return SignalRunSummary(
             signal_run_id="signal-child",
             loaded_strategies=["tranquillo"],
             action_required=False,
             orders_preview_count=0,
-        ),
-    )
-    operator_bot.store.save_signal_package(
-        "signal-child",
-        {
-            "orders_preview": [],
-            "funding_requests": funding_requests or [],
-            "budget_requests": budget_requests or [],
-        },
-    )
+        )
+
+    monkeypatch.setattr(operator_bot, "_run_child_signal", run_child)
 
 def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
     operator_bot, monkeypatch
@@ -1619,7 +1633,18 @@ def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
         )
 
     assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
-    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+    # The undelivered request is what the operator is told about, and it has
+    # to be: publishing req-2 superseded req-1, and list_incomplete_workflows
+    # drops a request that is no longer head -- so in exactly the case that
+    # has a card to deliver, the parent cannot be surfaced by the resume
+    # sweep. req-2 has no claim either (nobody could tap a card that never
+    # arrived), so neither request reaches that list.
+    assert list_incomplete_workflows(store) == []
+    undelivered = store.list_system_events_by_type(
+        "funding_request_card_undelivered", limit=None
+    )
+    assert [row["payload"]["request_id"] for row in undelivered] == ["req-2"]
+    assert undelivered[0]["payload"]["delivery"] == "failed"
 
 def test_a_telegram_timeout_on_a_follow_up_card_leaves_the_workflow_incomplete(
     operator_bot, monkeypatch
@@ -1657,10 +1682,92 @@ def test_a_telegram_timeout_on_a_follow_up_card_leaves_the_workflow_incomplete(
         )
 
     assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
-    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+    undelivered = store.list_system_events_by_type(
+        "funding_request_card_undelivered", limit=None
+    )
+    assert [row["payload"]["request_id"] for row in undelivered] == ["req-2"]
+    assert undelivered[0]["payload"]["delivery"] == "unknown"
     notices = [
         message
         for message in operator_bot.client.sent_messages
         if message.get("reply_markup") is None
     ]
     assert notices, "the operator must be told a copy could not be accounted for"
+
+
+def _other_scope_request(request_id: str) -> dict[str, Any]:
+    """A follow-up request in a different account scope.
+
+    Same-scope follow-ups supersede the parent (one head per scope+month),
+    which takes the parent out of the resume sweep entirely; these tests are
+    about the parent that is still resumable, so the follow-up has to live in
+    its own workflow.
+    """
+    return {**_request(request_id), "account_id": "paper_cash_2"}
+
+
+def test_a_follow_up_already_decided_is_not_re_delivered(operator_bot, monkeypatch):
+    """A resume reaches the delivery step again, and by then the card it
+    could not confirm has usually arrived and been acted on. Demanding
+    delivery of a request that is already decided would keep the parent
+    permanently uncompletable -- the card is never re-sent, so delivery can
+    never be confirmed, so completion can never proceed."""
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    follow_up = _other_scope_request("req-2")
+    _stub_child_signal(monkeypatch, operator_bot, funding_requests=[follow_up])
+    # The operator already dealt with the follow-up card. (Publishing it here
+    # rather than leaving it to the stub is what lets the claim below land;
+    # the stub's own publish then reports it as already_published.)
+    publish_contribution_request(store, "run-x", follow_up, phase="funding")
+    workflow_id = workflow_id_from_request(follow_up)
+    claim_workflow_attempt(
+        store,
+        new_run_id(),
+        workflow_id=workflow_id,
+        request_id="req-2",
+        phase="funding",
+        extra={"intent": "confirm"},
+    )
+    from maestro.state.funding_workflow import complete_workflow
+
+    complete_workflow(
+        store,
+        new_run_id(),
+        workflow_id=workflow_id,
+        request_id="req-2",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-2", "status": "confirmed", "decided_by": "op"},
+    )
+    before = len(operator_bot.client.sent_messages)
+
+    operator_bot._confirm_funding_request(
+        _request("req-1"), chat_id=1, user_id=2, username="op"
+    )
+
+    assert operator_bot.client.sent_messages[before:] == []
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert "req-1" in [row["payload"]["request_id"] for row in completed]
+
+
+def test_a_follow_up_already_replaced_is_not_re_delivered(operator_bot, monkeypatch):
+    """The other way a follow-up stops needing a card: a later run published
+    a replacement, so the one this package names is no longer head."""
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    follow_up = _other_scope_request("req-2")
+    _stub_child_signal(monkeypatch, operator_bot, funding_requests=[follow_up])
+    publish_contribution_request(store, "run-x", follow_up, phase="funding")
+    publish_contribution_request(
+        store, "run-y", _other_scope_request("req-3"), phase="funding"
+    )
+    before = len(operator_bot.client.sent_messages)
+
+    operator_bot._confirm_funding_request(
+        _request("req-1"), chat_id=1, user_id=2, username="op"
+    )
+
+    assert operator_bot.client.sent_messages[before:] == []
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert "req-1" in [row["payload"]["request_id"] for row in completed]
