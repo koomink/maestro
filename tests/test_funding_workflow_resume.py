@@ -347,9 +347,21 @@ def test_a_superseded_request_callback_is_refused(operator_bot):
 def test_a_crash_after_the_child_run_resumes_without_a_second_child(operator_bot):
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
-    # attempt 1 gets as far as the child run, then the process dies -- no
-    # claim was ever recorded for this attempt.
-    operator_bot._run_child_signal(_request("req-1"), _workflow_id_of("req-1"), attempt=1)
+    workflow_id = _workflow_id_of("req-1")
+    # attempt 1 claims (the real path always claims before touching
+    # run_signal), gets as far as the child run, then the process dies
+    # before completion.
+    claim = claim_workflow_attempt(
+        store,
+        new_run_id(),
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+    assert claim["claimed"]
+    operator_bot._run_child_signal(_request("req-1"), workflow_id, attempt=1)
     child = load_workflow_child(store, "req-1", "funding")
     assert child is not None
 

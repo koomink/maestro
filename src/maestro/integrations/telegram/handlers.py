@@ -5612,6 +5612,13 @@ def _funding_claim_refusal_response(
     "done" nor "replaced": the workflow record itself disagrees with the
     transition being asked for, which no amount of tapping can resolve.
 
+    ``attempt_out_of_order`` is the claim-side twin of the completion
+    fencing: this attempt number skipped one that was never claimed (a resume
+    button computing the wrong count, or a stale/replayed callback), so
+    nothing has entered the transition under it. There is no in-flight work
+    to check the status of -- the operator just needs a fresh resume rather
+    than to retry this exact tap.
+
     ``request_noun`` is phase-agnostic wording only ("funding" vs "budget");
     the claim/complete plumbing this describes is identical for both phases,
     so this helper is shared rather than duplicated per phase.
@@ -5622,6 +5629,13 @@ def _funding_claim_refusal_response(
             "so this one did not finish it. Check its current status before acting "
             "again.",
             "claim_fenced",
+        )
+    if reason == "attempt_out_of_order":
+        return (
+            f"This {request_noun} request's resume attempt is out of order and was "
+            "not applied. Use the latest resume card for this request rather than "
+            "retrying this tap.",
+            "claim_attempt_out_of_order",
         )
     if reason == "head_corrupt":
         return (

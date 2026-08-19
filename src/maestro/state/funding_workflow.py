@@ -323,8 +323,19 @@ def claim_workflow_attempt(
     내려가지 않으므로 head 검사만으로는 종결을 알 수 없고, 종결된 요청에
     새 attempt를 내주면 그 attempt가 child run과 cash flow를 다시 밟은 뒤
     맨 마지막에야 거절당한다.
+
+    ``attempt``는 1부터 시작해 순차적이어야 한다. attempt N (N>1)의 claim은
+    attempt N-1의 claim 키가 이미 존재함을 이 삽입과 같은 트랜잭션에서
+    요구한다 -- 그렇지 않으면 attempt 2를 건너뛰고 바로 attempt 3을 claim할
+    수 있고, ``complete_workflow``의 fencing은 "바로 다음 attempt가
+    없다"만 보므로 attempt 3이 이미 전이를 인수한 뒤에도 attempt 1이
+    ``claim_key(..., 2)``가 여전히 없다는 사실만으로 완료를 통과시켜
+    버린다. 존재 검사를 여기서 걸어 두면 attempt 3은 애초에 claim조차
+    얻지 못한다.
     """
     _require_phase(phase)
+    if attempt < 1:
+        raise ValueError(f"attempt must be a positive integer, got {attempt}")
     head = store.load_funding_workflow_head(workflow_id)
     if head is None:
         return {"claimed": False, "reason": "no_head", "attempt": attempt, "head_version": 0}
@@ -366,6 +377,17 @@ def claim_workflow_attempt(
     # complete_workflow의 replay 판정에 걸린다.
     finished_key = completed_key(workflow_id, request_id, phase)
     next_head_key = head_key(workflow_id, version + 1)
+    required_keys = [head_key(workflow_id, version)]
+    previous_attempt_key = None
+    if attempt > 1:
+        # Sequential-attempt fencing: attempt N may only be claimed once
+        # attempt N-1's own claim is on record. Without this, a caller (or a
+        # bug) that jumps straight to attempt 3 gets a claim for it, and
+        # ``complete_workflow`` -- which only checks that attempt N+1 does
+        # not exist -- would later let a stale attempt 1 complete over it,
+        # since it never asked whether 2 or 3 existed.
+        previous_attempt_key = claim_key(workflow_id, phase, request_id, attempt - 1)
+        required_keys.append(previous_attempt_key)
     try:
         outcome = store.save_system_events_atomic(
             run_id,
@@ -375,7 +397,7 @@ def claim_workflow_attempt(
                     "payload": claim_payload,
                 }
             ],
-            require_duplicate_keys=(head_key(workflow_id, version),),
+            require_duplicate_keys=tuple(required_keys),
             forbid_duplicate_keys=(next_head_key, finished_key),
         )
     except ValueError as exc:
@@ -398,9 +420,12 @@ def claim_workflow_attempt(
     if outcome["committed"]:
         return {"claimed": True, "reason": None, "attempt": attempt, "head_version": version}
     conflict = str(outcome["conflict"])
+    conflicting_keys = set(outcome.get("conflicting_keys") or ())
     if conflict == "already_committed":
         reason = "already_claimed"
-    elif finished_key in set(outcome.get("conflicting_keys") or ()):
+    elif previous_attempt_key is not None and previous_attempt_key in conflicting_keys:
+        reason = "attempt_out_of_order"
+    elif finished_key in conflicting_keys:
         reason = "already_completed"
     else:
         reason = "head_moved"
@@ -475,6 +500,14 @@ def complete_workflow(
     surface afterwards -- inside ``run_signal`` on a process that only looked
     dead -- and write the completion for a transition attempt 2 now owns,
     closing the workflow under attempt 2's feet.
+
+    "the next attempt does not exist" only means "attempt is the latest one"
+    because ``claim_workflow_attempt`` is the sole writer of claim events and
+    refuses to claim attempt N unless attempt N-1's claim already exists --
+    attempts can never have a gap. A completion check that instead re-derived
+    "latest" by scanning claims would be redundant with that invariant, not a
+    second layer of defense; the invariant is what has to hold, and it holds
+    at the one place claims are written, not at every place that reads them.
 
     A fenced-out completion raises ``WorkflowClaimRefused`` rather than
     returning falsy: every caller here has already done the transition's side

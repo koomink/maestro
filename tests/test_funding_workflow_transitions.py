@@ -673,3 +673,53 @@ def test_a_late_redelivery_does_not_stop_the_rest_of_its_signal_run(funding_orch
 
     assert outcome["committed"] is False
     assert outcome["conflict"] in {"already_committed", "already_published"}
+
+
+def test_an_attempt_that_skips_a_number_is_refused(tmp_path):
+    """Re-review Important: attempt is a fencing token only if claiming it
+    requires the previous attempt to have claimed first.
+
+    Without this, attempt 1 claims, attempt 3 claims (skipping 2 entirely),
+    and then attempt 1's completion only checks that attempt 2's claim does
+    not exist -- which it never did -- so attempt 1 could close a transition
+    attempt 3 already owns. Refusing attempt 3's claim here is what keeps
+    that from ever being reachable.
+    """
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    first = claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding", attempt=1
+    )
+    assert first["claimed"] is True
+
+    skipped = claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding", attempt=3
+    )
+    assert skipped["claimed"] is False
+    assert skipped["reason"] == "attempt_out_of_order"
+
+    # The transition is still attempt 1's alone: nobody took it over, so its
+    # completion must still be free to land.
+    outcome = complete_workflow(
+        store,
+        "run-2",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+    assert outcome["committed"] is True
+
+def test_a_non_positive_attempt_is_rejected(tmp_path):
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    with pytest.raises(ValueError, match="positive"):
+        claim_workflow_attempt(
+            store,
+            "run-1",
+            workflow_id=workflow_id,
+            request_id="req-1",
+            phase="funding",
+            attempt=0,
+        )
