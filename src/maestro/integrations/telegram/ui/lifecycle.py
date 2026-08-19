@@ -144,6 +144,15 @@ class CardLifecycleManager:
         Unlike ``deliver``, no audience is recorded: these cards go to the one
         chat that acted and are never swept for refreshes, so an audience
         would only pin a list nothing reads.
+
+        Returns "sent", "skipped", "failed" or "unknown". A caller that
+        completes something on the strength of this card having reached the
+        operator must treat only "sent"/"skipped" as done and refuse to
+        proceed on "failed"/"unknown" -- Telegram either refused the card
+        outright or its fate cannot be told, and "the workflow is complete"
+        is not true in either case. "unknown" is escalated to the operator
+        here, once, the moment it is first seen -- not deferred to whichever
+        later call happens to retry this copy.
         """
         copy = self.copies(card_key).get((card_key, chat_id))
         if copy is not None:
@@ -151,10 +160,13 @@ class CardLifecycleManager:
                 return "skipped"
             if copy.delivery == "unknown":
                 self._escalate_ambiguous(run_id, card_key, chat_id, stage)
-                return "ambiguous"
-        return self._deliver_one(
+                return "unknown"
+        outcome = self._deliver_one(
             run_id, card_key, stage, rendered, self.render_hash(rendered), chat_id
         )
+        if outcome == "unknown":
+            self._escalate_ambiguous(run_id, card_key, chat_id, stage)
+        return outcome
 
     def refresh(
         self,

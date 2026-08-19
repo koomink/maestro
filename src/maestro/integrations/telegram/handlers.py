@@ -3683,14 +3683,39 @@ class TelegramOperatorCommandRouter:
         budget_requests = signal.get("budget_requests") or []
         funding_requests = signal.get("funding_requests") or []
         for budget_request in budget_requests:
-            self._send_budget_request(chat_id, budget_request)
+            self._require_card_delivered(
+                self._send_budget_request(chat_id, budget_request), "budget", budget_request
+            )
         for funding_request in funding_requests:
-            self._send_funding_request(chat_id, funding_request)
+            self._require_card_delivered(
+                self._send_funding_request(chat_id, funding_request), "funding", funding_request
+            )
         if budget_requests:
             return ["approval_status: budget_still_required"]
         if funding_requests:
             return ["approval_status: funding_still_required"]
         return ["approval_status: not_required"]
+
+    @staticmethod
+    def _require_card_delivered(outcome: str, phase: str, request: dict[str, Any]) -> None:
+        """Refuse to let a caller treat an unconfirmed card as delivered.
+
+        "sent" and "skipped" (the operator already holds a confirmed copy)
+        are the only outcomes that mean the operator can act on this request.
+        "failed" means Telegram explicitly refused every chat; "unknown"
+        means a timeout or dropped connection left delivery unaccountable --
+        raising either keeps the caller (``_deliver_child_signal_outcome``)
+        from reaching ``complete_workflow``, so the workflow stays
+        claimed-but-incomplete and the resume sweep picks it back up instead
+        of the request silently having no card in front of anyone.
+        """
+        if outcome in ("sent", "skipped"):
+            return
+        request_id = request.get("request_id")
+        raise RuntimeError(
+            f"{phase} request card delivery is {outcome!r} for request {request_id!r}; "
+            "refusing to complete the workflow until delivery is confirmed"
+        )
 
     def _dispatch_child_approval(self, signal_run_id: str) -> list[str]:
         """Put an approval card in front of the operator for this child run.
@@ -4253,9 +4278,9 @@ class TelegramOperatorCommandRouter:
             },
         )
 
-    def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> None:
+    def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> str:
         request_id = str(request.get("request_id") or "")
-        self._send_request_card(
+        return self._send_request_card(
             chat_id,
             request_id,
             phase="funding",
@@ -4263,8 +4288,8 @@ class TelegramOperatorCommandRouter:
             reply_markup=funding_request_reply_markup(request_id),
         )
 
-    def _send_budget_request(self, chat_id: int, request: dict[str, Any]) -> None:
-        self._send_request_card(
+    def _send_budget_request(self, chat_id: int, request: dict[str, Any]) -> str:
+        return self._send_request_card(
             chat_id,
             str(request.get("request_id") or ""),
             phase="budget",
@@ -4280,7 +4305,7 @@ class TelegramOperatorCommandRouter:
         phase: str,
         text: str,
         reply_markup: dict[str, Any] | None,
-    ) -> None:
+    ) -> str:
         """Deliver an actionable request card at most once per chat.
 
         A request card is a live decision button, and the transition behind it
@@ -4294,11 +4319,16 @@ class TelegramOperatorCommandRouter:
         A request with no id cannot be keyed, so it falls back to a plain
         send: an un-keyed card delivered twice is better than one that is
         deduplicated against an unrelated card.
+
+        Returns the delivery outcome ("sent", "skipped", "failed" or
+        "unknown") rather than swallowing it -- a caller that completes a
+        workflow on the strength of this call must be able to tell a
+        confirmed delivery from one Telegram refused or left ambiguous.
         """
         if not request_id:
             self._send(chat_id, text, reply_markup=reply_markup)
-            return
-        self._card_manager.deliver_once(
+            return "sent"
+        return self._card_manager.deliver_once(
             new_run_id(),
             f"{phase}-request:{request_id}",
             "pending",

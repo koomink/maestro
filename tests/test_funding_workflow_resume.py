@@ -19,6 +19,7 @@ import yaml
 
 from maestro.config.loader import load_config
 from maestro.core.ids import new_run_id
+from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.orchestrator import SignalRunSummary
@@ -1565,3 +1566,101 @@ def test_a_budget_card_is_also_delivered_only_once(operator_bot):
     operator_bot._send_budget_request(100, request)
 
     assert len(_request_cards(operator_bot, "req-1")) == 1
+
+
+def _stub_child_signal(monkeypatch, operator_bot, *, funding_requests=None, budget_requests=None):
+    """Skip the real strategy run: hand back a settled child whose signal
+    package already carries the follow-up request(s) under test."""
+    monkeypatch.setattr(
+        operator_bot,
+        "_run_child_signal",
+        lambda *args, **kwargs: SignalRunSummary(
+            signal_run_id="signal-child",
+            loaded_strategies=["tranquillo"],
+            action_required=False,
+            orders_preview_count=0,
+        ),
+    )
+    operator_bot.store.save_signal_package(
+        "signal-child",
+        {
+            "orders_preview": [],
+            "funding_requests": funding_requests or [],
+            "budget_requests": budget_requests or [],
+        },
+    )
+
+def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
+    operator_bot, monkeypatch
+):
+    """Re-review Critical 2: deliver_once's answer used to be discarded.
+
+    _send_request_card threw away whether the follow-up card actually
+    reached the operator, so _deliver_child_signal_outcome ran to completion
+    and the caller went straight into complete_workflow regardless. Here
+    Telegram explicitly refuses the very first send (not a manual second
+    call to _send_funding_request, which is all the old test covered) --
+    the real operator path (_confirm_funding_request) must now surface that
+    as an exception and leave the workflow claimed-but-incomplete, the same
+    way a crash in delivery already does.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    _stub_child_signal(monkeypatch, operator_bot, funding_requests=[_request("req-2")])
+
+    def reject(chat_id, text, reply_markup=None):
+        raise TelegramApiRejected("telegram refused the funding request card")
+
+    monkeypatch.setattr(operator_bot.client, "send_message", reject)
+
+    with pytest.raises(RuntimeError, match="refusing to complete the workflow"):
+        operator_bot._confirm_funding_request(
+            _request("req-1"), chat_id=1, user_id=2, username="op"
+        )
+
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+def test_a_telegram_timeout_on_a_follow_up_card_leaves_the_workflow_incomplete(
+    operator_bot, monkeypatch
+):
+    """The unknown-outcome twin of the rejection case above: a timeout gives
+    no proof of non-delivery either way, so it must be treated the same as a
+    refusal for the purpose of completing the workflow -- and, unlike a
+    plain refusal, it must also leave the operator an ambiguity notice."""
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="budget")
+    _stub_child_signal(monkeypatch, operator_bot, budget_requests=[_budget_request("req-2")])
+
+    # Only the very first call (the request card itself) times out; the
+    # ambiguity notice deliver_once sends right after must still go through,
+    # the same way a single dropped request does not mean the connection is
+    # down for the rest of the process.
+    original_send = operator_bot.client.send_message
+    call_count = {"n": 0}
+
+    def flaky_once(chat_id, text, reply_markup=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise TimeoutError("connection dropped after Telegram accepted it")
+        return original_send(chat_id, text, reply_markup=reply_markup)
+
+    monkeypatch.setattr(operator_bot.client, "send_message", flaky_once)
+
+    with pytest.raises(RuntimeError, match="refusing to complete the workflow"):
+        operator_bot._confirm_budget_request(
+            _budget_request("req-1"),
+            selected_budget=500_000.0,
+            chat_id=1,
+            user_id=2,
+            username="op",
+        )
+
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+    notices = [
+        message
+        for message in operator_bot.client.sent_messages
+        if message.get("reply_markup") is None
+    ]
+    assert notices, "the operator must be told a copy could not be accounted for"
