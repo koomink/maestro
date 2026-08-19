@@ -82,3 +82,38 @@ def test_a_run_consumed_twice_is_reported_once(tmp_path):
     _consume(store, "signal-1")
 
     assert store.list_incomplete_signal_dispatches() == ["signal-1"]
+
+
+def test_one_groups_completion_does_not_settle_a_multi_group_dispatch(tmp_path):
+    # A crash between creating the first group's approval and the second
+    # group's leaves only one group's card in existence. The operator can
+    # still resolve that one card, which writes a per-group
+    # signal_approval_completed carrying that group's approval_id -- but the
+    # second group was never created, so the dispatch is not done.
+    store = _store(tmp_path)
+    _consume(store, "signal-1")
+    store.save_system_event(
+        "signal-1",
+        "signal_approval_completed",
+        {"signal_run_id": "signal-1", "approval_id": "approval-group-1"},
+    )
+
+    assert store.signal_dispatch_settled("signal-1") is False
+    assert store.list_incomplete_signal_dispatches() == ["signal-1"]
+
+def test_the_package_level_completion_settles_a_multi_group_dispatch(tmp_path):
+    # Once every group has been created, dispatch_pending_approvals writes
+    # the package-level signal_approval_pending event -- that alone marks
+    # the dispatch settled, regardless of how many per-group completions
+    # have also landed by then.
+    store = _store(tmp_path)
+    _consume(store, "signal-1")
+    store.save_system_event(
+        "signal-1",
+        "signal_approval_completed",
+        {"signal_run_id": "signal-1", "approval_id": "approval-group-1"},
+    )
+    _settle(store, "signal-1", "signal_approval_pending")
+
+    assert store.signal_dispatch_settled("signal-1") is True
+    assert store.list_incomplete_signal_dispatches() == []

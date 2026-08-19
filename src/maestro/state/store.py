@@ -2020,15 +2020,31 @@ class StateStore:
     #: Written once a dispatch has placed every approval it intended to. Either
     #: marks the package settled; ``signal_approval_completed`` covers the runs
     #: that needed no approval or were blocked before one was created.
-    _DISPATCH_SETTLED_EVENTS = ("signal_approval_pending", "signal_approval_completed")
+    #:
+    #: ``signal_approval_completed`` is also written per *group* -- once for
+    #: each Telegram approval button the operator resolves -- and those rows
+    #: carry an ``approval_id``. A multi-group dispatch that crashed before
+    #: creating every group's card would look settled the moment the first
+    #: group's button was pressed, permanently stranding the groups that were
+    #: never created. Only the package-level row, written with no
+    #: ``approval_id`` after every group has been placed (or none was
+    #: needed), counts as settled here; the generated ``approval_id`` column
+    #: (see the migration above) is what lets SQL tell the two apart.
+    @staticmethod
+    def _dispatch_settled_sql(table: str = "system_events") -> str:
+        return (
+            f"({table}.event_type = 'signal_approval_pending' "
+            f"OR ({table}.event_type = 'signal_approval_completed' "
+            f"AND {table}.approval_id IS NULL))"
+        )
 
     def signal_dispatch_settled(self, signal_run_id: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT 1 FROM system_events "
-                f"WHERE event_type IN ({','.join('?' * len(self._DISPATCH_SETTLED_EVENTS))}) "
+                f"WHERE {self._dispatch_settled_sql()} "
                 "AND signal_run_id = ? LIMIT 1",
-                (*self._DISPATCH_SETTLED_EVENTS, signal_run_id),
+                (signal_run_id,),
             ).fetchone()
         return row is not None
 
@@ -2064,7 +2080,6 @@ class StateStore:
         query existed, so an older completed run already has one.  A run that
         turns up here really is unfinished.
         """
-        placeholders = ",".join("?" * len(self._DISPATCH_SETTLED_EVENTS))
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT consumed.signal_run_id FROM system_events AS consumed "
@@ -2072,10 +2087,10 @@ class StateStore:
                 "AND consumed.signal_run_id IS NOT NULL "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM system_events AS settled "
-                f"  WHERE settled.event_type IN ({placeholders}) "
+                f"  WHERE {self._dispatch_settled_sql('settled')} "
                 "  AND settled.signal_run_id = consumed.signal_run_id"
                 ") ORDER BY consumed.id LIMIT ?",
-                (*self._DISPATCH_SETTLED_EVENTS, limit),
+                (limit,),
             ).fetchall()
         return [str(row[0]) for row in rows]
 
