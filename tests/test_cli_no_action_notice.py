@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from maestro import cli as _cli
-from maestro.cli import _run_daily_signal_approval
+from maestro.cli import RequestNotification, _run_daily_signal_approval
 from maestro.config.loader import load_config
 from maestro.integrations.telegram.ui.catalog import NO_ACTION_NOTICE
 
@@ -95,13 +95,26 @@ def _drive_no_action_day(
     monkeypatch.setattr(
         "maestro.cli._send_signal_summary_notification", lambda config, summary: None
     )
+    # The notifiers report three things now (requested / delivered / failed),
+    # because "nothing to send" and "something that did not go out" are
+    # opposite answers to "was today quiet?" and a single count collapsed
+    # both to zero. These stubs stand in for a clean send of one request.
+    def _outcome(raised) -> RequestNotification:
+        if isinstance(raised, RequestNotification):
+            return raised
+        return RequestNotification(
+            requested=1 if raised else 0,
+            delivered=1 if raised else 0,
+            failed=False,
+        )
+
     monkeypatch.setattr(
         "maestro.cli._send_signal_budget_request_notifications",
-        lambda config, signal_run_id: budget_sent,
+        lambda config, signal_run_id: _outcome(budget_sent),
     )
     monkeypatch.setattr(
         "maestro.cli._send_signal_funding_request_notifications",
-        lambda config, signal_run_id: funding_sent,
+        lambda config, signal_run_id: _outcome(funding_sent),
     )
 
     try:
@@ -229,3 +242,36 @@ def test_a_chat_that_failed_is_not_resent_the_next_run(monkeypatch, tmp_path):
     sent = _drive_no_action_day(monkeypatch, config)
 
     assert sent == []
+
+
+def test_a_day_whose_request_card_failed_is_not_a_quiet_day(monkeypatch, tmp_path):
+    """전송 실패는 "보낼 게 없었다"가 아니다.
+
+    두 발송 함수가 실패할 때도 0을 돌려주던 시절에는, 호출자가 그 0을
+    "오늘 아무것도 올라오지 않았다"로 읽고 "오늘은 매매할 것이 없어요"를
+    보냈다. 입금이 필요한 날에 아무 일 없다고 알리는 것은 카드가 안 오는
+    것보다 나쁘다 -- 운영자가 확인할 이유 자체를 없앤다.
+    """
+    config = _telegram_config(tmp_path)
+    sent = _drive_no_action_day(
+        monkeypatch,
+        config,
+        funding_sent=RequestNotification(requested=1, delivered=0, failed=True),
+    )
+
+    assert sent == []
+
+
+def test_a_delivery_failure_is_reported_as_its_own_status(monkeypatch, tmp_path, capsys):
+    config = _telegram_config(tmp_path)
+    _drive_no_action_day(
+        monkeypatch,
+        config,
+        funding_sent=RequestNotification(requested=1, delivered=0, failed=True),
+    )
+
+    out = capsys.readouterr().out
+    assert "status=request_delivery_failed kinds=funding" in out
+    # 요청이 있었으므로 그날의 결론은 여전히 funding_required다.
+    assert "status=funding_required" in out
+    assert "status=no_action" not in out

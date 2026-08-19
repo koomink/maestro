@@ -4,10 +4,10 @@ import os
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, NamedTuple, TypeVar
 from zoneinfo import ZoneInfo
 
 import typer
@@ -415,6 +415,20 @@ def _run_daily_signal_approval(
             signal_maestro_config,
             signal_summary.signal_run_id,
         )
+        # 분기는 전달 성공이 아니라 **요청이 있었는지**로 가른다. 전송에
+        # 실패한 날을 조용한 날로 보고하면, 입금이 필요한 날에 운영자가
+        # "오늘은 매매할 것이 없어요"를 받는다 -- 카드가 안 오는 것보다 나쁘다.
+        undelivered = [
+            kind
+            for kind, outcome in (("budget", budget_sent), ("funding", funding_sent))
+            if outcome.failed
+        ]
+        if undelivered:
+            typer.echo(
+                f"symphony_daily status=request_delivery_failed "
+                f"kinds={','.join(undelivered)} "
+                f"signal_run_id={signal_summary.signal_run_id}"
+            )
         if budget_sent:
             typer.echo(
                 f"symphony_daily status=budget_required "
@@ -571,83 +585,129 @@ def _single_line_error(exc: Exception) -> str:
     return message[:500]
 
 
-def _send_signal_funding_request_notifications(
+class RequestNotification(NamedTuple):
+    """What a day's funding/budget request notification actually did.
+
+    A single count cannot carry this. The caller uses it to decide whether
+    today was a quiet day, and "nothing to send" and "something to send that
+    did not go out" are opposite answers to that question -- both of which a
+    count collapses to zero. That collapse is what made a failed send
+    announce itself to the operator as "오늘은 매매할 것이 없어요".
+    """
+
+    requested: int
+    delivered: int
+    failed: bool
+
+    def __bool__(self) -> bool:
+        """Truthy when the day raised something, delivered or not."""
+        return self.requested > 0
+
+
+_NOTHING_REQUESTED = RequestNotification(requested=0, delivered=0, failed=False)
+
+
+def _send_signal_request_notifications(
     maestro_config: MaestroConfig,
     signal_run_id: str,
-) -> int:
-    if maestro_config.approval.provider != "telegram":
-        return 0
-    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
-    if not chat_ids:
-        return 0
-    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
-        typer.echo("telegram_funding_request=warn message=missing_bot_token")
-        return 0
+    *,
+    kind: str,
+    package_key: str,
+    render: Callable[[Mapping[str, Any]], tuple[str, dict[str, Any]]],
+) -> RequestNotification:
+    """Send one day's funding or budget request cards.
+
+    The package is read before the channel is checked, and that order is the
+    point: ``requested`` has to be right even when there is no way to send.
+    A missing bot token on a day with a funding request is not a quiet day,
+    and reporting it as one is worse than sending nothing -- the operator is
+    told there was nothing to do.
+
+    ``delivered`` counts sends that actually returned. It used to be
+    computed as requests x chats after the loop, so a partial send looked
+    total and an exception midway discarded the sends that had succeeded.
+    """
     store = StateStore(
         maestro_config.state.sqlite_path,
         maestro_config.portfolio.initial_cash,
         maestro_config.portfolio.cash_by_currency,
     )
     signal = store.load_signal_package(signal_run_id) or {}
-    funding_requests = signal.get("funding_requests") or []
-    if not funding_requests:
-        return 0
+    requests = signal.get(package_key) or []
+    if not requests:
+        return _NOTHING_REQUESTED
+    requested = len(requests)
+
+    def unsendable(reason: str) -> RequestNotification:
+        typer.echo(f"telegram_{kind}_request=warn message={reason}")
+        return RequestNotification(requested=requested, delivered=0, failed=True)
+
+    if maestro_config.approval.provider != "telegram":
+        return unsendable("approval_provider_not_telegram")
+    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
+    if not chat_ids:
+        return unsendable("no_allowed_chat_ids")
+    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
+        return unsendable("missing_bot_token")
+
+    delivered = 0
     try:
         client = TelegramBotAPIClient(
             token_env=maestro_config.approval.telegram_bot_token_env,
             timeout_seconds=10.0,
         )
-        for request in funding_requests:
-            request_id = str(request.get("request_id") or "")
-            message = format_contribution_funding_request(request)
-            markup = funding_request_reply_markup(request_id)
+        for request in requests:
+            message, markup = render(request)
             for chat_id in chat_ids:
                 client.send_message(chat_id, message, reply_markup=markup)
+                delivered += 1
     except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-        typer.echo(f"telegram_funding_request=warn message={exc}")
-        return 0
-    sent = len(funding_requests) * len(chat_ids)
-    typer.echo(f"telegram_funding_request=sent messages={sent}")
-    return sent
+        typer.echo(
+            f"telegram_{kind}_request=warn message={exc} "
+            f"requested={requested} delivered={delivered}"
+        )
+        return RequestNotification(requested=requested, delivered=delivered, failed=True)
+    typer.echo(f"telegram_{kind}_request=sent messages={delivered}")
+    return RequestNotification(requested=requested, delivered=delivered, failed=False)
+
+
+def _send_signal_funding_request_notifications(
+    maestro_config: MaestroConfig,
+    signal_run_id: str,
+) -> RequestNotification:
+    def render(request: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        request_id = str(request.get("request_id") or "")
+        return (
+            format_contribution_funding_request(request),
+            funding_request_reply_markup(request_id),
+        )
+
+    return _send_signal_request_notifications(
+        maestro_config,
+        signal_run_id,
+        kind="funding",
+        package_key="funding_requests",
+        render=render,
+    )
 
 
 def _send_signal_budget_request_notifications(
     maestro_config: MaestroConfig,
     signal_run_id: str,
-) -> int:
-    if maestro_config.approval.provider != "telegram":
-        return 0
-    chat_ids = maestro_config.approval.telegram_allowed_chat_ids
-    if not chat_ids:
-        return 0
-    if not DEFAULT_CREDENTIAL_RESOLVER.present(maestro_config.approval.telegram_bot_token_env):
-        typer.echo("telegram_budget_request=warn message=missing_bot_token")
-        return 0
-    store = StateStore(
-        maestro_config.state.sqlite_path,
-        maestro_config.portfolio.initial_cash,
-        maestro_config.portfolio.cash_by_currency,
-    )
-    signal = store.load_signal_package(signal_run_id) or {}
-    budget_requests = signal.get("budget_requests") or []
-    if not budget_requests:
-        return 0
-    try:
-        client = TelegramBotAPIClient(
-            token_env=maestro_config.approval.telegram_bot_token_env,
-            timeout_seconds=10.0,
+) -> RequestNotification:
+    def render(request: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        return (
+            format_contribution_budget_request(request),
+            budget_request_reply_markup(request),
         )
-        for request in budget_requests:
-            message = format_contribution_budget_request(request)
-            markup = budget_request_reply_markup(request)
-            for chat_id in chat_ids:
-                client.send_message(chat_id, message, reply_markup=markup)
-    except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-        typer.echo(f"telegram_budget_request=warn message={exc}")
-        return 0
-    sent = len(budget_requests) * len(chat_ids)
-    typer.echo(f"telegram_budget_request=sent messages={sent}")
-    return sent
+
+    return _send_signal_request_notifications(
+        maestro_config,
+        signal_run_id,
+        kind="budget",
+        package_key="budget_requests",
+        render=render,
+    )
 
 
 def _send_signal_summary_notification(maestro_config: MaestroConfig, summary) -> None:
