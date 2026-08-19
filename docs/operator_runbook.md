@@ -221,6 +221,47 @@ hash chain, failed reconciliation, stale broker state, or active safety halt.
 `ops-alerts` sends warn/fail health checks to configured Telegram approval
 chats.
 
+## Telegram card delivery
+
+`maestro health` reports `telegram_ui` in two ways, and they mean different
+things.
+
+`N card copies failing` means Telegram refused those sends and answered so.
+The card is retried, the counter resets on the first success, and after three
+straight refusals the operator gets the same content as plain text. Nothing to
+do unless it persists.
+
+`N unaccounted` means a send started and we never learned its outcome — a
+timeout, a dropped connection. That copy is **never re-sent**: Telegram offers
+no way to ask whether a message arrived, and sending again is how a second
+live decision button is created for one request. It also has no failure
+counter, so unlike a refusal it cannot clear itself. It stays until a person
+looks.
+
+When you see it:
+
+```bash
+maestro health --config <config>
+```
+
+The `unaccounted` detail names `<card_key>@<chat_id>`. Check the chat for that
+card. If it is there, act on it normally — the button works, and the workflow
+behind it completes as usual. If it is not there, the request is still live
+and the next scheduled signal run publishes a replacement and sends a fresh
+card; nothing needs to be forced.
+
+Two related notices can arrive in Telegram:
+
+- `⚠️ 입금/예산 요청 카드를 전달하지 못했어요` — that request has no card in
+  front of anyone. The event `funding_request_card_undelivered` records it
+  even when the notice itself could not be delivered.
+- `⚠️ 재개를 여러 번 시도했지만 끝내지 못했어요` — the workflow spent its
+  resume budget. Resume is no longer offered for it, and tapping an older
+  Resume card is refused. This one needs a person; do **not** look for a
+  command to force it closed, because none exists by design — a funding
+  workflow that cannot finish is superseded by the next scheduled run rather
+  than settled by hand.
+
 ## Symphony Workflow
 
 The multi-account operator workflow uses three configs:
