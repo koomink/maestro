@@ -1158,6 +1158,65 @@ def test_a_delivered_card_clears_the_degraded_state(tmp_path):
     assert checks["telegram_ui"].status == "ok"
 
 
+def _card_unknown(store, *, card_key, chat_id):
+    """전송 intent만 남고 결과가 없는 상태 -- 전송 도중 죽은 경우."""
+    from maestro.integrations.telegram.ui.card_state import card_intent_event
+
+    store.record_card_event(
+        "run_cards", card_intent_event(card_key, chat_id, "pending", "h1", "op-unknown")
+    )
+
+
+def test_telegram_ui_health_degrades_on_a_copy_it_cannot_account_for(tmp_path):
+    """실패 카운터가 없는 상태도 degraded여야 한다.
+
+    unknown 사본은 카운터가 오르지 않고(투영은 failed/confirmed에서만 움직인다)
+    다시 보내지도 않으므로 스스로 회복될 길이 없다. 실패만 세던 시절에는 이
+    상태에서 "cards delivering"으로 보고됐다 -- 회복 불가능한 쪽이 오히려
+    보이지 않았다.
+    """
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_unknown(store, card_key="funding-request:fund_1", chat_id=100)
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    check = checks["telegram_ui"]
+
+    assert check.status == "warn"
+    assert "unaccounted" in check.message
+    assert "funding-request:fund_1" in str(check.details)
+
+
+def test_telegram_ui_health_counts_failing_and_unaccounted_separately(tmp_path):
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_failure(store, card_key="approval:appr_1", chat_id=100, times=3)
+    _card_unknown(store, card_key="funding-request:fund_1", chat_id=100)
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    check = checks["telegram_ui"]
+
+    assert check.status == "warn"
+    assert "1 card copies failing" in check.message
+    assert "1 unaccounted" in check.message
+
+
+def test_a_confirmed_send_clears_an_unaccounted_copy(tmp_path):
+    """intent 뒤에 결과가 도착하면 그 사본은 더 이상 미결이 아니다."""
+    from maestro.integrations.telegram.ui.card_state import card_result_event
+
+    config = load_config(_readonly_config(tmp_path))
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    _card_unknown(store, card_key="funding-request:fund_1", chat_id=100)
+    store.record_card_event(
+        "run_cards",
+        card_result_event("funding-request:fund_1", 100, "pending", "h1", "op-unknown", 7001),
+    )
+
+    checks = {check.name: check for check in HealthService(config, store).run().checks}
+    assert checks["telegram_ui"].status == "ok"
+
+
 def test_telegram_ui_health_is_ok_when_no_card_was_ever_sent(tmp_path):
     """카드를 쓰지 않는 배포에서 헬스가 경고를 내면 안 된다."""
     config = load_config(_readonly_config(tmp_path))

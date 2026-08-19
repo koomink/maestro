@@ -1690,6 +1690,46 @@ class StateStore:
             for row in rows
         ]
 
+    def list_unaccounted_card_copies(
+        self,
+        chat_ids: Sequence[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Delivery copies whose fate is unknown -- an intent with no outcome.
+
+        Separate from ``list_failing_card_copies`` because the two are not
+        degrees of the same thing. A failure is a refusal Telegram answered
+        with, it increments a counter, and a later success clears it. An
+        unknown copy has no counter at all (``record_card_event`` only moves
+        ``consecutive_failures`` on failed and confirmed) and nothing will
+        ever clear it: the copy is deliberately never re-sent, because
+        re-sending a card that may already be in the chat is how a duplicate
+        decision button is made.
+
+        So it cannot heal, which is exactly why it has to be visible. Until
+        this existed, a copy stuck at unknown was invisible to every health
+        surface and ``telegram_ui`` reported "cards delivering".
+
+        ``chat_ids`` narrows to the chats still configured, for the same
+        reason the failure query does.
+        """
+        sql = (
+            "SELECT card_key, chat_id, stage FROM telegram_ui_card_state "
+            "WHERE delivery = 'unknown'"
+        )
+        values: list[Any] = []
+        if chat_ids is not None:
+            if not chat_ids:
+                return []
+            sql += f" AND chat_id IN ({','.join('?' * len(chat_ids))})"
+            values.extend(int(chat_id) for chat_id in chat_ids)
+        sql += " ORDER BY card_key, chat_id"
+        with self._connect() as conn:
+            rows = conn.execute(sql, values).fetchall()
+        return [
+            {"card_key": str(row[0]), "chat_id": int(row[1]), "stage": str(row[2])}
+            for row in rows
+        ]
+
     def record_card_audience(self, card_key: str, chat_ids: Iterable[int]) -> None:
         """Note the chats a card is addressed to. First writer wins.
 

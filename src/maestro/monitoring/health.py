@@ -430,6 +430,12 @@ class HealthService:
         Threshold matches the fallback's, deliberately: the same run of
         failures that gives up on the card is what degrades the service.
 
+        A copy whose delivery is *unknown* degrades it too, and for a
+        stronger reason: it has no failure counter to cross a threshold with,
+        and it is deliberately never re-sent, so unlike a failing copy it
+        cannot heal on its own. Counting only refusals reported "cards
+        delivering" while a card sat unaccounted for indefinitely.
+
         Scoped to the currently allowed chats. A copy in a chat the operator
         has removed gets no further sends, so its failure count can never be
         reset by a success -- counting it would pin this check to warn forever
@@ -445,16 +451,26 @@ class HealthService:
         failing = self.store.list_failing_card_copies(
             FALLBACK_AFTER_FAILURES, chat_ids=allowed or None
         )
-        if not failing:
+        unaccounted = self.store.list_unaccounted_card_copies(chat_ids=allowed or None)
+        if not failing and not unaccounted:
             return HealthCheck(name="telegram_ui", status="ok", message="cards delivering")
+        parts = []
+        if failing:
+            parts.append(f"{len(failing)} card copies failing")
+        if unaccounted:
+            parts.append(f"{len(unaccounted)} unaccounted")
         return HealthCheck(
             name="telegram_ui",
             status="warn",
-            message=f"{len(failing)} card copies failing",
+            message=", ".join(parts),
             details={
                 "cards": [
                     f"{row['card_key']}@{row['chat_id']}:{row['consecutive_failures']}"
                     for row in failing[:_MAX_REPORTED_FAILING_CARDS]
+                ],
+                "unaccounted": [
+                    f"{row['card_key']}@{row['chat_id']}"
+                    for row in unaccounted[:_MAX_REPORTED_FAILING_CARDS]
                 ],
             },
         )
