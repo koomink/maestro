@@ -752,6 +752,8 @@ class MaestroOrchestrator:
             budget_requests,
             build_package_payload,
             lineage_events,
+            source_request_id=source_request_id,
+            source_phase=source_phase,
         )
         status = str(payload["status"])
         self.audit.log(signal_run_id, "signal_package", payload)
@@ -1050,35 +1052,18 @@ class MaestroOrchestrator:
                 )
         self._validate_signal_package_for_approval(package)
         self._validate_signal_approval_preconditions(run_id, package)
-        approval_orders, capacity_blocks = self._partition_orders_by_capacity(
-            run_id,
-            approval_orders,
-            signal_run_id=signal_run_id,
-            package=package,
-        )
-        if not approval_orders:
-            if not already_consumed:
-                # A resume re-enters this method; marking again would stack
-                # a second consumed row for the same package.
-                self.state_store.mark_signal_package_consumed(signal_run_id, run_id)
-            self.state_store.save_system_event(
-                run_id,
-                "signal_approval_completed",
-                {
-                    "signal_run_id": signal_run_id,
-                    "orders_created": 0,
-                    "orders_planned": len(orders),
-                    "orders_capacity_blocked": len(capacity_blocks),
-                    "approval_status": "capacity_blocked",
-                },
-            )
-            return ApprovalDispatchResult(
-                signal_run_id=signal_run_id,
-                run_id=run_id,
-                orders_planned=len(orders),
-                orders_capacity_blocked=len(capacity_blocks),
-                approval_status="capacity_blocked",
-            )
+        # The manifest -- not a fresh capacity partition -- is what decides
+        # which groups this dispatch is obligated to resolve. Recomputing
+        # groups from live capacity on every resume let capacity that
+        # tightened between attempts make a group vanish from the
+        # computation entirely: never dispatched, never recorded as blocked,
+        # simply absent, while the settled event still fired over it. The
+        # manifest is built once, from the same posture-filtered orders a
+        # capacity check would have started from, and is what every later
+        # call -- including this one, if it already exists -- iterates
+        # instead. Capacity is still checked, per group, below; what it can
+        # no longer do is make a group disappear without a trace.
+        manifest = self._load_or_build_dispatch_manifest(signal_run_id, approval_orders, package)
         self._validate_signal_approval_gates(run_id, approval_orders, package)
         if not already_consumed:
             # A resume re-enters this method; marking again would stack
@@ -1090,21 +1075,57 @@ class MaestroOrchestrator:
             timeout_seconds=10.0,
         )
         risk_violations = package.get("risk_decision", {}).get("violations", [])
+        orders_by_id = {order.order_id: order for order in approval_orders}
         pending_count = 0
-        for source_strategy_ids, group_orders in self._approval_order_groups(
-            approval_orders,
-            package,
-        ):
-            group_id = dispatch_group_id(signal_run_id, source_strategy_ids)
+        orders_created = 0
+        capacity_blocks: list[OrderCapacityBlock] = []
+        for group in manifest["groups"]:
+            group_id = str(group["group_id"])
+            source_strategy_ids = [str(item) for item in group["source_strategy_ids"]]
+            try:
+                manifest_orders = [orders_by_id[str(order_id)] for order_id in group["order_ids"]]
+            except KeyError as exc:
+                raise ValueError(
+                    f"Dispatch manifest for {signal_run_id} names order {exc} that the "
+                    "package no longer carries"
+                ) from exc
             # 이 그룹의 승인이 이미 있으면 그것이 권위다. 새로 만들면
             # create_request가 새 approval_id와 utc_now 기준 만료시각을
             # 발급하므로(approval/manager.py), 같은 주문에 버튼 달린 카드가
             # 두 장 생기고 마감 시한이 재개마다 연장된다.
             stored = self.state_store.load_system_event_payload_by_duplicate_key(group_id)
             if stored is None:
+                blocked_key = f"{group_id}:capacity_blocked"
+                if self.state_store.duplicate_key_exists(blocked_key):
+                    # Resolved as blocked in a prior attempt. Capacity
+                    # blocking is terminal here, the same way the old
+                    # package-wide "capacity_blocked" outcome was: a group
+                    # once blocked is not silently retried on every resume,
+                    # it stays accounted-for and blocked.
+                    continue
+                accepted, blocked = self._partition_orders_by_capacity(
+                    run_id,
+                    manifest_orders,
+                    signal_run_id=signal_run_id,
+                    package=package,
+                )
+                capacity_blocks.extend(blocked)
+                if not accepted:
+                    self.state_store.insert_or_load_system_event(
+                        run_id,
+                        "dispatch_group_capacity_blocked",
+                        {
+                            "signal_run_id": signal_run_id,
+                            "group_id": group_id,
+                            "source_strategy_ids": source_strategy_ids,
+                            "duplicate_key": blocked_key,
+                        },
+                        blocked_key,
+                    )
+                    continue
                 request = self.approval_manager.create_request(
                     run_id,
-                    group_orders,
+                    accepted,
                     risk_violations,
                     source_strategy_ids,
                 )
@@ -1115,11 +1136,11 @@ class MaestroOrchestrator:
                     run_id=run_id,
                     signal_run_id=signal_run_id,
                     request=request,
-                    orders=[order.model_dump(mode="json") for order in group_orders],
+                    orders=[order.model_dump(mode="json") for order in accepted],
                     message=render_approval_stage_card(request, "pending").text,
-                    source_strategy_ids=list(source_strategy_ids),
+                    source_strategy_ids=source_strategy_ids,
                     account_ids=sorted(
-                        {order.account_id for order in group_orders if order.account_id}
+                        {order.account_id for order in accepted if order.account_id}
                     ),
                     reminder_seconds=self.config.approval.telegram_reminder_seconds,
                     created_at=request.created_at,
@@ -1139,7 +1160,15 @@ class MaestroOrchestrator:
                 if created:
                     self.audit.log(run_id, "telegram_approval_pending", stored)
             envelope = PendingApprovalEnvelope.model_validate(stored)
-            self._verify_reused_envelope(envelope, signal_run_id, source_strategy_ids)
+            # The manifest's own (capacity-independent) membership, not a
+            # fresh capacity computation: an envelope adopted from a prior
+            # attempt may legitimately hold fewer orders than that if some
+            # were capacity-blocked when it was created, and re-checking
+            # capacity here would only recompute what dispatching already
+            # settled for this group.
+            self._verify_reused_envelope(
+                envelope, signal_run_id, source_strategy_ids, manifest_orders
+            )
             request = envelope.request
             card = render_approval_stage_card(request, "pending")
             # 카드는 태어날 때부터 lifecycle이 소유한다. 여기서 직접 보내면
@@ -1163,17 +1192,42 @@ class MaestroOrchestrator:
                     f"Telegram refused the approval card for every chat: {request.approval_id}"
                 )
             pending_count += 1
+            orders_created += len(envelope.orders)
 
+        if pending_count > 0:
+            self.state_store.save_system_event(
+                run_id,
+                "signal_approval_pending",
+                {
+                    "signal_run_id": signal_run_id,
+                    "orders_created": orders_created,
+                    "orders_planned": len(orders),
+                    "orders_capacity_blocked": len(capacity_blocks),
+                    "approvals_pending": pending_count,
+                    "approval_status": "pending",
+                },
+            )
+            return ApprovalDispatchResult(
+                signal_run_id=signal_run_id,
+                run_id=run_id,
+                orders_planned=len(orders),
+                orders_capacity_blocked=len(capacity_blocks),
+                approvals_pending=pending_count,
+                approval_status="pending",
+            )
+        # Every manifest group resolved to capacity_blocked -- none newly,
+        # none in a prior attempt. Settling here (rather than leaving the
+        # dispatch open) matches the old all-blocked outcome: nothing is
+        # pending an operator decision, so there is nothing left to resume.
         self.state_store.save_system_event(
             run_id,
-            "signal_approval_pending",
+            "signal_approval_completed",
             {
                 "signal_run_id": signal_run_id,
-                "orders_created": len(approval_orders),
+                "orders_created": 0,
                 "orders_planned": len(orders),
                 "orders_capacity_blocked": len(capacity_blocks),
-                "approvals_pending": pending_count,
-                "approval_status": "pending",
+                "approval_status": "capacity_blocked",
             },
         )
         return ApprovalDispatchResult(
@@ -1181,9 +1235,48 @@ class MaestroOrchestrator:
             run_id=run_id,
             orders_planned=len(orders),
             orders_capacity_blocked=len(capacity_blocks),
-            approvals_pending=pending_count,
-            approval_status="pending",
+            approval_status="capacity_blocked",
         )
+
+    def _load_or_build_dispatch_manifest(
+        self,
+        signal_run_id: str,
+        approval_orders: list[OrderIntent],
+        package: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The durable, authoritative list of groups this dispatch must resolve.
+
+        Built once, from ``approval_orders`` before any capacity check -- the
+        same canonical grouping ``_approval_order_groups`` always produces
+        from the package's own posture-filtered orders, so it is a function
+        of data that does not change between attempts. A later call that
+        finds one already on record loads it rather than recomputing: not
+        because recomputing would usually differ (it would not, from the
+        same inputs), but because loading is what makes "the same groups
+        every time" a property of the record instead of an assumption about
+        every future caller's inputs staying identical.
+        """
+        manifest_key = f"dispatch-manifest:{signal_run_id}"
+        stored = self.state_store.load_system_event_payload_by_duplicate_key(manifest_key)
+        if stored is not None:
+            return stored
+        groups = [
+            {
+                "group_id": dispatch_group_id(signal_run_id, source_strategy_ids),
+                "source_strategy_ids": list(source_strategy_ids),
+                "order_ids": [order.order_id for order in group_orders],
+            }
+            for source_strategy_ids, group_orders in self._approval_order_groups(
+                approval_orders, package
+            )
+        ]
+        stored, _ = self.state_store.insert_or_load_system_event(
+            new_run_id(),
+            "signal_dispatch_manifest",
+            {"signal_run_id": signal_run_id, "groups": groups},
+            manifest_key,
+        )
+        return stored
 
     def _run_once_locked(self) -> RunOnceSummary:
         run_id = new_run_id()
@@ -1817,6 +1910,9 @@ class MaestroOrchestrator:
         budget_requests: list[ContributionBudgetRequest],
         build_payload: Callable[[list[Any], list[Any]], dict[str, Any]],
         lineage_events: Sequence[Mapping[str, Any]],
+        *,
+        source_request_id: str | None = None,
+        source_phase: str | None = None,
     ) -> tuple[list[Any], list[Any], dict[str, Any]]:
         """Commit the requests, their heads, the package and the lineage together.
 
@@ -1833,12 +1929,23 @@ class MaestroOrchestrator:
         that wanted it is dropped, the package is rebuilt without it and the
         batch is retried. Every pass drops at least one request, which is what
         bounds the loop.
+
+        ``source_request_id``/``source_phase`` are this run's own child
+        lineage (see ``run_signal``), and are what let a request published
+        here supersede a head that is still claimed: they are the legitimate
+        successor declaration ``plan_contribution_request`` requires for
+        that. A run with no source (not a child of any claimed transition)
+        passes ``None``, exactly like an independent publish must.
         """
         plans: list[tuple[str, Any, dict[str, Any]]] = []
         for phase, requests in (("funding", funding_requests), ("budget", budget_requests)):
             for request in requests:
                 plan = plan_contribution_request(
-                    self.state_store, request.model_dump(mode="json"), phase=phase
+                    self.state_store,
+                    request.model_dump(mode="json"),
+                    phase=phase,
+                    successor_of_request_id=source_request_id,
+                    successor_of_phase=source_phase,
                 )
                 if plan["refusal"] is not None:
                     self._audit_request_conflict(signal_run_id, phase, plan, plan["refusal"])
@@ -1856,7 +1963,14 @@ class MaestroOrchestrator:
                     *(event for _, _, plan in plans for event in plan["events"]),
                     *lineage_events,
                 ],
-                forbid_duplicate_keys=[plan["head_key"] for _, _, plan in plans],
+                require_duplicate_keys=[
+                    key for _, _, plan in plans for key in plan["extra_require_keys"]
+                ],
+                forbid_duplicate_keys=[
+                    key
+                    for _, _, plan in plans
+                    for key in (plan["head_key"], *plan["extra_forbid_keys"])
+                ],
             )
             if outcome["committed"]:
                 for phase, _, plan in plans:
@@ -1871,7 +1985,12 @@ class MaestroOrchestrator:
             survivors = []
             lost = False
             for item in plans:
-                if item[2]["head_key"] in blocked:
+                plan_keys = {
+                    item[2]["head_key"],
+                    *item[2]["extra_require_keys"],
+                    *item[2]["extra_forbid_keys"],
+                }
+                if plan_keys & blocked:
                     self._audit_request_conflict(
                         signal_run_id, item[0], item[2], str(outcome["conflict"])
                     )
@@ -2174,24 +2293,51 @@ class MaestroOrchestrator:
         envelope: PendingApprovalEnvelope,
         signal_run_id: str,
         source_strategy_ids: list[str],
+        group_orders: list[OrderIntent],
     ) -> None:
         """Refuse an envelope that is not the one this group wrote.
 
         The dispatch group id is the whole scope rather than a digest, so two
         unrelated groups cannot collide by accident. This checks the case that
-        remains: a key written by something other than this code path, or a
-        record altered by hand. Adopting such an envelope would send the
+        remains: a key written by something other than this code path, a
+        record altered by hand, or two in-memory groups that canonicalize to
+        the same durable id. Adopting such an envelope would send the
         operator a card for orders they were never shown and bind the approval
         buttons to it, so stop instead of continuing on a guess.
+
+        Strategies are compared as sets -- already canonicalized (sorted,
+        deduplicated) before they name a group, so set equality is exactly
+        "same group", and strategy membership does not change with capacity.
+        ``group_orders`` here is the group's full, capacity-independent
+        membership (the dispatch manifest's), not whatever this particular
+        call's capacity check happened to accept -- an envelope created while
+        some of the group's orders were capacity-blocked legitimately holds
+        fewer orders (and fewer account ids, if blocking emptied one account
+        entirely) than that full membership. So orders and account ids are
+        checked as subset, not equality: every order and account id the
+        envelope names must belong to the group, but the group may have more
+        than the envelope happened to carry.
         """
-        expected = sorted(set(source_strategy_ids))
-        recorded = sorted(set(envelope.source_strategy_ids))
-        if envelope.signal_run_id == signal_run_id and recorded == expected:
+        expected_strategies = sorted(set(source_strategy_ids))
+        recorded_strategies = sorted(set(envelope.source_strategy_ids))
+        expected_account_ids = {str(order.account_id) for order in group_orders if order.account_id}
+        recorded_account_ids = set(envelope.account_ids)
+        expected_order_ids = {order.order_id for order in group_orders}
+        recorded_order_ids = {str(order.get("order_id")) for order in envelope.orders}
+        if (
+            envelope.signal_run_id == signal_run_id
+            and recorded_strategies == expected_strategies
+            and recorded_account_ids <= expected_account_ids
+            and recorded_order_ids
+            and recorded_order_ids <= expected_order_ids
+        ):
             return
         raise ValueError(
             "Stored approval envelope does not match the group it was loaded for: "
-            f"expected signal_run_id={signal_run_id} strategies={expected}, "
-            f"found signal_run_id={envelope.signal_run_id} strategies={recorded}"
+            f"expected signal_run_id={signal_run_id} strategies={expected_strategies} "
+            f"account_ids<={sorted(expected_account_ids)} order_ids<={sorted(expected_order_ids)}, "
+            f"found signal_run_id={envelope.signal_run_id} strategies={recorded_strategies} "
+            f"account_ids={sorted(recorded_account_ids)} order_ids={sorted(recorded_order_ids)}"
         )
 
     def _approval_order_groups(
@@ -2207,7 +2353,16 @@ class MaestroOrchestrator:
             source_strategy_ids = order.metadata.get("source_strategy_ids")
             if not source_strategy_ids:
                 source_strategy_ids = fallback_source_strategy_ids
-            key = tuple(str(strategy_id) for strategy_id in source_strategy_ids if strategy_id)
+            # Canonicalized the same way dispatch_group_id canonicalizes its
+            # scope (sorted, deduplicated): that id is what durably names this
+            # group, so two orders naming the same strategies in a different
+            # order -- or with a repeat -- must land in the same in-memory
+            # group here, or they would split into two groups that then
+            # collide on one durable id, and the second write would be
+            # evaluated as a resume of the first group's envelope.
+            key = tuple(
+                sorted({str(strategy_id) for strategy_id in source_strategy_ids if strategy_id})
+            )
             if not key:
                 key = ("unknown",)
             groups.setdefault(key, []).append(order)

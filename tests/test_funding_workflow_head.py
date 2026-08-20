@@ -213,8 +213,16 @@ def test_a_request_that_loses_the_head_cas_is_absent_from_the_package(
     orchestrator, store = funding_orchestrator(isa_cash=1_000_000, ps_cash=500_000)
     real_plan = funding_workflow.plan_contribution_request
 
-    def plan_then_lose_the_slot(plan_store, request, *, phase):
-        plan = real_plan(plan_store, request, phase=phase)
+    def plan_then_lose_the_slot(
+        plan_store, request, *, phase, successor_of_request_id=None, successor_of_phase=None
+    ):
+        plan = real_plan(
+            plan_store,
+            request,
+            phase=phase,
+            successor_of_request_id=successor_of_request_id,
+            successor_of_phase=successor_of_phase,
+        )
         if plan["refusal"] is None:
             plan_store.save_system_event(
                 "someone-else",

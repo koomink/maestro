@@ -109,6 +109,15 @@ _REQUEST_EVENT = {
     "budget": "contribution_budget_request",
 }
 
+
+def _request_event_keys(request_id: str) -> tuple[str, str]:
+    """Both possible ``duplicate_key``s a request event for this id could
+    ever be published under -- funding phase or budget. Phase-agnostic on
+    purpose: whether the id turns out to have been recorded as funding or
+    budget is exactly what the caller does not yet know.
+    """
+    return tuple(f"{event_type}:{request_id}" for event_type in _REQUEST_EVENT.values())
+
 # The pre-CAS handler (_load_pending_funding_request in
 # telegram/handlers.py) decides a request is finished by looking for one of
 # these legacy event types, never funding_workflow_completed. Exported (not
@@ -137,6 +146,8 @@ def publish_contribution_request(
     request: Mapping[str, Any],
     *,
     phase: str,
+    successor_of_request_id: str | None = None,
+    successor_of_phase: str | None = None,
 ) -> dict[str, Any]:
     """요청 저장·이전 요청 supersede·head 전환을 한 트랜잭션으로 커밋한다.
 
@@ -147,8 +158,19 @@ def publish_contribution_request(
     한 요청만 단독으로 커밋한다. 시그널 런처럼 여러 요청과 패키지를 함께
     커밋해야 하는 호출자는 ``plan_contribution_request``로 이벤트만 받아
     자기 트랜잭션에 실어야 한다.
+
+    ``successor_of_request_id``/``successor_of_phase`` declare that this
+    publish is happening on behalf of a transition already claimed on the
+    current head -- see ``plan_contribution_request`` for why that is the
+    only thing allowed to supersede a claimed head.
     """
-    plan = plan_contribution_request(store, request, phase=phase)
+    plan = plan_contribution_request(
+        store,
+        request,
+        phase=phase,
+        successor_of_request_id=successor_of_request_id,
+        successor_of_phase=successor_of_phase,
+    )
     if plan["refusal"] is not None:
         return {
             "committed": False,
@@ -160,7 +182,8 @@ def publish_contribution_request(
     outcome = store.save_system_events_atomic(
         run_id,
         plan["events"],
-        forbid_duplicate_keys=(plan["head_key"],),
+        require_duplicate_keys=plan["extra_require_keys"],
+        forbid_duplicate_keys=(plan["head_key"], *plan["extra_forbid_keys"]),
     )
     return {
         "committed": bool(outcome["committed"]),
@@ -180,6 +203,8 @@ def plan_contribution_request(
     request: Mapping[str, Any],
     *,
     phase: str,
+    successor_of_request_id: str | None = None,
+    successor_of_phase: str | None = None,
 ) -> dict[str, Any]:
     """The events that publishing this request would write, without writing them.
 
@@ -194,6 +219,28 @@ def plan_contribution_request(
     the same vocabulary the commit path reports. ``head_key`` is the CAS
     target the caller has to declare as forbidden -- it is what turns losing
     the race for that slot into a result rather than an exception.
+
+    A head with an open (claimed, not yet completed) transition on it must
+    not be superseded by an unrelated publish: ``complete_workflow`` never
+    re-checks the head, so the claimed request would go on to complete
+    legitimately on its own attempt fencing while an independent request that
+    overwrote its head became claimable too -- one workflow's single live
+    decision executing twice. The one publish allowed to move a claimed head
+    is the transition's own legitimate successor -- e.g. the follow-up budget
+    request a confirmed funding request's child signal run generates -- which
+    must declare so via ``successor_of_request_id``/``successor_of_phase``,
+    matching the exact request and phase that is open. A declaration that
+    does not match is refused exactly like an undeclared publish would be:
+    trusting the label without checking it against the open claim would just
+    move the race one field over.
+
+    Both the decision and its precondition are computed from one read here,
+    but ``extra_require_keys``/``extra_forbid_keys`` pin that decision to the
+    write's own atomic transaction: a claim that lands (or the transition
+    that already held one completing) between this read and the caller's
+    write is what those keys catch, since ``save_system_events_atomic``
+    evaluates them fresh, inside the same ``BEGIN IMMEDIATE`` as the insert --
+    not merely what this function happened to observe first.
     """
     _require_phase(phase)
     workflow_id = workflow_id_from_request(request)
@@ -223,8 +270,65 @@ def plan_contribution_request(
             "workflow_id": workflow_id,
             "version": int(head.get("version") or 0) if head else 0,
             "payload": dict(request),
+            "extra_require_keys": (),
+            "extra_forbid_keys": (),
         }
     previous_request_id = str(head.get("request_id") or "") if head else ""
+    extra_require_keys: tuple[str, ...] = ()
+    extra_forbid_keys: tuple[str, ...] = ()
+    if head is not None and previous_request_id:
+        head_phase = head.get("phase")
+        # A head written before phase existed cannot be judged -- see
+        # _head_contradicts_transition's docstring for the same rule applied
+        # to claiming. Absent is not evidence of "unclaimed".
+        if head_phase is not None:
+            open_claim_attempt = _open_claim_attempt(
+                store, workflow_id, str(head_phase), previous_request_id
+            )
+            is_declared_successor = (
+                successor_of_request_id is not None
+                and str(successor_of_request_id) == previous_request_id
+                and successor_of_phase is not None
+                and str(successor_of_phase) == str(head_phase)
+            )
+            if open_claim_attempt is not None and not is_declared_successor:
+                return {
+                    "refusal": "head_claimed",
+                    "events": [],
+                    "head_key": "",
+                    "workflow_id": workflow_id,
+                    "version": int(head.get("version") or 0),
+                    "payload": dict(request),
+                    "extra_require_keys": (),
+                    "extra_forbid_keys": (),
+                }
+            if open_claim_attempt is not None:
+                # Verified above to be a legitimate successor of exactly this
+                # claim. Requiring it atomically at the write is not a second
+                # opinion on that -- claims are append-only, so if it existed
+                # for this read it cannot stop existing -- it is what closes
+                # the read-then-write gap against a *different* history this
+                # decision did not see.
+                extra_require_keys = (
+                    claim_key(
+                        workflow_id, str(head_phase), previous_request_id, open_claim_attempt
+                    ),
+                )
+            elif not store.duplicate_key_exists(
+                claim_key(workflow_id, str(head_phase), previous_request_id, 1)
+            ):
+                # No open claim observed, and attempt 1 was never claimed at
+                # all -- as opposed to claimed and already completed, where
+                # attempt 1's key exists permanently and forbidding it would
+                # refuse every future publish over a transition that is
+                # long since resolved. Forbidding it now, atomically at the
+                # write, means a claim landing in the gap between this read
+                # and that write refuses the supersession there, rather than
+                # letting an unrelated publish silently win a race an
+                # operator's claim should have won.
+                extra_forbid_keys = (
+                    claim_key(workflow_id, str(head_phase), previous_request_id, 1),
+                )
     # Always the version right after whatever head currently says: trusting a
     # head we didn't write ourselves (e.g. one Task 11's convergence sweep
     # wrote to repair a dangling head) is intentional here, not a gap. The
@@ -277,6 +381,8 @@ def plan_contribution_request(
         "workflow_id": workflow_id,
         "version": version,
         "payload": payload,
+        "extra_require_keys": extra_require_keys,
+        "extra_forbid_keys": extra_forbid_keys,
     }
 
 
@@ -464,6 +570,37 @@ def _is_own_key_content_conflict(exc: ValueError, duplicate_key: str) -> bool:
     """
     message = str(exc)
     return "with different content" in message and repr(duplicate_key) in message
+
+
+def _open_claim_attempt(
+    store: StateStore, workflow_id: str, phase: str, request_id: str
+) -> int | None:
+    """The highest attempt claimed for this request, if the request has no
+    completion yet -- ``None`` if it was never claimed, or if it was and has
+    since completed. Either of those means no transition is currently
+    running on it for a publish to worry about superseding.
+
+    Scans every claim rather than probing a single deterministic key: unlike
+    ``head_key`` or ``completed_key``, the attempt number is not known in
+    advance here, so there is no key to probe. Matches the scan
+    ``list_incomplete_workflows`` already does for the same "claimed but not
+    completed" question, scoped to one request instead of every workflow.
+    """
+    if store.duplicate_key_exists(completed_key(workflow_id, request_id, phase)):
+        return None
+    latest: int | None = None
+    for row in store.list_system_events_by_type("funding_workflow_claim", limit=None):
+        payload = row.get("payload") or {}
+        if (
+            str(payload.get("workflow_id")) != workflow_id
+            or str(payload.get("phase")) != phase
+            or str(payload.get("request_id")) != request_id
+        ):
+            continue
+        attempt = int(payload.get("attempt") or 0)
+        if latest is None or attempt > latest:
+            latest = attempt
+    return latest
 
 
 def complete_workflow(
@@ -697,6 +834,26 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
                 continue
             if (workflow_id, request_id, phase) in accounted_completed:
                 continue
+            # ``live_request_ids`` is a snapshot taken once, at the top of
+            # this sweep -- everything between here and the write below (an
+            # earlier candidate's own write, another writer entirely) can
+            # change what it says without this loop ever re-reading it. The
+            # candidate might still look headless by every check above and
+            # yet have gained a real head in the meantime: a manual repair
+            # landing the request this row's own workflow was missing, most
+            # plausibly. Pinning the write to the exact head state this
+            # snapshot saw -- present and unmoved, or altogether absent --
+            # is what makes the decision this loop already made agree with
+            # what SQLite actually commits, rather than merely with what was
+            # true when the snapshot was taken.
+            head_for_workflow = heads.get(workflow_id)
+            if head_for_workflow is not None:
+                head_version = int(head_for_workflow.get("version") or 0)
+                require_keys = (head_key(workflow_id, head_version),)
+                forbid_keys = (head_key(workflow_id, head_version + 1),)
+            else:
+                require_keys = ()
+                forbid_keys = (head_key(workflow_id, 1),)
             try:
                 outcome = store.save_system_events_atomic(
                     str(row.get("run_id") or request_id),
@@ -712,6 +869,8 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
                             },
                         }
                     ],
+                    require_duplicate_keys=require_keys,
+                    forbid_duplicate_keys=forbid_keys,
                 )
             except ValueError:
                 logger.error(
@@ -757,7 +916,20 @@ def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> di
                         },
                     }
                 ],
-                forbid_duplicate_keys=(new_key,),
+                # ``new_key`` alone (the row's own key) already refuses a
+                # rollback that lost the race for the next version -- that
+                # collision is caught earlier, as an own-key content
+                # mismatch, before forbid is even consulted. What it does
+                # not catch is the request itself turning up: the head can
+                # stay at exactly this version and still stop being
+                # dangling, if the request it names -- missing when
+                # ``_request_ever_recorded`` was checked above -- gets
+                # recorded (a manual repair, a delayed write from a
+                # different process) before this write commits. Forbidding
+                # both possible event types for it here, evaluated fresh
+                # inside this same transaction, is what makes that repair
+                # win instead of being silently rolled back over.
+                forbid_duplicate_keys=(new_key, *_request_event_keys(request_id)),
             )
         except ValueError:
             logger.error(

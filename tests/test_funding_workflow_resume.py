@@ -1035,6 +1035,116 @@ def test_a_malformed_request_row_does_not_abort_the_sweep_for_others(operator_bo
     assert [row["payload"]["request_id"] for row in superseded] == ["good-1"]
 
 
+def test_a_head_created_between_the_snapshot_and_the_orphan_write_is_not_overwritten(
+    operator_bot, monkeypatch
+):
+    """Race test (priority 4): orphan discovery reads a snapshot of every
+    workflow's head once, at the top of the sweep, then may write a
+    supersede marker for a candidate much later in the same pass. The write
+    must re-verify at commit time that the candidate is still headless --
+    not merely trust what the snapshot said minutes (or, under load, just
+    milliseconds) earlier. Here a manual repair lands the missing head
+    between the snapshot and the write; the repair must win.
+    """
+    store = operator_bot.store
+    request = _request("req-1")
+    workflow_id = workflow_id_from_request(request)
+    store.save_system_event("run-1", "contribution_funding_request", dict(request))
+
+    real_list_heads = store.list_funding_workflow_heads
+
+    def racing_list_heads():
+        result = real_list_heads()
+        # The repair lands right after the sweep takes its snapshot -- the
+        # sweep has already decided req-1 looks headless by the time this
+        # runs, but has not written the supersede marker yet.
+        store.save_system_event(
+            "run-repair",
+            "funding_workflow_head",
+            {
+                "duplicate_key": head_key(workflow_id, 1),
+                "workflow_id": workflow_id,
+                "version": 1,
+                "request_id": "req-1",
+                "phase": "funding",
+                "status": "pending",
+            },
+        )
+        return result
+
+    monkeypatch.setattr(store, "list_funding_workflow_heads", racing_list_heads)
+
+    converge_workflow_invariants(store, cutoff=0)
+
+    assert store.list_system_events_by_type("funding_workflow_superseded", limit=None) == []
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head is not None
+    assert head["request_id"] == "req-1"
+
+
+def test_a_request_recorded_between_the_snapshot_and_the_rollback_is_not_discarded(
+    operator_bot, monkeypatch
+):
+    """Race test (priority 4): the dangling-head rollback picks its target
+    (the nearest earlier version with a real request) and only then writes
+    the new head version. A request recorded for the *dangling* version --
+    turning out not to be dangling after all -- in the gap between that
+    choice and the write must stop the rollback, not be discarded by it.
+    """
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    store.save_system_events_atomic(
+        "run-2",
+        [
+            {
+                "event_type": "funding_workflow_head",
+                "payload": {
+                    "duplicate_key": head_key(workflow_id, 2),
+                    "workflow_id": workflow_id,
+                    "version": 2,
+                    "request_id": "req-bad",
+                    "phase": "funding",
+                    "status": "pending",
+                },
+            }
+        ],
+    )
+
+    import maestro.state.funding_workflow as funding_workflow_module
+
+    real_previous = funding_workflow_module._previous_head_with_a_real_request
+
+    def racing_previous(store_, workflow_id_, head):
+        result = real_previous(store_, workflow_id_, head)
+        # The repair lands after the rollback target (req-1) is chosen, but
+        # before the rollback write -- req-bad turns out to have existed
+        # all along. duplicate_key matches what plan_contribution_request
+        # would have stamped on it, since that is the key the rollback's own
+        # atomic write checks for.
+        store_.save_system_event(
+            "run-repair",
+            "contribution_funding_request",
+            {
+                **_request("req-bad"),
+                "status": "pending",
+                "duplicate_key": "contribution_funding_request:req-bad",
+            },
+        )
+        return result
+
+    monkeypatch.setattr(
+        funding_workflow_module, "_previous_head_with_a_real_request", racing_previous
+    )
+
+    converge_workflow_invariants(store, cutoff=0)
+
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-bad"
+    assert head["version"] == 2
+
+
 
 # --- final review fixes -------------------------------------------------
 
@@ -1217,7 +1327,13 @@ def test_an_unknown_recorded_intent_is_not_silently_treated_as_confirm(operator_
 
 def test_a_stalled_claim_on_a_superseded_request_is_no_longer_incomplete(operator_bot):
     """Final review F6: a request that is no longer head can never be resumed,
-    so it must not sit in the list that means "needs action" forever."""
+    so it must not sit in the list that means "needs action" forever.
+
+    req-2 supersedes req-1 as its declared legitimate successor (the shape a
+    child signal run's own follow-up request takes) -- not as an independent,
+    unrelated publish, which priority 1 now refuses outright while req-1's
+    claim is still open.
+    """
     store = operator_bot.store
     workflow_id = publish_contribution_request(
         store, "run-1", _request("req-1"), phase="funding"
@@ -1227,7 +1343,14 @@ def test_a_stalled_claim_on_a_superseded_request_is_no_longer_incomplete(operato
     )
     assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
 
-    publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    publish_contribution_request(
+        store,
+        "run-2",
+        _request("req-2"),
+        phase="funding",
+        successor_of_request_id="req-1",
+        successor_of_phase="funding",
+    )
 
     assert list_incomplete_workflows(store) == []
 
@@ -1568,7 +1691,15 @@ def test_a_budget_card_is_also_delivered_only_once(operator_bot):
     assert len(_request_cards(operator_bot, "req-1")) == 1
 
 
-def _stub_child_signal(monkeypatch, operator_bot, *, funding_requests=None, budget_requests=None):
+def _stub_child_signal(
+    monkeypatch,
+    operator_bot,
+    *,
+    funding_requests=None,
+    budget_requests=None,
+    source_request_id=None,
+    source_phase=None,
+):
     """Skip the real strategy run, but keep everything it publishes.
 
     The child run does two things the delivery step depends on: it writes
@@ -1577,6 +1708,14 @@ def _stub_child_signal(monkeypatch, operator_bot, *, funding_requests=None, budg
     because ordering matters -- publishing a follow-up request supersedes
     the parent request in the same scope, so doing it before the parent
     claims would make the parent's own claim fail as not_head.
+
+    ``source_request_id``/``source_phase`` name the parent request this
+    stubbed child run is acting on behalf of. A same-scope follow-up needs
+    them to declare itself as the parent's legitimate successor -- priority
+    1 refuses an undeclared publish while the parent's claim is still open,
+    exactly as it would refuse an unrelated one. Callers whose follow-up
+    lives in its own scope (nothing claimed there) have no need to pass
+    these.
     """
     store = operator_bot.store
     funding_requests = funding_requests or []
@@ -1584,9 +1723,23 @@ def _stub_child_signal(monkeypatch, operator_bot, *, funding_requests=None, budg
 
     def run_child(*args, **kwargs):
         for request in budget_requests:
-            publish_contribution_request(store, "run-child", request, phase="budget")
+            publish_contribution_request(
+                store,
+                "run-child",
+                request,
+                phase="budget",
+                successor_of_request_id=source_request_id,
+                successor_of_phase=source_phase,
+            )
         for request in funding_requests:
-            publish_contribution_request(store, "run-child", request, phase="funding")
+            publish_contribution_request(
+                store,
+                "run-child",
+                request,
+                phase="funding",
+                successor_of_request_id=source_request_id,
+                successor_of_phase=source_phase,
+            )
         store.save_signal_package(
             "signal-child",
             {
@@ -1620,7 +1773,13 @@ def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
     """
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
-    _stub_child_signal(monkeypatch, operator_bot, funding_requests=[_request("req-2")])
+    _stub_child_signal(
+        monkeypatch,
+        operator_bot,
+        funding_requests=[_request("req-2")],
+        source_request_id="req-1",
+        source_phase="funding",
+    )
 
     def reject(chat_id, text, reply_markup=None):
         raise TelegramApiRejected("telegram refused the funding request card")
@@ -1655,7 +1814,13 @@ def test_a_telegram_timeout_on_a_follow_up_card_leaves_the_workflow_incomplete(
     plain refusal, it must also leave the operator an ambiguity notice."""
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="budget")
-    _stub_child_signal(monkeypatch, operator_bot, budget_requests=[_budget_request("req-2")])
+    _stub_child_signal(
+        monkeypatch,
+        operator_bot,
+        budget_requests=[_budget_request("req-2")],
+        source_request_id="req-1",
+        source_phase="budget",
+    )
 
     # Only the very first call (the request card itself) times out; the
     # ambiguity notice deliver_once sends right after must still go through,

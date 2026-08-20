@@ -2002,6 +2002,7 @@ class StateStore:
         *,
         together_with: Sequence[Mapping[str, Any]] = (),
         forbid_duplicate_keys: Sequence[str] = (),
+        require_duplicate_keys: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Persist the package, optionally in one transaction with related events.
 
@@ -2022,6 +2023,9 @@ class StateStore:
         ``forbid_duplicate_keys`` is passed straight through so the requests'
         head CAS still guards that same transaction; the caller reads
         ``conflicting_keys`` off the result to learn which request lost.
+        ``require_duplicate_keys`` is the same passthrough for a positive
+        precondition -- e.g. a legitimate successor's claim to supersede
+        atomically with the same freshness guarantee.
 
         Only the batched write keys the package row, and any key inherited
         from a payload read back out of the store is dropped first. A package
@@ -2045,6 +2049,7 @@ class StateStore:
                 *together_with,
             ],
             forbid_duplicate_keys=forbid_duplicate_keys,
+            require_duplicate_keys=require_duplicate_keys,
         )
 
     def mark_signal_package_consumed(self, signal_run_id: str, approval_run_id: str) -> None:

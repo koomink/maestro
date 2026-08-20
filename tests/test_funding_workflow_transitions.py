@@ -723,3 +723,178 @@ def test_a_non_positive_attempt_is_rejected(tmp_path):
             phase="funding",
             attempt=0,
         )
+
+
+def test_an_independent_publish_cannot_supersede_a_claimed_head(tmp_path):
+    """Priority 1: two unrelated requests must never both become executable.
+
+    req-1 claims (an operator confirms it, say) and its transition is still
+    running -- cash flow recording, a child signal run, completion are all
+    still ahead of it. An unrelated req-2 (a fresh scheduled signal run, a
+    manual re-publish) must not be allowed to supersede req-1's head out from
+    under it: complete_workflow never re-checks the head, so req-1 would go
+    on to complete legitimately while req-2 also becomes claimable and runs
+    its own cash flow and child signal -- one workflow's single live decision
+    executing twice.
+    """
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim = claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    assert claim["claimed"] is True
+
+    result = publish_contribution_request(
+        store, "run-2", _request("req-2"), phase="funding"
+    )
+
+    assert result["committed"] is False
+    assert result["conflict"] == "head_claimed"
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-1"
+
+    # req-1's own transition is unaffected: it is still the sole live
+    # decision, and it can complete normally.
+    outcome = complete_workflow(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+    assert outcome["committed"] is True
+
+
+def test_a_legitimate_child_successor_supersedes_a_claimed_head(tmp_path):
+    """The child-run counterpart: a follow-up request the claimed transition
+    itself generates (e.g. a budget request the confirm triggers) must still
+    be able to supersede the head it is claimed on -- that is the normal,
+    intended shape of a multi-step workflow, not the race this priority
+    guards against."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim = claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    assert claim["claimed"] is True
+
+    result = publish_contribution_request(
+        store,
+        "run-2",
+        _request("req-2"),
+        phase="funding",
+        successor_of_request_id="req-1",
+        successor_of_phase="funding",
+    )
+
+    assert result["committed"] is True
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-2"
+
+    # req-1's own transition still completes on its own attempt fencing --
+    # the legitimate successor does not disturb it.
+    outcome = complete_workflow(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+    assert outcome["committed"] is True
+
+
+def test_a_successor_declaration_naming_the_wrong_request_is_refused(tmp_path):
+    """A successor declaration is verified, not merely trusted: it must name
+    the request that is actually claimed and open, or it is exactly the
+    independent-publish race with an unverified label pasted on."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+
+    result = publish_contribution_request(
+        store,
+        "run-2",
+        _request("req-2"),
+        phase="funding",
+        successor_of_request_id="some-other-request",
+        successor_of_phase="funding",
+    )
+
+    assert result["committed"] is False
+    assert result["conflict"] == "head_claimed"
+
+
+def test_a_publish_is_unblocked_once_the_claimed_transition_completes(tmp_path):
+    """Once req-1 completes with no successor, the head still names it (head
+    never moves on completion) but the transition is no longer open -- a
+    routine, unrelated publish (next cycle's cron, say) must proceed exactly
+    as it always has."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    complete_workflow(
+        store,
+        "run-2",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+
+    result = publish_contribution_request(
+        store, "run-3", _request("req-2"), phase="funding"
+    )
+
+    assert result["committed"] is True
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-2"
+
+
+def test_a_publish_proceeds_normally_when_the_head_was_never_claimed(tmp_path):
+    """The overwhelmingly common case -- nobody has acted on the current head
+    yet -- must not regress: a fresh publish still supersedes it exactly as
+    before."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+
+    result = publish_contribution_request(
+        store, "run-2", _request("req-2"), phase="funding"
+    )
+
+    assert result["committed"] is True
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-2"
+
+
+def test_stale_attempt_fencing_remains_intact_around_the_head_claimed_guard(tmp_path):
+    """Priority 1's guard must not weaken priority 1's own prerequisite: a
+    skipped attempt number is still refused, whether or not an independent
+    publish was also attempted against the same claimed head."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding", attempt=1
+    )
+    blocked = publish_contribution_request(store, "run-2", _request("req-2"), phase="funding")
+    assert blocked["committed"] is False
+
+    skipped = claim_workflow_attempt(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=3,
+    )
+
+    assert skipped["claimed"] is False
+    assert skipped["reason"] == "attempt_out_of_order"

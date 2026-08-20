@@ -22,6 +22,7 @@ from maestro.config.loader import load_config, load_config_with_identity
 from maestro.core.clock import utc_now
 from maestro.core.enums import OrderSide, OrderStatus
 from maestro.core.ids import new_run_id
+from maestro.execution.base import OrderIntent
 from maestro.execution.brokers.kis.models import KISAccountSnapshot, KISReadOnlySnapshot
 from maestro.execution.brokers.kis.service import KISReadOnlyService
 from maestro.execution.brokers.readonly import BrokerBuyingPower
@@ -712,73 +713,448 @@ def test_a_dispatch_interrupted_between_groups_is_not_recorded_as_settled(monkey
     assert store.list_incomplete_signal_dispatches() == []
 
 
+def _capacity_lookup(*, blocked_symbols: frozenset[str] = frozenset()):
+    def lookup(order):
+        blocked = order.symbol in blocked_symbols
+        return BrokerBuyingPower(
+            symbol=order.symbol,
+            order_price=order.price,
+            cash_buying_power=0 if blocked else 10_000_000,
+            max_buy_quantity=0 if blocked else 100_000,
+            source="fake",
+        )
+
+    return lookup
+
+
+def _two_group_config(tmp_path, *, armed: bool = False):
+    config = _telegram_dispatch_config(tmp_path)
+    config.execution.live_order_limits.max_order_notional = 100_000_000
+    config.execution.live_order_limits.max_daily_notional = 200_000_000
+    config.accounts.append(
+        config.accounts[0].model_copy(update={"id": "kis_paper_b", "account_id": "MOCK-LIVE-B"})
+    )
+    config.strategies.append(
+        config.strategies[0].model_copy(
+            update={
+                "id": "second_static",
+                "entrypoint": f"{__name__}:SecondStaticAllocationStrategy",
+                "account_id": "kis_paper_b",
+                "weight": 1.0,
+                "config": {"allocations": {"MOCK_ETF_B": 1.0}},
+            }
+        )
+    )
+    if armed:
+        # _partition_orders_by_capacity only ever looks at armed orders --
+        # everything else (dry_run, the default this fixture otherwise
+        # leaves every order in) bypasses the capacity lookup entirely.
+        config.execution.order_posture = "armed"
+        for strategy in config.strategies:
+            strategy.order_posture = "armed"
+    return config
+
+
+def _dispatch_orchestrator_with_capacity(config, client, lookup):
+    return MaestroOrchestrator(config, telegram_client=client, order_capacity_lookup=lookup)
+
+
+def test_a_resume_marks_every_group_capacity_blocked_rather_than_dropping_them(
+    monkeypatch, tmp_path
+):
+    """Priority 2, all-groups-blocked: a dispatch that never created a single
+    envelope, resumed once capacity has tightened to zero, must not let the
+    settled event fire over groups nobody ever recorded a disposition for.
+
+    Recomputing groups from live, post-capacity orders (the old behavior)
+    would see zero approval orders survive the partition and never even
+    build the two groups the original dispatch was obligated to resolve --
+    "capacity_blocked" would report a number, but nothing would say *which*
+    groups that covered, and a resume after capacity recovers would have no
+    way to tell "already resolved as blocked" from "never seen".
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _two_group_config(tmp_path, armed=True)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    # First attempt dies before either group's card is even rendered -- the
+    # manifest (if the dispatch got that far) is the only durable record of
+    # what groups exist at all.
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    def die_immediately(request, stage):
+        raise RuntimeError("process died before the first card")
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_immediately)
+    with pytest.raises(RuntimeError, match="died before the first card"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+    monkeypatch.undo()
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    manifest = store.load_system_event_payload_by_duplicate_key(
+        f"dispatch-manifest:{signal_summary.signal_run_id}"
+    )
+    assert manifest is not None
+    assert len(manifest["groups"]) == 2
+
+    # Resume with capacity now blocking everything.
+    _dispatch_orchestrator_with_capacity(
+        config,
+        FakeTelegramClient(),
+        _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    assert store.list_system_events_by_type("telegram_approval_pending") == []
+    blocked = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+    assert {row["payload"]["group_id"] for row in blocked} == {
+        group["group_id"] for group in manifest["groups"]
+    }
+    assert store.signal_dispatch_settled(signal_summary.signal_run_id) is True
+    assert store.list_incomplete_signal_dispatches() == []
+
+
+def test_a_resume_blocks_only_the_group_capacity_now_refuses(monkeypatch, tmp_path):
+    """Priority 2, some-groups-blocked: one group already has a live card;
+    resuming after capacity now refuses the other must adopt the first
+    envelope unchanged and durably record the second as blocked, not drop it
+    from the run's accounting."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _two_group_config(tmp_path, armed=True)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    real_render = orchestrator_module.render_approval_stage_card
+    calls = {"n": 0}
+
+    def die_on_second(request, stage):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("process died between groups")
+        return real_render(request, stage)
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_on_second)
+    with pytest.raises(RuntimeError, match="died between groups"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", real_render)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    pending_before = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending_before) == 1
+    surviving = pending_before[0]["payload"]
+
+    # Resume with capacity now refusing MOCK_ETF_B -- whichever group that is
+    # (the two accounts' strategies race in unspecified order), the surviving
+    # envelope above already tells us which group made it through.
+    blocked_symbol = "MOCK_ETF_A" if "MOCK_ETF_A" not in {
+        order["symbol"] for order in surviving["orders"]
+    } else "MOCK_ETF_B"
+    result = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({blocked_symbol}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    pending_after = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending_after) == 1
+    assert pending_after[0]["payload"]["approval_id"] == surviving["approval_id"]
+    blocked = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+    assert len(blocked) == 1
+    assert result.approval_status == "pending"
+    assert result.approvals_pending == 1
+    assert store.signal_dispatch_settled(signal_summary.signal_run_id) is True
+    assert store.list_incomplete_signal_dispatches() == []
+
+
+def test_the_manifest_is_unchanged_by_a_resume_under_unchanged_capacity(monkeypatch, tmp_path):
+    """Priority 2, unchanged capacity: the manifest a resume loads must be
+    byte-identical to the one the first attempt wrote -- nothing about a
+    routine resume may recompute the obligation."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _two_group_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    manifest_key = f"dispatch-manifest:{signal_summary.signal_run_id}"
+
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    real_render = orchestrator_module.render_approval_stage_card
+    calls = {"n": 0}
+
+    def die_on_second(request, stage):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("process died between groups")
+        return real_render(request, stage)
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_on_second)
+    with pytest.raises(RuntimeError, match="died between groups"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", real_render)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    first_manifest = store.load_system_event_payload_by_duplicate_key(manifest_key)
+    assert first_manifest is not None
+    assert len(first_manifest["groups"]) == 2
+
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    second_manifest = store.load_system_event_payload_by_duplicate_key(manifest_key)
+    assert second_manifest == first_manifest
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 2
+
+
+def test_repeated_resumes_under_unchanged_capacity_are_idempotent(monkeypatch, tmp_path):
+    """Priority 2, repeated resume/idempotency: a dispatch that takes three
+    calls to fully land (each of the first two interrupted at a different
+    point) must not multiply the manifest, envelopes, or the settled event
+    -- and once it has landed, a further call is refused exactly as any
+    other settled dispatch is."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _two_group_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    manifest_key = f"dispatch-manifest:{signal_summary.signal_run_id}"
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    real_render = orchestrator_module.render_approval_stage_card
+
+    def die_on_call(n: int):
+        calls = {"i": 0}
+
+        def render(request, stage):
+            calls["i"] += 1
+            if calls["i"] == n:
+                raise RuntimeError(f"process died on card {n}")
+            return real_render(request, stage)
+
+        return render
+
+    # Attempt 1: dies before the first card. Attempt 2 (resume): the first
+    # card survives, dies before the second.
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_on_call(1))
+    with pytest.raises(RuntimeError, match="died on card 1"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_on_call(2))
+    with pytest.raises(RuntimeError, match="died on card 2"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 1
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", real_render)
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    manifests = store.list_system_events_by_type("signal_dispatch_manifest")
+    assert len(manifests) == 1
+    assert store.load_system_event_payload_by_duplicate_key(manifest_key) == manifests[0][
+        "payload"
+    ]
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 2
+    assert len(store.list_system_events_by_type("signal_approval_pending")) == 1
+    assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 0
+
+    # Now that it has fully landed, a further call is an ordinary settled
+    # dispatch -- refused, not silently re-run.
+    with pytest.raises(ValueError, match="already consumed"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+
+def _envelope(
+    *,
+    signal_run_id: str = "signal-1",
+    source_strategy_ids: list[str],
+    account_ids: list[str] | None = None,
+    orders: list[dict] | None = None,
+    duplicate_key: str = "k",
+) -> PendingApprovalEnvelope:
+    return PendingApprovalEnvelope(
+        approval_id="a1",
+        run_id="run-1",
+        signal_run_id=signal_run_id,
+        request=ApprovalRequest(
+            approval_id="a1",
+            run_id="run-1",
+            profile_name="p",
+            created_at=utc_now(),
+            expires_at=utc_now(),
+            channel="telegram",
+            source_strategy_ids=source_strategy_ids,
+            order_count=len(orders or []),
+            estimated_notional=0.0,
+            proposed_orders=[],
+            risk_violations=[],
+        ),
+        orders=orders or [],
+        message="m",
+        source_strategy_ids=source_strategy_ids,
+        account_ids=account_ids or [],
+        reminder_seconds=[],
+        created_at=utc_now(),
+        expires_at=utc_now(),
+        duplicate_key=duplicate_key,
+    )
+
+
 def test_an_envelope_from_another_group_is_refused_rather_than_adopted(tmp_path):
     # Adopting it would show the operator a card for orders they were never
     # sent, with the approval buttons bound to it.
     config = _live_signal_config(tmp_path, "expired")
     orchestrator = MaestroOrchestrator(config)
-    envelope = PendingApprovalEnvelope(
-        approval_id="a1",
-        run_id="run-1",
+    envelope = _envelope(
         signal_run_id="signal-other",
-        request=ApprovalRequest(
-            approval_id="a1",
-            run_id="run-1",
-            profile_name="p",
-            created_at=utc_now(),
-            expires_at=utc_now(),
-            channel="telegram",
-            source_strategy_ids=["other"],
-            order_count=0,
-            estimated_notional=0.0,
-            proposed_orders=[],
-            risk_violations=[],
-        ),
-        orders=[],
-        message="m",
         source_strategy_ids=["other"],
-        account_ids=[],
-        reminder_seconds=[],
-        created_at=utc_now(),
-        expires_at=utc_now(),
-        duplicate_key="dispatch-group:signal-1:[\"mine\"]",
+        duplicate_key='dispatch-group:signal-1:["mine"]',
     )
 
     with pytest.raises(ValueError, match="does not match the group"):
-        orchestrator._verify_reused_envelope(envelope, "signal-1", ["mine"])
+        orchestrator._verify_reused_envelope(envelope, "signal-1", ["mine"], [])
 
 
 def test_a_matching_envelope_passes_verification_whatever_order_it_records(tmp_path):
     config = _live_signal_config(tmp_path, "expired")
     orchestrator = MaestroOrchestrator(config)
-    envelope = PendingApprovalEnvelope(
-        approval_id="a1",
-        run_id="run-1",
-        signal_run_id="signal-1",
-        request=ApprovalRequest(
-            approval_id="a1",
-            run_id="run-1",
-            profile_name="p",
-            created_at=utc_now(),
-            expires_at=utc_now(),
-            channel="telegram",
-            source_strategy_ids=["b", "a"],
-            order_count=0,
-            estimated_notional=0.0,
-            proposed_orders=[],
-            risk_violations=[],
-        ),
-        orders=[],
-        message="m",
+    order = _order("o1", ["a", "b"], account_id="acct-1")
+    envelope = _envelope(
         source_strategy_ids=["b", "a"],
-        account_ids=[],
-        reminder_seconds=[],
-        created_at=utc_now(),
-        expires_at=utc_now(),
-        duplicate_key="k",
+        account_ids=["acct-1"],
+        orders=[order.model_dump(mode="json")],
     )
 
-    orchestrator._verify_reused_envelope(envelope, "signal-1", ["a", "b"])
+    orchestrator._verify_reused_envelope(envelope, "signal-1", ["a", "b"], [order])
+
+
+def test_an_envelope_with_a_different_account_id_is_refused(tmp_path):
+    # A key written by a different code path (or altered by hand) could match
+    # on strategies alone while binding the approval buttons to orders in a
+    # different account than the ones this group actually built.
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    order = _order("o1", ["a"], account_id="acct-real")
+    envelope = _envelope(
+        source_strategy_ids=["a"],
+        account_ids=["acct-other"],
+        orders=[order.model_dump(mode="json")],
+    )
+
+    with pytest.raises(ValueError, match="does not match the group"):
+        orchestrator._verify_reused_envelope(envelope, "signal-1", ["a"], [order])
+
+
+def test_an_envelope_with_a_different_order_id_is_refused(tmp_path):
+    # Same strategies and account, but the stored envelope's orders are not
+    # the ones this group actually built -- adopting it would bind the
+    # approval buttons to the wrong orders.
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    stored_order = _order("o-stored", ["a"], account_id="acct-1")
+    real_order = _order("o-real", ["a"], account_id="acct-1")
+    envelope = _envelope(
+        source_strategy_ids=["a"],
+        account_ids=["acct-1"],
+        orders=[stored_order.model_dump(mode="json")],
+    )
+
+    with pytest.raises(ValueError, match="does not match the group"):
+        orchestrator._verify_reused_envelope(envelope, "signal-1", ["a"], [real_order])
+
+
+def test_an_envelope_with_an_extra_order_is_refused(tmp_path):
+    # Same order ids as a prefix, but the stored envelope carries one more --
+    # a subset/superset mismatch must not pass as "close enough".
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    order_1 = _order("o1", ["a"], account_id="acct-1")
+    order_2 = _order("o2", ["a"], account_id="acct-1")
+    envelope = _envelope(
+        source_strategy_ids=["a"],
+        account_ids=["acct-1"],
+        orders=[order_1.model_dump(mode="json"), order_2.model_dump(mode="json")],
+    )
+
+    with pytest.raises(ValueError, match="does not match the group"):
+        orchestrator._verify_reused_envelope(envelope, "signal-1", ["a"], [order_1])
+
+
+def test_an_envelope_missing_a_capacity_blocked_order_still_passes(tmp_path):
+    # Priority 2: a group's envelope can legitimately hold fewer orders than
+    # the group's full (capacity-independent) manifest membership, when some
+    # of the group's orders were capacity-blocked at the time the envelope
+    # was created. Verification is called with the *manifest's* full order
+    # set (capacity-independent), so a genuine subset must still pass -- only
+    # an envelope naming an order outside that set is a mismatch.
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    order_1 = _order("o1", ["a"], account_id="acct-1")
+    order_2 = _order("o2", ["a"], account_id="acct-1")
+    envelope = _envelope(
+        source_strategy_ids=["a"],
+        account_ids=["acct-1"],
+        orders=[order_1.model_dump(mode="json")],
+    )
+
+    orchestrator._verify_reused_envelope(envelope, "signal-1", ["a"], [order_1, order_2])
+
+
+def _order(order_id: str, source_strategy_ids: list[str], *, account_id: str = "acct-1"):
+    return OrderIntent(
+        order_id=order_id,
+        symbol="MOCK_ETF_A",
+        side=OrderSide.BUY,
+        quantity=1.0,
+        price=100.0,
+        notional=100.0,
+        account_id=account_id,
+        metadata={"source_strategy_ids": source_strategy_ids},
+    )
+
+
+def test_approval_order_groups_merges_the_same_strategies_in_a_different_order(tmp_path):
+    # dispatch_group_id canonicalizes source_strategy_ids (sorted, deduped).
+    # If _approval_order_groups uses raw list identity as its grouping key
+    # instead, two orders naming the same strategies in a different order
+    # split into two in-memory groups that both durably collide on the same
+    # dispatch_group_id -- the second group's write would be evaluated
+    # against the first group's stored envelope.
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    forward = _order("o1", ["a", "b"])
+    backward = _order("o2", ["b", "a"])
+
+    groups = orchestrator._approval_order_groups([forward, backward], {})
+
+    assert len(groups) == 1
+    source_strategy_ids, group_orders = groups[0]
+    assert {order.order_id for order in group_orders} == {"o1", "o2"}
+    assert dispatch_group_id("signal-1", source_strategy_ids) == dispatch_group_id(
+        "signal-1", ["a", "b"]
+    )
+
+
+def test_approval_order_groups_merges_duplicate_strategy_ids_within_one_order(tmp_path):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+    duped = _order("o1", ["a", "a", "b"])
+    plain = _order("o2", ["a", "b"])
+
+    groups = orchestrator._approval_order_groups([duped, plain], {})
+
+    assert len(groups) == 1
+    _, group_orders = groups[0]
+    assert {order.order_id for order in group_orders} == {"o1", "o2"}
 
 
 def test_approve_signal_propagates_signal_run_id_to_live_order_events(monkeypatch, tmp_path):
