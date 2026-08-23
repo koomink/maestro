@@ -6,6 +6,7 @@ from maestro.state.funding_workflow import (
     claim_workflow_attempt,
     complete_workflow,
     head_key,
+    list_incomplete_workflows,
     load_workflow_child,
     publish_contribution_request,
 )
@@ -898,3 +899,165 @@ def test_stale_attempt_fencing_remains_intact_around_the_head_claimed_guard(tmp_
 
     assert skipped["claimed"] is False
     assert skipped["reason"] == "attempt_out_of_order"
+
+
+def test_a_claimed_parent_survived_by_its_successor_stays_recoverable(tmp_path):
+    """2026-08 re-review, priority 1: complete_workflow never re-checks head,
+    so a crash between the legitimate successor's publish and completing the
+    parent must not strand the parent. list_incomplete_workflows has to
+    surface req-1 even though req-2 -- its own declared successor -- is now
+    head, and claim_workflow_attempt has to let a resumed attempt on req-1
+    land despite req-1 no longer being head.
+    """
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    publish_contribution_request(
+        store,
+        "run-2",
+        _request("req-2"),
+        phase="funding",
+        successor_of_request_id="req-1",
+        successor_of_phase="funding",
+    )
+    head = store.load_funding_workflow_head(workflow_id)
+    assert head["request_id"] == "req-2"
+
+    incomplete = list_incomplete_workflows(store)
+    assert [row["request_id"] for row in incomplete] == ["req-1"]
+
+    resumed = claim_workflow_attempt(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=2,
+    )
+    assert resumed["claimed"] is True
+
+    outcome = complete_workflow(
+        store,
+        "run-4",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=2,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+    assert outcome["committed"] is True
+    # req-1 is done; req-2 -- unclaimed, untouched -- is still head.
+    assert list_incomplete_workflows(store) == []
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-2"
+
+
+def test_a_request_with_no_legitimate_successor_marker_stays_not_head(tmp_path):
+    """The recoverability granted above is narrow: a request that is simply
+    not head -- with no durable proof its own claimed transition produced
+    whatever replaced it -- must still be refused as not_head. Otherwise any
+    claimed-and-superseded request would look recoverable, which is exactly
+    the double-execution risk priority 1 (independent publish) exists to
+    close.
+    """
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    complete_workflow(
+        store,
+        "run-2",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+    # req-1 is completed and unclaimed at any later attempt; req-2 replaces
+    # it as an entirely ordinary, non-successor publish.
+    publish_contribution_request(store, "run-3", _request("req-2"), phase="funding")
+
+    stale = claim_workflow_attempt(
+        store,
+        "run-4",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=2,
+    )
+
+    assert stale["claimed"] is False
+    assert stale["reason"] == "not_head"
+
+
+def test_stale_attempt_fencing_still_holds_after_a_successor_recovery(tmp_path):
+    """A skipped attempt number must still be refused when the request being
+    resumed is reached through the legitimate-successor path, not just when
+    it is still head."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    publish_contribution_request(
+        store,
+        "run-2",
+        _request("req-2"),
+        phase="funding",
+        successor_of_request_id="req-1",
+        successor_of_phase="funding",
+    )
+
+    skipped = claim_workflow_attempt(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=3,
+    )
+
+    assert skipped["claimed"] is False
+    assert skipped["reason"] == "attempt_out_of_order"
+
+
+def test_a_stale_attempt_cannot_complete_after_a_successor_recovery_takes_over(tmp_path):
+    """The other half of fencing: once a resumed attempt claims req-1 through
+    the successor path, an older attempt must still be refused at
+    completion, exactly as if req-1 had never lost the head at all."""
+    store = _store(tmp_path)
+    workflow_id = _published(store, "req-1")
+    claim_workflow_attempt(
+        store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
+    )
+    publish_contribution_request(
+        store,
+        "run-2",
+        _request("req-2"),
+        phase="funding",
+        successor_of_request_id="req-1",
+        successor_of_phase="funding",
+    )
+    resumed = claim_workflow_attempt(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=2,
+    )
+    assert resumed["claimed"] is True
+
+    with pytest.raises(WorkflowClaimRefused) as excinfo:
+        complete_workflow(
+            store,
+            "run-4",
+            workflow_id=workflow_id,
+            request_id="req-1",
+            phase="funding",
+            attempt=1,
+            legacy_payload={"request_id": "req-1", "status": "confirmed"},
+        )
+    assert excinfo.value.reason == "attempt_superseded"

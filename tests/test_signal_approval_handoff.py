@@ -713,14 +713,14 @@ def test_a_dispatch_interrupted_between_groups_is_not_recorded_as_settled(monkey
     assert store.list_incomplete_signal_dispatches() == []
 
 
-def _capacity_lookup(*, blocked_symbols: frozenset[str] = frozenset()):
+def _capacity_lookup(*, blocked_symbols: frozenset[str] = frozenset(), cash: float = 10_000_000):
     def lookup(order):
         blocked = order.symbol in blocked_symbols
         return BrokerBuyingPower(
             symbol=order.symbol,
             order_price=order.price,
-            cash_buying_power=0 if blocked else 10_000_000,
-            max_buy_quantity=0 if blocked else 100_000,
+            cash_buying_power=0 if blocked else cash,
+            max_buy_quantity=0 if blocked else 1_000_000,
             source="fake",
         )
 
@@ -757,6 +757,16 @@ def _two_group_config(tmp_path, *, armed: bool = False):
 
 def _dispatch_orchestrator_with_capacity(config, client, lookup):
     return MaestroOrchestrator(config, telegram_client=client, order_capacity_lookup=lookup)
+
+
+def _armed_dispatch_config(tmp_path):
+    """One strategy, one group, two orders (MOCK_ETF_A and MOCK_ETF_B) --
+    for exercising a *partial* block within a single group, which
+    _two_group_config's one-symbol-per-group strategies cannot."""
+    config = _telegram_dispatch_config(tmp_path)
+    config.execution.order_posture = "armed"
+    config.strategies[0].order_posture = "armed"
+    return config
 
 
 def test_a_resume_marks_every_group_capacity_blocked_rather_than_dropping_them(
@@ -864,8 +874,185 @@ def test_a_resume_blocks_only_the_group_capacity_now_refuses(monkeypatch, tmp_pa
     assert len(blocked) == 1
     assert result.approval_status == "pending"
     assert result.approvals_pending == 1
+    # Priority 3: the blocked group's order was durably blocked, not merely
+    # observed and forgotten -- the final summary must report it even
+    # though it was recorded on this same call, not a fresh re-observation
+    # after the fact.
+    assert result.orders_capacity_blocked == 1
+    pending_event = store.list_system_events_by_type("signal_approval_pending")[0]
+    assert pending_event["payload"]["orders_capacity_blocked"] == 1
     assert store.signal_dispatch_settled(signal_summary.signal_run_id) is True
     assert store.list_incomplete_signal_dispatches() == []
+
+
+def test_orders_capacity_blocked_reports_the_durable_total_from_an_earlier_attempt(
+    monkeypatch, tmp_path
+):
+    """Priority 3: a group blocked on an *earlier* attempt (its own call to
+    _partition_orders_by_capacity long since returned) must still count in
+    a *later* attempt's final summary. The old implementation started
+    capacity_blocks = [] fresh every call and skipped already-blocked
+    groups outright, so their orders were counted nowhere once the call
+    that actually observed them had returned.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _two_group_config(tmp_path, armed=True)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    # Attempt 1: block every group's orders, then die before the settled
+    # event -- as if the process crashed right after recording the block.
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    real_render = orchestrator_module.render_approval_stage_card
+
+    def die_after_blocking(request, stage):
+        raise RuntimeError("process died after recording the block")
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_after_blocking)
+    with pytest.raises(RuntimeError, match="died after recording the block"):
+        _dispatch_orchestrator_with_capacity(
+            config,
+            FakeTelegramClient(),
+            _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A"})),
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", real_render)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    # One group (MOCK_ETF_A's) is durably blocked; the other was never
+    # reached this call (render died before it could be).
+    assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 1
+
+    # Attempt 2 (resume): capacity is wide open now (generous enough for
+    # second_static's full-weight order too), so the group 1's accepted
+    # remainder and group 2 both dispatch cleanly. Nothing re-checks -- let
+    # alone un-blocks -- the group attempt 1 already resolved.
+    result = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(cash=25_000_000)
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 2
+    assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 1
+    assert result.approval_status == "pending"
+    assert result.orders_capacity_blocked == 1
+    pending_event = store.list_system_events_by_type("signal_approval_pending")[0]
+    assert pending_event["payload"]["orders_capacity_blocked"] == 1
+
+
+def test_a_partially_blocked_group_records_the_exact_blocked_order_ids(monkeypatch, tmp_path):
+    """Priority 2: within one group, some orders may be capacity-blocked
+    while others are approved. The blocked disposition must name exactly
+    the blocked orders, and together with the envelope it must exactly
+    partition the manifest's order ids for that group -- no gaps, no
+    overlap."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    manifest = store.load_system_event_payload_by_duplicate_key(
+        f"dispatch-manifest:{signal_summary.signal_run_id}"
+    )
+    assert len(manifest["groups"]) == 1
+    manifest_order_ids = set(manifest["groups"][0]["order_ids"])
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    envelope_order_ids = {order["order_id"] for order in pending[0]["payload"]["orders"]}
+    assert {order["symbol"] for order in pending[0]["payload"]["orders"]} == {"MOCK_ETF_A"}
+
+    blocked = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+    assert len(blocked) == 1
+    blocked_order_ids = set(blocked[0]["payload"]["blocked_order_ids"])
+    assert blocked_order_ids
+    assert blocked_order_ids.isdisjoint(envelope_order_ids)
+    assert envelope_order_ids | blocked_order_ids == manifest_order_ids
+
+
+def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(
+    monkeypatch, tmp_path
+):
+    """TOCTOU: this call's own capacity computation may lose the race to
+    write the group's blocked disposition -- insert_or_load_system_event is
+    atomic, so a concurrent writer's decision can land first under the same
+    key. The accepted set used to build the envelope must then be
+    re-derived from whichever disposition actually became durable, not from
+    this call's own, now-stale, local computation -- otherwise an order the
+    durable record calls blocked could still end up in an approval
+    envelope, or one it calls accepted could be silently dropped.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    package = store.load_signal_package(signal_summary.signal_run_id)
+    orders_by_symbol = {o["symbol"]: o["order_id"] for o in package["orders_preview"]}
+    order_a = orders_by_symbol["MOCK_ETF_A"]
+    order_b = orders_by_symbol["MOCK_ETF_B"]
+
+    orchestrator = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    )
+    real_insert_or_load = orchestrator.state_store.insert_or_load_system_event
+
+    def racing_insert_or_load(run_id, event_type, payload, duplicate_key):
+        if event_type == "dispatch_group_capacity_blocked":
+            # A concurrent writer's decision -- blocking A instead of the B
+            # this call's own capacity check just decided -- has already
+            # landed under this exact key by the time this call's own
+            # insert is attempted.
+            winning_payload = {**payload, "blocked_order_ids": [order_a]}
+            return real_insert_or_load(run_id, event_type, winning_payload, duplicate_key)
+        return real_insert_or_load(run_id, event_type, payload, duplicate_key)
+
+    monkeypatch.setattr(
+        orchestrator.state_store, "insert_or_load_system_event", racing_insert_or_load
+    )
+
+    orchestrator.dispatch_signal_approval(signal_summary.signal_run_id)
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    envelope_order_ids = {order["order_id"] for order in pending[0]["payload"]["orders"]}
+    # The winning disposition blocked A, not B -- the envelope must reflect
+    # that, not this call's own (losing) computation that blocked B.
+    assert envelope_order_ids == {order_b}
+    blocked = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+    assert set(blocked[0]["payload"]["blocked_order_ids"]) == {order_a}
+
+
+def test_a_partial_block_disposition_survives_capacity_recovering_on_a_later_resume(
+    monkeypatch, tmp_path
+):
+    """Priority 2: once a group's disposition is durably split between an
+    envelope and a blocked marker, capacity recovering later must not
+    reopen the group -- the manifest's membership for that group is fixed
+    forever once it has one envelope, exactly as an all-accepted group
+    already is."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    blocked_before = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+
+    # Already fully settled (pending_count > 0) -- a further call is an
+    # ordinary settled dispatch, refused outright, not a live re-evaluation.
+    with pytest.raises(ValueError, match="already consumed"):
+        _dispatch_orchestrator_with_capacity(
+            config, FakeTelegramClient(), _capacity_lookup()
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    assert store.list_system_events_by_type("dispatch_group_capacity_blocked") == blocked_before
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 1
 
 
 def test_the_manifest_is_unchanged_by_a_resume_under_unchanged_capacity(monkeypatch, tmp_path):
@@ -1107,6 +1294,90 @@ def test_an_envelope_missing_a_capacity_blocked_order_still_passes(tmp_path):
     )
 
     orchestrator._verify_reused_envelope(envelope, "signal-1", ["a"], [order_1, order_2])
+
+
+def test_disposition_is_valid_when_envelope_and_blocked_exactly_partition_the_manifest(
+    tmp_path,
+):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+
+    orchestrator._verify_group_disposition(
+        "group-1",
+        manifest_order_ids={"o1", "o2"},
+        envelope_order_ids={"o1"},
+        blocked_order_ids={"o2"},
+    )
+
+
+def test_disposition_fails_loudly_when_a_manifest_order_has_no_disposition(tmp_path):
+    # The envelope alone proves it has no unknown order -- it does not prove
+    # the manifest order missing from it (o2) was ever durably accounted
+    # for as blocked. That must fail loudly, not be silently accepted as
+    # "capacity must have blocked it".
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+
+    with pytest.raises(ValueError, match="no disposition"):
+        orchestrator._verify_group_disposition(
+            "group-1",
+            manifest_order_ids={"o1", "o2"},
+            envelope_order_ids={"o1"},
+            blocked_order_ids=set(),
+        )
+
+
+def test_disposition_fails_loudly_when_the_envelope_names_an_order_outside_the_manifest(
+    tmp_path,
+):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+
+    with pytest.raises(ValueError, match="not in the manifest"):
+        orchestrator._verify_group_disposition(
+            "group-1",
+            manifest_order_ids={"o1"},
+            envelope_order_ids={"o1", "o-foreign"},
+            blocked_order_ids=set(),
+        )
+
+
+def test_disposition_fails_loudly_when_an_order_is_both_approved_and_blocked(tmp_path):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+
+    with pytest.raises(ValueError, match="both"):
+        orchestrator._verify_group_disposition(
+            "group-1",
+            manifest_order_ids={"o1", "o2"},
+            envelope_order_ids={"o1", "o2"},
+            blocked_order_ids={"o2"},
+        )
+
+
+def test_disposition_is_valid_for_a_fully_blocked_group(tmp_path):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+
+    orchestrator._verify_group_disposition(
+        "group-1",
+        manifest_order_ids={"o1", "o2"},
+        envelope_order_ids=set(),
+        blocked_order_ids={"o1", "o2"},
+    )
+
+
+def test_disposition_fails_loudly_when_a_blocked_order_is_outside_the_manifest(tmp_path):
+    config = _live_signal_config(tmp_path, "expired")
+    orchestrator = MaestroOrchestrator(config)
+
+    with pytest.raises(ValueError, match="not in the manifest"):
+        orchestrator._verify_group_disposition(
+            "group-1",
+            manifest_order_ids={"o1"},
+            envelope_order_ids=set(),
+            blocked_order_ids={"o1", "o-foreign"},
+        )
 
 
 def _order(order_id: str, source_strategy_ids: list[str], *, account_id: str = "acct-1"):

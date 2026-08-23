@@ -33,7 +33,9 @@ from maestro.sdk import (
 )
 from maestro.state.funding_workflow import (
     WorkflowClaimRefused,
+    child_key,
     claim_workflow_attempt,
+    complete_workflow,
     converge_workflow_invariants,
     head_key,
     list_incomplete_workflows,
@@ -1325,14 +1327,17 @@ def test_an_unknown_recorded_intent_is_not_silently_treated_as_confirm(operator_
     assert store.list_system_events_by_type("signal_package", limit=None) == []
 
 
-def test_a_stalled_claim_on_a_superseded_request_is_no_longer_incomplete(operator_bot):
-    """Final review F6: a request that is no longer head can never be resumed,
-    so it must not sit in the list that means "needs action" forever.
+def test_a_claim_survived_by_its_own_legitimate_successor_stays_incomplete(operator_bot):
+    """2026-08 re-review, priority 1 (supersedes final-review F6): a claim
+    whose own transition produced the request that replaced its head is not
+    the same as one abandoned to an unrelated request -- complete_workflow
+    never re-checks head, so req-1's transition is still there to finish,
+    and it must keep surfacing until it actually does.
 
     req-2 supersedes req-1 as its declared legitimate successor (the shape a
-    child signal run's own follow-up request takes) -- not as an independent,
-    unrelated publish, which priority 1 now refuses outright while req-1's
-    claim is still open.
+    child signal run's own follow-up request takes) -- not as an
+    independent, unrelated publish, which priority 1 refuses outright while
+    req-1's claim is still open.
     """
     store = operator_bot.store
     workflow_id = publish_contribution_request(
@@ -1350,6 +1355,18 @@ def test_a_stalled_claim_on_a_superseded_request_is_no_longer_incomplete(operato
         phase="funding",
         successor_of_request_id="req-1",
         successor_of_phase="funding",
+    )
+
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
+
+    complete_workflow(
+        store,
+        "run-3",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
     )
 
     assert list_incomplete_workflows(store) == []
@@ -1722,6 +1739,20 @@ def _stub_child_signal(
     budget_requests = budget_requests or []
 
     def run_child(*args, **kwargs):
+        # Mirrors run_signal's own get-or-create: a resume must reach the
+        # same child it already built, not publish everything a second
+        # time. Real run_signal makes this check inside the same lock that
+        # creates the lineage record; the stub has no concurrent caller to
+        # race, so a plain check-then-write is faithful enough.
+        if source_request_id is not None:
+            existing = load_workflow_child(store, source_request_id, source_phase or "funding")
+            if existing is not None:
+                return SignalRunSummary(
+                    signal_run_id=existing,
+                    loaded_strategies=["tranquillo"],
+                    action_required=False,
+                    orders_preview_count=0,
+                )
         for request in budget_requests:
             publish_contribution_request(
                 store,
@@ -1740,6 +1771,19 @@ def _stub_child_signal(
                 successor_of_request_id=source_request_id,
                 successor_of_phase=source_phase,
             )
+        together_with = []
+        if source_request_id is not None:
+            together_with.append(
+                {
+                    "event_type": "funding_workflow_child_created",
+                    "payload": {
+                        "duplicate_key": child_key(source_request_id, source_phase or "funding"),
+                        "request_id": source_request_id,
+                        "phase": source_phase or "funding",
+                        "signal_run_id": "signal-child",
+                    },
+                }
+            )
         store.save_signal_package(
             "signal-child",
             {
@@ -1747,6 +1791,7 @@ def _stub_child_signal(
                 "funding_requests": funding_requests,
                 "budget_requests": budget_requests,
             },
+            together_with=together_with,
         )
         return SignalRunSummary(
             signal_run_id="signal-child",
@@ -1792,13 +1837,14 @@ def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
         )
 
     assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
-    # The undelivered request is what the operator is told about, and it has
-    # to be: publishing req-2 superseded req-1, and list_incomplete_workflows
-    # drops a request that is no longer head -- so in exactly the case that
-    # has a card to deliver, the parent cannot be surfaced by the resume
-    # sweep. req-2 has no claim either (nobody could tap a card that never
-    # arrived), so neither request reaches that list.
-    assert list_incomplete_workflows(store) == []
+    # Publishing req-2 superseded req-1's head, but as req-1's own declared
+    # legitimate successor -- not an unrelated request -- so req-1 (still
+    # claimed, still not completed) is exactly what the resume sweep must
+    # keep surfacing. req-2 has no claim of its own (nobody could tap a card
+    # that never arrived), so it does not appear; resuming req-1 is what
+    # retries delivering req-2's card, via the same _deliver_child_signal_
+    # outcome step req-1's own confirm already runs.
+    assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
     undelivered = store.list_system_events_by_type(
         "funding_request_card_undelivered", limit=None
     )
@@ -2009,3 +2055,72 @@ def test_a_workflow_inside_the_budget_is_still_offered_resume(operator_bot):
 
     message = operator_bot.client.sent_messages[-1]
     assert message["reply_markup"]["inline_keyboard"][0][0]["text"] == "Resume"
+
+
+def test_a_parent_workflow_survives_a_crash_after_its_legitimate_successor_advances_the_head(
+    operator_bot, monkeypatch
+):
+    """2026-08 review, priority 1: complete_workflow never re-checks head, so
+    a crash between the legitimate successor's publish and
+    complete_workflow(parent) must not strand the parent.
+
+    req-1 claims, records cash flow, creates its child signal, and that
+    child's package advertises a same-scope follow-up (req-2) which
+    supersedes req-1's head as its declared legitimate successor -- all of
+    that durable -- before the process dies right before
+    complete_workflow(req-1). req-1 is claimed, not completed, and no
+    longer head: it must still be recoverable, and resuming it must not
+    duplicate any side effect that already landed, nor disturb req-2's
+    place as head.
+    """
+    store = operator_bot.store
+    publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
+    workflow_id = _workflow_id_of("req-1")
+    _stub_child_signal(
+        monkeypatch,
+        operator_bot,
+        funding_requests=[_request("req-2")],
+        source_request_id="req-1",
+        source_phase="funding",
+    )
+
+    import maestro.integrations.telegram.handlers as handlers_module
+
+    real_complete_workflow = handlers_module.complete_workflow
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("crashed before completing the parent")
+
+    monkeypatch.setattr(handlers_module, "complete_workflow", boom)
+    with pytest.raises(RuntimeError, match="crashed before completing the parent"):
+        operator_bot._confirm_funding_request(
+            _request("req-1"), chat_id=1, user_id=2, username="op"
+        )
+    monkeypatch.setattr(handlers_module, "complete_workflow", real_complete_workflow)
+
+    # req-2 is durably head; req-1's own transition (cash flow, child) ran
+    # exactly once and is not yet completed.
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-2"
+    assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
+    cash_flows_before = store.list_system_events_by_type("strategy_cash_flow", limit=None)
+    assert len(cash_flows_before) == 1
+    children_before = store.list_system_events_by_type("signal_package", limit=None)
+    assert len(children_before) == 1
+
+    # req-1 is claimed and not completed: the sweep must still surface it,
+    # even though it is no longer head. req-2 -- never claimed -- does not.
+    incomplete = list_incomplete_workflows(store)
+    assert [row["request_id"] for row in incomplete] == ["req-1"]
+
+    assert operator_bot.process_update(callback_update("operator:wfresume:funding:req-1"))
+
+    assert _wfresume_statuses(store) == ["resumed"]
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert [row["payload"]["request_id"] for row in completed] == ["req-1"]
+    # Exactly once: the resume must not have re-run the side effects.
+    assert store.list_system_events_by_type("strategy_cash_flow", limit=None) == cash_flows_before
+    assert store.list_system_events_by_type("signal_package", limit=None) == children_before
+    # req-2 remains head, undisturbed by req-1's completion.
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-2"
+    # req-1 has disappeared from the recovery list now that it is done.
+    assert list_incomplete_workflows(store) == []

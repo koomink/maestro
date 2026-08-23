@@ -276,6 +276,8 @@ def plan_contribution_request(
     previous_request_id = str(head.get("request_id") or "") if head else ""
     extra_require_keys: tuple[str, ...] = ()
     extra_forbid_keys: tuple[str, ...] = ()
+    is_legitimate_successor = False
+    superseded_open_claim_phase: str | None = None
     if head is not None and previous_request_id:
         head_phase = head.get("phase")
         # A head written before phase existed cannot be judged -- see
@@ -291,6 +293,9 @@ def plan_contribution_request(
                 and successor_of_phase is not None
                 and str(successor_of_phase) == str(head_phase)
             )
+            if open_claim_attempt is not None and is_declared_successor:
+                is_legitimate_successor = True
+                superseded_open_claim_phase = str(head_phase)
             if open_claim_attempt is not None and not is_declared_successor:
                 return {
                     "refusal": "head_claimed",
@@ -343,15 +348,31 @@ def plan_contribution_request(
         {"event_type": _REQUEST_EVENT[phase], "payload": payload}
     ]
     if previous_request_id and previous_request_id != request_id:
+        superseded_payload: dict[str, Any] = {
+            "duplicate_key": superseded_key(workflow_id, previous_request_id),
+            "workflow_id": workflow_id,
+            "request_id": previous_request_id,
+            "superseded_by": request_id,
+        }
+        if is_legitimate_successor:
+            # Durable, explicit proof -- not merely inferable from current
+            # head state -- that this supersession was previous_request_id's
+            # own claimed transition producing request_id as its causal
+            # successor (e.g. the follow-up budget request a confirmed
+            # funding request's child signal run generates). This is what
+            # lets claim_workflow_attempt and list_incomplete_workflows tell
+            # "the parent's own transition moved the head on" apart from "an
+            # unrelated request took the head" -- the latter can only reach
+            # this branch of plan_contribution_request at all when
+            # previous_request_id had no open claim, so it is never marked.
+            # Append-only and permanent once written: nothing later can
+            # revoke a supersession's own legitimacy.
+            superseded_payload["legitimate_successor"] = True
+            superseded_payload["successor_of_phase"] = superseded_open_claim_phase
         events.append(
             {
                 "event_type": "funding_workflow_superseded",
-                "payload": {
-                    "duplicate_key": superseded_key(workflow_id, previous_request_id),
-                    "workflow_id": workflow_id,
-                    "request_id": previous_request_id,
-                    "superseded_by": request_id,
-                },
+                "payload": superseded_payload,
             }
         )
     new_head_key = head_key(workflow_id, version)
@@ -446,14 +467,39 @@ def claim_workflow_attempt(
     if head is None:
         return {"claimed": False, "reason": "no_head", "attempt": attempt, "head_version": 0}
     version = int(expected_version if expected_version is not None else head.get("version") or 0)
+    via_legitimate_successor = False
     if str(head.get("request_id") or "") != request_id:
-        return {
-            "claimed": False,
-            "reason": "not_head",
-            "attempt": attempt,
-            "head_version": int(head.get("version") or 0),
-        }
-    if _head_contradicts_transition(head, workflow_id=workflow_id, phase=phase):
+        # Not head -- but not-head-at-all and not-head-because-my-own-claimed-
+        # transition-legitimately-moved-on are different situations.
+        # ``plan_contribution_request`` marks the latter durably (see its
+        # docstring): a ``funding_workflow_superseded`` row for this exact
+        # request_id, in this exact phase, that can only ever have been
+        # written when this request_id itself had an open claim declaring
+        # the very request that replaced it as its successor. An unrelated
+        # publish can never produce that marker -- it is refused outright
+        # while a claim is open -- so finding it here is proof, not
+        # inference, that request_id's own transition is what moved the
+        # head away, and that transition may still be resumed to finish its
+        # own bookkeeping regardless of what the head reads now.
+        marker = store.load_system_event_payload_by_duplicate_key(
+            superseded_key(workflow_id, request_id)
+        )
+        if (
+            marker is not None
+            and marker.get("legitimate_successor") is True
+            and str(marker.get("successor_of_phase")) == phase
+        ):
+            via_legitimate_successor = True
+        else:
+            return {
+                "claimed": False,
+                "reason": "not_head",
+                "attempt": attempt,
+                "head_version": int(head.get("version") or 0),
+            }
+    if not via_legitimate_successor and _head_contradicts_transition(
+        head, workflow_id=workflow_id, phase=phase
+    ):
         return {
             "claimed": False,
             "reason": "head_corrupt",
@@ -482,8 +528,21 @@ def claim_workflow_attempt(
     # 그리고 그 attempt는 cash flow와 child run을 다시 밟은 뒤에야
     # complete_workflow의 replay 판정에 걸린다.
     finished_key = completed_key(workflow_id, request_id, phase)
-    next_head_key = head_key(workflow_id, version + 1)
-    required_keys = [head_key(workflow_id, version)]
+    required_keys: list[str] = []
+    forbid_keys = [finished_key]
+    if via_legitimate_successor:
+        # request_id's own head slot is not what this claim defends -- it
+        # has already moved on, for a reason durably proven above. Requiring
+        # that same proof's own key here is the atomic anchor: the marker is
+        # append-only, so if it existed for the read above it cannot stop
+        # existing by the time this write commits. Pinning to a head
+        # version would be meaningless (and wrong) here, since head is
+        # expected to differ from whatever it was when request_id was
+        # published.
+        required_keys.append(superseded_key(workflow_id, request_id))
+    else:
+        required_keys.append(head_key(workflow_id, version))
+        forbid_keys.append(head_key(workflow_id, version + 1))
     previous_attempt_key = None
     if attempt > 1:
         # Sequential-attempt fencing: attempt N may only be claimed once
@@ -504,7 +563,7 @@ def claim_workflow_attempt(
                 }
             ],
             require_duplicate_keys=tuple(required_keys),
-            forbid_duplicate_keys=(next_head_key, finished_key),
+            forbid_duplicate_keys=tuple(forbid_keys),
         )
     except ValueError as exc:
         # 같은 attempt를 서로 다른 ``extra`` 내용으로 두 번 claim하면
@@ -704,6 +763,25 @@ def list_incomplete_workflows(store: StateStore) -> list[dict[str, Any]]:
         (str(row.get("workflow_id")), str(row.get("request_id")))
         for row in store.list_funding_workflow_heads()
     }
+    # A request whose own claimed transition produced a legitimate successor
+    # (see plan_contribution_request) stays surfaceable even after the head
+    # moves to that successor: complete_workflow never re-checks head, so
+    # the transition is still there to finish, and claim_workflow_attempt
+    # accepts a resumed attempt on it via the same durable marker checked
+    # here. An ordinary (non-successor) supersession is not added -- that
+    # marker can only ever be written while the superseded request had an
+    # open claim, so a merely-replaced, never-claimed request is correctly
+    # left out, exactly as before.
+    live.update(
+        (str(payload.get("workflow_id")), str(payload.get("request_id")))
+        for payload in (
+            (row.get("payload") or {})
+            for row in store.list_system_events_by_type(
+                "funding_workflow_superseded", limit=None
+            )
+        )
+        if payload.get("legitimate_successor") is True
+    )
     completed = {
         (
             str((row.get("payload") or {}).get("request_id")),

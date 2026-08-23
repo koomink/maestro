@@ -1078,7 +1078,7 @@ class MaestroOrchestrator:
         orders_by_id = {order.order_id: order for order in approval_orders}
         pending_count = 0
         orders_created = 0
-        capacity_blocks: list[OrderCapacityBlock] = []
+        orders_capacity_blocked = 0
         for group in manifest["groups"]:
             group_id = str(group["group_id"])
             source_strategy_ids = [str(item) for item in group["source_strategy_ids"]]
@@ -1089,76 +1089,114 @@ class MaestroOrchestrator:
                     f"Dispatch manifest for {signal_run_id} names order {exc} that the "
                     "package no longer carries"
                 ) from exc
+            manifest_order_ids = {order.order_id for order in manifest_orders}
+            blocked_key = f"{group_id}:capacity_blocked"
             # 이 그룹의 승인이 이미 있으면 그것이 권위다. 새로 만들면
             # create_request가 새 approval_id와 utc_now 기준 만료시각을
             # 발급하므로(approval/manager.py), 같은 주문에 버튼 달린 카드가
             # 두 장 생기고 마감 시한이 재개마다 연장된다.
             stored = self.state_store.load_system_event_payload_by_duplicate_key(group_id)
+            blocked_disposition = self.state_store.load_system_event_payload_by_duplicate_key(
+                blocked_key
+            )
             if stored is None:
-                blocked_key = f"{group_id}:capacity_blocked"
-                if self.state_store.duplicate_key_exists(blocked_key):
-                    # Resolved as blocked in a prior attempt. Capacity
-                    # blocking is terminal here, the same way the old
-                    # package-wide "capacity_blocked" outcome was: a group
-                    # once blocked is not silently retried on every resume,
-                    # it stays accounted-for and blocked.
-                    continue
-                accepted, blocked = self._partition_orders_by_capacity(
-                    run_id,
-                    manifest_orders,
-                    signal_run_id=signal_run_id,
-                    package=package,
-                )
-                capacity_blocks.extend(blocked)
-                if not accepted:
-                    self.state_store.insert_or_load_system_event(
+                if blocked_disposition is None:
+                    # The one and only time capacity is ever consulted for
+                    # this group -- see _load_or_build_dispatch_manifest for
+                    # why group *membership* never gets recomputed; this is
+                    # the same guarantee applied to which of that membership
+                    # is blocked. Once this decision is durable, a later
+                    # call derives the accepted complement from it instead
+                    # of asking capacity again, which could disagree with
+                    # what was already decided.
+                    accepted, blocked = self._partition_orders_by_capacity(
                         run_id,
-                        "dispatch_group_capacity_blocked",
-                        {
-                            "signal_run_id": signal_run_id,
-                            "group_id": group_id,
-                            "source_strategy_ids": source_strategy_ids,
-                            "duplicate_key": blocked_key,
-                        },
-                        blocked_key,
+                        manifest_orders,
+                        signal_run_id=signal_run_id,
+                        package=package,
                     )
-                    continue
-                request = self.approval_manager.create_request(
-                    run_id,
-                    accepted,
-                    risk_violations,
-                    source_strategy_ids,
-                )
-                if request is None:
-                    raise ValueError("live_approval mode requires an approval request")
-                candidate = PendingApprovalEnvelope(
-                    approval_id=request.approval_id,
-                    run_id=run_id,
-                    signal_run_id=signal_run_id,
-                    request=request,
-                    orders=[order.model_dump(mode="json") for order in accepted],
-                    message=render_approval_stage_card(request, "pending").text,
-                    source_strategy_ids=source_strategy_ids,
-                    account_ids=sorted(
-                        {order.account_id for order in accepted if order.account_id}
-                    ),
-                    reminder_seconds=self.config.approval.telegram_reminder_seconds,
-                    created_at=request.created_at,
-                    expires_at=request.expires_at,
-                    duplicate_key=group_id,
-                    # 카드 전송은 바로 아래에서 lifecycle이 한다. 이 표시가 있어야
-                    # sweep이 "전송 전에 죽은 승인"을 "구 코드가 이미 보낸 승인"과
-                    # 구분해 살려낼 수 있다.
-                    card_delivery_version=1,
-                )
-                stored, created = self.state_store.insert_or_load_system_event(
-                    run_id,
-                    "telegram_approval_pending",
-                    candidate.model_dump(mode="json"),
-                    group_id,
-                )
-                if created:
-                    self.audit.log(run_id, "telegram_approval_pending", stored)
+                    blocked_order_ids = sorted(item.order.order_id for item in blocked)
+                    if blocked_order_ids:
+                        blocked_disposition, _ = self.state_store.insert_or_load_system_event(
+                            run_id,
+                            "dispatch_group_capacity_blocked",
+                            {
+                                "signal_run_id": signal_run_id,
+                                "group_id": group_id,
+                                "source_strategy_ids": source_strategy_ids,
+                                # The exact orders blocked, not just the fact
+                                # that some were: this is what lets a later
+                                # call verify that every manifest order has
+                                # exactly one disposition, and what lets the
+                                # accepted complement below be derived
+                                # without re-consulting capacity.
+                                "blocked_order_ids": blocked_order_ids,
+                                "duplicate_key": blocked_key,
+                            },
+                            blocked_key,
+                        )
+                        # insert_or_load_system_event is atomic, but this
+                        # call's own submission is not guaranteed to be what
+                        # actually landed -- a concurrent writer's decision
+                        # for this exact key may have won instead. accepted
+                        # must reflect whichever content is now durable, not
+                        # this call's own (possibly stale) local partition,
+                        # or an order that content calls blocked could still
+                        # reach an approval envelope.
+                        winning_blocked_ids = set(
+                            blocked_disposition.get("blocked_order_ids") or []
+                        )
+                        accepted = [
+                            order
+                            for order in manifest_orders
+                            if order.order_id not in winning_blocked_ids
+                        ]
+                else:
+                    # A prior attempt already decided and durably recorded
+                    # this group's blocked subset (in full or in part).
+                    # Capacity is not re-consulted -- the accepted
+                    # complement is derived from that record alone, so a
+                    # resume can never disagree with what dispatching
+                    # already committed to.
+                    already_blocked_ids = set(blocked_disposition.get("blocked_order_ids") or [])
+                    accepted = [
+                        order
+                        for order in manifest_orders
+                        if order.order_id not in already_blocked_ids
+                    ]
+                if accepted:
+                    stored = self._create_pending_approval_envelope(
+                        run_id,
+                        signal_run_id,
+                        group_id,
+                        source_strategy_ids,
+                        accepted,
+                        risk_violations,
+                    )
+
+            envelope_order_ids = (
+                {str(order.get("order_id")) for order in stored.get("orders") or []}
+                if stored is not None
+                else set()
+            )
+            blocked_order_ids_for_group = set(
+                (blocked_disposition or {}).get("blocked_order_ids") or []
+            )
+            # Every manifest order must land in exactly one of the two sets
+            # above -- never neither (silently unaccounted), never both.
+            # Checked on every visit, not only the one that just decided
+            # it, so an adopted envelope or disposition from a prior
+            # attempt is held to the same durable proof a fresh one is.
+            self._verify_group_disposition(
+                group_id, manifest_order_ids, envelope_order_ids, blocked_order_ids_for_group
+            )
+            orders_capacity_blocked += len(blocked_order_ids_for_group)
+            if stored is None:
+                # Every manifest order for this group is durably blocked;
+                # _verify_group_disposition above already proved it, so
+                # there is nothing left to create or deliver.
+                continue
+
             envelope = PendingApprovalEnvelope.model_validate(stored)
             # The manifest's own (capacity-independent) membership, not a
             # fresh capacity computation: an envelope adopted from a prior
@@ -1202,7 +1240,7 @@ class MaestroOrchestrator:
                     "signal_run_id": signal_run_id,
                     "orders_created": orders_created,
                     "orders_planned": len(orders),
-                    "orders_capacity_blocked": len(capacity_blocks),
+                    "orders_capacity_blocked": orders_capacity_blocked,
                     "approvals_pending": pending_count,
                     "approval_status": "pending",
                 },
@@ -1211,7 +1249,7 @@ class MaestroOrchestrator:
                 signal_run_id=signal_run_id,
                 run_id=run_id,
                 orders_planned=len(orders),
-                orders_capacity_blocked=len(capacity_blocks),
+                orders_capacity_blocked=orders_capacity_blocked,
                 approvals_pending=pending_count,
                 approval_status="pending",
             )
@@ -1226,7 +1264,7 @@ class MaestroOrchestrator:
                 "signal_run_id": signal_run_id,
                 "orders_created": 0,
                 "orders_planned": len(orders),
-                "orders_capacity_blocked": len(capacity_blocks),
+                "orders_capacity_blocked": orders_capacity_blocked,
                 "approval_status": "capacity_blocked",
             },
         )
@@ -1234,9 +1272,59 @@ class MaestroOrchestrator:
             signal_run_id=signal_run_id,
             run_id=run_id,
             orders_planned=len(orders),
-            orders_capacity_blocked=len(capacity_blocks),
+            orders_capacity_blocked=orders_capacity_blocked,
             approval_status="capacity_blocked",
         )
+
+    def _create_pending_approval_envelope(
+        self,
+        run_id: str,
+        signal_run_id: str,
+        group_id: str,
+        source_strategy_ids: list[str],
+        accepted: list[OrderIntent],
+        risk_violations: list[Any],
+    ) -> dict[str, Any]:
+        """Create (or adopt, if a race already filed one) this group's envelope.
+
+        Split out of the dispatch loop because both places that reach a
+        group's first-ever envelope -- capacity never having been checked
+        for it yet, and capacity already having been durably decided by an
+        earlier attempt -- need the exact same construction, and this is the
+        one place ``insert_or_load_system_event`` is called for it.
+        """
+        request = self.approval_manager.create_request(
+            run_id, accepted, risk_violations, source_strategy_ids
+        )
+        if request is None:
+            raise ValueError("live_approval mode requires an approval request")
+        candidate = PendingApprovalEnvelope(
+            approval_id=request.approval_id,
+            run_id=run_id,
+            signal_run_id=signal_run_id,
+            request=request,
+            orders=[order.model_dump(mode="json") for order in accepted],
+            message=render_approval_stage_card(request, "pending").text,
+            source_strategy_ids=source_strategy_ids,
+            account_ids=sorted({order.account_id for order in accepted if order.account_id}),
+            reminder_seconds=self.config.approval.telegram_reminder_seconds,
+            created_at=request.created_at,
+            expires_at=request.expires_at,
+            duplicate_key=group_id,
+            # 카드 전송은 바로 아래에서 lifecycle이 한다. 이 표시가 있어야
+            # sweep이 "전송 전에 죽은 승인"을 "구 코드가 이미 보낸 승인"과
+            # 구분해 살려낼 수 있다.
+            card_delivery_version=1,
+        )
+        stored, created = self.state_store.insert_or_load_system_event(
+            run_id,
+            "telegram_approval_pending",
+            candidate.model_dump(mode="json"),
+            group_id,
+        )
+        if created:
+            self.audit.log(run_id, "telegram_approval_pending", stored)
+        return stored
 
     def _load_or_build_dispatch_manifest(
         self,
@@ -2339,6 +2427,53 @@ class MaestroOrchestrator:
             f"found signal_run_id={envelope.signal_run_id} strategies={recorded_strategies} "
             f"account_ids={sorted(recorded_account_ids)} order_ids={sorted(recorded_order_ids)}"
         )
+
+    @staticmethod
+    def _verify_group_disposition(
+        group_id: str,
+        manifest_order_ids: set[str],
+        envelope_order_ids: set[str],
+        blocked_order_ids: set[str],
+    ) -> None:
+        """Every manifest order must have exactly one accounted disposition.
+
+        The dispatch manifest freezes a group's order roster once; from then
+        on, each of those orders must end up either in an approval envelope
+        or in a durable capacity-block record -- never both, never neither.
+        ``_verify_reused_envelope`` only proves the envelope carries no
+        *unknown* order (a subset check); it says nothing about whether the
+        orders missing from it were ever durably recorded as blocked, so a
+        manifest order could otherwise vanish -- present in neither the
+        envelope nor any blocked disposition -- without either check
+        noticing. This is what closes that gap: it is called with the
+        group's actual current envelope and blocked-disposition order ids,
+        never recomputed from live capacity, so it verifies durable state
+        as it stands rather than re-deriving what it should be.
+        """
+        foreign_envelope = envelope_order_ids - manifest_order_ids
+        if foreign_envelope:
+            raise ValueError(
+                f"Group {group_id} envelope names order(s) not in the manifest: "
+                f"{sorted(foreign_envelope)}"
+            )
+        foreign_blocked = blocked_order_ids - manifest_order_ids
+        if foreign_blocked:
+            raise ValueError(
+                f"Group {group_id} blocked disposition names order(s) not in the "
+                f"manifest: {sorted(foreign_blocked)}"
+            )
+        overlap = envelope_order_ids & blocked_order_ids
+        if overlap:
+            raise ValueError(
+                f"Group {group_id} has order(s) marked both approved and capacity-"
+                f"blocked: {sorted(overlap)}"
+            )
+        unaccounted = manifest_order_ids - envelope_order_ids - blocked_order_ids
+        if unaccounted:
+            raise ValueError(
+                f"Group {group_id} has manifest order(s) with no disposition -- "
+                f"neither approved nor durably capacity-blocked: {sorted(unaccounted)}"
+            )
 
     def _approval_order_groups(
         self,
