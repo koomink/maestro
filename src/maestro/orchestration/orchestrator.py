@@ -383,12 +383,19 @@ class MaestroOrchestrator:
             if decision.status == "approved":
                 self._validate_signal_package_for_approval(package)
                 self._validate_signal_approval_preconditions(envelope.run_id, package)
-                orders, capacity_blocks = self._partition_orders_by_capacity(
-                    envelope.run_id,
-                    orders,
-                    signal_run_id=envelope.signal_run_id,
-                    package=package,
-                )
+                # Pure, not the side-effecting _partition_orders_by_capacity:
+                # this order already belongs to a pending approval envelope,
+                # so it is approval-owned. Writing live_order_capacity_blocked
+                # here (the old behavior) made it *also* recovery-owned --
+                # visible to the operator retry/recovery flow under a new
+                # order_id -- while the approval itself stayed durably
+                # resumable (save_approval has not run yet), so the same
+                # trade could execute twice once capacity recovered. A
+                # resolution-time capacity failure instead fails closed and
+                # leaves the ORIGINAL approval the only path back to this
+                # order: capacity is rechecked, not re-owned, on the next
+                # resume.
+                orders, capacity_blocks = self._partition_orders_by_capacity_pure(orders)
                 if capacity_blocks or not orders:
                     raise ValueError("Pending approval is blocked by current broker capacity")
                 self._validate_signal_approval_gates(envelope.run_id, orders, package)
@@ -1151,11 +1158,25 @@ class MaestroOrchestrator:
                             }
                             for item in blocked
                         ]
-                        blocked_disposition, _live_payloads, _created = (
+                        blocked_disposition, live_payloads, created = (
                             self.state_store.insert_or_load_dispatch_group_capacity_block(
                                 run_id, group_payload, blocked_key, live_events
                             )
                         )
+                        if created:
+                            # The atomic store primitive writes system_events
+                            # directly, bypassing save_audited_system_event --
+                            # mirror its audit.log call here, and only for
+                            # the batch this call actually committed, so a
+                            # replay (adopted from a prior attempt or a
+                            # concurrent winner) does not duplicate the
+                            # hash-chained audit trail for content that was
+                            # already logged when it first landed.
+                            self.audit.log(
+                                run_id, "dispatch_group_capacity_blocked", blocked_disposition
+                            )
+                            for live_payload in live_payloads:
+                                self.audit.log(run_id, "live_order_capacity_blocked", live_payload)
                         # This call's own submission is not guaranteed to be
                         # what actually landed -- a concurrent writer's
                         # decision for this exact key may have won instead.
@@ -2894,7 +2915,12 @@ class MaestroOrchestrator:
                 f"Order {order_id} is durably capacity-blocked under {blocked_key} but has "
                 "no live_order_capacity_blocked record to notify from"
             )
-        self._notify_capacity_block(run_id, OrderCapacityBlock.model_validate(live_payload))
+        sent = self._notify_capacity_block(run_id, OrderCapacityBlock.model_validate(live_payload))
+        if not sent:
+            # Every chat failed -- _notify_capacity_block already recorded
+            # why. Leaving the marker unwritten means the next resume tries
+            # again instead of silently losing the notification forever.
+            return
         self.state_store.insert_or_load_system_event(
             run_id,
             "live_order_capacity_block_notified",
@@ -2902,7 +2928,17 @@ class MaestroOrchestrator:
             notified_key,
         )
 
-    def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> None:
+    def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> bool:
+        """Send the capacity-block notification; return whether any chat got it.
+
+        A caller that tracks "notified" as a durable, one-time marker (see
+        ``_deliver_capacity_block_notification``) must only commit that
+        marker once something actually went out -- every ``send_message``
+        failing here is caught per chat (so one bad chat id does not stop
+        the rest), never re-raised, and previously left the caller with no
+        way to tell "delivered" from "silently failed everywhere," writing
+        the marker either way and losing the notification for good.
+        """
         client = self.telegram_client or TelegramBotAPIClient(
             token_env=self.config.approval.telegram_bot_token_env,
             timeout_seconds=10.0,
@@ -2920,6 +2956,7 @@ class MaestroOrchestrator:
                 "Tap below to review the current retry quantities.",
             ]
         )
+        sent = False
         for chat_id in self.config.approval.telegram_allowed_chat_ids:
             try:
                 client.send_message(
@@ -2938,6 +2975,7 @@ class MaestroOrchestrator:
                         ]
                     },
                 )
+                sent = True
             except Exception as exc:
                 self._record_event(
                     run_id,
@@ -2949,6 +2987,7 @@ class MaestroOrchestrator:
                         "error_message": str(exc),
                     },
                 )
+        return sent
 
     def _notify_recovery_order(
         self,

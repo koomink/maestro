@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -38,6 +39,8 @@ from maestro.execution.live_orders import (
 )
 from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
 from maestro.integrations.telegram.bot import TelegramApiRejected
+from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
+from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.dispatch_group import dispatch_group_id
 from maestro.orchestration.orchestrator import (
     MaestroOrchestrator,
@@ -972,6 +975,55 @@ def test_a_partially_blocked_group_records_the_exact_blocked_order_ids(monkeypat
     assert envelope_order_ids | blocked_order_ids == manifest_order_ids
 
 
+def _audited_event_types(config) -> list[str]:
+    return [
+        json.loads(line)["event_type"]
+        for line in Path(config.audit.jsonl_path).read_text().splitlines()
+        if line.strip()
+    ]
+
+
+def test_a_capacity_block_disposition_reaches_the_audit_log(monkeypatch, tmp_path):
+    """The atomic disposition commit writes system_events directly (it must
+    hold one DB transaction across the group disposition and every blocked
+    order's record, which save_audited_system_event does not support), so
+    the caller is responsible for mirroring both into the hash-chained
+    JSONL audit trail exactly as save_audited_system_event would have --
+    once per event, only for the batch that actually landed, not again
+    when a resume merely adopts what already committed."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    import maestro.orchestration.orchestrator as orchestrator_module
+
+    def die_before_card(request, stage):
+        raise RuntimeError("process died before delivering the card")
+
+    monkeypatch.setattr(orchestrator_module, "render_approval_stage_card", die_before_card)
+    with pytest.raises(RuntimeError, match="died before delivering the card"):
+        _dispatch_orchestrator_with_capacity(
+            config,
+            FakeTelegramClient(),
+            _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"})),
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+    monkeypatch.undo()
+
+    audited_types = _audited_event_types(config)
+    assert audited_types.count("dispatch_group_capacity_blocked") == 1
+    assert audited_types.count("live_order_capacity_blocked") == 1
+
+    # Resume adopts the already-committed disposition -- it must not be
+    # logged a second time.
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    audited_types_after = _audited_event_types(config)
+    assert audited_types_after.count("dispatch_group_capacity_blocked") == 1
+    assert audited_types_after.count("live_order_capacity_blocked") == 1
+
+
 def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(
     monkeypatch, tmp_path
 ):
@@ -1394,6 +1446,49 @@ def test_a_repeated_resume_does_not_resend_the_capacity_block_notification(monke
     # Only the order that was never notified in the first attempt gets a
     # message this time -- the already-notified one must not be resent.
     assert len(telegram_2.sent_messages) == 1
+
+
+def test_a_notification_that_reaches_no_chat_is_retried_not_marked_notified(
+    monkeypatch, tmp_path
+):
+    """Every chat rejecting the capacity-block message must not be recorded
+    as delivered -- the old code wrote the 'notified' marker unconditionally
+    after calling _notify_capacity_block, which swallows send failures per
+    chat and never raises, so a message that reached nobody would still be
+    marked done and never retried.
+
+    A fully-blocked group settles in one call with no further resume
+    possible (there is nothing left to resolve), so this uses a partial
+    block: the accepted order's card delivery also fails against the same
+    refusing client, which does raise, leaving the dispatch open for a
+    resume where a working client retries both.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    with pytest.raises(RuntimeError, match="refused the approval card"):
+        _dispatch_orchestrator_with_capacity(
+            config,
+            RefusingTelegramClient(),
+            _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"})),
+        ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    assert store.list_system_events_by_type("live_order_capacity_block_notified") == []
+    assert store.list_system_events_by_type("live_order_notification_failed")
+    # The disposition itself is unaffected -- only delivery is retried.
+    assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 1
+    assert len(store.list_system_events_by_type("telegram_approval_pending")) == 1
+
+    telegram = FakeTelegramClient()
+    _dispatch_orchestrator_with_capacity(
+        config, telegram, _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    assert telegram.sent_messages
+    assert len(store.list_system_events_by_type("live_order_capacity_block_notified")) == 1
+    assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 1
 
 
 def _envelope(
@@ -3031,3 +3126,223 @@ def test_dispatch_still_fails_loudly_when_telegram_refuses_every_chat(monkeypatc
                 source="fake",
             ),
         ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+
+def _dry_run_armed_dispatch_config(tmp_path):
+    """One group, two orders, capacity-gated like _armed_dispatch_config, but
+    execution itself is a recorded dry run -- these tests exercise the
+    resolution-time capacity recheck and ownership bookkeeping, not a real
+    broker submission."""
+    config = _armed_dispatch_config(tmp_path)
+    config.execution.live_order_dry_run = True
+    return config
+
+
+def _dispatch_one_pending_envelope(config):
+    signal_summary = MaestroOrchestrator(config).run_signal()
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    envelope = PendingApprovalEnvelope.model_validate(pending[0]["payload"])
+    order_ids = {order["order_id"] for order in pending[0]["payload"]["orders"]}
+    decision = ApprovalDecision(
+        approval_id=envelope.approval_id,
+        run_id=envelope.run_id,
+        status="approved",
+        decided_at=utc_now(),
+        decided_by="telegram:operator",
+    )
+    return store, envelope, decision, order_ids
+
+
+def test_a_resolution_time_capacity_block_stays_approval_owned_not_recovery_owned(
+    monkeypatch, tmp_path
+):
+    """Critical: a temporary capacity failure discovered during resolution
+    (after the operator already approved) must not create an independent,
+    recovery-visible ownership for the order -- the approval remains the
+    sole, resumable authority. Creating a live_order_capacity_blocked
+    record here (the old behavior) let the order later execute through
+    BOTH the resumed original approval (once capacity recovered) AND an
+    operator recovery/retry proposal under a new order_id.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _dry_run_armed_dispatch_config(tmp_path)
+    store, envelope, decision, order_ids = _dispatch_one_pending_envelope(config)
+    assert len(order_ids) == 2
+
+    blocked_orchestrator = _dispatch_orchestrator_with_capacity(
+        config,
+        FakeTelegramClient(),
+        _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+    )
+    with pytest.raises(ValueError, match="blocked by current broker capacity"):
+        blocked_orchestrator.resolve_pending_signal_approval(envelope, decision)
+
+    # No recovery ownership was created for the resolution-time block, and
+    # the approval itself never durably closed -- it stays resumable.
+    assert store.list_system_events_by_type("live_order_capacity_blocked") == []
+    assert store.list_system_events_by_type("live_order_recovery_candidate") == []
+    assert store.approval_exists(envelope.approval_id) is False
+
+    # Capacity recovers; resuming the SAME approval/decision executes the
+    # original orders exactly once.
+    recovered_orchestrator = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    )
+    summary = recovered_orchestrator.resolve_pending_signal_approval(envelope, decision)
+
+    assert summary.orders_created == len(order_ids)
+    dry_run_events = store.list_system_events_by_type("live_order_dry_run")
+    submitted_order_ids = {row["payload"]["request"]["order_id"] for row in dry_run_events}
+    assert submitted_order_ids == order_ids
+    assert len(dry_run_events) == len(order_ids)
+    assert store.approval_exists(envelope.approval_id) is True
+    assert store.list_system_events_by_type("live_order_capacity_blocked") == []
+    assert store.list_system_events_by_type("signal_approval_completed")
+
+    # A further resume attempt of the same approval cannot execute again.
+    with pytest.raises(ValueError, match="Approval decision already exists"):
+        recovered_orchestrator.resolve_pending_signal_approval(envelope, decision)
+    assert len(store.list_system_events_by_type("live_order_dry_run")) == len(order_ids)
+
+
+def test_a_resolution_time_capacity_block_exposes_no_recovery_callback(monkeypatch, tmp_path):
+    """The operator-facing recovery surface (_pending_capacity_block /
+    _pending_recovery_candidate) must not see anything for an order whose
+    only capacity failure happened during resolution of a still-live
+    approval -- there is nothing durable to recover independently of that
+    approval."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _dry_run_armed_dispatch_config(tmp_path)
+    store, envelope, decision, order_ids = _dispatch_one_pending_envelope(config)
+    blocked_order_id = next(iter(order_ids))
+
+    with pytest.raises(ValueError, match="blocked by current broker capacity"):
+        _dispatch_orchestrator_with_capacity(
+            config,
+            FakeTelegramClient(),
+            _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+        ).resolve_pending_signal_approval(envelope, decision)
+
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=FakeTelegramClient(),
+    )
+    assert router._pending_capacity_block(blocked_order_id) is None
+    assert router._pending_recovery_candidate(blocked_order_id) is None
+
+
+def test_repeated_resolution_capacity_failures_do_not_accumulate_recovery_state(
+    monkeypatch, tmp_path
+):
+    """A capacity block that persists across several resume attempts must
+    not accumulate recovery candidates, replacement orders, or change who
+    owns the order -- only the bounded resolution-failure trail already
+    used by the approval recovery state machine."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _dry_run_armed_dispatch_config(tmp_path)
+    store, envelope, decision, order_ids = _dispatch_one_pending_envelope(config)
+
+    for _ in range(3):
+        with pytest.raises(ValueError, match="blocked by current broker capacity"):
+            _dispatch_orchestrator_with_capacity(
+                config,
+                FakeTelegramClient(),
+                _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+            ).resolve_pending_signal_approval(envelope, decision)
+
+    assert store.list_system_events_by_type("live_order_capacity_blocked") == []
+    assert store.list_system_events_by_type("live_order_recovery_candidate") == []
+    assert store.list_system_events_by_type("live_order_dry_run") == []
+    assert store.approval_exists(envelope.approval_id) is False
+
+
+def test_a_resolution_time_capacity_block_recovers_cleanly_on_resume(monkeypatch, tmp_path):
+    """Once capacity recovers, resuming the same approval executes the
+    original orders under their original ids, through the original
+    envelope, exactly once -- no recovery order, no duplicate submit."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _dry_run_armed_dispatch_config(tmp_path)
+    store, envelope, decision, order_ids = _dispatch_one_pending_envelope(config)
+
+    with pytest.raises(ValueError, match="blocked by current broker capacity"):
+        _dispatch_orchestrator_with_capacity(
+            config,
+            FakeTelegramClient(),
+            _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+        ).resolve_pending_signal_approval(envelope, decision)
+
+    summary = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    ).resolve_pending_signal_approval(envelope, decision)
+
+    assert summary.orders_created == len(order_ids)
+    dry_run_events = store.list_system_events_by_type("live_order_dry_run")
+    assert {row["payload"]["request"]["approval_id"] for row in dry_run_events} == {
+        envelope.approval_id
+    }
+    assert {row["payload"]["request"]["order_id"] for row in dry_run_events} == order_ids
+    completed = store.list_system_events_by_type("signal_approval_completed")
+    assert len(completed) == 1
+    assert completed[0]["payload"]["approval_id"] == envelope.approval_id
+
+
+def test_a_dispatch_time_capacity_block_still_creates_recovery_ownership(monkeypatch, tmp_path):
+    """Unchanged: a capacity failure discovered at INITIAL DISPATCH (before
+    any approval exists) is still recovery-owned -- only the resolution-time
+    recheck on an already-approved order was ever the bug."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    assert store.list_system_events_by_type("live_order_capacity_blocked") != []
+    assert store.list_system_events_by_type("dispatch_group_capacity_blocked") != []
+
+
+def test_a_race_between_two_resolution_attempts_cannot_create_dual_ownership(
+    monkeypatch, tmp_path
+):
+    """TOCTOU: two resolution attempts for the same approval evaluate
+    capacity around the same time and both find it sufficient. DB-level
+    fencing on the approvals table (not a process-local lock) must ensure
+    only one of them ever executes the original order, and neither one can
+    have created an independent recovery ownership for it along the way."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _dry_run_armed_dispatch_config(tmp_path)
+    store, envelope, decision, order_ids = _dispatch_one_pending_envelope(config)
+
+    orchestrator_a = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    )
+    orchestrator_b = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    )
+    real_save_approval = orchestrator_b.state_store.save_approval
+
+    def racing_save_approval(run_id, approval_id, payload):
+        # A concurrent resolution attempt commits first, in a fully
+        # separate transaction, right as this call is about to write its
+        # own approvals row.
+        orchestrator_a.resolve_pending_signal_approval(envelope, decision)
+        return real_save_approval(run_id, approval_id, payload)
+
+    monkeypatch.setattr(orchestrator_b.state_store, "save_approval", racing_save_approval)
+
+    with pytest.raises(ValueError, match="Approval decision already exists"):
+        orchestrator_b.resolve_pending_signal_approval(envelope, decision)
+
+    dry_run_events = store.list_system_events_by_type("live_order_dry_run")
+    assert {row["payload"]["request"]["order_id"] for row in dry_run_events} == order_ids
+    assert len(dry_run_events) == len(order_ids)
+    assert store.list_system_events_by_type("live_order_capacity_blocked") == []
