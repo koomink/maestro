@@ -2446,6 +2446,117 @@ class StateStore:
             output.append(item)
         return output
 
+    def insert_or_load_dispatch_group_capacity_block(
+        self,
+        run_id: str,
+        group_payload: dict[str, Any],
+        group_key: str,
+        live_events: Sequence[Mapping[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+        """Commit a dispatch group's capacity-block disposition together with
+        every blocked order's recovery record, or adopt whichever batch
+        already won this group's key.
+
+        Returns ``(group_payload, live_payloads, created)``.  When
+        ``created`` is False both the group payload and the live payloads
+        are the winner's own, not this call's.
+
+        ``live_events`` is this call's own ``live_order_capacity_blocked``
+        record for each order it partitioned as blocked -- one
+        ``{"payload": ..., "duplicate_key": ...}`` per order. Two
+        independent capacity evaluations of the same group can legitimately
+        disagree (capacity read at slightly different moments), so, like
+        ``insert_or_load_system_event``, a stored ``group_key`` from a
+        concurrent writer wins outright rather than being compared for
+        equality against this call's own content.
+
+        What must never happen is either half landing without the other.
+        An order counted in the winning disposition's ``blocked_order_ids``
+        with no matching ``live_order_capacity_blocked`` row would be
+        durably blocked yet invisible to operator recovery. A
+        ``live_order_capacity_blocked`` row for an order the eventual
+        disposition never blocked is the reverse and more dangerous fault:
+        a resume that finds no group disposition for that order re-admits
+        it through ordinary approval, while the stale row still advertises
+        it as a recovery candidate -- the same order executable through two
+        independent paths. Both halves are therefore inserted under one
+        ``BEGIN IMMEDIATE``, keyed on the group's own disposition row: if
+        that row is new, the whole batch is new and is written in full; if
+        it already exists, this call contributes nothing and reads back the
+        winner's own group payload plus the winner's own live rows instead
+        of trusting its local, possibly-stale computation.
+
+        No notification is sent here. The caller sends it -- at most once,
+        tracked by its own idempotency key -- only after this call returns,
+        so a crash between this commit and that notification never loses
+        the durable disposition, and a resume that finds the disposition
+        already committed retries only the notification, never the
+        capacity check.
+        """
+        group_payload_json = json.dumps(group_payload, default=str)
+        with self.writer_lock("insert_or_load_dispatch_group_capacity_block"):
+            with self._connect() as conn:
+                conn.isolation_level = None
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute(
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            run_id,
+                            "dispatch_group_capacity_blocked",
+                            group_payload_json,
+                            group_key,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    stored_row = conn.execute(
+                        "SELECT payload FROM system_events WHERE duplicate_key = ?",
+                        (group_key,),
+                    ).fetchone()
+                    if stored_row is None:
+                        # The unique index on duplicate_key is the only
+                        # constraint this INSERT can violate, so a missing
+                        # row means something else is wrong; do not paper
+                        # over it.
+                        raise
+                    winner_group_payload = json.loads(stored_row[0])
+                    winner_blocked_ids = [
+                        str(order_id)
+                        for order_id in winner_group_payload.get("blocked_order_ids") or []
+                    ]
+                    winner_live_payloads: list[dict[str, Any]] = []
+                    if winner_blocked_ids:
+                        winner_live_keys = [
+                            f"{group_key}:live:{order_id}" for order_id in winner_blocked_ids
+                        ]
+                        placeholders = ",".join("?" * len(winner_live_keys))
+                        rows = conn.execute(
+                            "SELECT payload FROM system_events "
+                            f"WHERE duplicate_key IN ({placeholders})",
+                            winner_live_keys,
+                        ).fetchall()
+                        winner_live_payloads = [json.loads(row[0]) for row in rows]
+                    return winner_group_payload, winner_live_payloads, False
+                live_payloads: list[dict[str, Any]] = []
+                for event in live_events:
+                    payload = dict(event["payload"])
+                    duplicate_key = str(event["duplicate_key"])
+                    conn.execute(
+                        "INSERT INTO system_events "
+                        "(run_id, event_type, payload, duplicate_key) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            run_id,
+                            "live_order_capacity_blocked",
+                            json.dumps(payload, default=str),
+                            duplicate_key,
+                        ),
+                    )
+                    live_payloads.append(payload)
+                return group_payload, live_payloads, True
+
     def insert_or_load_system_event(
         self,
         run_id: str,

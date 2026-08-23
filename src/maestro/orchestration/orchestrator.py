@@ -1109,40 +1109,60 @@ class MaestroOrchestrator:
                     # call derives the accepted complement from it instead
                     # of asking capacity again, which could disagree with
                     # what was already decided.
-                    accepted, blocked = self._partition_orders_by_capacity(
-                        run_id,
-                        manifest_orders,
-                        signal_run_id=signal_run_id,
-                        package=package,
-                    )
+                    #
+                    # The evaluation itself (_pure) has no side effects: no
+                    # durable record and no notification exist yet. Both are
+                    # only ever committed together with the group
+                    # disposition below, atomically -- a crash between
+                    # evaluating capacity and here leaves nothing durable at
+                    # all, rather than a recovery-visible record for a block
+                    # the group disposition never actually committed to.
+                    accepted, blocked = self._partition_orders_by_capacity_pure(manifest_orders)
                     blocked_order_ids = sorted(item.order.order_id for item in blocked)
                     if blocked_order_ids:
-                        blocked_disposition, _ = self.state_store.insert_or_load_system_event(
-                            run_id,
-                            "dispatch_group_capacity_blocked",
+                        group_payload = {
+                            "signal_run_id": signal_run_id,
+                            "group_id": group_id,
+                            "source_strategy_ids": source_strategy_ids,
+                            # The exact orders blocked, not just the fact
+                            # that some were: this is what lets a later
+                            # call verify that every manifest order has
+                            # exactly one disposition, and what lets the
+                            # accepted complement below be derived
+                            # without re-consulting capacity.
+                            "blocked_order_ids": blocked_order_ids,
+                            "duplicate_key": blocked_key,
+                        }
+                        live_events = [
                             {
-                                "signal_run_id": signal_run_id,
-                                "group_id": group_id,
-                                "source_strategy_ids": source_strategy_ids,
-                                # The exact orders blocked, not just the fact
-                                # that some were: this is what lets a later
-                                # call verify that every manifest order has
-                                # exactly one disposition, and what lets the
-                                # accepted complement below be derived
-                                # without re-consulting capacity.
-                                "blocked_order_ids": blocked_order_ids,
-                                "duplicate_key": blocked_key,
-                            },
-                            blocked_key,
+                                "payload": {
+                                    **item.model_dump(mode="json"),
+                                    "blocked_order_id": item.order.order_id,
+                                    "signal_run_id": signal_run_id,
+                                    "status": "pending",
+                                    "config_signal_contract_fingerprint": (
+                                        package or {}
+                                    ).get("config_signal_contract_fingerprint"),
+                                    "config_runtime_fingerprint": (package or {}).get(
+                                        "config_runtime_fingerprint"
+                                    ),
+                                },
+                                "duplicate_key": f"{blocked_key}:live:{item.order.order_id}",
+                            }
+                            for item in blocked
+                        ]
+                        blocked_disposition, _live_payloads, _created = (
+                            self.state_store.insert_or_load_dispatch_group_capacity_block(
+                                run_id, group_payload, blocked_key, live_events
+                            )
                         )
-                        # insert_or_load_system_event is atomic, but this
-                        # call's own submission is not guaranteed to be what
-                        # actually landed -- a concurrent writer's decision
-                        # for this exact key may have won instead. accepted
-                        # must reflect whichever content is now durable, not
-                        # this call's own (possibly stale) local partition,
-                        # or an order that content calls blocked could still
-                        # reach an approval envelope.
+                        # This call's own submission is not guaranteed to be
+                        # what actually landed -- a concurrent writer's
+                        # decision for this exact key may have won instead.
+                        # accepted must reflect whichever content is now
+                        # durable, not this call's own (possibly stale)
+                        # local partition, or an order that content calls
+                        # blocked could still reach an approval envelope.
                         winning_blocked_ids = set(
                             blocked_disposition.get("blocked_order_ids") or []
                         )
@@ -1190,6 +1210,15 @@ class MaestroOrchestrator:
             self._verify_group_disposition(
                 group_id, manifest_order_ids, envelope_order_ids, blocked_order_ids_for_group
             )
+            # Only after the disposition above is proven durable does the
+            # operator ever hear about it -- on every visit, not only the
+            # one that just committed it, so a crash between the commit and
+            # this delivery loses nothing but the notification, which is
+            # retried here, not the disposition itself.
+            for blocked_order_id in sorted(blocked_order_ids_for_group):
+                self._deliver_capacity_block_notification(
+                    run_id, blocked_key, blocked_order_id
+                )
             orders_capacity_blocked += len(blocked_order_ids_for_group)
             if stored is None:
                 # Every manifest order for this group is durably blocked;
@@ -2685,14 +2714,23 @@ class MaestroOrchestrator:
             )
             raise ValueError("Signal approval blocked by live execution gate: stale_data")
 
-    def _partition_orders_by_capacity(
+    def _partition_orders_by_capacity_pure(
         self,
-        run_id: str,
         orders: list[OrderIntent],
-        *,
-        signal_run_id: str | None,
-        package: dict[str, Any] | None = None,
     ) -> tuple[list[OrderIntent], list[OrderCapacityBlock]]:
+        """Decide capacity with no durable write and no notification.
+
+        A caller that must commit the block disposition atomically (the
+        dispatch manifest loop, via ``insert_or_load_dispatch_group_capacity_block``)
+        partitions here first, so nothing durable or operator-visible exists
+        until that atomic commit lands. Doing the evaluation and the
+        side effects together -- the old shape of
+        ``_partition_orders_by_capacity`` below -- left a crash window where
+        a recovery-visible record could be written and a notification sent
+        for a block that the authoritative group disposition never
+        committed, letting the order execute through both the recovered
+        normal-approval path and an operator retry.
+        """
         if self.config.mode != RunMode.LIVE_APPROVAL or not orders:
             return orders, []
         armed = [order for order in orders if self._effective_order_posture(order) == "armed"]
@@ -2709,6 +2747,17 @@ class MaestroOrchestrator:
             for order in orders
             if self._effective_order_posture(order) != "armed" or order.order_id in accepted_ids
         ]
+        return accepted, blocked
+
+    def _partition_orders_by_capacity(
+        self,
+        run_id: str,
+        orders: list[OrderIntent],
+        *,
+        signal_run_id: str | None,
+        package: dict[str, Any] | None = None,
+    ) -> tuple[list[OrderIntent], list[OrderCapacityBlock]]:
+        accepted, blocked = self._partition_orders_by_capacity_pure(orders)
         for item in blocked:
             payload = item.model_dump(mode="json")
             payload.update(
@@ -2818,6 +2867,39 @@ class MaestroOrchestrator:
             cash_buying_power=float(by_currency[currency.value]),
             currency=currency.value,
             source="broker_composite_snapshot",
+        )
+
+    def _deliver_capacity_block_notification(
+        self, run_id: str, blocked_key: str, order_id: str
+    ) -> None:
+        """Send this durably blocked order's operator notification at most once.
+
+        Runs on every visit to a group with a durable disposition, not only
+        the one that just committed it, so a crash between the disposition
+        committing and this firing loses only the notification -- a resume
+        retries it here instead of re-consulting capacity. The order's own
+        ``live_order_capacity_blocked`` record (written atomically with the
+        group disposition) is the source for what to send, since a later
+        resume that reaches this without ever having recomputed the block
+        itself still needs the original reason and figures.
+        """
+        notified_key = f"{blocked_key}:notified:{order_id}"
+        if self.state_store.load_system_event_payload_by_duplicate_key(notified_key) is not None:
+            return
+        live_payload = self.state_store.load_system_event_payload_by_duplicate_key(
+            f"{blocked_key}:live:{order_id}"
+        )
+        if live_payload is None:
+            raise ValueError(
+                f"Order {order_id} is durably capacity-blocked under {blocked_key} but has "
+                "no live_order_capacity_blocked record to notify from"
+            )
+        self._notify_capacity_block(run_id, OrderCapacityBlock.model_validate(live_payload))
+        self.state_store.insert_or_load_system_event(
+            run_id,
+            "live_order_capacity_block_notified",
+            {"blocked_key": blocked_key, "order_id": order_id, "duplicate_key": notified_key},
+            notified_key,
         )
 
     def _notify_capacity_block(self, run_id: str, block: OrderCapacityBlock) -> None:

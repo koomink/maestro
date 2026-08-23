@@ -976,13 +976,15 @@ def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(
     monkeypatch, tmp_path
 ):
     """TOCTOU: this call's own capacity computation may lose the race to
-    write the group's blocked disposition -- insert_or_load_system_event is
-    atomic, so a concurrent writer's decision can land first under the same
-    key. The accepted set used to build the envelope must then be
-    re-derived from whichever disposition actually became durable, not from
-    this call's own, now-stale, local computation -- otherwise an order the
-    durable record calls blocked could still end up in an approval
-    envelope, or one it calls accepted could be silently dropped.
+    commit the group's blocked disposition -- a concurrent writer's decision
+    can land first under the same group key. The accepted set used to build
+    the envelope must then be re-derived from whichever disposition
+    actually became durable, not from this call's own, now-stale, local
+    computation -- otherwise an order the durable record calls blocked
+    could still end up in an approval envelope, or one it calls accepted
+    could be silently dropped. The winner's per-order
+    live_order_capacity_blocked record must win together with it, not be
+    left mismatched against the loser's own local blocked set.
     """
     _mock_kis_snapshot_refresh(monkeypatch)
     config = _armed_dispatch_config(tmp_path)
@@ -997,20 +999,28 @@ def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(
     orchestrator = _dispatch_orchestrator_with_capacity(
         config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
     )
-    real_insert_or_load = orchestrator.state_store.insert_or_load_system_event
+    real_commit = orchestrator.state_store.insert_or_load_dispatch_group_capacity_block
 
-    def racing_insert_or_load(run_id, event_type, payload, duplicate_key):
-        if event_type == "dispatch_group_capacity_blocked":
-            # A concurrent writer's decision -- blocking A instead of the B
-            # this call's own capacity check just decided -- has already
-            # landed under this exact key by the time this call's own
-            # insert is attempted.
-            winning_payload = {**payload, "blocked_order_ids": [order_a]}
-            return real_insert_or_load(run_id, event_type, winning_payload, duplicate_key)
-        return real_insert_or_load(run_id, event_type, payload, duplicate_key)
+    def racing_commit(run_id, group_payload, group_key, live_events):
+        # A concurrent writer's decision -- blocking A instead of the B this
+        # call's own capacity check just decided -- has already landed
+        # under this exact group key, together with its own matching
+        # live_order_capacity_blocked record, by the time this call's own
+        # commit is attempted.
+        winning_group_payload = {**group_payload, "blocked_order_ids": [order_a]}
+        winning_live_events = [
+            {
+                "payload": {**live_events[0]["payload"], "blocked_order_id": order_a},
+                "duplicate_key": f"{group_key}:live:{order_a}",
+            }
+        ]
+        real_commit(new_run_id(), winning_group_payload, group_key, winning_live_events)
+        return real_commit(run_id, group_payload, group_key, live_events)
 
     monkeypatch.setattr(
-        orchestrator.state_store, "insert_or_load_system_event", racing_insert_or_load
+        orchestrator.state_store,
+        "insert_or_load_dispatch_group_capacity_block",
+        racing_commit,
     )
 
     orchestrator.dispatch_signal_approval(signal_summary.signal_run_id)
@@ -1023,6 +1033,10 @@ def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(
     assert envelope_order_ids == {order_b}
     blocked = store.list_system_events_by_type("dispatch_group_capacity_blocked")
     assert set(blocked[0]["payload"]["blocked_order_ids"]) == {order_a}
+    # The winner's own live record -- not this call's -- must be what is
+    # durable and what the (retried) notification is built from.
+    live_blocked = store.list_system_events_by_type("live_order_capacity_blocked")
+    assert {row["payload"]["blocked_order_id"] for row in live_blocked} == {order_a}
 
 
 def test_a_partial_block_disposition_survives_capacity_recovering_on_a_later_resume(
@@ -1158,6 +1172,228 @@ def test_repeated_resumes_under_unchanged_capacity_are_idempotent(monkeypatch, t
         _dispatch_orchestrator_with_capacity(
             config, FakeTelegramClient(), _capacity_lookup()
         ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+
+def test_a_crash_before_the_block_disposition_commits_leaves_no_recovery_trace(
+    monkeypatch, tmp_path
+):
+    """Crash window 1: the process dies after capacity was *evaluated* as
+    blocking an order but before the authoritative
+    dispatch_group_capacity_blocked disposition -- and the per-order
+    live_order_capacity_blocked record that makes an order eligible for the
+    operator recovery/retry flow -- ever commits. Nothing durable or
+    operator-visible may exist from a decision that was never committed:
+    a resume must be free to re-evaluate capacity for this order from
+    scratch, exactly as if the first attempt never happened.
+    """
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    orchestrator = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    )
+
+    def die_before_commit(run_id, group_payload, group_key, live_events):
+        raise RuntimeError("process died before the disposition committed")
+
+    monkeypatch.setattr(
+        orchestrator.state_store,
+        "insert_or_load_dispatch_group_capacity_block",
+        die_before_commit,
+    )
+    with pytest.raises(RuntimeError, match="died before the disposition committed"):
+        orchestrator.dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    assert store.list_system_events_by_type("dispatch_group_capacity_blocked") == []
+    # The evaluation never became durable -- no recovery-visible trace of it
+    # may survive the crash, or a resume that admits the order normally
+    # would leave it also eligible for operator recovery under the stale
+    # record.
+    assert store.list_system_events_by_type("live_order_capacity_blocked") == []
+
+    result = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    assert {order["symbol"] for order in pending[0]["payload"]["orders"]} == {
+        "MOCK_ETF_A",
+        "MOCK_ETF_B",
+    }
+    assert store.list_system_events_by_type("dispatch_group_capacity_blocked") == []
+    assert store.list_system_events_by_type("live_order_capacity_blocked") == []
+    assert result.orders_capacity_blocked == 0
+
+
+def test_a_crash_after_the_block_disposition_commits_only_retries_notification(
+    monkeypatch, tmp_path
+):
+    """Crash window 2: the block disposition and its per-order recovery
+    record already committed durably; the process then dies before the
+    operator notification goes out. A resume must not re-consult capacity
+    for the already-blocked order -- even if capacity has since recovered --
+    and must only retry the notification, not re-open the group."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    orchestrator = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    )
+
+    def die_on_notify(run_id, block):
+        raise RuntimeError("process died before the notification was sent")
+
+    monkeypatch.setattr(orchestrator, "_notify_capacity_block", die_on_notify)
+    with pytest.raises(RuntimeError, match="died before the notification was sent"):
+        orchestrator.dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    blocked = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+    assert len(blocked) == 1
+    blocked_order_ids = set(blocked[0]["payload"]["blocked_order_ids"])
+    assert len(store.list_system_events_by_type("live_order_capacity_blocked")) == 1
+    assert store.list_system_events_by_type("live_order_capacity_block_notified") == []
+
+    # Resume with capacity now wide open -- must NOT re-admit the durably
+    # blocked order into a normal approval envelope.
+    telegram = FakeTelegramClient()
+    result = _dispatch_orchestrator_with_capacity(
+        config, telegram, _capacity_lookup()
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    assert store.list_system_events_by_type("dispatch_group_capacity_blocked") == blocked
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending) == 1
+    envelope_order_ids = {order["order_id"] for order in pending[0]["payload"]["orders"]}
+    assert envelope_order_ids.isdisjoint(blocked_order_ids)
+    assert result.orders_capacity_blocked == 1
+    # The retried notification made it out this time.
+    assert telegram.sent_messages
+    assert len(store.list_system_events_by_type("live_order_capacity_block_notified")) == 1
+
+
+def test_a_capacity_blocked_order_never_appears_in_its_own_approval_envelope(
+    monkeypatch, tmp_path
+):
+    """Mutual exclusion: a manifest order that is durably capacity-blocked
+    (and therefore a live, operator-visible recovery candidate) must never
+    simultaneously sit inside a normal approval envelope -- the two are the
+    two competing execution paths this whole area exists to keep apart."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    live_blocked_order_ids = {
+        row["payload"]["blocked_order_id"]
+        for row in store.list_system_events_by_type("live_order_capacity_blocked")
+    }
+    assert live_blocked_order_ids
+    pending = store.list_system_events_by_type("telegram_approval_pending")
+    envelope_order_ids = {
+        order["order_id"] for row in pending for order in row["payload"]["orders"]
+    }
+    assert envelope_order_ids.isdisjoint(live_blocked_order_ids)
+
+
+def test_a_partial_blocks_ownership_survives_a_crash_before_notification(monkeypatch, tmp_path):
+    """A group split between one accepted and one blocked order must keep
+    that exact split even if the crash-and-resume happens between the
+    disposition committing and its notification, and even if capacity has
+    since recovered by the time of the resume."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    orchestrator = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_B"}))
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_notify_capacity_block",
+        lambda run_id, block: (_ for _ in ()).throw(RuntimeError("died before notify")),
+    )
+    with pytest.raises(RuntimeError, match="died before notify"):
+        orchestrator.dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    blocked_before = store.list_system_events_by_type("dispatch_group_capacity_blocked")
+    pending_before = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(blocked_before) == 1
+    assert len(pending_before) == 1
+    assert {o["symbol"] for o in pending_before[0]["payload"]["orders"]} == {"MOCK_ETF_A"}
+
+    _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    assert store.list_system_events_by_type("dispatch_group_capacity_blocked") == blocked_before
+    pending_after = store.list_system_events_by_type("telegram_approval_pending")
+    assert len(pending_after) == 1
+    assert pending_after[0]["payload"]["approval_id"] == pending_before[0]["payload"]["approval_id"]
+    assert {o["symbol"] for o in pending_after[0]["payload"]["orders"]} == {"MOCK_ETF_A"}
+
+
+def test_a_repeated_resume_does_not_resend_the_capacity_block_notification(monkeypatch, tmp_path):
+    """Idempotent resume: once a blocked order's notification has gone out,
+    a further resume of the same (still-open) dispatch must not send it
+    again, must not write a second live_order_capacity_blocked record, and
+    must not re-evaluate capacity for it."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    # One group, two orders both blocked -- the crash lands between the two
+    # orders' own notifications, inside the same group's notify loop.
+    config = _armed_dispatch_config(tmp_path)
+    signal_summary = MaestroOrchestrator(config).run_signal()
+
+    telegram_1 = FakeTelegramClient()
+    orchestrator = _dispatch_orchestrator_with_capacity(
+        config,
+        telegram_1,
+        _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+    )
+    real_notify = orchestrator._notify_capacity_block
+    calls = {"n": 0}
+
+    def die_on_second_notify(run_id, block):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("process died between the two orders' notifications")
+        return real_notify(run_id, block)
+
+    monkeypatch.setattr(orchestrator, "_notify_capacity_block", die_on_second_notify)
+    with pytest.raises(RuntimeError, match="died between the two orders' notifications"):
+        orchestrator.dispatch_signal_approval(signal_summary.signal_run_id)
+
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    notified_after_first = store.list_system_events_by_type("live_order_capacity_block_notified")
+    assert len(notified_after_first) == 1
+    assert len(telegram_1.sent_messages) == 1
+    already_notified_order_id = notified_after_first[0]["payload"]["order_id"]
+
+    telegram_2 = FakeTelegramClient()
+    _dispatch_orchestrator_with_capacity(
+        config,
+        telegram_2,
+        _capacity_lookup(blocked_symbols=frozenset({"MOCK_ETF_A", "MOCK_ETF_B"})),
+    ).dispatch_signal_approval(signal_summary.signal_run_id)
+
+    notified_after_second = store.list_system_events_by_type("live_order_capacity_block_notified")
+    assert len(notified_after_second) == 2
+    notified_order_ids = {row["payload"]["order_id"] for row in notified_after_second}
+    assert already_notified_order_id in notified_order_ids
+    assert len(store.list_system_events_by_type("live_order_capacity_blocked")) == 2
+    assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 1
+    # Only the order that was never notified in the first attempt gets a
+    # message this time -- the already-notified one must not be resent.
+    assert len(telegram_2.sent_messages) == 1
 
 
 def _envelope(
