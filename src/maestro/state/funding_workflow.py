@@ -104,6 +104,70 @@ def superseded_key(workflow_id: str, request_id: str) -> str:
     return f"wf-superseded:{workflow_id}:{request_id}"
 
 
+TERMINAL_WORKFLOW_EVENTS: tuple[str, str] = (
+    "funding_workflow_completed",
+    "funding_workflow_superseded",
+)
+
+
+def request_terminal_state(store: StateStore, request_id: str, phase: str) -> str | None:
+    """Whether this request's transition is over, per *workflow* state alone.
+
+    Deliberately blind to ``contribution_funding_request_ack`` and
+    ``contribution_budget_request_decision``. Those are the rollback
+    compatibility projection ``complete_workflow`` writes for the pre-CAS
+    binary, not a second opinion this generation is allowed to consult: the
+    legacy event cannot express phase, attempt or supersession, so the two
+    answers can differ, and a system with two definitions of "finished"
+    eventually acts on the wrong one.
+
+    A pre-3a-4 ack with no completion behind it therefore reports ``None``
+    here, on purpose. That is not this function calling the request live -- it
+    is this function declining to decide. The upgrade backfill classifies such
+    history under a quiesce barrier with the whole database in front of it,
+    which is the only place the distinction can be drawn safely.
+    """
+    _require_phase(phase)
+    for row in store.list_system_events_by_type("funding_workflow_completed", limit=None):
+        payload = row.get("payload") or {}
+        if (
+            str(payload.get("request_id") or "") == request_id
+            and str(payload.get("phase") or "") == phase
+        ):
+            return "completed"
+    # Supersession is matched without phase: the marker names the request the
+    # head moved off, and a request id only ever exists in one phase.
+    for row in store.list_system_events_by_type("funding_workflow_superseded", limit=None):
+        payload = row.get("payload") or {}
+        if str(payload.get("request_id") or "") == request_id:
+            return "superseded"
+    return None
+
+
+def load_request_payload(
+    store: StateStore, request_id: str, phase: str
+) -> dict[str, Any] | None:
+    """The stored request event's payload, whatever its status."""
+    _require_phase(phase)
+    for row in store.list_system_events_by_type(_REQUEST_EVENT[phase], limit=None):
+        payload = row.get("payload") or {}
+        if str(payload.get("request_id") or "") == request_id:
+            return dict(payload)
+    return None
+
+
+def is_request_pending(store: StateStore, request_id: str, phase: str) -> bool:
+    """Whether the operator can still act on this request.
+
+    Both halves are required: the request must have been recorded as pending,
+    and the workflow must not have closed it since.
+    """
+    payload = load_request_payload(store, request_id, phase)
+    if payload is None or payload.get("status") != "pending":
+        return False
+    return request_terminal_state(store, request_id, phase) is None
+
+
 _REQUEST_EVENT = {
     "funding": "contribution_funding_request",
     "budget": "contribution_budget_request",
@@ -1070,6 +1134,7 @@ def _previous_head_with_a_real_request(
 __all__ = [
     "LEGACY_TERMINAL_EVENT",
     "PHASES",
+    "TERMINAL_WORKFLOW_EVENTS",
     "WorkflowClaimRefused",
     "child_key",
     "claim_key",
@@ -1079,11 +1144,14 @@ __all__ = [
     "converge_workflow_invariants",
     "funding_workflow_id",
     "head_key",
+    "is_request_pending",
     "list_incomplete_workflows",
     "load_migration_cutoff",
+    "load_request_payload",
     "load_workflow_child",
     "plan_contribution_request",
     "publish_contribution_request",
+    "request_terminal_state",
     "scope_prefix",
     "superseded_key",
     "workflow_id_from_request",
