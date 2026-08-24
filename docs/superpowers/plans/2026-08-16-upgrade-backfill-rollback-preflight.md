@@ -1,3 +1,12 @@
+> **SUPERSEDED (2026-08-24).** The canonical Phase 3a-5 plan is
+> `docs/superpowers/plans/2026-08-24-upgrade-backfill-rollback-preflight-v2.md`.
+> This document is retained for its historical design assumptions. Three of its
+> tasks must NOT be implemented as written: the legacy-approval "no evidence =>
+> canceled" resolution backfill (synthesizes history from absence), the rollback
+> preflight's idempotent legacy-event repair (preflight is read-only), and the
+> convergence-sweep stale-snapshot task (already solved at HEAD by atomic
+> require/forbid preconditions). See the v2 plan's "Reconciliation" section.
+
 # 3a-5: 업그레이드 backfill · 전체 롤백 preflight CLI 구현 계획
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
