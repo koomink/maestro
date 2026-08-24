@@ -48,6 +48,33 @@ class MigrationStateInvalid(RuntimeError):
         self.reason = reason
 
 
+class MigrationActive(RuntimeError):
+    """A migration-sensitive financial entry point ran during MIGRATING/INVALID.
+
+    Raised by :func:`ensure_no_active_migration`. A migration that crashes
+    stays MIGRATING after its process exits and releases the writer lock, so
+    safety cannot depend on every operator remembering which entry points are
+    unsafe; the authoritative ones check and refuse here.
+    """
+
+    def __init__(self, state: MigrationState) -> None:
+        if state.phase is MigrationPhase.MIGRATING:
+            message = (
+                "a state migration owns this database (MIGRATING): financial entry "
+                "points are fenced until `maestro upgrade-backfill` completes. "
+                "Do not restart services while blocking quarantines remain."
+            )
+        else:
+            message = (
+                f"migration markers are contradictory ({state.reason}): nothing may "
+                "create workflow ownership or dispatch approvals until the markers "
+                "are repaired."
+            )
+        super().__init__(message)
+        self.phase = state.phase
+        self.reason = state.reason
+
+
 def _cutoffs(store: StateStore, event_type: str) -> list[int] | None:
     """The distinct cutoffs recorded by ``event_type``, or None if any is malformed.
 
@@ -168,16 +195,40 @@ def complete_migration(store: StateStore, run_id: str, *, cutoff: int) -> None:
     )
 
 
+def ensure_no_active_migration(store: StateStore) -> MigrationState:
+    """Fail closed unless this database is safe to run financial paths on.
+
+    The narrowest fence that protects every production entry point at once:
+    callers are the authoritative orchestrator methods that can create or
+    replace workflow ownership, dispatch approvals, or execute signals --
+    exactly the transitions the migration is classifying. Read-only status and
+    health views deliberately do not call this; production is quiesced for the
+    real migration, and disabling those would only hide state an operator
+    needs to see.
+
+    NOT_STARTED and COMPLETED pass through. MIGRATING means heads and
+    quarantines exist for part of the history and not the rest, so a decision
+    made from it can be wrong in the one direction that costs money. INVALID
+    means the markers contradict each other and no boundary is trustworthy.
+    """
+    state = load_migration_state(store)
+    if state.phase in (MigrationPhase.MIGRATING, MigrationPhase.INVALID):
+        raise MigrationActive(state)
+    return state
+
+
 __all__ = [
     "COMPLETED_EVENT",
     "COMPLETED_KEY",
     "MIGRATION_ID",
     "STARTED_EVENT",
     "STARTED_KEY",
+    "MigrationActive",
     "MigrationPhase",
     "MigrationState",
     "MigrationStateInvalid",
     "complete_migration",
+    "ensure_no_active_migration",
     "load_migration_state",
     "start_migration",
 ]

@@ -135,6 +135,7 @@ from maestro.state.funding_workflow import (
     plan_contribution_request,
     request_terminal_state,
 )
+from maestro.state.migration_state import ensure_no_active_migration
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 from maestro.universe.dynamic import DynamicUniverseService, InstrumentResolver
@@ -284,6 +285,11 @@ class MaestroOrchestrator:
         # _execute_live_approval_orders -> submit_approved_order, which takes it.
         with self.state_store.live_order_lock("run_once"):
             with self.state_store.writer_lock("run_once"):
+                # Inside the lock so the fence and everything under it describe
+                # one interval: a migration completing between the check and
+                # the work is fine (the next entry point sees it), but one
+                # starting mid-run would classify state this call is writing.
+                ensure_no_active_migration(self.state_store)
                 return self._run_once_locked()
 
     def run_signal(
@@ -312,7 +318,14 @@ class MaestroOrchestrator:
         # it goes into the same transaction as the signal package itself (see
         # save_signal_package), so no interruption can leave a package that
         # nothing points at.
+        #
+        # The migration fence sits inside the lock for the same reason: while
+        # MIGRATING or INVALID, nothing here may create workflow ownership --
+        # that history belongs to the backfill's classification. This covers
+        # every caller at once: `maestro run-signal`, daily-signal-approval,
+        # dashboard generate-signal and the Telegram operator's own paths.
         with self.state_store.writer_lock("run_signal"):
+            ensure_no_active_migration(self.state_store)
             if source_request_id is not None:
                 existing = load_workflow_child(
                     self.state_store, source_request_id, source_phase or "funding"
@@ -352,11 +365,13 @@ class MaestroOrchestrator:
         # _execute_live_approval_orders -> submit_approved_order, which takes it.
         with self.state_store.live_order_lock("approve_signal"):
             with self.state_store.writer_lock("approve_signal"):
+                ensure_no_active_migration(self.state_store)
                 return self._approve_signal_locked(signal_run_id)
 
     def dispatch_signal_approval(self, signal_run_id: str) -> ApprovalDispatchResult:
         """Persist and send live Telegram approvals without polling for a decision."""
         with self.state_store.writer_lock("dispatch_signal_approval"):
+            ensure_no_active_migration(self.state_store)
             return self._dispatch_signal_approval_locked(signal_run_id)
 
     def resolve_pending_signal_approval(

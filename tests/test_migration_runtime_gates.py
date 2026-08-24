@@ -208,3 +208,117 @@ def test_a_completed_migration_leaves_the_funding_callback_working(operator_bot)
     assert operator_bot.process_update(callback_update("operator:funding:cancel:req-1"))
 
     assert _statuses(store, "/funding_cancel") == ["canceled"]
+
+
+# --- direct orchestration entry points (no Telegram in sight) --------------
+#
+# A crashed migration leaves MIGRATING behind after its process exits, so
+# safety cannot depend on the operator remembering not to run some other
+# command. The orchestrator methods that can create workflow ownership,
+# dispatch approvals or execute signals check the same fence themselves.
+
+
+@pytest.fixture
+def orchestrator(tmp_path):
+    from contribution_fixtures import _multi_account_config
+
+    from maestro.orchestration.orchestrator import MaestroOrchestrator
+
+    config = _multi_account_config(tmp_path)
+    return MaestroOrchestrator(config)
+
+
+def test_run_signal_refuses_while_migrating(orchestrator):
+    _start(orchestrator.state_store)
+    before = event_count(orchestrator.state_store)
+
+    with pytest.raises(ms.MigrationActive, match="MIGRATING"):
+        orchestrator.run_signal()
+
+    assert event_count(orchestrator.state_store) == before
+
+
+def test_run_signal_refuses_on_invalid_markers(orchestrator):
+    store = orchestrator.state_store
+    store.save_system_event("r", ms.STARTED_EVENT, {"cutoff": "x", "duplicate_key": ms.STARTED_KEY})
+    before = event_count(store)
+
+    with pytest.raises(ms.MigrationActive, match="contradictory"):
+        orchestrator.run_signal()
+
+    assert event_count(store) == before
+
+
+@pytest.mark.parametrize(
+    ("entry", "inner", "args"),
+    (
+        ("run_signal", "_run_signal_locked", ()),
+        ("run_once", "_run_once_locked", ()),
+        ("approve_signal", "_approve_signal_locked", ("sig-1",)),
+        ("dispatch_signal_approval", "_dispatch_signal_approval_locked", ("sig-1",)),
+    ),
+)
+def test_every_authoritative_entry_point_is_fenced_while_migrating(
+    orchestrator, monkeypatch, entry, inner, args
+):
+    """Directly, not through Telegram: `maestro run-signal`, run-once,
+    daily-signal-approval, dashboard generate-signal and every other caller
+    all pass through these four methods."""
+    store = orchestrator.state_store
+    reached: list[bool] = []
+    monkeypatch.setattr(
+        type(orchestrator), inner, lambda self, *a, **k: reached.append(True) or None
+    )
+    _start(store)
+    before = event_count(store)
+
+    with pytest.raises(ms.MigrationActive):
+        getattr(orchestrator, entry)(*args)
+
+    assert reached == []
+    assert event_count(store) == before
+
+
+@pytest.mark.parametrize(
+    ("entry", "inner", "args"),
+    (
+        ("run_signal", "_run_signal_locked", ()),
+        ("run_once", "_run_once_locked", ()),
+        ("approve_signal", "_approve_signal_locked", ("sig-1",)),
+        ("dispatch_signal_approval", "_dispatch_signal_approval_locked", ("sig-1",)),
+    ),
+)
+def test_the_fence_lifts_once_no_migration_is_ongoing(
+    orchestrator, monkeypatch, entry, inner, args
+):
+    """NOT_STARTED and COMPLETED are ordinary operating states."""
+    from test_migration_runtime_gates import _stub_summary
+
+    reached: list[bool] = []
+    monkeypatch.setattr(
+        type(orchestrator),
+        inner,
+        lambda self, *a, **k: reached.append(True) or _stub_summary(entry),
+    )
+
+    getattr(orchestrator, entry)(*args)
+    _complete(orchestrator.state_store)
+
+    getattr(orchestrator, entry)(*args)
+
+    assert reached == [True, True]
+
+
+def _stub_summary(entry):
+    from maestro.approval.models import ApprovalDispatchResult
+    from maestro.orchestration.orchestrator import RunOnceSummary
+
+    if entry == "run_once":
+        return RunOnceSummary(
+            run_id="r", loaded_strategies=[], orders_created=0, total_value=0.0, cash=0.0
+        )
+    if entry == "dispatch_signal_approval":
+        return ApprovalDispatchResult(
+            signal_run_id="s", run_id="r", orders_planned=0, approval_status="pending"
+        )
+    return None
