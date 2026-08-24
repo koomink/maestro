@@ -27,15 +27,36 @@ from migration_fixtures import (
     publish_current_request,
     workflow_id,
 )
+from test_funding_workflow_resume import (
+    FakeTelegramClient,
+    _readonly_config_path,
+    _signal_config_path,
+)
 
-from test_funding_workflow_resume import operator_bot  # noqa: F401 - pytest fixture
-
+from maestro.config.loader import load_config
+from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
+from maestro.monitoring.audit_logger import AuditLogger
 from maestro.state import funding_workflow as fw
+from maestro.state.store import StateStore
 
 
 @pytest.fixture
 def store(tmp_path):
     return make_store(tmp_path)
+
+
+@pytest.fixture
+def operator_bot(tmp_path):
+    """Built here rather than imported: importing a fixture into a module that
+    also names it as a parameter reads as a redefinition."""
+    config = load_config(_readonly_config_path(tmp_path))
+    return TelegramOperatorCommandRouter(
+        config=config,
+        store=StateStore(config.state.sqlite_path, config.portfolio.initial_cash),
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=FakeTelegramClient(),
+        signal_config_path=_signal_config_path(tmp_path),
+    )
 
 
 def test_a_completed_workflow_is_terminal_without_any_legacy_projection(store):
