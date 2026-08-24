@@ -526,3 +526,19 @@ Verify:
 systemctl list-timers maestro-resume-order-tracking.timer
 journalctl -u maestro-resume-order-tracking.service -n 5 --no-pager
 ```
+
+## 상태 마이그레이션 시의 quiesce
+
+이 문서의 유닛 중 Maestro 상태 DB에 쓰는 것과 그것을 되살릴 수 있는 것의
+목록은 `src/maestro/ops/quiesce.py`가 소유하고, `tests/test_quiesce_units.py`가
+`deploy/systemd/`의 실제 파일과 대조한다 — 유닛을 새로 추가하면 그 테스트가
+먼저 깨지므로 장벽에서 조용히 빠질 수 없다.
+
+주의 두 가지. `maestro-dashboard.service`는 이름과 달리 writer다
+(`POST /api/dashboard/refresh`, `POST /api/dashboard/virtuoso/{id}/generate-signal`).
+그리고 `maestro-run-once.service`의 `ExecStopPost`는 텔레그램 오퍼레이터를
+**기동**하므로, 정지 순서에서 오퍼레이터보다 먼저 내려야 한다.
+
+절차 전체는 [docs/rollback_and_upgrade_3a.md](rollback_and_upgrade_3a.md).
+`maestro quiesce-status`가 세 조건(모든 writer inactive · 모든 activator
+inactive · 대기 중인 systemd job 없음)과 복구용 원래 enable 상태를 찍는다.

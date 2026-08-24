@@ -262,6 +262,14 @@ Two related notices can arrive in Telegram:
   workflow that cannot finish is superseded by the next scheduled run rather
   than settled by hand.
 
+## 3a 업그레이드 / 롤백
+
+funding workflow head/CAS(3a-4)와 업그레이드 backfill · 롤백 preflight(3a-5)의
+배포·되돌리기 절차, quiesce 유닛 목록, 격리(quarantine) 판단표는
+[docs/rollback_and_upgrade_3a.md](rollback_and_upgrade_3a.md)에 있다.
+`maestro quiesce-status` → `maestro upgrade-backfill` →
+`maestro rollback-preflight` 세 명령이 축이다.
+
 ## Symphony Workflow
 
 The multi-account operator workflow uses three configs:
