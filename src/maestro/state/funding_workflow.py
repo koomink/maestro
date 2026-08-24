@@ -895,11 +895,23 @@ def load_migration_cutoff(store: StateStore) -> int | None:
     없는 게 정상이지 orphan이 아니다. 경계를 모른 채(혹은 0으로 지어내어)
     쓸어담으면 그 요청들이 전부 orphan으로 오판되어 supersede되고, 이번
     달 투자가 조용히 취소된다.
+
+    판정 자체는 ``migration_state``가 단독으로 소유한다. 마커가 서로 모순되면
+    ``MigrationStateInvalid``를 올린다: 여기서 조용히 ``None``을 돌려주면
+    sweep은 "3a 이전 DB라 수렴할 것이 없다"와 "마커가 깨져 무엇도 믿을 수
+    없다"를 같은 무행동으로 처리하고, 운영자는 후자에 대해 아무 신호도 받지
+    못한다.
     """
-    rows = store.list_system_events_by_type("funding_workflow_migration_started", limit=None)
-    if not rows:
-        return None
-    return min(int((row.get("payload") or {}).get("cutoff") or 0) for row in rows)
+    from maestro.state.migration_state import (
+        MigrationPhase,
+        MigrationStateInvalid,
+        load_migration_state,
+    )
+
+    state = load_migration_state(store)
+    if state.phase is MigrationPhase.INVALID:
+        raise MigrationStateInvalid(str(state.reason))
+    return state.cutoff
 
 
 def converge_workflow_invariants(store: StateStore, *, cutoff: int | None) -> dict[str, int]:
