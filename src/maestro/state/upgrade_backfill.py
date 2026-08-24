@@ -23,6 +23,7 @@ payloads, not just keys).
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -76,7 +77,6 @@ class BackfillReport:
     heads_created: int = 0
     heads_already_coherent: int = 0
     terminal_skipped: int = 0
-    superseded_by_newer: int = 0
     quarantines: list[Quarantine] = field(default_factory=list)
 
     @property
@@ -131,18 +131,29 @@ def list_quarantines(store: StateStore) -> list[Quarantine]:
     return sorted(quarantines, key=lambda item: (item.subsystem, item.identifier))
 
 
-def _legacy_terminal_request_ids(store: StateStore) -> set[str]:
+def _legacy_terminal_request_ids(store: StateStore, *, cutoff: int) -> tuple[set[str], set[str]]:
     """Requests the pre-3a-4 binary recorded a terminal decision for.
 
-    Read here, and only here, as *historical* evidence -- the one job the
-    legacy terminal events keep. What they may no longer do is answer the same
-    question at runtime; see ``funding_workflow.request_terminal_state``.
+    Split by the cutoff on purpose. A pre-cutoff ack is *historical* evidence
+    -- the one job the legacy terminal events keep; what they may no longer do
+    is answer the same question at runtime (see
+    ``funding_workflow.request_terminal_state``). An ack **above** the cutoff
+    is not history: it is a legacy-generation row written after the migration
+    took ownership, which under the barrier nothing may produce. Reading it as
+    "this request finished" would silently absorb that breach -- and possibly
+    strand a request whose transition already had broker side effects -- so
+    those come back separately and become blocking quarantines instead.
     """
-    return {
-        str((row.get("payload") or {}).get("request_id") or "")
-        for event_type in LEGACY_TERMINAL_EVENT.values()
-        for row in store.list_system_events_by_type(event_type, limit=None)
-    }
+    pre_cutoff: set[str] = set()
+    post_cutoff: set[str] = set()
+    for event_type in LEGACY_TERMINAL_EVENT.values():
+        for row in store.list_system_events_by_type(event_type, limit=None):
+            request_id = str((row.get("payload") or {}).get("request_id") or "")
+            if int(row.get("id") or 0) > cutoff:
+                post_cutoff.add(request_id)
+            else:
+                pre_cutoff.add(request_id)
+    return pre_cutoff, post_cutoff
 
 
 def _workflow_terminal_request_ids(store: StateStore) -> set[str]:
@@ -153,15 +164,76 @@ def _workflow_terminal_request_ids(store: StateStore) -> set[str]:
     }
 
 
-def _request_event_ids(store: StateStore) -> dict[str, int]:
-    """``request_id -> system_events.id`` for every recorded contribution request."""
-    ids: dict[str, int] = {}
-    for event_type in _REQUEST_EVENT.values():
-        for row in store.list_system_events_by_type(event_type, limit=None):
-            request_id = str((row.get("payload") or {}).get("request_id") or "")
-            if request_id:
-                ids[request_id] = int(row.get("id") or 0)
-    return ids
+def _intended_head_payload(
+    workflow_id: str, phase: str, payload: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The exact v1 head this backfill writes for an unambiguous candidate.
+
+    Deterministic by construction -- identifiers only, no clock -- so a
+    crashed run's restart reproduces it byte for byte and the store recognizes
+    its own prior work as a replay.
+    """
+    return {
+        "duplicate_key": head_key(workflow_id, 1),
+        "workflow_id": workflow_id,
+        "version": 1,
+        "request_id": str(payload.get("request_id")),
+        "phase": phase,
+        "status": "pending",
+        "scope": [
+            payload.get("contribution_group_id"),
+            payload.get("account_id"),
+            payload.get("execution_sleeve"),
+            payload.get("currency"),
+        ],
+        "reason": "legacy_backfill_v1",
+    }
+
+
+def _commit_v1_head(
+    store: StateStore, run_id: str, workflow_id: str, intended: dict[str, Any]
+) -> tuple[str, dict[str, Any] | None]:
+    """Write the v1 head, or classify a lost race against whatever committed.
+
+    Returns ``("created", None)``, ``("coherent", head)`` or
+    ``("conflict", head)``. A conflict is never judged from the exception
+    alone: the authoritative current head is reloaded and compared to the full
+    intended payload. Only byte-identical content counts as coherent --
+    anything else (a different request, phase, scope or version) is someone
+    else's ownership claim and comes back as a conflict for quarantine.
+    """
+    try:
+        outcome = store.save_system_events_atomic(
+            run_id,
+            [{"event_type": "funding_workflow_head", "payload": intended}],
+            # The workflow had no head when this loop read the store, and
+            # under the barrier nothing else can give it one -- but pinning it
+            # here costs nothing and makes the decision this loop made agree
+            # with what SQLite commits rather than with what was true when the
+            # snapshot was taken.
+            forbid_duplicate_keys=(head_key(workflow_id, 1),),
+        )
+    except ValueError:
+        # A same-key different-content (or provenance) collision is exactly
+        # what losing the v1 slot looks like. Classify from what actually
+        # committed -- but only once something *is* there to classify; a
+        # ValueError over an absent head is some other fault entirely and
+        # keeps its identity as an exception.
+        if store.load_funding_workflow_head(workflow_id) is None:
+            raise
+        return _classify_committed_head(store, workflow_id, intended)
+    if outcome["committed"]:
+        return "created", None
+    return _classify_committed_head(store, workflow_id, intended)
+
+
+def _classify_committed_head(
+    store: StateStore, workflow_id: str, intended: dict[str, Any]
+) -> tuple[str, dict[str, Any] | None]:
+    committed = store.load_funding_workflow_head(workflow_id)
+    if committed == intended:
+        return "coherent", committed
+    return "conflict", committed
 
 
 def backfill_funding_heads(
@@ -171,23 +243,45 @@ def backfill_funding_heads(
 
     Without a head, ``claim_workflow_attempt`` refuses every transition on a
     pre-3a-4 request and the operator's month cannot be confirmed at all. With
-    the *wrong* head, it confirms the wrong request. So a head is written only
-    where exactly one pending request survives every terminal test, and the
-    workflow either has no head or already names that same request.
+    the *wrong* head, it confirms the wrong request. So candidates are grouped
+    by **workflow_id across every phase** -- one workflow has one head, not one
+    per phase -- and a head is written only where exactly one pending request
+    survives every terminal test and the workflow either has no head or
+    already carries exactly the head this backfill intends.
 
-    Everything else is quarantined and blocks completion. Leaving the system
-    stopped is strictly better than assigning a live head by guess.
+    A legitimate succession is never guessed here. Current-generation lineage
+    leaves a durable ``funding_workflow_superseded`` marker behind, and any
+    request carrying one is terminal before candidacy begins; therefore no
+    live candidate can be provably linked to some other request's head. A head
+    pointing anywhere but the sole remaining candidate is a blocking conflict.
+
+    Everything ambiguous is quarantined and blocks completion. Leaving the
+    system stopped is strictly better than assigning a live head by guess.
     """
     if not store.holds_writer_lock():
         raise RuntimeError("backfill_funding_heads requires the StateStore writer lock")
 
     report = BackfillReport()
-    terminal = _legacy_terminal_request_ids(store) | _workflow_terminal_request_ids(store)
-    request_event_ids = _request_event_ids(store)
-    heads = {row["workflow_id"]: row for row in store.list_funding_workflow_heads()}
+    legacy_terminal, post_cutoff_terminal = _legacy_terminal_request_ids(store, cutoff=cutoff)
+    terminal = legacy_terminal | _workflow_terminal_request_ids(store)
+    quarantined_post_cutoff: set[str] = set()
+    for request_id in sorted(post_cutoff_terminal):
+        if not request_id or request_id in quarantined_post_cutoff:
+            continue
+        quarantined_post_cutoff.add(request_id)
+        report.quarantines.append(
+            Quarantine(
+                subsystem="funding",
+                identifier=request_id,
+                reason="post_cutoff_legacy_terminal",
+                blocking=True,
+                detail={},
+            )
+        )
 
-    # workflow_id -> phase -> [request payloads still open]
-    candidates: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    # workflow_id -> [(phase, request payload)] of live candidates, every phase
+    # together, so ownership is decided over the whole workflow at once.
+    candidates: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     for phase, event_type in _REQUEST_EVENT.items():
         for row in store.list_system_events_by_type(event_type, limit=None):
             if int(row.get("id") or 0) > cutoff:
@@ -198,8 +292,13 @@ def backfill_funding_heads(
             if payload.get("status") != "pending" or request_id in terminal:
                 report.terminal_skipped += 1
                 continue
+            if request_id in quarantined_post_cutoff:
+                # Its post-cutoff legacy ack already blocked the migration;
+                # giving the request a live head on top of that could repeat a
+                # transition that may have executed.
+                continue
             try:
-                workflow_id = str(
+                workflow_id_str = str(
                     payload.get("funding_workflow_id") or workflow_id_from_request(payload)
                 )
             except (ValueError, KeyError):
@@ -217,88 +316,69 @@ def backfill_funding_heads(
                     )
                 )
                 continue
-            candidates.setdefault((workflow_id, phase), []).append(payload)
+            candidates.setdefault(workflow_id_str, []).append((phase, payload))
 
-    for (workflow_id, phase), pending in sorted(candidates.items()):
-        pending.sort(key=lambda item: str(item.get("request_id")))
-        request_ids = [str(item["request_id"]) for item in pending]
-        if len(pending) > 1:
-            # Two live requests for one month. Nothing in the record says which
-            # the operator meant, and picking either would hand it the month's
+    for workflow_id_str, entries in sorted(candidates.items()):
+        entries.sort(key=lambda item: (item[0], str(item[1].get("request_id"))))
+        if len(entries) > 1:
+            # Two live requests for one workflow -- whether they compete in the
+            # same phase or across phases, nothing in the record says which the
+            # operator meant, and picking either would hand it the month's
             # investment.
+            phases = sorted({phase for phase, _ in entries})
+            request_ids = sorted(str(payload.get("request_id")) for _, payload in entries)
             report.quarantines.append(
                 Quarantine(
                     subsystem="funding",
-                    identifier=workflow_id,
+                    identifier=workflow_id_str,
                     reason="ambiguous_pending_requests",
                     blocking=True,
-                    detail={"phase": phase, "request_ids": request_ids},
+                    detail={"phases": phases, "request_ids": request_ids},
                 )
             )
             continue
-        payload = pending[0]
-        request_id = request_ids[0]
-        head = heads.get(workflow_id)
+        phase, payload = entries[0]
+        intended = _intended_head_payload(workflow_id_str, phase, payload)
+        head = store.load_funding_workflow_head(workflow_id_str)
         if head is not None:
-            head_request_id = str(head.get("request_id") or "")
-            if head_request_id == request_id:
+            if head == intended:
                 report.heads_already_coherent += 1
-                continue
-            if request_event_ids.get(head_request_id, 0) > cutoff:
-                # A post-cutoff request already owns this workflow: 3a
-                # published it, atomically, with its own head. That lineage is
-                # current and coherent, and the pre-cutoff request is inert --
-                # no head points at it, so no transition can be claimed on it.
-                report.superseded_by_newer += 1
                 continue
             report.quarantines.append(
                 Quarantine(
                     subsystem="funding",
-                    identifier=workflow_id,
+                    identifier=workflow_id_str,
                     reason="head_ownership_conflict",
                     blocking=True,
                     detail={
                         "phase": phase,
-                        "pending_request_id": request_id,
-                        "head_request_id": head_request_id,
+                        "pending_request_id": str(intended["request_id"]),
+                        "head_request_id": str(head.get("request_id") or ""),
                         "head_version": int(head.get("version") or 0),
                     },
                 )
             )
             continue
-        outcome = store.save_system_events_atomic(
-            str(payload.get("run_id") or f"run_{request_id}"),
-            [
-                {
-                    "event_type": "funding_workflow_head",
-                    "payload": {
-                        "duplicate_key": head_key(workflow_id, 1),
-                        "workflow_id": workflow_id,
-                        "version": 1,
-                        "request_id": request_id,
-                        "phase": phase,
-                        "status": "pending",
-                        "scope": [
-                            payload.get("contribution_group_id"),
-                            payload.get("account_id"),
-                            payload.get("execution_sleeve"),
-                            payload.get("currency"),
-                        ],
-                        "reason": "legacy_backfill_v1",
-                    },
-                }
-            ],
-            # The workflow had no head when this loop read the store, and
-            # under the barrier nothing else can give it one -- but pinning it
-            # here costs nothing and makes the decision this loop made agree
-            # with what SQLite commits rather than with what was true when the
-            # snapshot was taken.
-            forbid_duplicate_keys=(head_key(workflow_id, 1),),
-        )
-        if outcome["committed"]:
+        verdict, committed = _commit_v1_head(store, run_id, workflow_id_str, intended)
+        if verdict == "created":
             report.heads_created += 1
-        else:
+        elif verdict == "coherent":
             report.heads_already_coherent += 1
+        else:
+            report.quarantines.append(
+                Quarantine(
+                    subsystem="funding",
+                    identifier=workflow_id_str,
+                    reason="head_ownership_conflict",
+                    blocking=True,
+                    detail={
+                        "phase": phase,
+                        "pending_request_id": str(intended["request_id"]),
+                        "head_request_id": str((committed or {}).get("request_id") or ""),
+                        "head_version": int((committed or {}).get("version") or 0),
+                    },
+                )
+            )
 
     for quarantine in report.quarantines:
         write_quarantine(store, run_id, quarantine)
@@ -507,6 +587,19 @@ def detect_reupgrade_after_rollback(
     request and its head in one batch, so a request no head has ever named is
     likewise only reachable from an old writer.
 
+    ``legacy_ack_without_schema_version`` -- this generation's single ack write
+    site always records an int ``schema_version``, so a bare ack above the
+    cutoff can only have come from a pre-versioning binary. A *versioned* ack,
+    by contrast, is ordinary current activity and never evidence here.
+
+    One legacy shape is deliberately NOT a detector: a consumed-but-unsettled
+    dispatch with no manifest. The synchronous approve path (paper / non-async
+    modes) legitimately runs without manifests at all, so its own crash could
+    produce exactly that shape -- flagging it would accuse this generation of
+    being an old binary. The condition is already contained fail-closed
+    elsewhere: rollback preflight R2 refuses the rollback, the resume fence
+    refuses automatic replay, and the migration quarantined it on first pass.
+
     Nothing is merged, no second cutoff is chosen and no epoch 2 is created. A
     database in this state needs a dedicated procedure and a person to design
     it; guessing here is how two generations get silently interleaved.
@@ -554,6 +647,23 @@ def detect_reupgrade_after_rollback(
                     "event_type": event_type,
                 }
             )
+
+    for row in store.list_system_events_by_type("telegram_approval_ack", limit=None):
+        if int(row.get("id") or 0) <= cutoff:
+            continue
+        payload = row.get("payload") or {}
+        if isinstance(payload.get("schema_version"), int):
+            # Current generation: the resume path owns these, and rollback
+            # preflight (R3) is what checks them.
+            continue
+        evidence.append(
+            {
+                "detector": "legacy_ack_without_schema_version",
+                "event_id": int(row.get("id") or 0),
+                "identifier": str(payload.get("approval_id") or ""),
+                "event_type": "telegram_approval_ack",
+            }
+        )
     return sorted(evidence, key=lambda item: item["event_id"])
 
 

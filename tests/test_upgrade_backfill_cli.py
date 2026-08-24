@@ -297,6 +297,36 @@ def test_a_post_cutoff_request_with_no_head_is_also_evidence(store, config_path)
     assert "request_without_head" in result.stdout
 
 
+def test_a_post_cutoff_schema_less_approval_ack_is_also_evidence(store, config_path):
+    """This generation has never written an ack without an int schema_version
+    (one write site, always versioned), so a bare one above the cutoff is
+    positive evidence of an old writer -- not something to merge quietly."""
+    _run(config_path)
+    _schema_less_ack(store, "ap-rolled-back")
+
+    result = _run(config_path)
+
+    assert result.exit_code == 1
+    assert "reupgrade_after_rollback" in result.stdout
+    assert "legacy_ack_without_schema_version" in result.stdout
+    assert "ap-rolled-back" in result.stdout
+
+
+def test_an_ordinary_versioned_ack_is_not_mistaken_for_a_rollback(store, config_path):
+    """Current-generation activity must pass the rerun untouched."""
+    _run(config_path)
+    store.save_system_event(
+        "run_ap",
+        "telegram_approval_ack",
+        {"approval_id": "ap-current", "schema_version": 2},
+    )
+
+    result = _run(config_path)
+
+    assert result.exit_code == 0, result.stdout
+    assert "reupgrade_after_rollback" not in result.stdout
+
+
 def test_ordinary_current_generation_activity_is_not_mistaken_for_a_rollback(store, config_path):
     _run(config_path)
     publish_current_request(store, "req-new", month_key="2026-09")
