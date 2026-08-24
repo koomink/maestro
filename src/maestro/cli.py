@@ -63,6 +63,7 @@ from maestro.integrations.telegram.ui import catalog as ui_catalog
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
 from maestro.monitoring.logging import configure_structured_logging
+from maestro.ops import quiesce
 from maestro.ops.batch_execution import (
     SettlementRefused,
     build_order_evidence,
@@ -91,6 +92,7 @@ from maestro.state.events import (
 )
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
+from maestro.state.upgrade_backfill import UpgradeResult, run_upgrade_backfill
 
 app = typer.Typer()
 performance_baseline_app = typer.Typer()
@@ -1611,6 +1613,114 @@ def clear_halt(
         raise typer.Exit(1)
     current = SafetyControlService(store, audit).clear_halt(new_run_id(), reason)
     typer.echo(f"state={current.state.value} reason={current.reason}")
+
+
+def _echo_upgrade_result(result: UpgradeResult) -> None:
+    """One key=value line per category. Partial state is never hidden."""
+    typer.echo(f"upgrade_backfill state={result.state.phase.value} cutoff={result.state.cutoff}")
+    backfill = result.backfill
+    if backfill is not None:
+        typer.echo(
+            "upgrade_backfill "
+            f"legacy_rows_inspected={backfill.legacy_requests_inspected} "
+            f"heads_created={backfill.heads_created} "
+            f"heads_already_coherent={backfill.heads_already_coherent} "
+            f"terminal_skipped={backfill.terminal_skipped} "
+            f"superseded_by_newer={backfill.superseded_by_newer}"
+        )
+    if result.approvals is not None:
+        typer.echo(
+            "upgrade_backfill "
+            f"approval_acks_inspected={result.approvals.acks_inspected} "
+            f"approvals_proven_complete={result.approvals.proven_complete}"
+        )
+    if result.dispatches is not None:
+        typer.echo(
+            "upgrade_backfill "
+            f"dispatches_inspected={result.dispatches.dispatches_inspected} "
+            f"dispatches_resumable={result.dispatches.resumable}"
+        )
+    for quarantine in result.quarantines:
+        typer.echo(
+            f"upgrade_backfill quarantine subsystem={quarantine.subsystem} "
+            f"identifier={quarantine.identifier} reason={quarantine.reason} "
+            f"blocking={quarantine.blocking} detail={quarantine.detail}"
+        )
+    for evidence in result.reupgrade_evidence:
+        typer.echo(
+            f"upgrade_backfill reupgrade_evidence detector={evidence['detector']} "
+            f"event_id={evidence['event_id']} identifier={evidence['identifier']} "
+            f"event_type={evidence['event_type']}"
+        )
+    if result.aborted_reason is not None:
+        typer.echo(f"upgrade_backfill status=aborted reason={result.aborted_reason}")
+        if result.aborted_reason == "blocking_quarantine":
+            typer.echo(
+                "upgrade_backfill next=resolve the blocking quarantines above and rerun. "
+                "Do NOT restart services: funding ownership is unresolved."
+            )
+        if result.aborted_reason == "reupgrade_after_rollback":
+            typer.echo(
+                "upgrade_backfill next=this database was written by an older binary after "
+                "the migration completed. See docs/rollback_and_upgrade_3a.md; do not force it."
+            )
+        return
+    typer.echo("upgrade_backfill status=completed")
+
+
+def _echo_quiesce_failure(command: str, report: quiesce.QuiesceReport) -> None:
+    for unit in report.active_units:
+        typer.echo(f"{command} status=fail reason=writer_active unit={unit}")
+    for unit in report.queued_jobs:
+        typer.echo(f"{command} status=fail reason=queued_job unit={unit}")
+
+
+@app.command("quiesce-status")
+def quiesce_status() -> None:
+    """장벽이 서 있는지, 그리고 나중에 무엇을 원래대로 되돌려야 하는지 보여준다.
+
+    아무것도 정지시키거나 활성화하지 않는다. `enable --now`로 일괄 복구하면
+    운영자가 일부러 꺼 둔 writer까지 켜지므로, 복구는 여기 찍힌 원래 상태를
+    보고 사람이 한다.
+    """
+    report = quiesce.verify_quiesced()
+    typer.echo(f"quiesce quiesced={report.quiesced}")
+    _echo_quiesce_failure("quiesce", report)
+    for state in quiesce.capture_unit_states():
+        typer.echo(f"quiesce unit={state.unit} active={state.active} enabled={state.enabled}")
+
+
+@app.command("upgrade-backfill")
+def upgrade_backfill(
+    config: Path | None = CONFIG_OPTION,
+    require_quiesce: bool = typer.Option(
+        True,
+        "--require-quiesce/--no-require-quiesce",
+        help="Refuse to run unless every writer unit and activator is stopped.",
+    ),
+) -> None:
+    """3a 업그레이드 backfill. quiesce 장벽 아래에서만 실행한다.
+
+    브로커 주문 제출, 승인 재집행, 시그널 생성·재생, 과거 dispatch 의도의
+    재계산, 현금흐름 기록 -- 어느 것도 하지 않는다. 쓰는 것은 마이그레이션
+    소유권 마커, 결정적 v1 head, 격리 레코드뿐이며 `migration_completed`가
+    마지막 쓰기다.
+
+    막는 격리(funding 소유권 모호)가 남으면 완료하지 않고 MIGRATING 상태로
+    끝낸다. 그러면 런타임 게이트가 계속 닫혀 있으므로, 소유권이 정리되기
+    전에는 서비스를 재개하지 않는다.
+    """
+    if require_quiesce:
+        report = quiesce.verify_quiesced()
+        if not report.quiesced:
+            _echo_quiesce_failure("upgrade_backfill", report)
+            raise typer.Exit(1)
+    maestro_config, identity = _load_operator_config(config)
+    store = _state_store(maestro_config, identity)
+    result = run_upgrade_backfill(store, new_run_id())
+    _echo_upgrade_result(result)
+    if result.aborted_reason is not None:
+        raise typer.Exit(1)
 
 
 def _service_is_active(unit: str) -> bool:

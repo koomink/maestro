@@ -26,10 +26,16 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from maestro.state import migration_state
 from maestro.state.funding_workflow import (
     LEGACY_TERMINAL_EVENT,
     head_key,
     workflow_id_from_request,
+)
+from maestro.state.migration_state import (
+    MigrationPhase,
+    MigrationState,
+    load_migration_state,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -458,19 +464,166 @@ def classify_legacy_dispatches(
     return report
 
 
+
+@dataclass
+class UpgradeResult:
+    state: MigrationState
+    backfill: BackfillReport | None = None
+    approvals: ApprovalClassificationReport | None = None
+    dispatches: DispatchClassificationReport | None = None
+    completed: bool = False
+    aborted_reason: str | None = None
+    reupgrade_evidence: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def quarantines(self) -> list[Quarantine]:
+        return [
+            item
+            for report in (self.backfill, self.approvals, self.dispatches)
+            if report is not None
+            for item in report.quarantines
+        ]
+
+
+def detect_reupgrade_after_rollback(
+    store: StateStore, *, cutoff: int
+) -> list[dict[str, Any]]:
+    """Evidence that an *old* binary wrote to this database after the migration.
+
+    The situation: migration_completed(cutoff=N), then a rollback, then the old
+    code writes events N+1.., then this binary is deployed again. A rerun that
+    saw only the completed marker would call the database migrated and leave
+    that old-generation state unclassified forever -- pending requests with no
+    head, terminal events with no completion.
+
+    Both detectors are positive durable evidence of a write this generation
+    cannot have made, never an inference from something being absent:
+
+    ``legacy_terminal_without_completion`` -- ``complete_workflow`` writes the
+    workflow completion and its legacy projection in one transaction, so the
+    split can only come from a writer that does not know about the workflow.
+
+    ``request_without_head`` -- ``plan_contribution_request`` commits the
+    request and its head in one batch, so a request no head has ever named is
+    likewise only reachable from an old writer.
+
+    Nothing is merged, no second cutoff is chosen and no epoch 2 is created. A
+    database in this state needs a dedicated procedure and a person to design
+    it; guessing here is how two generations get silently interleaved.
+    """
+    evidence: list[dict[str, Any]] = []
+    completed = {
+        (
+            str((row.get("payload") or {}).get("request_id") or ""),
+            str((row.get("payload") or {}).get("phase") or ""),
+        )
+        for row in store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    }
+    for phase, event_type in LEGACY_TERMINAL_EVENT.items():
+        for row in store.list_system_events_by_type(event_type, limit=None):
+            if int(row.get("id") or 0) <= cutoff:
+                continue
+            request_id = str((row.get("payload") or {}).get("request_id") or "")
+            if (request_id, phase) in completed:
+                continue
+            evidence.append(
+                {
+                    "detector": "legacy_terminal_without_completion",
+                    "event_id": int(row.get("id") or 0),
+                    "identifier": request_id,
+                    "event_type": event_type,
+                }
+            )
+
+    headed = {
+        str((row.get("payload") or {}).get("request_id") or "")
+        for row in store.list_system_events_by_type("funding_workflow_head", limit=None)
+    }
+    for event_type in _REQUEST_EVENT.values():
+        for row in store.list_system_events_by_type(event_type, limit=None):
+            if int(row.get("id") or 0) <= cutoff:
+                continue
+            request_id = str((row.get("payload") or {}).get("request_id") or "")
+            if request_id in headed:
+                continue
+            evidence.append(
+                {
+                    "detector": "request_without_head",
+                    "event_id": int(row.get("id") or 0),
+                    "identifier": request_id,
+                    "event_type": event_type,
+                }
+            )
+    return sorted(evidence, key=lambda item: item["event_id"])
+
+
+def run_upgrade_backfill(store: StateStore, run_id: str) -> UpgradeResult:
+    """The whole 3a migration, under one continuously held writer lock.
+
+    The lock is taken once, around everything, rather than around each insert.
+    The cutoff means "no state existed past here when this migration began",
+    and that is only true if no cooperating writer -- a `maestro` CLI an
+    operator runs by hand, a recovery script -- can append between observing it
+    and completing. Per-insert locking would leave a gap after every step.
+
+    ``migration_completed`` is the last write, unconditionally. Anything
+    written after it lands in a database that has already declared itself
+    migrated, and would be invisible to the next run's classification. A
+    blocking quarantine therefore leaves the migration MIGRATING rather than
+    completing over it: the runtime gates stay closed and the operator must not
+    restart services until the ownership question is answered.
+    """
+    with store.writer_lock("upgrade_backfill", timeout_seconds=60.0):
+        state = load_migration_state(store)
+        if state.phase is MigrationPhase.INVALID:
+            return UpgradeResult(state=state, aborted_reason=f"invalid:{state.reason}")
+        if state.phase is MigrationPhase.COMPLETED:
+            evidence = detect_reupgrade_after_rollback(store, cutoff=int(state.cutoff or 0))
+            if evidence:
+                return UpgradeResult(
+                    state=state,
+                    aborted_reason="reupgrade_after_rollback",
+                    reupgrade_evidence=evidence,
+                )
+            # Already migrated and nothing old-generation has been written
+            # since. A verification pass, not a second migration -- it writes
+            # nothing at all.
+            return UpgradeResult(state=state, completed=True)
+
+        state = migration_state.start_migration(store, run_id)
+        cutoff = int(state.cutoff or 0)
+        result = UpgradeResult(state=state)
+        # Module-level lookups on purpose: each stage has to be independently
+        # replaceable by the crash-injection tests, and each has to observe the
+        # work its predecessor already committed.
+        result.backfill = backfill_funding_heads(store, run_id, cutoff=cutoff)
+        result.approvals = classify_legacy_approvals(store, run_id, cutoff=cutoff)
+        result.dispatches = classify_legacy_dispatches(store, run_id, cutoff=cutoff)
+        if result.backfill.blocking:
+            result.aborted_reason = "blocking_quarantine"
+            return result
+        migration_state.complete_migration(store, run_id, cutoff=cutoff)
+        result.state = load_migration_state(store)
+        result.completed = True
+        return result
+
+
 __all__ = [
     "QUARANTINE_EVENT",
     "ApprovalClassificationReport",
     "BackfillReport",
     "DispatchClassificationReport",
     "Quarantine",
+    "UpgradeResult",
     "backfill_funding_heads",
     "classify_legacy_approvals",
     "classify_legacy_dispatches",
     "completed_legacy_approval_ids",
+    "detect_reupgrade_after_rollback",
     "dispatch_manifest_key",
     "has_dispatch_manifest",
     "list_quarantines",
     "quarantine_key",
+    "run_upgrade_backfill",
     "write_quarantine",
 ]
