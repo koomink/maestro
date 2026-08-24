@@ -213,17 +213,28 @@ def run_rollback_preflight(store: StateStore) -> RollbackPreflightResult:
 
     An operator quiesces the system once and wants the whole list, not one
     problem at a time across five stop/start cycles.
+
+    The whole run sits inside one held ``store.writer_lock``. R0-R4 must
+    describe a single writer-fenced interval: systemd quiesce stops deployed
+    services, but nothing about it constrains a cooperating ``maestro`` CLI or
+    recovery script an operator runs by hand, and a preflight that reads R1
+    safe, lets another writer append incompatible state, then reads R2-R4 and
+    reports SAFE would clear a rollback over state it never actually examined.
+    Owning the lock here (rather than trusting every caller to hold it) is
+    re-entrant within a thread, so the upgrade path -- which already holds the
+    lock for its own whole operation -- can invoke this without deadlock.
     """
-    failures: list[InvariantFailure] = []
-    for check in (
-        _r0_migration_state,
-        _r1_workflow_claims,
-        _r2_consumed_dispatches,
-        _r3_versioned_approvals,
-        _r4_legacy_projection,
-    ):
-        failures.extend(check(store))
-    return RollbackPreflightResult(failures=tuple(failures))
+    with store.writer_lock("rollback_preflight", timeout_seconds=60.0):
+        failures: list[InvariantFailure] = []
+        for check in (
+            _r0_migration_state,
+            _r1_workflow_claims,
+            _r2_consumed_dispatches,
+            _r3_versioned_approvals,
+            _r4_legacy_projection,
+        ):
+            failures.extend(check(store))
+        return RollbackPreflightResult(failures=tuple(failures))
 
 
 __all__ = [

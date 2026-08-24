@@ -9,6 +9,7 @@ an intermediate build -- writing the event would erase which.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from typer.testing import CliRunner
 from maestro import cli
 from maestro.ops import quiesce
 from maestro.state import migration_state as ms
+from maestro.state import rollback_preflight as rollback_preflight_module
 from maestro.state.rollback_preflight import run_rollback_preflight
 
 
@@ -305,6 +307,94 @@ def test_r4_is_the_mirror_of_the_runtime_reading_its_own_completion(store, tmp_p
 
 
 # --- shape of the whole run -----------------------------------------------
+
+
+def test_preflight_holds_the_writer_lock_for_the_whole_interval(store, monkeypatch):
+    """R0-R4 must describe one writer-fenced interval, not five loose reads.
+
+    Systemd quiesce stops deployed services; it does nothing about a
+    cooperating `maestro` CLI or recovery script an operator runs by hand.
+    Owning the lock here -- re-entrant, so callers that already hold it nest
+    safely -- is what makes it impossible to run an unfenced preflight.
+    """
+    observed: list[bool] = []
+    original = rollback_preflight_module._r1_workflow_claims
+
+    def spy(store_):
+        observed.append(store_.holds_writer_lock())
+        return original(store_)
+
+    monkeypatch.setattr(rollback_preflight_module, "_r1_workflow_claims", spy)
+
+    run_rollback_preflight(store)
+
+    assert observed == [True]
+
+
+def test_a_competing_writer_cannot_commit_during_the_preflight_interval(store, monkeypatch):
+    """The race the lock exists to close: R1 reads safe, another writer appends
+    incompatible state, R2-R4 read the mutated database and report SAFE over
+    state that was never actually preflighted."""
+    started = threading.Event()
+    release = threading.Event()
+    original = rollback_preflight_module._r1_workflow_claims
+
+    def gate(store_):
+        # Reached only from inside the fenced interval.
+        started.set()
+        assert release.wait(timeout=10)
+        return original(store_)
+
+    monkeypatch.setattr(rollback_preflight_module, "_r1_workflow_claims", gate)
+    outcome: list[str] = []
+    writer_errors: list[BaseException] = []
+    preflight_results: list[object] = []
+    preflight_errors: list[BaseException] = []
+
+    def competing_writer():
+        try:
+            with store.writer_lock("competing-writer", timeout_seconds=0.5):
+                store.save_system_event(
+                    "run-competing",
+                    "telegram_approval_ack",
+                    {"approval_id": "ap-raced", "schema_version": 2},
+                )
+            outcome.append("committed")
+        except TimeoutError:
+            outcome.append("blocked")
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            writer_errors.append(exc)
+
+    def run_preflight():
+        try:
+            preflight_results.append(run_rollback_preflight(store))
+        except BaseException as exc:  # pragma: no cover - diagnostic only
+            preflight_errors.append(exc)
+
+    preflight_thread = threading.Thread(target=run_preflight)
+    preflight_thread.start()
+    assert started.wait(timeout=10), "preflight never reached its fenced interval"
+
+    writer_thread = threading.Thread(target=competing_writer)
+    writer_thread.start()
+    writer_thread.join(timeout=10)
+
+    release.set()
+    preflight_thread.join(timeout=10)
+
+    assert not preflight_errors
+    assert not writer_errors
+    assert outcome == ["blocked"]
+    # The fenced interval saw the database exactly as it was at entry.
+    assert preflight_results[0].failures == ()
+    assert store.list_system_events_by_type("telegram_approval_ack", limit=None) == []
+
+
+def test_preflight_nested_under_a_caller_held_lock_still_runs(store):
+    """Re-entrant: the upgrade path already holds the lock for its whole run,
+    so a preflight invoked from inside it must not deadlock or refuse."""
+    with store.writer_lock("outer"):
+        assert run_rollback_preflight(store).safe is True
 
 
 def test_preflight_writes_nothing_at_all(store):
