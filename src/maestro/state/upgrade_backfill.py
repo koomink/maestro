@@ -299,11 +299,177 @@ def backfill_funding_heads(
     return report
 
 
+@dataclass
+class ApprovalClassificationReport:
+    acks_inspected: int = 0
+    proven_complete: int = 0
+    quarantines: list[Quarantine] = field(default_factory=list)
+
+
+@dataclass
+class DispatchClassificationReport:
+    dispatches_inspected: int = 0
+    resumable: int = 0
+    quarantines: list[Quarantine] = field(default_factory=list)
+
+
+def completed_legacy_approval_ids(store: StateStore) -> set[str]:
+    """legacy 완료 판정. **signal_run_id만으로 판정하면 안 된다** -- 하나의
+    signal run이 여러 승인 그룹으로 나뉘고(orchestrator의
+    ``_approval_order_groups``) 그룹마다 별도 approval_id가 발급되므로, 한
+    그룹의 완료가 다른 그룹의 유실을 가린다.
+
+    신규 ``signal_approval_completed``에는 approval_id가 있어 정확히
+    매칭된다. approval_id가 없는 구 이벤트는 그 signal run의 승인 그룹이
+    하나뿐일 때만 완료로 인정하고, 둘 이상이면 **모호하므로 완료로 치지
+    않는다**.
+
+    Lives here rather than on the bot so the migration's classification and
+    the runtime's legacy notice judge by one rule. Two copies of a
+    conservative rule drift, and the drift stays invisible until one of them
+    calls a half-finished approval done.
+    """
+    groups: dict[str, list[str]] = {}
+    for row in store.list_system_events_by_type("telegram_approval_pending", limit=None):
+        payload = row.get("payload") or {}
+        groups.setdefault(str(payload.get("signal_run_id")), []).append(
+            str(payload.get("approval_id"))
+        )
+
+    completed: set[str] = set()
+    for row in store.list_system_events_by_type("signal_approval_completed", limit=None):
+        payload = row.get("payload") or {}
+        approval_id = payload.get("approval_id")
+        if isinstance(approval_id, str) and approval_id:
+            completed.add(approval_id)
+            continue
+        group = groups.get(str(payload.get("signal_run_id")), [])
+        if len(group) == 1:
+            completed.add(group[0])
+    return completed
+
+
+def classify_legacy_approvals(
+    store: StateStore, run_id: str, *, cutoff: int
+) -> ApprovalClassificationReport:
+    """Sort pre-two-phase approval acks into proven-complete or quarantined.
+
+    Nothing is synthesized. The old 3a-5 design would have read "a legacy ack,
+    no approvals row, no completion evidence" as proof of cancellation and
+    written a resolution event saying so. That is a broker's behaviour inferred
+    from a gap in local persistence -- the order may have reached the broker
+    before the process that was recording it died -- and a synthetic
+    cancellation is exactly the record that would later authorize a re-run.
+
+    None of these quarantines block the migration. The current runtime already
+    refuses to auto-execute a schema-less ack (``_resume_unresolved_approvals``
+    skips one, ``ops.batch_execution`` refuses to settle one), so the record
+    exists to give the ambiguity a named owner rather than to add a gate.
+    """
+    if not store.holds_writer_lock():
+        raise RuntimeError("classify_legacy_approvals requires the StateStore writer lock")
+
+    report = ApprovalClassificationReport()
+    completed = completed_legacy_approval_ids(store)
+    for row in store.list_system_events_by_type("telegram_approval_ack", limit=None):
+        if int(row.get("id") or 0) > cutoff:
+            continue
+        payload = row.get("payload") or {}
+        if isinstance(payload.get("schema_version"), int):
+            # Current generation: the resume path owns it, and rollback
+            # preflight (R3) is what checks it.
+            continue
+        approval_id = str(payload.get("approval_id") or "")
+        report.acks_inspected += 1
+        if approval_id in completed:
+            report.proven_complete += 1
+            continue
+        if store.approval_exists(approval_id):
+            # The approval itself was persisted, so execution may already have
+            # been entered. Strictly worse than "unknown", and labelled so the
+            # operator checks the broker first.
+            reason = "execution_may_have_been_entered"
+        else:
+            reason = "completion_unprovable"
+        report.quarantines.append(
+            Quarantine(
+                subsystem="approval",
+                identifier=approval_id,
+                reason=reason,
+                blocking=False,
+                detail={"event_id": int(row.get("id") or 0)},
+            )
+        )
+    for quarantine in report.quarantines:
+        write_quarantine(store, run_id, quarantine)
+    return report
+
+
+def dispatch_manifest_key(signal_run_id: str) -> str:
+    return f"dispatch-manifest:{signal_run_id}"
+
+
+def has_dispatch_manifest(store: StateStore, signal_run_id: str) -> bool:
+    """Whether this dispatch's intent was ever durably recorded."""
+    return store.duplicate_key_exists(dispatch_manifest_key(signal_run_id))
+
+
+def classify_legacy_dispatches(
+    store: StateStore, run_id: str, *, cutoff: int
+) -> DispatchClassificationReport:
+    """Separate resumable dispatches from pre-manifest ones.
+
+    ``consumed + unsettled + a manifest`` is an ordinary crash: the manifest
+    says which groups the dispatch was obligated to resolve, so re-entering it
+    finishes exactly that work.
+
+    ``consumed + unsettled + no manifest`` is pre-manifest history, and its
+    intent was never written down. Rebuilding it would mean re-deriving the
+    groups from today's strategy output, capacity, buying power, portfolio and
+    account state, which can differ from what the run actually decided -- so a
+    replay could place orders the run never intended. The missing manifest also
+    does not prove nothing went out. Neither replay nor "assume finished" is
+    safe, so it is isolated from automatic resume and handed to a person.
+
+    Read exhaustively (``limit=None``): a window would silently drop the 51st
+    unfinished run, and a lost dispatch is the failure this exists to catch.
+    """
+    if not store.holds_writer_lock():
+        raise RuntimeError("classify_legacy_dispatches requires the StateStore writer lock")
+
+    del cutoff  # Settlement, not the migration boundary, decides membership here.
+    report = DispatchClassificationReport()
+    for signal_run_id in store.list_incomplete_signal_dispatches(limit=None):
+        report.dispatches_inspected += 1
+        if has_dispatch_manifest(store, signal_run_id):
+            report.resumable += 1
+            continue
+        report.quarantines.append(
+            Quarantine(
+                subsystem="dispatch",
+                identifier=signal_run_id,
+                reason="legacy_dispatch_no_manifest",
+                blocking=False,
+                detail={},
+            )
+        )
+    for quarantine in report.quarantines:
+        write_quarantine(store, run_id, quarantine)
+    return report
+
+
 __all__ = [
     "QUARANTINE_EVENT",
+    "ApprovalClassificationReport",
     "BackfillReport",
+    "DispatchClassificationReport",
     "Quarantine",
     "backfill_funding_heads",
+    "classify_legacy_approvals",
+    "classify_legacy_dispatches",
+    "completed_legacy_approval_ids",
+    "dispatch_manifest_key",
+    "has_dispatch_manifest",
     "list_quarantines",
     "quarantine_key",
     "write_quarantine",

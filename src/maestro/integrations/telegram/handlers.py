@@ -129,6 +129,10 @@ from maestro.state.funding_workflow import (
 )
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
+from maestro.state.upgrade_backfill import (
+    completed_legacy_approval_ids,
+    has_dispatch_manifest,
+)
 
 OPERATOR_CALLBACK_PREFIX = "operator:"
 # Callback data is length-limited, so classifications travel as single letters.
@@ -1826,10 +1830,28 @@ class TelegramOperatorCommandRouter:
         a stale broker snapshot, a config that no longer loads -- from
         retrying on every poll forever. When it runs out the run goes to the
         operator instead, once.
+
+        A durable manifest is a prerequisite for entering any of this; see the
+        loop below.
         """
         if self.approval_config_path is None:
             return
         for signal_run_id in self.store.list_incomplete_signal_dispatches():
+            if not has_dispatch_manifest(self.store, signal_run_id):
+                # Pre-manifest history. The manifest is the only durable record
+                # of which groups this dispatch was obligated to resolve;
+                # without one, re-entering dispatch would rebuild that intent
+                # from today's strategy output, capacity, buying power,
+                # portfolio and approval grouping, and could place a set of
+                # orders the run never decided on. Nor does a missing manifest
+                # prove nothing went out. Neither replay nor "assume finished"
+                # is safe, so it goes to a person.
+                #
+                # Checked before the attempt budget on purpose: this run is not
+                # failing, it is refused, and spending attempts on a stable
+                # refusal would eventually make it look merely exhausted.
+                self._notify_dispatch_needs_attention(signal_run_id)
+                continue
             attempt = self._next_dispatch_resume_attempt(signal_run_id)
             if attempt > _MAX_DISPATCH_RESUME_ATTEMPT:
                 self._notify_dispatch_needs_attention(signal_run_id)
@@ -2209,38 +2231,14 @@ class TelegramOperatorCommandRouter:
             )
 
     def _completed_legacy_approval_ids(self) -> set[str]:
-        """legacy 완료 판정. **signal_run_id만으로 판정하면 안 된다** — 하나의
-        signal run이 여러 승인 그룹으로 나뉘고(orchestrator의 `_approval_order_groups`)
-        그룹마다 별도 approval_id가 발급되므로, 한 그룹의 완료가 다른 그룹의
-        유실을 가린다.
+        """See ``upgrade_backfill.completed_legacy_approval_ids``.
 
-        신규 `signal_approval_completed`에는 approval_id가 있어 정확히 매칭된다.
-        approval_id가 없는 구 이벤트는 그 signal run의 승인 그룹이 하나뿐일 때만
-        완료로 인정하고, 둘 이상이면 **모호하므로 완료로 치지 않는다** — legacy는
-        자동 재집행하지 않고 알림만 내므로, 모호하면 알리는 쪽이 안전하다.
+        Delegated rather than duplicated: the upgrade backfill classifies the
+        same legacy acks by the same conservative rule, and two copies of it
+        would drift -- invisibly, until one of them called a half-finished
+        approval done.
         """
-        groups: dict[str, list[str]] = defaultdict(list)
-        for row in self.store.list_system_events_by_type(
-            "telegram_approval_pending",
-            limit=None,
-        ):
-            payload = row["payload"]
-            groups[str(payload.get("signal_run_id"))].append(str(payload.get("approval_id")))
-
-        completed: set[str] = set()
-        for row in self.store.list_system_events_by_type(
-            "signal_approval_completed",
-            limit=None,
-        ):
-            payload = row["payload"]
-            approval_id = payload.get("approval_id")
-            if isinstance(approval_id, str) and approval_id:
-                completed.add(approval_id)
-                continue
-            group = groups.get(str(payload.get("signal_run_id")), [])
-            if len(group) == 1:
-                completed.add(group[0])
-        return completed
+        return completed_legacy_approval_ids(self.store)
 
     def _sweep_pending_approvals(self) -> None:
         self._resume_incomplete_dispatches()

@@ -79,9 +79,29 @@ def _router(tmp_path, *, dispatch_error=None, approval_config_path="set"):
     return router, store
 
 
+def _manifest(store, signal_run_id):
+    """The immutable record of which groups a dispatch owes.
+
+    dispatch_signal_approval writes it *before* marking the package consumed,
+    so every current-generation stranded run has one. It is what makes a
+    resume finish the work the run actually decided on rather than whatever
+    today's capacity and grouping would produce.
+    """
+    store.save_system_event(
+        signal_run_id,
+        "signal_dispatch_manifest",
+        {
+            "signal_run_id": signal_run_id,
+            "groups": [],
+            "duplicate_key": f"dispatch-manifest:{signal_run_id}",
+        },
+    )
+
+
 def _strand(store, signal_run_id="signal-1"):
     """Leave a package consumed with no settled event -- a dispatch that died
-    inside the group loop."""
+    inside the group loop, in the current generation's shape."""
+    _manifest(store, signal_run_id)
     store.mark_signal_package_consumed(signal_run_id, "run-1")
     return signal_run_id
 
@@ -181,3 +201,70 @@ def test_the_sweep_skips_an_attempt_another_poller_already_claimed(tmp_path):
     router._resume_incomplete_dispatches()
 
     assert router.dispatched == []
+
+
+def test_a_consumed_run_with_no_manifest_is_not_auto_resumed(tmp_path):
+    """Consumed + unsettled + no manifest is pre-manifest history.
+
+    Its dispatch intent was never written down, so re-entering dispatch would
+    rebuild it out of today's capacity, buying power, portfolio and approval
+    grouping -- and could place a set of orders the run never decided on. The
+    missing manifest is not proof that nothing went out, either. Neither replay
+    nor "assume finished" is safe, so it goes to a person.
+    """
+    router, store = _router(tmp_path)
+    store.mark_signal_package_consumed("signal-legacy", "run-1")
+
+    router._resume_incomplete_dispatches()
+
+    assert router.dispatched == []
+    notices = store.list_system_events_by_type("telegram_dispatch_needs_attention", limit=None)
+    assert [row["payload"].get("signal_run_id") for row in notices] == ["signal-legacy"]
+
+
+def test_a_consumed_run_with_a_manifest_still_resumes(tmp_path):
+    router, store = _router(tmp_path)
+    _strand(store, "signal-current")
+
+    router._resume_incomplete_dispatches()
+
+    assert router.dispatched == ["signal-current"]
+
+
+def test_the_manifestless_notice_is_sent_once_per_run(tmp_path):
+    router, store = _router(tmp_path)
+    store.mark_signal_package_consumed("signal-legacy", "run-1")
+
+    router._resume_incomplete_dispatches()
+    router._resume_incomplete_dispatches()
+
+    notices = [
+        row
+        for row in store.list_system_events_by_type(
+            "telegram_dispatch_needs_attention", limit=None
+        )
+        if row["payload"].get("signal_run_id") == "signal-legacy"
+    ]
+    assert len(notices) == 1
+
+
+def test_a_manifestless_run_never_spends_a_resume_attempt(tmp_path):
+    """The attempt budget exists to stop a dispatch that keeps failing. This
+    one is not failing, it is refused, and spending attempts on it would turn a
+    stable refusal into a run that eventually just looks exhausted."""
+    router, store = _router(tmp_path)
+    store.mark_signal_package_consumed("signal-legacy", "run-1")
+
+    router._resume_incomplete_dispatches()
+
+    assert store.list_system_events_by_type("telegram_dispatch_resume_claim", limit=None) == []
+
+
+def test_a_manifestless_run_does_not_starve_a_resumable_one(tmp_path):
+    router, store = _router(tmp_path)
+    store.mark_signal_package_consumed("signal-legacy", "run-1")
+    _strand(store, "signal-current")
+
+    router._resume_incomplete_dispatches()
+
+    assert router.dispatched == ["signal-current"]

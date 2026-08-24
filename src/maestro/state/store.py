@@ -2112,7 +2112,7 @@ class StateStore:
             ).fetchone()
         return row is not None
 
-    def list_incomplete_signal_dispatches(self, limit: int = 50) -> list[str]:
+    def list_incomplete_signal_dispatches(self, limit: int | None = 50) -> list[str]:
         """Signal runs marked consumed whose dispatch never reported finishing.
 
         ``mark_signal_package_consumed`` runs before the loop that creates and
@@ -2124,19 +2124,28 @@ class StateStore:
         been written at the end of every dispatch since long before this
         query existed, so an older completed run already has one.  A run that
         turns up here really is unfinished.
+
+        ``limit=None`` reads every one of them. The poll loop keeps its window
+        so its cost stays proportional to what is open, but the migration and
+        rollback preflight must be exhaustive: a window there would silently
+        drop the 51st unfinished run, and a dropped dispatch is exactly the
+        failure both of them exist to catch.
         """
+        query = (
+            "SELECT DISTINCT consumed.signal_run_id FROM system_events AS consumed "
+            "WHERE consumed.event_type = 'signal_package_consumed' "
+            "AND consumed.signal_run_id IS NOT NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM system_events AS settled "
+            f"  WHERE {self._dispatch_settled_sql('settled')} "
+            "  AND settled.signal_run_id = consumed.signal_run_id"
+            ") ORDER BY consumed.id"
+        )
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT consumed.signal_run_id FROM system_events AS consumed "
-                "WHERE consumed.event_type = 'signal_package_consumed' "
-                "AND consumed.signal_run_id IS NOT NULL "
-                "AND NOT EXISTS ("
-                "  SELECT 1 FROM system_events AS settled "
-                f"  WHERE {self._dispatch_settled_sql('settled')} "
-                "  AND settled.signal_run_id = consumed.signal_run_id"
-                ") ORDER BY consumed.id LIMIT ?",
-                (limit,),
-            ).fetchall()
+            if limit is None:
+                rows = conn.execute(query).fetchall()
+            else:
+                rows = conn.execute(f"{query} LIMIT ?", (limit,)).fetchall()
         return [str(row[0]) for row in rows]
 
     def load_signal_package(self, signal_run_id: str) -> dict[str, Any] | None:
