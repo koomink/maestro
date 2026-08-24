@@ -7,6 +7,7 @@ from typer.testing import CliRunner
 
 from maestro.cli import app
 from maestro.config.loader import load_config
+from maestro.ops import quiesce
 from maestro.state.store import StateStore
 
 
@@ -48,7 +49,10 @@ def test_preflight_exits_zero_when_no_unresolved_approvals(tmp_path):
         {"approval_id": "appr_1", "status": "approved"},
     )
 
-    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["approval-rollback-preflight", "--config", str(config_path), "--no-require-quiesce"],
+    )
 
     assert result.exit_code == 0
     assert "status=safe" in result.stdout
@@ -63,7 +67,10 @@ def test_preflight_exits_nonzero_and_names_unresolved_approvals(tmp_path):
         {"approval_id": "appr_unresolved", "status": "approved", "schema_version": 2},
     )
 
-    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["approval-rollback-preflight", "--config", str(config_path), "--no-require-quiesce"],
+    )
 
     assert result.exit_code == 1
     assert "appr_unresolved" in result.stdout
@@ -79,14 +86,25 @@ def test_preflight_ignores_legacy_acks(tmp_path):
         {"approval_id": "appr_legacy", "status": "approved"},
     )
 
-    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["approval-rollback-preflight", "--config", str(config_path), "--no-require-quiesce"],
+    )
 
     assert result.exit_code == 0
 
 
-def test_preflight_require_quiesce_fails_when_operator_service_is_active(tmp_path, monkeypatch):
+def test_preflight_require_quiesce_fails_when_any_writer_is_active(tmp_path, monkeypatch):
+    """The barrier is no longer the telegram operator alone: a live timer or a
+    dashboard that can refresh broker state breaks it just as thoroughly."""
     config_path = _telegram_config_path(tmp_path)
-    monkeypatch.setattr("maestro.cli._service_is_active", lambda unit: True)
+    monkeypatch.setattr(
+        quiesce,
+        "verify_quiesced",
+        lambda **_: quiesce.QuiesceReport(
+            active_units=("maestro-symphony-signal-kr.timer",), queued_jobs=()
+        ),
+    )
 
     result = CliRunner().invoke(
         app,
@@ -94,10 +112,10 @@ def test_preflight_require_quiesce_fails_when_operator_service_is_active(tmp_pat
     )
 
     assert result.exit_code == 1
-    assert "operator_still_running" in result.stdout
+    assert "maestro-symphony-signal-kr.timer" in result.stdout
 
 
-def test_preflight_require_quiesce_proceeds_when_operator_service_is_inactive(
+def test_preflight_require_quiesce_proceeds_when_every_unit_is_inactive(
     tmp_path, monkeypatch
 ):
     config_path = _telegram_config_path(tmp_path)
@@ -112,7 +130,11 @@ def test_preflight_require_quiesce_proceeds_when_operator_service_is_inactive(
         "telegram_approval_resolution_completed",
         {"approval_id": "appr_1", "status": "approved"},
     )
-    monkeypatch.setattr("maestro.cli._service_is_active", lambda unit: False)
+    monkeypatch.setattr(
+        quiesce,
+        "verify_quiesced",
+        lambda **_: quiesce.QuiesceReport(active_units=(), queued_jobs=()),
+    )
 
     result = CliRunner().invoke(
         app,
@@ -137,7 +159,10 @@ def test_preflight_applies_no_time_window(tmp_path):
     with sqlite3.connect(store.path) as conn:
         conn.execute("UPDATE system_events SET created_at = ?", (backdated,))
 
-    result = CliRunner().invoke(app, ["approval-rollback-preflight", "--config", str(config_path)])
+    result = CliRunner().invoke(
+        app,
+        ["approval-rollback-preflight", "--config", str(config_path), "--no-require-quiesce"],
+    )
 
     assert result.exit_code == 1
     assert "appr_ancient" in result.stdout

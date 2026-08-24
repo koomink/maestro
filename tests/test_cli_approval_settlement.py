@@ -261,17 +261,19 @@ def test_settle_makes_rollback_preflight_safe(tmp_path):
     config_path = _config_path(tmp_path)
     _seed(config_path)
     before = CliRunner().invoke(
-        app, ["approval-rollback-preflight", "--config", str(config_path)]
+        app,
+        ["approval-rollback-preflight", "--config", str(config_path), "--no-require-quiesce"],
     )
     assert before.exit_code == 1
 
     _settle(config_path, "--confirm", "SETTLE")
 
     after = CliRunner().invoke(
-        app, ["approval-rollback-preflight", "--config", str(config_path)]
+        app,
+        ["approval-rollback-preflight", "--config", str(config_path), "--no-require-quiesce"],
     )
     assert after.exit_code == 0
-    assert "status=safe unresolved=0" in after.stdout
+    assert "status=safe failures=0" in after.stdout
 
 
 def test_settle_reports_a_batch_that_is_being_executed_right_now(tmp_path, monkeypatch):

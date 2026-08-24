@@ -1,0 +1,12 @@
+{
+  "pending_budget": {
+    "req-budget-decided": false
+  },
+  "pending_funding": {
+    "req-acked": false,
+    "req-amb-a": true,
+    "req-amb-b": true,
+    "req-clean": true
+  },
+  "source_commit": "209ed4f18ed57773a72ab4a146e49efae1747348"
+}

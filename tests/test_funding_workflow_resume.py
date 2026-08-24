@@ -874,7 +874,20 @@ def test_a_double_tap_of_resume_enters_exactly_once_through_the_router(operator_
     for thread in threads:
         thread.join()
 
-    assert sorted(_wfresume_statuses(store)) == ["claim_in_flight", "resumed"]
+    # Exactly one tap entered, and the other was refused -- but *which*
+    # refusal depends on how far the winner got before the loser reached the
+    # claim, and nothing in this test controls that. Still mid-transition and
+    # the loser sees its own attempt already claimed (``claim_in_flight``);
+    # already finished, and the head has moved to the successor the winner
+    # published, so the loser sees ``claim_superseded``. Both are safe
+    # refusals. Asserting one of them specifically made this fail whenever
+    # machine load changed the interleaving, which is a property of the test
+    # rather than of the code. The invariant that matters -- one entry, at
+    # attempt 2 -- is asserted exactly, below.
+    statuses = sorted(_wfresume_statuses(store))
+    assert len(statuses) == 2
+    assert "resumed" in statuses
+    assert set(statuses) - {"resumed"} <= {"claim_in_flight", "claim_superseded"}
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     assert len(completed) == 1
     assert completed[0]["payload"]["attempt"] == 2

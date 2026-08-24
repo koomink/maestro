@@ -91,6 +91,7 @@ from maestro.state.events import (
     save_audited_system_event,
 )
 from maestro.state.models import PortfolioState
+from maestro.state.rollback_preflight import run_rollback_preflight
 from maestro.state.store import StateStore
 from maestro.state.upgrade_backfill import UpgradeResult, run_upgrade_backfill
 
@@ -1723,59 +1724,63 @@ def upgrade_backfill(
         raise typer.Exit(1)
 
 
-def _service_is_active(unit: str) -> bool:
-    result = subprocess.run(  # noqa: S603 - fixed args, no user input
-        ["systemctl", "is-active", "--quiet", unit],
-        check=False,
-    )
-    return result.returncode == 0
-
-
-@app.command("approval-rollback-preflight")
-def approval_rollback_preflight(
+@app.command("rollback-preflight")
+def rollback_preflight(
     config: Path | None = CONFIG_OPTION,
     require_quiesce: bool = typer.Option(
-        False,
-        "--require-quiesce",
-        help="Fail if the telegram operator service is still running.",
+        True,
+        "--require-quiesce/--no-require-quiesce",
+        help="Fail if any writer unit or activator is still running.",
     ),
 ) -> None:
-    """롤백 전 안전 검사. 미완 승인이 있으면 exit 1.
+    """구버전 배포 전 안전 검사. 하나라도 어긋나면 exit 1.
 
-    schema_version=2 ack가 있고 resolution_completed가 없는 승인은 구버전이
-    ack만 보고 종결로 오판하므로, 이 상태에서 롤백하면 주문이 유실된다.
+    R0 마이그레이션이 진행 중이거나 마커가 모순
+    R1 claim은 있으나 completed가 없는 funding/budget 전이 -- 구 handler는
+       claim을 읽지 않으므로 요청을 pending으로 보고 run_signal()을 다시 돌린다
+    R2 consumed이지만 settled가 없는 signal package -- 구 코드는 consumed를
+       영구로 취급해 승인 카드가 유실된다
+    R3 schema_version ack은 있으나 resolution_completed가 없는 승인 -- 구
+       handler는 ack만으로 종결로 보아 승인된 주문이 나가지 않는다
+    R4 funding_workflow_completed에 대응하는 legacy 종결 이벤트가 없음
 
-    이 명령의 판정 로직 자체는 읽기 전용이며 승인 상태를 바꾸지 않는다.
-    다만 `_state_store` 생성은 다른 모든 CLI 명령과 동일하게 보류 중인
-    스키마 마이그레이션/백필(`StateStore._init_db`)을 적용할 수 있다 —
-    모두 additive-only(`CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE
-    ADD COLUMN`)이거나 멱등적인 백필이며, 롤백 대상인 구버전 코드도 기동
-    시 동일한 마이그레이션을 실행하므로 롤백 안전성에는 영향이 없다.
+    **이 명령은 어떤 호환성 상태도 복구하지 않는다.** R4가 걸리면 그 자리에서
+    실패한다 -- complete_workflow가 둘을 한 트랜잭션으로 쓰므로 없다는 것은
+    손상·수동 변경·중간 빌드 중 하나라는 뜻이고, 여기서 지어내면 무엇이었는지
+    알 수 없게 되며 이 코드가 알 수 없는 종결 상태를 단언하게 된다.
+
+    판정 로직은 읽기 전용이다. 다만 `_state_store` 생성은 다른 모든 CLI 명령과
+    동일하게 보류 중인 스키마 마이그레이션(`StateStore._init_db`)을 적용할 수
+    있다 -- 모두 additive-only(`CREATE TABLE/INDEX IF NOT EXISTS`, `ALTER TABLE
+    ADD COLUMN`)이며 롤백 대상인 구버전 코드도 기동 시 동일한 마이그레이션을
+    실행하므로 롤백 안전성에는 영향이 없다.
     """
-    if require_quiesce and _service_is_active("maestro-telegram-operator.service"):
-        typer.echo("approval_rollback_preflight status=fail reason=operator_still_running")
-        raise typer.Exit(1)
+    if require_quiesce:
+        report = quiesce.verify_quiesced()
+        if not report.quiesced:
+            _echo_quiesce_failure("rollback_preflight", report)
+            raise typer.Exit(1)
     maestro_config, identity = _load_operator_config(config)
     store = _state_store(maestro_config, identity)
-    acked = {
-        str(row["payload"].get("approval_id"))
-        for row in store.list_system_events_by_type("telegram_approval_ack", limit=None)
-        if isinstance(row["payload"].get("schema_version"), int)
-    }
-    completed = {
-        str(row["payload"].get("approval_id"))
-        for row in store.list_system_events_by_type(
-            "telegram_approval_resolution_completed", limit=None
-        )
-    }
-    unresolved = sorted(acked - completed)
-    if not unresolved:
-        typer.echo("approval_rollback_preflight status=safe unresolved=0")
+    result = run_rollback_preflight(store)
+    if result.safe:
+        typer.echo("rollback_preflight status=safe failures=0")
         return
-    for approval_id in unresolved:
-        typer.echo(f"approval_rollback_preflight status=unsafe approval_id={approval_id}")
-    typer.echo(f"approval_rollback_preflight status=unsafe unresolved={len(unresolved)}")
+    for failure in result.failures:
+        event_ids = ",".join(str(item) for item in failure.event_ids)
+        typer.echo(
+            f"rollback_preflight status=unsafe invariant={failure.invariant} "
+            f"identifier={failure.identifier} event_ids={event_ids} "
+            f"detail={failure.detail}"
+        )
+    typer.echo(f"rollback_preflight status=unsafe failures={len(result.failures)}")
     raise typer.Exit(1)
+
+
+#: The name the runbook and the operator's shell history already know. Same
+#: command: the checks were never approval-specific, and renaming without an
+#: alias is how a rollback gets attempted with no preflight at all.
+app.command("approval-rollback-preflight")(rollback_preflight)
 
 
 @app.command("approval-outcome")
