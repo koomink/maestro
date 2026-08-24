@@ -157,15 +157,25 @@ def load_request_payload(
 
 
 def is_request_pending(store: StateStore, request_id: str, phase: str) -> bool:
-    """Whether the operator can still act on this request.
+    """Whether this request's transition is still outstanding.
 
-    Both halves are required: the request must have been recorded as pending,
-    and the workflow must not have closed it since.
+    Completion, and only completion, is disqualifying here. Supersession is
+    deliberately *not* consulted, even though ``request_terminal_state``
+    reports it: whether a superseded request may still be transitioned is a
+    question the head answers atomically inside ``claim_workflow_attempt``, and
+    it answers it with more information than any read here could have. A
+    request whose own claimed transition produced a legitimate successor stays
+    resumable past the head moving on (see ``list_incomplete_workflows``), and
+    an ordinarily-replaced one is refused as ``not_head`` -- which is also what
+    lets the operator be told "already processed or superseded" instead of the
+    much vaguer "no longer active". Screening supersession out up here would
+    collapse both cases into silence and would re-strand the claimed parent
+    that 3a-4 went to some trouble to keep recoverable.
     """
     payload = load_request_payload(store, request_id, phase)
     if payload is None or payload.get("status") != "pending":
         return False
-    return request_terminal_state(store, request_id, phase) is None
+    return request_terminal_state(store, request_id, phase) != "completed"
 
 
 _REQUEST_EVENT = {

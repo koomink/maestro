@@ -121,8 +121,10 @@ from maestro.state.funding_workflow import (
     claim_workflow_attempt,
     complete_workflow,
     converge_workflow_invariants,
+    is_request_pending,
     list_incomplete_workflows,
     load_migration_cutoff,
+    load_request_payload,
     workflow_id_from_request,
 )
 from maestro.state.models import PortfolioState
@@ -4505,23 +4507,23 @@ class TelegramOperatorCommandRouter:
         )
 
     def _load_pending_budget_request(self, request_id: str) -> dict[str, Any] | None:
-        decided = {
-            str(row["payload"].get("request_id"))
-            for row in self.store.list_system_events_by_type(
-                "contribution_budget_request_decision",
-                limit=1000,
-            )
-        }
-        if request_id in decided:
+        """The request payload, if the *workflow* still says this request is open.
+
+        This used to ask "is there no contribution_budget_request_decision row
+        for it?". That row is the rollback compatibility projection
+        complete_workflow writes for the pre-CAS binary, and using it here made
+        it a second definition of "pending" -- one that cannot see supersession,
+        phase or attempt, and that a rollback-era writer can produce on its own.
+        It is still written, and rollback preflight still requires it (R4), but
+        it no longer decides anything here.
+
+        Both scans were also windowed at 1000 rows. The workflow readers are
+        not: an operator acting on a request that has scrolled out of a window
+        is exactly the case where being wrong costs a duplicate transition.
+        """
+        if not is_request_pending(self.store, request_id, "budget"):
             return None
-        for row in self.store.list_system_events_by_type(
-            "contribution_budget_request",
-            limit=1000,
-        ):
-            payload = row.get("payload") or {}
-            if payload.get("request_id") == request_id and payload.get("status") == "pending":
-                return payload
-        return None
+        return load_request_payload(self.store, request_id, "budget")
 
     def _cancel_budget_request(
         self,
@@ -4571,23 +4573,11 @@ class TelegramOperatorCommandRouter:
         )
 
     def _load_pending_funding_request(self, request_id: str) -> dict[str, Any] | None:
-        acked = {
-            str(row["payload"].get("request_id"))
-            for row in self.store.list_system_events_by_type(
-                "contribution_funding_request_ack",
-                limit=1000,
-            )
-        }
-        if request_id in acked:
+        """See ``_load_pending_budget_request``: the workflow decides, not the
+        legacy ``contribution_funding_request_ack`` projection."""
+        if not is_request_pending(self.store, request_id, "funding"):
             return None
-        for row in self.store.list_system_events_by_type(
-            "contribution_funding_request",
-            limit=1000,
-        ):
-            payload = row.get("payload") or {}
-            if payload.get("request_id") == request_id and payload.get("status") == "pending":
-                return payload
-        return None
+        return load_request_payload(self.store, request_id, "funding")
 
     def _cancel_funding_request(
         self,

@@ -15,8 +15,6 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-import pytest
-
 from maestro.state.funding_workflow import (
     LEGACY_TERMINAL_EVENT,
     claim_workflow_attempt,
@@ -38,8 +36,13 @@ _REQUEST_EVENT = {
 _LEGACY_KEY_PREFIX = {"funding": "funding-ack", "budget": "budget-decision"}
 
 
-@pytest.fixture
-def store(tmp_path) -> StateStore:
+def make_store(tmp_path) -> StateStore:
+    """The ``store`` fixture each migration test module declares over this.
+
+    Deliberately not a fixture itself: importing a fixture by name into a
+    module that also takes it as a parameter reads as a redefinition, and the
+    indirection buys nothing over three lines of ``@pytest.fixture``.
+    """
     return StateStore(tmp_path / "state.db", 1_000_000.0)
 
 
