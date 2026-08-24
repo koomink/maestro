@@ -130,8 +130,10 @@ from maestro.signals.validator import SignalValidator
 from maestro.state.events import SystemEventType, save_audited_system_event
 from maestro.state.funding_workflow import (
     child_key,
+    load_migration_cutoff,
     load_workflow_child,
     plan_contribution_request,
+    request_terminal_state,
 )
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
@@ -4761,6 +4763,27 @@ class MaestroOrchestrator:
         execution_sleeve: str,
         month_key: str,
     ) -> float | None:
+        """The amount the operator chose for this scope's month, if any.
+
+        ``contribution_budget_request_decision`` is the rollback compatibility
+        projection, and it is the only place ``selected_budget`` is recorded --
+        ``funding_workflow_completed`` has no field for it. Rather than invent
+        a second record of the amount, which would be a new source of truth,
+        the *lifecycle* judgement is made authoritative here and the amount
+        keeps coming from the row ``complete_workflow`` writes in the same
+        transaction, so the two can never disagree.
+
+        Above the migration cutoff, a decision with no completion behind it can
+        only have come from an older binary or a manual mutation, and this
+        refuses rather than skipping it: skipping falls through to
+        ``available_cash`` and invests *more* than the operator selected, which
+        is the wrong direction to fail in. Below the cutoff it is legitimate
+        pre-3a-4 history. With no cutoff at all the two are indistinguishable,
+        so behaviour is left exactly as it was -- guessing would be worse than
+        the status quo, and the migration gate is what keeps the system from
+        running in that state for long.
+        """
+        cutoff = load_migration_cutoff(self.state_store)
         for row in self.state_store.list_system_events_by_type(
             "contribution_budget_request_decision",
             limit=1000,
@@ -4778,6 +4801,18 @@ class MaestroOrchestrator:
                 continue
             if payload.get("month_key") != month_key:
                 continue
+            request_id = str(payload.get("request_id") or "")
+            if cutoff is not None and int(row.get("id") or 0) > cutoff:
+                if (
+                    request_terminal_state(self.state_store, request_id, "budget")
+                    != "completed"
+                ):
+                    raise ValueError(
+                        "uncorroborated contribution budget decision for "
+                        f"request_id={request_id}: no funding_workflow_completed backs "
+                        "it. Run `maestro rollback-preflight` and check for old-binary "
+                        "writes before trading against this amount."
+                    )
             return float(payload["selected_budget"])
         return None
 

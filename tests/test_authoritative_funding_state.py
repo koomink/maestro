@@ -17,6 +17,9 @@ that the very same database is refused for rollback.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 import pytest
 from migration_fixtures import (
     claim_and_complete,
@@ -36,6 +39,7 @@ from test_funding_workflow_resume import (
 from maestro.config.loader import load_config
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.orchestrator import MaestroOrchestrator
 from maestro.state import funding_workflow as fw
 from maestro.state.store import StateStore
 
@@ -43,6 +47,21 @@ from maestro.state.store import StateStore
 @pytest.fixture
 def store(tmp_path):
     return make_store(tmp_path)
+
+
+def _start_migration(store):
+    from maestro.state.migration_state import start_migration
+
+    with store.writer_lock("test"):
+        return start_migration(store, "run-migrate")
+
+
+@pytest.fixture
+def orchestrator(tmp_path):
+    """Only the state store matters here: _selected_contribution_budget reads
+    events and nothing else."""
+    config = load_config(_readonly_config_path(tmp_path))
+    return MaestroOrchestrator(config)
 
 
 @pytest.fixture
@@ -198,3 +217,146 @@ def test_a_superseded_request_is_still_loaded_so_the_head_can_refuse_it(operator
 
     assert operator_bot._load_pending_funding_request("req-1") is not None
     assert operator_bot._load_pending_funding_request("req-2") is not None
+
+
+# --- the selected budget amount -------------------------------------------
+#
+# selected_budget lives only on the legacy decision payload; there is no field
+# for it on funding_workflow_completed. Rather than invent a second record of
+# the amount -- a new source of truth -- the *lifecycle* decision is made
+# authoritative and the amount keeps coming from the row complete_workflow
+# writes in the same transaction, so the two cannot disagree.
+
+
+def _budget_decision_row(store, request_id, *, selected_budget):
+    store.save_system_event(
+        f"run_{request_id}",
+        "contribution_budget_request_decision",
+        {
+            "request_id": request_id,
+            "status": "selected",
+            "selected_budget": selected_budget,
+            "strategy_ids": ["tranquillo"],
+            "contribution_group_id": "grp",
+            "account_id": "acct",
+            "execution_sleeve": "sleeve",
+            "month_key": "2026-08",
+            "duplicate_key": f"budget-decision:{request_id}",
+        },
+    )
+
+
+def _selected(orchestrator):
+    return orchestrator._selected_contribution_budget(
+        "grp", "tranquillo", "acct", "sleeve", "2026-08"
+    )
+
+
+def test_a_post_cutoff_decision_without_a_completion_is_refused(orchestrator):
+    """Ignoring it would fall through to available_cash -- i.e. invest *more*
+    than the operator chose. Refusing is the fail-closed direction."""
+    store = orchestrator.state_store
+    _start_migration(store)
+    _budget_decision_row(store, "req-b", selected_budget=500_000.0)
+
+    with pytest.raises(ValueError, match="uncorroborated"):
+        _selected(orchestrator)
+
+
+def test_a_pre_cutoff_decision_is_honored_as_history(orchestrator):
+    store = orchestrator.state_store
+    _budget_decision_row(store, "req-b", selected_budget=500_000.0)
+    _start_migration(store)
+
+    assert _selected(orchestrator) == 500_000.0
+
+
+def test_a_corroborated_decision_is_honored(orchestrator):
+    store = orchestrator.state_store
+    _start_migration(store)
+    _budget_decision_row(store, "req-b", selected_budget=500_000.0)
+    store.save_system_event(
+        "run_req-b",
+        "funding_workflow_completed",
+        {
+            "duplicate_key": fw.completed_key(workflow_id(), "req-b", "budget"),
+            "workflow_id": workflow_id(),
+            "request_id": "req-b",
+            "phase": "budget",
+            "attempt": 1,
+        },
+    )
+
+    assert _selected(orchestrator) == 500_000.0
+
+
+def test_without_a_migration_cutoff_behaviour_is_unchanged(orchestrator):
+    """With no cutoff, pre- and post-3a-5 rows are indistinguishable. Guessing
+    would be worse than the status quo, and the migration gate is what keeps
+    the system from running in this state for long."""
+    store = orchestrator.state_store
+    _budget_decision_row(store, "req-b", selected_budget=500_000.0)
+
+    assert _selected(orchestrator) == 500_000.0
+
+
+def test_no_decision_at_all_still_reports_nothing_selected(orchestrator):
+    assert _selected(orchestrator) is None
+
+
+# --- keeping the projection from growing a second reader ------------------
+
+#: Every module in src/ that may spell a legacy terminal event out as a literal.
+#:
+#: Deliberately short. Everything else that legitimately touches the projection
+#: -- the upgrade backfill's historical classification, rollback preflight's
+#: R4 -- goes through ``funding_workflow.LEGACY_TERMINAL_EVENT``, so the phase
+#: to event mapping has exactly one definition and a change to it cannot leave
+#: one caller reading an older spelling.
+ALLOWED_LEGACY_READERS = {
+    # Defines the mapping, and writes the projection atomically with the
+    # workflow completion.
+    "src/maestro/state/funding_workflow.py",
+    # The cutoff-gated selected_budget read. The amount has no other home:
+    # funding_workflow_completed carries no field for it.
+    "src/maestro/orchestration/orchestrator.py",
+}
+
+
+def _names_a_legacy_event_in_code(path: Path) -> bool:
+    """Whether the module uses a legacy terminal event name as a value.
+
+    Docstrings are excluded on purpose. Explaining why a module no longer reads
+    the projection is exactly the comment that should be there, and a text
+    search would punish writing it.
+    """
+    tree = ast.parse(path.read_text())
+    docstrings = {
+        ast.get_docstring(node, clean=False)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef)
+    }
+    return any(
+        isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value
+        in {"contribution_funding_request_ack", "contribution_budget_request_decision"}
+        and node.value not in docstrings
+        for node in ast.walk(tree)
+    )
+
+
+def test_no_new_module_starts_reading_the_compatibility_projection():
+    """The projection exists for the old binary.
+
+    A new reader here is a second definition of "finished" reappearing, which
+    is the whole condition 3a-5 removed. If a module genuinely needs one, add
+    it to this set deliberately -- and say why, as the entries above do.
+    """
+    root = Path(__file__).resolve().parents[1]
+    offenders = {
+        str(path.relative_to(root))
+        for path in (root / "src").rglob("*.py")
+        if _names_a_legacy_event_in_code(path)
+    }
+    assert offenders == ALLOWED_LEGACY_READERS
