@@ -127,6 +127,7 @@ from maestro.state.funding_workflow import (
     load_request_payload,
     workflow_id_from_request,
 )
+from maestro.state.migration_state import MigrationPhase, load_migration_state
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 from maestro.state.upgrade_backfill import (
@@ -1501,6 +1502,8 @@ class TelegramOperatorCommandRouter:
         user_id: int,
         username: str | None,
     ) -> bool:
+        if self._migration_block_reason() is not None:
+            return self._refuse_for_migration(callback, "/approval", chat_id, user_id, username)
         parts = action.split(":", 2)
         if len(parts) != 3 or parts[1] not in {"a", "r"}:
             self._answer(callback, ui_catalog.STALE_CALLBACK_TEXT)
@@ -1836,6 +1839,8 @@ class TelegramOperatorCommandRouter:
         """
         if self.approval_config_path is None:
             return
+        if self._migration_block_reason() is not None:
+            return
         for signal_run_id in self.store.list_incomplete_signal_dispatches():
             if not has_dispatch_manifest(self.store, signal_run_id):
                 # Pre-manifest history. The manifest is the only durable record
@@ -1944,6 +1949,8 @@ class TelegramOperatorCommandRouter:
 
     def _resume_unresolved_approvals(self) -> None:
         """결정은 기록됐지만 집행이 끝나지 않은 승인을 기록된 결정으로 재개한다."""
+        if self._migration_block_reason() is not None:
+            return
         self._reclaim_abandoned_resume_claims()
         completed = {
             str(row["payload"].get("approval_id"))
@@ -2342,6 +2349,8 @@ class TelegramOperatorCommandRouter:
         나가도록 ``_notify_operator_chats``의 채팅별 duplicate_key에 맡긴다
         -- 새 attempt(재개 실패 후 다시 stall)는 새 키이므로 다시 알린다.
         """
+        if self._migration_block_reason() is not None:
+            return
         for row in list_incomplete_workflows(self.store):
             if int(row["attempt"]) >= _MAX_WORKFLOW_RESUME_ATTEMPT:
                 self._notify_workflow_needs_attention(row)
@@ -2410,6 +2419,43 @@ class TelegramOperatorCommandRouter:
             },
         )
 
+    def _migration_block_reason(self) -> str | None:
+        """Why a migration-sensitive path must stand down, or None.
+
+        MIGRATING means part of the legacy history has been classified and
+        part has not, so a decision taken from it can be wrong in the one
+        direction that costs money -- confirming a request whose ownership the
+        backfill has not settled yet, or resuming a transition the migration is
+        about to quarantine. INVALID means the markers contradict each other
+        and nothing in the database says which generation a row belongs to.
+
+        Read-only views are deliberately not gated. Production is quiesced for
+        the real migration, and a global StateStore write framework built for
+        ``status`` would be scope this argument does not need.
+        """
+        state = load_migration_state(self.store)
+        if state.phase is MigrationPhase.MIGRATING:
+            return "migrating"
+        if state.phase is MigrationPhase.INVALID:
+            return f"invalid:{state.reason}"
+        return None
+
+    def _refuse_for_migration(
+        self,
+        callback: Mapping[str, Any] | None,
+        command: str,
+        chat_id: int,
+        user_id: int,
+        username: str | None,
+    ) -> bool:
+        """Tell the operator this is paused, not broken, and record it as such."""
+        if callback is None:
+            self._send(chat_id, ui_catalog.MIGRATION_IN_PROGRESS_TEXT)
+        else:
+            self._answer(callback, ui_catalog.MIGRATION_IN_PROGRESS_TEXT)
+        self._record(command, chat_id, user_id, username, "migration_blocked")
+        return True
+
     def _converge_workflow_invariants(self) -> None:
         """orphan 요청과 dangling head를 수렴시킨다 (Task 11의 backstop).
 
@@ -2417,7 +2463,13 @@ class TelegramOperatorCommandRouter:
         중단이나 수동 복구는 그 밖에서 일어날 수 있다. cutoff가 없으면
         (3a-5가 아직 배포되지 않았으면) 아무것도 하지 않는다 -- 3a 이전
         요청은 head가 원래 없었으므로 orphan으로 오판하면 안 된다.
+
+        마이그레이션이 진행 중이거나 마커가 모순이면 아예 돌지 않는다. 전자는
+        backfill이 아직 head를 다 만들지 않은 상태라 sweep이 그 요청들을
+        orphan으로 오판하고, 후자는 cutoff 자체를 믿을 수 없다.
         """
+        if self._migration_block_reason() is not None:
+            return
         converge_workflow_invariants(self.store, cutoff=load_migration_cutoff(self.store))
 
     def _sweep_lifecycle_cards(self) -> None:
@@ -3182,6 +3234,8 @@ class TelegramOperatorCommandRouter:
         user_id: int,
         username: str | None,
     ) -> bool:
+        if self._migration_block_reason() is not None:
+            return self._refuse_for_migration(callback, "/funding", chat_id, user_id, username)
         parts = action.split(":", 2)
         if len(parts) != 3 or parts[0] != "funding" or parts[1] not in {"complete", "cancel"}:
             self._answer(callback, "This funding request is no longer active.")
@@ -3267,6 +3321,8 @@ class TelegramOperatorCommandRouter:
         username: str | None,
     ) -> bool:
         parts = action.split(":", 3)
+        if self._migration_block_reason() is not None:
+            return self._refuse_for_migration(callback, "/budget", chat_id, user_id, username)
         valid = (len(parts) == 3 and parts[0] == "budget" and parts[1] == "cancel") or (
             len(parts) == 4
             and parts[0] == "budget"
@@ -3365,6 +3421,8 @@ class TelegramOperatorCommandRouter:
         한 번만 존재할 수 있다). 이 메서드는 그 결과를 각 눌림에 보여줄 뿐,
         스스로 재시도하거나 다른 attempt를 대신 골라주지 않는다.
         """
+        if self._migration_block_reason() is not None:
+            return self._refuse_for_migration(callback, "/wfresume", chat_id, user_id, username)
         parts = action.split(":", 2)
         if len(parts) != 3 or parts[0] != "wfresume" or parts[1] not in PHASES:
             self._answer(callback, "This resume card is no longer active.")
@@ -3491,6 +3549,9 @@ class TelegramOperatorCommandRouter:
         user_id: int,
         username: str | None,
     ) -> None:
+        if self._migration_block_reason() is not None:
+            self._refuse_for_migration(None, "/budget", chat_id, user_id, username)
+            return
         parts = text.strip().split()
         if len(parts) != 3:
             self._send(chat_id, "Usage: /budget <request_id> <amount>")
