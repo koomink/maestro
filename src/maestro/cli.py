@@ -1626,8 +1626,7 @@ def _echo_upgrade_result(result: UpgradeResult) -> None:
             f"legacy_rows_inspected={backfill.legacy_requests_inspected} "
             f"heads_created={backfill.heads_created} "
             f"heads_already_coherent={backfill.heads_already_coherent} "
-            f"terminal_skipped={backfill.terminal_skipped} "
-            f"superseded_by_newer={backfill.superseded_by_newer}"
+            f"terminal_skipped={backfill.terminal_skipped}"
         )
     if result.approvals is not None:
         typer.echo(
@@ -1674,6 +1673,11 @@ def _echo_quiesce_failure(command: str, report: quiesce.QuiesceReport) -> None:
         typer.echo(f"{command} status=fail reason=writer_active unit={unit}")
     for unit in report.queued_jobs:
         typer.echo(f"{command} status=fail reason=queued_job unit={unit}")
+    for unit in report.autostart_units:
+        typer.echo(
+            f"{command} status=fail reason=reboot_autostart unit={unit} "
+            "(disable or mask it: a reboot during the migration would start it again)"
+        )
 
 
 @app.command("quiesce-status")

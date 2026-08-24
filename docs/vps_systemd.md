@@ -540,5 +540,7 @@ journalctl -u maestro-resume-order-tracking.service -n 5 --no-pager
 **기동**하므로, 정지 순서에서 오퍼레이터보다 먼저 내려야 한다.
 
 절차 전체는 [docs/rollback_and_upgrade_3a.md](rollback_and_upgrade_3a.md).
-`maestro quiesce-status`가 세 조건(모든 writer inactive · 모든 activator
-inactive · 대기 중인 systemd job 없음)과 복구용 원래 enable 상태를 찍는다.
+`maestro quiesce-status`가 네 조건(모든 writer inactive · 모든 activator
+inactive · 대기 중인 systemd job 없음 · 재부팅 시 스스로 기동될 수 있는 유닛
+없음 — stop만 한 enabled 서비스는 재부팅 시 multi-user.target과 Persistent
+타이머가 다시 켠다)과 복구용 원래 enable 상태를 찍는다.

@@ -14,12 +14,22 @@ def _shipped() -> set[str]:
     return {path.name for path in UNIT_DIR.iterdir() if path.is_file()}
 
 
-def _fake_systemctl(*, active: set[str], jobs: list[str]):
+def _fake_systemctl(
+    *,
+    active: set[str],
+    jobs: list[str],
+    enabled: dict[str, str] | None = None,
+):
+    """``enabled`` maps unit -> is-enabled answer; anything unmapped reports
+    "disabled", the safe default, so tests exercise the dimension they name."""
+
     def run(args, **_kwargs):
         if args[1] == "is-active":
             return subprocess.CompletedProcess(args, 0 if args[2] in active else 3, "", "")
         if args[1] == "is-enabled":
-            return subprocess.CompletedProcess(args, 0, "enabled\n", "")
+            state = (enabled or {}).get(args[2], "disabled")
+            code = 0 if state not in {"", "not-found"} else 1
+            return subprocess.CompletedProcess(args, code, f"{state}\n", "")
         if args[1] == "list-jobs":
             body = "".join(f"1 {unit} start running\n" for unit in jobs)
             return subprocess.CompletedProcess(args, 0, body, "")
@@ -135,10 +145,76 @@ def test_a_queued_job_for_an_unrelated_unit_is_ignored():
     assert report.quiesced is True
 
 
+def test_a_stopped_but_enabled_writer_comes_back_at_the_next_reboot():
+    """is-active says "inactive" for a unit multi-user.target will start at
+    boot -- and Persistent timers replay anything missed while the box was
+    down. A migration can outlive an unplanned reboot; inactive-now is not
+    reboot-safe."""
+    report = quiesce.verify_quiesced(
+        run=_fake_systemctl(
+            active=set(),
+            jobs=[],
+            enabled={"maestro-telegram-operator.service": "enabled"},
+        )
+    )
+    assert report.quiesced is False
+    assert report.autostart_units == ("maestro-telegram-operator.service",)
+
+
+def test_every_enabled_unit_is_reported_not_just_one():
+    enabled = {unit: "enabled" for unit in quiesce.BARRIER_UNITS}
+    report = quiesce.verify_quiesced(run=_fake_systemctl(active=set(), jobs=[], enabled=enabled))
+    assert set(report.autostart_units) == set(quiesce.BARRIER_UNITS)
+
+
+def test_a_masked_or_disabled_unit_cannot_start_itself():
+    for state in ("disabled", "masked"):
+        report = quiesce.verify_quiesced(
+            run=_fake_systemctl(
+                active=set(),
+                jobs=[],
+                enabled={"maestro-dashboard.service": state},
+            )
+        )
+        assert report.quiesced is True, state
+
+
+def test_a_static_service_cannot_self_start_its_trigger_units_are_checked():
+    """run-once has no [Install]: only its timer can pull it in, and the timer
+    is a barrier member of its own. Static is not an auto-start risk."""
+    report = quiesce.verify_quiesced(
+        run=_fake_systemctl(
+            active=set(),
+            jobs=[],
+            enabled={"maestro-run-once.service": "static"},
+        )
+    )
+    assert report.autostart_units == ()
+
+
+def test_an_unrecognized_enablement_answer_fails_closed():
+    """An enablement state this inventory has not reasoned about stops the
+    migration rather than passing it."""
+    for state in ("", "enabled-runtime", "transient", "generated"):
+        report = quiesce.verify_quiesced(
+            run=_fake_systemctl(
+                active=set(),
+                jobs=[],
+                enabled={"maestro-heartbeat.timer": state},
+            )
+        )
+        assert report.quiesced is False, repr(state)
+        assert report.autostart_units == ("maestro-heartbeat.timer",)
+
+
 def test_capture_records_what_to_restore():
     states = quiesce.capture_unit_states(
         units=("maestro-heartbeat.timer",),
-        run=_fake_systemctl(active={"maestro-heartbeat.timer"}, jobs=[]),
+        run=_fake_systemctl(
+            active={"maestro-heartbeat.timer"},
+            jobs=[],
+            enabled={"maestro-heartbeat.timer": "enabled"},
+        ),
     )
     assert states == [
         quiesce.UnitState(unit="maestro-heartbeat.timer", active=True, enabled="enabled")

@@ -5,11 +5,17 @@ restart helper left enabled brings a writer back between the check and the
 operation, and ``systemctl is-active`` answers "inactive" for a unit whose start
 job is merely queued -- it will be running a moment later, inside the migration.
 
-So the barrier is three conditions at once: every writer inactive, every
-activator inactive, and no queued job for either. On top of all three the
-migration also holds the StateStore writer lock for its whole run, because none
-of this constrains a cooperating ``maestro`` CLI invocation an operator runs by
-hand.
+And being down *now* is not enough either. A service that is merely stopped
+comes straight back after a host reboot -- multi-user.target pulls in every
+enabled unit, and ``Persistent=true`` timers replay anything missed while the
+box was down. A migration can outlive an unplanned reboot; it must survive one.
+
+So the barrier is four conditions at once: every writer inactive, every
+activator inactive, no queued job for either, and no barrier unit left in an
+enablement state that lets systemd start it on its own at boot. On top of all
+four the migration also holds the StateStore writer lock for its whole run,
+because none of this constrains a cooperating ``maestro`` CLI invocation an
+operator runs by hand.
 """
 
 from __future__ import annotations
@@ -77,6 +83,17 @@ NON_WRITER_UNITS: tuple[str, ...] = (
 
 BARRIER_UNITS: tuple[str, ...] = (*WRITER_UNITS, *ACTIVATOR_UNITS)
 
+#: ``systemctl is-enabled`` answers that provably cannot pull a unit in at
+#: boot by themselves. ``static``/``indirect``/``linked`` units have no install
+#: target of their own -- they are activated only by their trigger (timer,
+#: path, socket), which is itself a barrier member checked above. Anything
+#: else -- ``enabled``, ``enabled-runtime``, or an unrecognized answer --
+#: counts as capable of auto-starting on reboot: fail closed on states this
+#: inventory has not reasoned about.
+BOOT_AUTOSTART_SAFE_STATES: frozenset[str] = frozenset(
+    {"disabled", "masked", "static", "indirect", "linked"}
+)
+
 #: The order the runbook stops units in.
 #:
 #: Activators first, so nothing restarts what is about to be stopped. Then the
@@ -121,10 +138,11 @@ class UnitState:
 class QuiesceReport:
     active_units: tuple[str, ...]
     queued_jobs: tuple[str, ...]
+    autostart_units: tuple[str, ...] = ()
 
     @property
     def quiesced(self) -> bool:
-        return not self.active_units and not self.queued_jobs
+        return not self.active_units and not self.queued_jobs and not self.autostart_units
 
 
 def _run(runner: Runner, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
@@ -135,6 +153,19 @@ def _run(runner: Runner, args: Sequence[str]) -> subprocess.CompletedProcess[str
 
 def _is_active(runner: Runner, unit: str) -> bool:
     return _run(runner, ["systemctl", "is-active", unit]).returncode == 0
+
+
+def _enabled_state(runner: Runner, unit: str) -> str:
+    return (_run(runner, ["systemctl", "is-enabled", unit]).stdout or "").strip()
+
+
+def _autostart_capable(runner: Runner, unit: str) -> bool:
+    """Whether systemd could start this unit on its own after a reboot.
+
+    An unrecognized or empty answer counts as capable: an enablement state the
+    inventory has not reasoned about must stop the migration, not pass it.
+    """
+    return _enabled_state(runner, unit) not in BOOT_AUTOSTART_SAFE_STATES
 
 
 def _queued_jobs(runner: Runner) -> tuple[str, ...]:
@@ -175,15 +206,21 @@ def verify_quiesced(*, run: Runner = subprocess.run) -> QuiesceReport:
     """Re-check the barrier rather than trusting the stop commands.
 
     Named, not counted: an operator whose barrier failed needs to know which
-    unit is still up, and the answer is frequently a timer nobody thought of.
+    unit is still up, and the answer is frequently a timer nobody thought of --
+    or a service that was only *stopped* and would come straight back at the
+    next reboot, straight into a MIGRATING database.
     """
     active = tuple(unit for unit in BARRIER_UNITS if _is_active(run, unit))
-    return QuiesceReport(active_units=active, queued_jobs=_queued_jobs(run))
+    autostart = tuple(unit for unit in BARRIER_UNITS if _autostart_capable(run, unit))
+    return QuiesceReport(
+        active_units=active, queued_jobs=_queued_jobs(run), autostart_units=autostart
+    )
 
 
 __all__ = [
     "ACTIVATOR_UNITS",
     "BARRIER_UNITS",
+    "BOOT_AUTOSTART_SAFE_STATES",
     "NON_WRITER_UNITS",
     "QUIESCE_STOP_ORDER",
     "WRITER_UNITS",

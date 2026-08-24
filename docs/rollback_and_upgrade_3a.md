@@ -46,19 +46,31 @@
 
 ## 2. quiesce 장벽
 
-**서비스만 멈추는 것으로는 부족하다.** 세 가지가 동시에 성립해야 한다.
+**서비스만 멈추는 것으로는 부족하다.** 네 가지가 동시에 성립해야 한다.
 
 1. 모든 writer 유닛이 inactive
 2. 모든 activator(타이머 · `.path` · 재시작 헬퍼)가 inactive
 3. 관련 유닛에 대해 대기 중인 systemd job이 없음
    (`systemctl is-active`는 start job이 **큐에 있는** 유닛도 "inactive"라고
    답한다 — 검사 통과 직후에 뜬다)
+4. 재부팅 시 스스로 기동될 수 있는 유닛이 없음. **지금 inactive인 것만으로는
+   재부팅에 안전하지 않다**: multi-user.target은 enabled 유닛을 전부 끌어 올리고,
+   `Persistent=true` 타이머는 다운 동안 밀린 작업을 기동 직후 재실행한다.
+   마이그레이션 중 정전·재부팅이 일어나면 MIGRATING DB에 writer가 다시 쓴다.
+   그래서 장벽 검사는 `is-enabled`도 본다 — `disabled`/`masked`(자력 기동
+   불가)와 `static`/`indirect`/`linked`(트리거 유닛 없인 못 올라감; 트리거는
+   1~3에서 검사)만 안전하며, 그 외 상태(`enabled`, `enabled-runtime`, 알 수
+   없는 답)는 전부 실패로 처리한다(fail closed).
 
 그 위에 마이그레이션/preflight가 **StateStore writer lock을 작업 전체에 걸쳐**
 잡는다. systemd 장벽은 배포된 프로세스를 막고, writer lock은 운영자가 손으로
-실행하는 `maestro` CLI나 복구 스크립트를 막는다. 둘 다 필요하다.
+실행하는 `maestro` CLI나 복구 스크립트를 막는다. 둘 다 필요하다. 롤백 preflight
+(`run_rollback_preflight`)도 R0–R4 읽기 전체를 하나의 writer lock 안에서
+돌린다 — 검사와 검사 사이에 다른 writer가 끼어들어 "R1은 통과했는데 R2는 이미
+변한 DB"를 SAFE로 통과시키는 경합을 막기 위해서다. lock은 스레드 내 재진입
+가능하므로 이미 lock을 잡은 호출자가 감싸 호출해도 안전하다.
 
-`maestro quiesce-status`가 세 조건과 각 유닛의 현재 enable 상태를 찍는다.
+`maestro quiesce-status`가 네 조건과 각 유닛의 현재 enable 상태를 찍는다.
 아무것도 정지·기동시키지 않는다.
 
 ### 함정 두 가지
@@ -91,7 +103,9 @@ maestro quiesce-status | tee ~/quiesce-before-upgrade.txt
 cp /path/to/state.db ~/state-before-upgrade.db
 sqlite3 /path/to/state.db 'PRAGMA integrity_check;'
 
-# 4. activator를 먼저 내린다 (타이머 · path · 재시작 헬퍼)
+# 4. activator를 먼저 내린다 (타이머 · path · 재시작 헬퍼).
+#    disable까지 해야 재부팅에도 안전하다. stop만 하면 재부팅 시 multi-user
+#    target과 Persistent 타이머가 다시 켠다.
 sudo systemctl disable --now \
   maestro-book-performance.timer maestro-dashboard-health.timer \
   maestro-fx-refresh.timer maestro-heartbeat.timer \
@@ -100,21 +114,23 @@ sudo systemctl disable --now \
   maestro-symphony-readonly-us.timer maestro-symphony-signal.timer \
   maestro-symphony-signal-kr.timer maestro-symphony-signal-us.timer \
   maestro-dashboard.path
-sudo systemctl stop \
+sudo systemctl disable --now \
   maestro-dashboard-src-watch.service maestro-dashboard-health.service \
   maestro-dashboard-reload.service
 
 # 5. writer를 QUIESCE_STOP_ORDER대로 내린다. run-once가 오퍼레이터보다 먼저다.
-sudo systemctl stop \
+#    여기도 stop만이 아니라 **disable**이다: telegram-operator와 dashboard는
+#    WantedBy=multi-user.target이므로 enabled로 남아 있으면 재부팅 시 되살아난다.
+sudo systemctl disable --now \
   maestro-symphony-signal.service maestro-symphony-signal-kr.service \
   maestro-symphony-signal-us.service maestro-symphony-rebalance-kr.service \
   maestro-symphony-rebalance-us.service maestro-symphony-readonly.service \
   maestro-symphony-readonly-kr.service maestro-symphony-readonly-us.service \
   maestro-fx-refresh.service maestro-heartbeat.service \
   maestro-resume-order-tracking.service maestro-run-once.service
-sudo systemctl stop maestro-telegram-operator.service maestro-dashboard.service
+sudo systemctl disable --now maestro-telegram-operator.service maestro-dashboard.service
 
-# 6. 장벽 재검사. quiesced=True가 아니면 여기서 멈춘다.
+# 6. 장벽 재검사. quiesced=True가 아니면(재부팅 안전 조건 포함) 여기서 멈춘다.
 maestro quiesce-status
 
 # 7. backfill 실행 (--require-quiesce가 기본값이다)
@@ -147,9 +163,19 @@ sqlite3 /path/to/state.db \
 ### ⚠️ funding 소유권이 모호하면 서비스를 올리지 않는다
 
 `ambiguous_pending_requests` / `head_ownership_conflict` /
-`malformed_workflow_identity` 격리가 하나라도 남으면 마이그레이션은
-**완료되지 않고 MIGRATING 상태로 끝난다.** 그 상태에서는 런타임 게이트가
-계속 닫혀 있어 funding/budget 콜백과 복구 sweep이 전부 서 있는다.
+`post_cutoff_legacy_terminal` / `malformed_workflow_identity` 격리가 하나라도
+남으면 마이그레이션은 **완료되지 않고 MIGRATING 상태로 끝난다.** 그 상태에서는
+런타임 게이트가 계속 닫혀 있어 funding/budget 콜백과 복구 sweep이 전부 서 있는다.
+
+게이트는 텔레그램에만 있는 게 아니다. 마이그레이션이 크래시로 끝나면 프로세스가
+끝난 뒤에도 DB는 MIGRATING으로 남고, writer lock은 풀린다. 그래서 워크플로우
+소유권을 만들거나 승인을 집행하는 **권위 있는 오케스트레이터 진입점 전체** --
+`run_signal`(= `maestro run-signal`, daily-signal-approval, dashboard
+generate-signal, 텔레그램 경로), `approve_signal`, `dispatch_signal_approval`,
+`run_once` -- 가 MIGRATING/INVALID에서 스스로 실패한다
+(`maestro.state.migration_state.MigrationActive`). 운영자가 어떤 명령을
+실행하지 말아야 하는지 기억해야 하는 구조가 아니라, 명령이 스스로 멈춘다.
+읽기 전용 status/health 조회는 막지 않는다.
 
 **시스템을 멈춰 두는 쪽이 잘못된 head를 살려 두는 것보다 안전하다.**
 잘못된 head는 이번 달 투자를 운영자가 고르지 않은 요청에 붙인다.
@@ -160,8 +186,9 @@ sqlite3 /path/to/state.db \
 
 | reason | 서브시스템 | 완료를 막는가 | 무엇이 발견됐나 / 운영자가 할 일 |
 |---|---|---|---|
-| `ambiguous_pending_requests` | funding | **예** | 같은 워크플로우(scope+월)에 pending 요청이 2건 이상. 어느 쪽이 유효한지 기록에 없다. 운영자가 남기지 않을 요청에 `funding_workflow_superseded`를 직접 기록한 뒤 재실행한다. |
-| `head_ownership_conflict` | funding | **예** | head가 가리키는 요청이 이 DB의 어떤 이벤트로도 확인되지 않거나, cutoff 이전의 다른 요청을 가리킨다. head 이력을 직접 확인해야 한다. |
+| `ambiguous_pending_requests` | funding | **예** | 같은 워크플로우(scope+월)에 live pending 요청이 2건 이상 — **페스가 달라도 같다.** head는 워크플로우당 하나이므로 소유권은 모든 페이즈 후보를 한 번에 판단해야 한다. 어느 쪽이 유효한지 기록에 없다. 운영자가 남기지 않을 요청에 `funding_workflow_superseded`를 직접 기록한 뒤 재실행한다. |
+| `head_ownership_conflict` | funding | **예** | head가 이 후보가 아닌 다른 요청(확인 불가능한 요청, cutoff 이후 요청, 다른 페이즈)을 가리킨다. "더 최신"은 승계 증거가 아니다 — 정당한 승계는 반드시 `legitimate_successor` 마커를 남기고, 마커가 있는 요청은 애초에 후보가 되지 않는다. head 이력을 직접 확인해야 한다. CAS 충돌 후 커밋된 head가 의도한 것과 정확히 일치할 때만 멱등 일치로 인정한다. |
+| `post_cutoff_legacy_terminal` | funding | **예** | cutoff **이후에** 쓰인 legacy ack/decision. 장벽 아래서는 불가능한 쓰기다 — 구 바이너리가 도는 중이라는 뜻이다. 이걸 "종결됨"으로 읽으면 침입을 조용히 흡수하고, 이미 집행됐을 수 있는 전이에 live head를 붙여 재실행 위험을 만든다. 브로커 확인이 먼저다. |
 | `malformed_workflow_identity` | funding | **예** | 요청에 `month_key`가 없어 워크플로우 식별자를 만들 수 없다. 어느 달의 예산인지가 곧 돈이 가는 곳이므로 유추하지 않는다. |
 | `execution_may_have_been_entered` | approval | 아니오 | schema 없는 legacy ack + `approvals` 행은 있고 종결 기록이 없다. **주문이 이미 브로커에 나갔을 수 있다.** 증권사 앱에서 먼저 확인한다. |
 | `completion_unprovable` | approval | 아니오 | legacy ack의 완료를 증명할 수 없다(예: 한 run에 그룹이 둘인데 완료 이벤트에 approval_id가 없다). |
@@ -249,7 +276,7 @@ maestro upgrade-backfill
 찍고 해당 행들을 이름으로 열거한 뒤 아무것도 쓰지 않는다. 두 세대를 병합하는
 방법을 추측하지 않고, 새 cutoff를 고르지도, epoch 2를 만들지도 않는다.
 
-탐지 근거는 둘 다 **이 세대가 만들 수 없는 쓰기**의 적극적 증거다(무언가가
+탐지 근거는 셋 다 **이 세대가 만들 수 없는 쓰기**의 적극적 증거다(무언가가
 없다는 추론이 아니다):
 
 - `legacy_terminal_without_completion` — `complete_workflow`는 워크플로우 완료와
@@ -257,6 +284,17 @@ maestro upgrade-backfill
   writer가 썼다는 뜻이다.
 - `request_without_head` — `plan_contribution_request`는 요청과 head를 한
   배치로 커밋한다. 어떤 head도 가리킨 적 없는 요청도 마찬가지다.
+- `legacy_ack_without_schema_version` — 현재 세대의 ack 쓰기 지점은 하나뿐이고
+  항상 int `schema_version`을 기록한다. cutoff 위의 schema 없는 ack은 구
+  버전의 흔적이다. 반대로 versioned ack은 현재 세대의 정상 활동이므로 근거가
+  아니다.
+
+**일부러 탐지기에 넣지 않은 모양이 하나 있다**: consumed인데 unsettled이고
+manifest가 없는 dispatch. 동기 승인 경로(paper 등 비동기 아닌 모드)는 애초에
+manifest 없이 돌므로 그 경로 자체의 크래시가 똑같은 모양을 만들 수 있고,
+여기서 근거라 부르면 현재 세대를 구 바이너리로 오인한다. 이 조건은 이미 다른
+곳에서 fail-closed로 붙들려 있다 — 롤백 preflight R2가 롤백을 거부하고, 재개
+경로가 자동 replay를 거부하고, 마이그레이션이 첫 패스에서 격리했다.
 
 이 상황이 실제로 발생하면 전용 마이그레이션 절차를 설계해야 한다.
 **강제로 통과시키지 않는다.**
