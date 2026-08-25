@@ -380,163 +380,187 @@ class MaestroOrchestrator:
         decision: ApprovalDecision,
     ) -> SignalApprovalSummary:
         """Apply one terminal decision loaded by the long-running Telegram operator."""
+        # live_order_lock outermost, then writer_lock -- the same order every
+        # other live-order path uses, and the one whose inversion deadlocked
+        # production before (StateStore._assert_live_order_lock_order). The
+        # writer lock is held across the WHOLE admission+execution interval,
+        # not taken per write: this method is a public authoritative boundary
+        # into broker submission, and a migration check made without that lock
+        # would be a TOCTOU -- run_upgrade_backfill holds writer_lock for its
+        # entire run, so holding it here is what makes "the state was safe when
+        # I checked" and "no migration can start classifying while I execute"
+        # the same fact instead of two observations an instant apart. Either
+        # side wins the lock first and the other waits: a resolution admitted
+        # under the lock knows the migration has not begun and cannot begin
+        # until it is done; a resolution arriving during a migration cannot
+        # even read state until the migration releases, and then sees
+        # MIGRATING (or INVALID) and refuses before touching anything.
         with self.state_store.live_order_lock("resolve_pending_signal_approval"):
-            if self.state_store.approval_resolution_exists(envelope.approval_id):
-                # Somebody already closed this approval -- in practice an
-                # operator settling a half-executed batch by hand. A resume
-                # that claimed its attempt before that settlement landed is
-                # otherwise committed to executing, and would send orders
-                # against a batch the operator has been told is closed and is
-                # by now replacing themselves. Read under the lock settlement
-                # also holds, and before save_approval, which is what precedes
-                # every submission.
-                raise ValueError(
-                    f"Approval {envelope.approval_id} is already closed; not executing"
-                )
-            package = self.state_store.load_signal_package(envelope.signal_run_id)
-            if package is None:
-                raise ValueError(f"Unknown signal_run_id: {envelope.signal_run_id}")
-            orders = [OrderIntent.model_validate(item) for item in envelope.orders]
-            if decision.status == "approved":
-                self._validate_signal_package_for_approval(package)
-                self._validate_signal_approval_preconditions(envelope.run_id, package)
-                # Pure, not the side-effecting _partition_orders_by_capacity:
-                # this order already belongs to a pending approval envelope,
-                # so it is approval-owned. Writing live_order_capacity_blocked
-                # here (the old behavior) made it *also* recovery-owned --
-                # visible to the operator retry/recovery flow under a new
-                # order_id -- while the approval itself stayed durably
-                # resumable (save_approval has not run yet), so the same
-                # trade could execute twice once capacity recovered. A
-                # resolution-time capacity failure instead fails closed and
-                # leaves the ORIGINAL approval the only path back to this
-                # order: capacity is rechecked, not re-owned, on the next
-                # resume.
-                orders, capacity_blocks = self._partition_orders_by_capacity_pure(orders)
-                if capacity_blocks or not orders:
-                    raise ValueError("Pending approval is blocked by current broker capacity")
-                self._validate_signal_approval_gates(envelope.run_id, orders, package)
+            with self.state_store.writer_lock("resolve_pending_signal_approval"):
+                ensure_no_active_migration(self.state_store)
+                return self._resolve_pending_signal_approval_locked(envelope, decision)
 
-            approval_payload = {
-                "signal_run_id": envelope.signal_run_id,
-                "source_strategy_ids": envelope.source_strategy_ids,
-                "request": envelope.request.model_dump(mode="json"),
-                "decision": decision.model_dump(mode="json"),
-                "message": envelope.message,
-                "account_ids": envelope.account_ids,
-            }
-            if len(envelope.account_ids) == 1:
-                approval_payload["account_id"] = envelope.account_ids[0]
-            self.state_store.save_approval(
-                envelope.run_id,
-                envelope.approval_id,
-                approval_payload,
+    def _resolve_pending_signal_approval_locked(
+        self,
+        envelope: PendingApprovalEnvelope,
+        decision: ApprovalDecision,
+    ) -> SignalApprovalSummary:
+        if self.state_store.approval_resolution_exists(envelope.approval_id):
+            # Somebody already closed this approval -- in practice an
+            # operator settling a half-executed batch by hand. A resume
+            # that claimed its attempt before that settlement landed is
+            # otherwise committed to executing, and would send orders
+            # against a batch the operator has been told is closed and is
+            # by now replacing themselves. Read under the lock settlement
+            # also holds, and before save_approval, which is what precedes
+            # every submission.
+            raise ValueError(
+                f"Approval {envelope.approval_id} is already closed; not executing"
             )
-            self.audit.log(envelope.run_id, "approval_decision", approval_payload)
+        package = self.state_store.load_signal_package(envelope.signal_run_id)
+        if package is None:
+            raise ValueError(f"Unknown signal_run_id: {envelope.signal_run_id}")
+        orders = [OrderIntent.model_validate(item) for item in envelope.orders]
+        if decision.status == "approved":
+            self._validate_signal_package_for_approval(package)
+            self._validate_signal_approval_preconditions(envelope.run_id, package)
+            # Pure, not the side-effecting _partition_orders_by_capacity:
+            # this order already belongs to a pending approval envelope,
+            # so it is approval-owned. Writing live_order_capacity_blocked
+            # here (the old behavior) made it *also* recovery-owned --
+            # visible to the operator retry/recovery flow under a new
+            # order_id -- while the approval itself stayed durably
+            # resumable (save_approval has not run yet), so the same
+            # trade could execute twice once capacity recovered. A
+            # resolution-time capacity failure instead fails closed and
+            # leaves the ORIGINAL approval the only path back to this
+            # order: capacity is rechecked, not re-owned, on the next
+            # resume.
+            orders, capacity_blocks = self._partition_orders_by_capacity_pure(orders)
+            if capacity_blocks or not orders:
+                raise ValueError("Pending approval is blocked by current broker capacity")
+            self._validate_signal_approval_gates(envelope.run_id, orders, package)
 
-            lifecycle_results: list[LiveOrderLifecycleResult] = []
-            if decision.status == "approved":
-                lifecycle_results, next_state = self._execute_live_approval_orders(
-                    envelope.run_id,
-                    orders,
-                    envelope.approval_id,
-                    decision,
-                    signal_run_id=envelope.signal_run_id,
-                )
-                if self.config.mode != RunMode.LIVE_APPROVAL:
-                    self.state_store.save_portfolio_snapshot(envelope.run_id, next_state)
-            else:
-                self.state_store.save_system_event(
-                    envelope.run_id,
-                    SystemEventType.EXECUTION_SKIPPED,
-                    {
-                        "signal_run_id": envelope.signal_run_id,
-                        "source_strategy_ids": envelope.source_strategy_ids,
-                        "approval_status": decision.status,
-                    },
-                )
+        approval_payload = {
+            "signal_run_id": envelope.signal_run_id,
+            "source_strategy_ids": envelope.source_strategy_ids,
+            "request": envelope.request.model_dump(mode="json"),
+            "decision": decision.model_dump(mode="json"),
+            "message": envelope.message,
+            "account_ids": envelope.account_ids,
+        }
+        if len(envelope.account_ids) == 1:
+            approval_payload["account_id"] = envelope.account_ids[0]
+        self.state_store.save_approval(
+            envelope.run_id,
+            envelope.approval_id,
+            approval_payload,
+        )
+        self.audit.log(envelope.run_id, "approval_decision", approval_payload)
 
-            for order in orders:
-                order_payload = order.model_dump(mode="json")
-                order_payload["signal_run_id"] = envelope.signal_run_id
-                order_payload["approval_status"] = decision.status
-                if not (
-                    self.config.mode == RunMode.LIVE_APPROVAL
-                    and self._effective_order_posture(order) == "dry_run"
-                ):
-                    self.state_store.save_order(
-                        envelope.run_id,
-                        order.order_id,
-                        order_payload,
-                    )
-                if decision.status == "expired":
-                    duplicate_key = f"live-order-recovery-candidate:{order.order_id}"
-                    if not self.state_store.duplicate_key_exists(duplicate_key):
-                        self._record_event(
-                            envelope.run_id,
-                            "live_order_recovery_candidate",
-                            {
-                                "source_order_id": order.order_id,
-                                "order": order.model_dump(mode="json"),
-                                "source_type": "approval_expired",
-                                "reason": "telegram_approval_expired_before_submit",
-                                "signal_run_id": envelope.signal_run_id,
-                                "created_at": decision.decided_at.isoformat(),
-                                "status": "pending",
-                                "duplicate_key": duplicate_key,
-                            },
-                        )
-                        self._notify_recovery_order(
-                            envelope.run_id,
-                            order,
-                            "telegram_approval_expired_before_submit",
-                        )
+        lifecycle_results: list[LiveOrderLifecycleResult] = []
+        if decision.status == "approved":
+            lifecycle_results, next_state = self._execute_live_approval_orders(
+                envelope.run_id,
+                orders,
+                envelope.approval_id,
+                decision,
+                signal_run_id=envelope.signal_run_id,
+            )
+            if self.config.mode != RunMode.LIVE_APPROVAL:
+                self.state_store.save_portfolio_snapshot(envelope.run_id, next_state)
+        else:
             self.state_store.save_system_event(
                 envelope.run_id,
-                "signal_approval_completed",
+                SystemEventType.EXECUTION_SKIPPED,
                 {
-                    "approval_id": envelope.approval_id,
                     "signal_run_id": envelope.signal_run_id,
-                    "orders_created": len(orders),
-                    "orders_planned": len(envelope.orders),
-                    "orders_submitted": sum(
-                        result.submitted_order is not None for result in lifecycle_results
-                    ),
-                    "orders_accepted": sum(
-                        result.broker_order_id is not None for result in lifecycle_results
-                    ),
-                    "orders_filled": sum(
-                        result.final_status.value == "filled" for result in lifecycle_results
-                    ),
-                    "orders_failed": sum(
-                        result.final_status.value in {"failed", "rejected", "halted"}
-                        for result in lifecycle_results
-                    ),
+                    "source_strategy_ids": envelope.source_strategy_ids,
                     "approval_status": decision.status,
-                    "approval_count": 1,
-                    "approval_statuses": [decision.status],
                 },
             )
-            return SignalApprovalSummary(
-                signal_run_id=envelope.signal_run_id,
-                run_id=envelope.run_id,
-                orders_created=len(orders),
-                approval_status=decision.status,
-                orders_planned=len(envelope.orders),
-                orders_submitted=sum(
+
+        for order in orders:
+            order_payload = order.model_dump(mode="json")
+            order_payload["signal_run_id"] = envelope.signal_run_id
+            order_payload["approval_status"] = decision.status
+            if not (
+                self.config.mode == RunMode.LIVE_APPROVAL
+                and self._effective_order_posture(order) == "dry_run"
+            ):
+                self.state_store.save_order(
+                    envelope.run_id,
+                    order.order_id,
+                    order_payload,
+                )
+            if decision.status == "expired":
+                duplicate_key = f"live-order-recovery-candidate:{order.order_id}"
+                if not self.state_store.duplicate_key_exists(duplicate_key):
+                    self._record_event(
+                        envelope.run_id,
+                        "live_order_recovery_candidate",
+                        {
+                            "source_order_id": order.order_id,
+                            "order": order.model_dump(mode="json"),
+                            "source_type": "approval_expired",
+                            "reason": "telegram_approval_expired_before_submit",
+                            "signal_run_id": envelope.signal_run_id,
+                            "created_at": decision.decided_at.isoformat(),
+                            "status": "pending",
+                            "duplicate_key": duplicate_key,
+                        },
+                    )
+                    self._notify_recovery_order(
+                        envelope.run_id,
+                        order,
+                        "telegram_approval_expired_before_submit",
+                    )
+        self.state_store.save_system_event(
+            envelope.run_id,
+            "signal_approval_completed",
+            {
+                "approval_id": envelope.approval_id,
+                "signal_run_id": envelope.signal_run_id,
+                "orders_created": len(orders),
+                "orders_planned": len(envelope.orders),
+                "orders_submitted": sum(
                     result.submitted_order is not None for result in lifecycle_results
                 ),
-                orders_accepted=sum(
+                "orders_accepted": sum(
                     result.broker_order_id is not None for result in lifecycle_results
                 ),
-                orders_filled=sum(
+                "orders_filled": sum(
                     result.final_status.value == "filled" for result in lifecycle_results
                 ),
-                orders_failed=sum(
+                "orders_failed": sum(
                     result.final_status.value in {"failed", "rejected", "halted"}
                     for result in lifecycle_results
                 ),
-            )
+                "approval_status": decision.status,
+                "approval_count": 1,
+                "approval_statuses": [decision.status],
+            },
+        )
+        return SignalApprovalSummary(
+            signal_run_id=envelope.signal_run_id,
+            run_id=envelope.run_id,
+            orders_created=len(orders),
+            approval_status=decision.status,
+            orders_planned=len(envelope.orders),
+            orders_submitted=sum(
+                result.submitted_order is not None for result in lifecycle_results
+            ),
+            orders_accepted=sum(
+                result.broker_order_id is not None for result in lifecycle_results
+            ),
+            orders_filled=sum(
+                result.final_status.value == "filled" for result in lifecycle_results
+            ),
+            orders_failed=sum(
+                result.final_status.value in {"failed", "rejected", "halted"}
+                for result in lifecycle_results
+            ),
+        )
 
     def _run_signal_locked(
         self,

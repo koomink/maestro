@@ -884,10 +884,28 @@ def test_a_double_tap_of_resume_enters_exactly_once_through_the_router(operator_
     # machine load changed the interleaving, which is a property of the test
     # rather than of the code. The invariant that matters -- one entry, at
     # attempt 2 -- is asserted exactly, below.
+    #
+    # ``claim_fenced`` is a third safe refusal, added after the 3a-5
+    # migration-fence work shifted scheduling enough to surface it: if the
+    # loser reads the stalled row in the window AFTER the winner's claim
+    # landed but BEFORE its completion, it legitimately resumes as
+    # attempt+1 (the sequential-attempt fencing is satisfied -- the winner's
+    # own claim is on record), adopts the same request-keyed child run and
+    # cash flow, and completes; the winner's completion is then correctly
+    # refused as taken over. Exactly one tap still enters and exactly one
+    # completion still lands -- the fencing did its job -- and the refusal
+    # text ("taken over by a newer resume attempt") is true of that
+    # interleaving. What must never appear is a second successful entry.
     statuses = sorted(_wfresume_statuses(store))
     assert len(statuses) == 2
     assert "resumed" in statuses
-    assert set(statuses) - {"resumed"} <= {"claim_in_flight", "claim_superseded"}
+    assert set(statuses) - {"resumed"} <= {
+        "claim_in_flight",
+        "claim_superseded",
+        "claim_fenced",
+    }
+    completions = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert len(completions) == 1
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     assert len(completed) == 1
     assert completed[0]["payload"]["attempt"] == 2

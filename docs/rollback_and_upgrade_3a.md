@@ -172,10 +172,15 @@ sqlite3 /path/to/state.db \
 소유권을 만들거나 승인을 집행하는 **권위 있는 오케스트레이터 진입점 전체** --
 `run_signal`(= `maestro run-signal`, daily-signal-approval, dashboard
 generate-signal, 텔레그램 경로), `approve_signal`, `dispatch_signal_approval`,
+`resolve_pending_signal_approval`(승인 카드 결정의 집행 경로),
 `run_once` -- 가 MIGRATING/INVALID에서 스스로 실패한다
-(`maestro.state.migration_state.MigrationActive`). 운영자가 어떤 명령을
+(`maestro.state.migration_state.MigrationActive`). 각 진입점은 자기
+protected 구간 전체를 live_order_lock -> writer_lock 아래에서 돌리므로,
+검사 시점에 안전했다는 사실과 실행 중간에 마이그레이션이 끼어들 수 없다는
+사실이 하나의 lock 관계로 성립한다. 운영자가 어떤 명령을
 실행하지 말아야 하는지 기억해야 하는 구조가 아니라, 명령이 스스로 멈춘다.
-읽기 전용 status/health 조회는 막지 않는다.
+읽기 전용 status/health 조회와, 이미 나간 주문을 정리하는
+`recover-live-order`(신규 집행·소유권 생성 없음)는 막지 않는다.
 
 **시스템을 멈춰 두는 쪽이 잘못된 head를 살려 두는 것보다 안전하다.**
 잘못된 head는 이번 달 투자를 운영자가 고르지 않은 요청에 붙인다.

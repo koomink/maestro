@@ -12,6 +12,8 @@ argument does not need.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from migration_fixtures import (
     claim_only,
@@ -24,6 +26,13 @@ from test_funding_workflow_resume import (
     _readonly_config_path,
     _signal_config_path,
     callback_update,
+)
+from test_signal_approval_handoff import (
+    _capacity_lookup,
+    _dispatch_one_pending_envelope,
+    _dispatch_orchestrator_with_capacity,
+    _dry_run_armed_dispatch_config,
+    _mock_kis_snapshot_refresh,
 )
 
 from maestro.config.loader import load_config
@@ -322,3 +331,234 @@ def _stub_summary(entry):
             signal_run_id="s", run_id="r", orders_planned=0, approval_status="pending"
         )
     return None
+
+
+# --- pending approval resolution (direct, no Telegram) ---------------------
+#
+# resolve_pending_signal_approval is a public, authoritative execution
+# boundary: it persists the operator's decision and can submit broker orders.
+# The Telegram callback two frames up checks migration state, but a public
+# boundary that can execute money must own its own fence -- and it must hold
+# the writer lock across the whole admission+execution interval, or a
+# migration could begin classification halfway through an already-admitted
+# resolution (and vice versa).
+
+
+def _pending_resolution(tmp_path, monkeypatch):
+    """A dispatched approval envelope, dry-run armed, ready to resolve."""
+    _mock_kis_snapshot_refresh(monkeypatch)
+    config = _dry_run_armed_dispatch_config(tmp_path)
+    store, envelope, decision, _order_ids = _dispatch_one_pending_envelope(config)
+    orchestrator = _dispatch_orchestrator_with_capacity(
+        config, FakeTelegramClient(), _capacity_lookup()
+    )
+    return store, orchestrator, envelope, decision
+
+
+def _assert_no_financial_effect(store, envelope, execution):
+    assert execution == []
+    assert store.approval_exists(envelope.approval_id) is False
+    assert (
+        [
+            row
+            for row in store.list_system_events_by_type(
+                "signal_approval_completed", limit=None
+            )
+            if row["payload"].get("approval_id") == envelope.approval_id
+        ]
+        == []
+    )
+
+
+def test_resolution_refuses_directly_while_migrating(tmp_path, monkeypatch):
+    store, orchestrator, envelope, decision = _pending_resolution(tmp_path, monkeypatch)
+    execution: list[str] = []
+    original = orchestrator._execute_live_approval_orders
+
+    def spy(*args, **kwargs):
+        execution.append("executed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_execute_live_approval_orders", spy)
+    _start(store)
+
+    with pytest.raises(ms.MigrationActive, match="MIGRATING"):
+        orchestrator.resolve_pending_signal_approval(envelope, decision)
+
+    _assert_no_financial_effect(store, envelope, execution)
+
+
+def test_resolution_refuses_directly_on_invalid_markers(tmp_path, monkeypatch):
+    store, orchestrator, envelope, decision = _pending_resolution(tmp_path, monkeypatch)
+    execution: list[str] = []
+    original = orchestrator._execute_live_approval_orders
+
+    def spy(*args, **kwargs):
+        execution.append("executed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_execute_live_approval_orders", spy)
+    store.save_system_event("r", ms.STARTED_EVENT, {"cutoff": "x", "duplicate_key": ms.STARTED_KEY})
+
+    with pytest.raises(ms.MigrationActive, match="contradictory"):
+        orchestrator.resolve_pending_signal_approval(envelope, decision)
+
+    _assert_no_financial_effect(store, envelope, execution)
+
+
+def test_resolution_still_works_before_any_migration(tmp_path, monkeypatch):
+    """The fence must not disable ordinary operation."""
+    store, orchestrator, envelope, decision = _pending_resolution(tmp_path, monkeypatch)
+
+    summary = orchestrator.resolve_pending_signal_approval(envelope, decision)
+
+    assert summary.orders_created > 0
+    assert store.approval_exists(envelope.approval_id) is True
+    completed = [
+        row
+        for row in store.list_system_events_by_type("signal_approval_completed", limit=None)
+        if row["payload"].get("approval_id") == envelope.approval_id
+    ]
+    assert len(completed) == 1
+
+
+def test_resolution_still_works_after_a_completed_migration(tmp_path, monkeypatch):
+    """COMPLETED lifts the fence: post-classification resolutions are ordinary."""
+    store, orchestrator, envelope, decision = _pending_resolution(tmp_path, monkeypatch)
+    _complete(store)
+
+    summary = orchestrator.resolve_pending_signal_approval(envelope, decision)
+
+    assert summary.orders_created > 0
+    assert store.approval_exists(envelope.approval_id) is True
+
+
+def test_an_admitted_resolution_excludes_every_cooperating_writer_including_the_migration(
+    tmp_path, monkeypatch
+):
+    """No interleaving where the resolution observes a safe state, the
+    migration starts, and the resolution then executes financial work.
+
+    The resolution holds live_order_lock -> writer_lock for its whole
+    admission+execution interval. While that interval is open, the migration
+    -- which needs the same writer lock to write its start marker -- cannot
+    begin; the database it would classify cannot move under it. A probe
+    writer is refused for the entire interval, proving the exclusion holds
+    against any cooperating writer, not just the migration by name.
+    """
+    from maestro.state import upgrade_backfill as ub
+
+    store, orchestrator, envelope, decision = _pending_resolution(tmp_path, monkeypatch)
+    entered = threading.Event()
+    may_finish = threading.Event()
+    original = orchestrator._execute_live_approval_orders
+
+    def gated_executor(*args, **kwargs):
+        # Inside the protected interval: both locks held, no financial
+        # effect has landed yet.
+        entered.set()
+        assert may_finish.wait(timeout=30)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_execute_live_approval_orders", gated_executor)
+
+    summaries: list[object] = []
+    resolution_thread = threading.Thread(
+        target=lambda: summaries.append(
+            orchestrator.resolve_pending_signal_approval(envelope, decision)
+        )
+    )
+    resolution_thread.start()
+    assert entered.wait(timeout=30), "resolution never reached its protected interval"
+
+    probe_errors: list[BaseException] = []
+
+    def probe_writer():
+        try:
+            with store.writer_lock("probe", timeout_seconds=0.5):
+                probe_errors.append(AssertionError("writer_lock acquired mid-resolution"))
+        except TimeoutError:
+            pass
+
+    probe = threading.Thread(target=probe_writer)
+    probe.start()
+    probe.join(timeout=10)
+    assert probe_errors == []
+
+    migration_results: list[object] = []
+    mig_started = threading.Event()
+
+    def migration_runner():
+        mig_started.set()
+        migration_results.append(ub.run_upgrade_backfill(store, "run-mig"))
+
+    migration_thread = threading.Thread(target=migration_runner)
+    migration_thread.start()
+    assert mig_started.wait(timeout=10)
+    # A bounded window in which the migration has every chance to contend;
+    # it must still be waiting outside the interval.
+    contention_window = threading.Event()
+    contention_window.wait(timeout=0.5)
+    assert migration_thread.is_alive()
+    assert ms.load_migration_state(store).phase is ms.MigrationPhase.NOT_STARTED
+
+    may_finish.set()
+    resolution_thread.join(timeout=60)
+    migration_thread.join(timeout=60)
+
+    assert summaries[0].orders_created > 0
+    assert ms.load_migration_state(store).phase is ms.MigrationPhase.COMPLETED
+
+
+def test_a_migration_that_won_first_leaves_the_resolution_refusing(tmp_path, monkeypatch):
+    """If the migration owns the interval first, the resolution must observe
+    MIGRATING and refuse before any execution -- not execute on stale
+    admission."""
+    store, orchestrator, envelope, decision = _pending_resolution(tmp_path, monkeypatch)
+    execution: list[str] = []
+    original = orchestrator._execute_live_approval_orders
+
+    def spy(*args, **kwargs):
+        execution.append("executed")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(orchestrator, "_execute_live_approval_orders", spy)
+    lock_held = threading.Event()
+    release = threading.Event()
+
+    def hold_migration_lock():
+        with store.writer_lock("migration-holder", timeout_seconds=10):
+            # The migration's first act under its lock is to take ownership.
+            ms.start_migration(store, "run-mig")
+            lock_held.set()
+            assert release.wait(timeout=30)
+
+    holder = threading.Thread(target=hold_migration_lock)
+    holder.start()
+    assert lock_held.wait(timeout=10)
+
+    outcomes: list[BaseException | str] = []
+
+    def run_resolution():
+        try:
+            orchestrator.resolve_pending_signal_approval(envelope, decision)
+        except BaseException as exc:
+            outcomes.append(exc)
+
+    resolution_thread = threading.Thread(target=run_resolution)
+    resolution_thread.start()
+    # The resolution cannot even read state while the migration holds the
+    # writer lock: it stays parked outside the fence.
+    parked = threading.Event()
+    parked.wait(timeout=0.5)
+    assert resolution_thread.is_alive()
+    assert outcomes == []
+
+    release.set()
+    resolution_thread.join(timeout=60)
+    holder.join(timeout=10)
+
+    # The lock came free only after a crash-style abort left MIGRATING behind,
+    # which is exactly what the fence must see.
+    assert isinstance(outcomes[0], ms.MigrationActive)
+    _assert_no_financial_effect(store, envelope, execution)
