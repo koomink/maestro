@@ -12,10 +12,11 @@
 
 ## Global Constraints
 
-- Plan and implement against repository baseline `c298861f6cce2981b699cc9668f576875534f8cd` or the actual newer `main` after inspecting every intervening commit. Never reset or discard unrelated work.
+- Plan and implement against repository baseline `df23fba205be410cf4b39acb391e9baafe2e3205` or the actual newer `main` after inspecting every intervening commit. Never reset or discard unrelated work.
 - This is GitHub/development-repository work only. Production VPS deployment, production migration state, and production live-order incident remediation remain separate and must not be inferred from GitHub completion.
 - Telegram Operator is the only network owner for actionable funding/budget cards. Do not preserve dual CLI/operator sending and do not add a cross-process Telegram delivery lease or CAS.
 - `card_delivery_version` is Telegram delivery provenance only: missing/default `0` is legacy/raw-send generation and explicit `1` is lifecycle-owned generation. It never enters `funding_workflow_head.version`, head CAS, or financial claim logic.
+- No deployable intermediate commit may persist `card_delivery_version=1` while any CLI raw actionable funding/budget sender remains active. The field describes actual delivery ownership, not capability prepared before Task 9.
 - The logical card key is exactly `funding-workflow:<funding_workflow_id>`. Every funding/budget action callback continues to carry the exact `request_id`; never route a stale request callback to the current head.
 - Unknown delivery is not non-delivery. `unknown` is never replayed automatically; only explicit `failed` evidence permits a retry, and edit replacement requires proof that the target is absent.
 - Delivery and adoption decisions are per `(workflow_id, chat_id)`. Unknown in one chat does not suppress a safe send/edit in another chat.
@@ -36,7 +37,7 @@
 - `load_request_payload(store, request_id, phase)` loads the authoritative funding/budget request event without a row limit.
 - `funding_workflow_superseded` records durable predecessor/successor lineage. A legitimate child successor has `legitimate_successor=true` and `successor_of_phase`.
 - `funding_workflow_claim` carries `attempt`, `intent`, and, for budget confirmation, `selected_budget`. `funding_workflow_completed` identifies the exact completed `(workflow_id, request_id, phase, attempt)`; terminal rendering must join these records.
-- `list_incomplete_workflows(store)` reports claimed-but-uncompleted transitions for the attention overlay and the existing recovery UI. The monthly sweep must never invoke the recovery action.
+- `list_incomplete_workflows(store)` reports claimed-but-uncompleted transitions to the existing recovery sweep, but durable claim state alone cannot distinguish an ordinary call still executing from work abandoned at a process boundary. The monthly projector marks `incomplete_transition` only after the existing recovery path has durably surfaced the exact attempt through `funding_workflow_stalled_notice` or `funding_workflow_needs_attention`; it never invents a timeout or invokes recovery.
 - `StateStore.record_card_event`, `load_card_delivery_state`, `record_card_audience`, and `load_card_audience` already provide atomic event/projection persistence and per-card audience pinning. Adoption fits this event model; no new table is justified.
 - `CardLifecycleManager.refresh` already preserves send ambiguity per chat, skips confirmed equal renders, retries proven failed sends, and escalates unknown/repeated failures. Phase 3b needs a strict edit-replacement policy without changing the approval-card default.
 - `TelegramOperatorCommandRouter.poll_once` currently runs pending approvals, recovery notifications, approval lifecycle cards, incomplete workflow notices, and workflow convergence in that order. The monthly-card sweep can run immediately after the existing lifecycle-card sweep and tolerate one poll of convergence lag because it is read-only, validates each head/request, and isolates malformed workflows.
@@ -48,8 +49,8 @@
 
 | File | Responsibility in Phase 3b |
 |---|---|
-| `src/maestro/execution/funding_requests.py` | Backward-compatible funding delivery generation field; new builder stamps generation 1. |
-| `src/maestro/execution/budget_requests.py` | Backward-compatible budget delivery generation field; new builder stamps generation 1. |
+| `src/maestro/execution/funding_requests.py` | Backward-compatible funding delivery generation field; Task 9 activates builder generation 1 in the ownership-cutover commit. |
+| `src/maestro/execution/budget_requests.py` | Backward-compatible budget delivery generation field; Task 9 activates builder generation 1 in the ownership-cutover commit. |
 | `src/maestro/state/funding_workflow.py` | Read-only predecessor-completion admission predicate built on existing supersession/completion events; no claim/CAS changes. |
 | `src/maestro/integrations/telegram/ui/funding_workflow.py` (new) | Ephemeral workflow lineage and `FundingWorkflowCardModel` projection from authoritative state. |
 | `src/maestro/integrations/telegram/ui/funding_workflow_delivery.py` (new) | Per-chat workflow-card adoption and lifecycle synchronization; no financial writes. |
@@ -82,22 +83,30 @@
 
 The repository has no safe mechanism that turns an active request's `unknown` lifecycle copy into confirmed absence or confirmed presence. Phase 3b therefore records/preserves the unknown workflow copy, emits the existing buttonless ambiguity notice, reports it through `telegram_ui` health, and creates no second actionable representation. This plan does **not** invent a clear/reset/force-send command. The financial callback on the possibly existing original request card remains request-scoped and can proceed once predecessor admission is satisfied. A dedicated operator resolution procedure requires a separate approved architecture decision, but its absence does not block the specified fail-closed Phase 3b cutover.
 
+## Deployability / Cutover Invariant
+
+1. Tasks 1-8 are preparatory commits and must preserve legacy-safe behavior if accidentally deployed: builders continue to emit generation 0, CLI remains the existing top-level actionable sender, and the prepared Operator path refuses an absent lifecycle copy for generation 0.
+2. Generation 1 must not be written until Telegram Operator sole ownership is active in the same binary. Code being capable of processing generation 1 is not sufficient provenance.
+3. **Task 9 is the delivery ownership cutover commit and is the first commit allowed to produce generation-1 funding/budget requests.** That one semantic unit activates both builders, retires all CLI raw actionable funding/budget sends, and replaces the Operator's request-scoped child-send path with workflow-card synchronization.
+4. No Phase 3b intermediate commit is approved for production deployment merely because it is independently testable; production deployability requires the explicit designation above and a separate deployment decision.
+5. GitHub engineering completion remains separate from VPS deployment and migration verification. This plan is not a production deployment runbook.
+
+Independent-commit safety follows the dependency order: Task 1 is additive default-0 compatibility only; Task 2 adds a fail-closed admission precondition; Tasks 3-4 add unused pure projection/rendering; Task 5 keeps stricter edit behavior opt-in; Task 6 adds an unused coordinator that refuses unsafe absence; Task 7 wires the coordinator but builders remain 0 and therefore cannot create a second initial card; Task 8 adds only migration-fenced refreshes and deliberately retains existing senders; Task 9 changes all three ownership facts atomically; Task 10 changes documentation only after verification. Thus no preparatory commit can advertise generation 1, weaken a financial gate, or create dual actionable ownership.
+
 ---
 
-### Task 1: Cut Over Request Delivery Generation
+### Task 1: Add Backward-Compatible Delivery Generation Fields
 
 **Files:**
 - Create: `tests/test_contribution_funding_requests.py`
 - Modify: `src/maestro/execution/funding_requests.py`
 - Modify: `src/maestro/execution/budget_requests.py`
 - Modify: `tests/test_contribution_budget_requests.py`
-- Modify: `tests/test_signal_approval_handoff.py`
-- Modify: `tests/test_multi_account_contributions.py`
 
 **Interfaces:**
 - Consumes: Existing `ContributionFundingRequest`, `ContributionBudgetRequest`, `build_contribution_funding_request(...)`, and `build_contribution_budget_request(...)` APIs.
-- Produces: `ContributionFundingRequest.card_delivery_version: int = 0` and `ContributionBudgetRequest.card_delivery_version: int = 0`; both builders return objects with `card_delivery_version == 1`.
-- Invariant: `model_validate()` of a persisted payload missing the field yields `0`; `model_dump(mode="json")` of every newly built request persists `1`.
+- Produces: `ContributionFundingRequest.card_delivery_version: int = 0` and `ContributionBudgetRequest.card_delivery_version: int = 0`.
+- Invariant: `model_validate()` of a persisted payload missing the field yields `0`; direct model construction and both builders still emit/persist `0` until Task 9 atomically changes delivery ownership.
 
 - [ ] **Step 1: Write failing legacy-deserialization tests**
 
@@ -129,28 +138,30 @@ def test_missing_card_delivery_version_is_legacy_generation():
 
 Use the same shape in `tests/test_contribution_budget_requests.py` for `ContributionBudgetRequest`.
 
-- [ ] **Step 2: Write failing new-request generation tests**
+- [ ] **Step 2: Write failing legacy-safe builder tests**
 
-Extend the existing persisted request assertions:
+Call each real builder with the smallest existing valid fixture and assert the preparatory binary does not advertise ownership it does not yet have:
 
 ```python
-assert signal["funding_requests"][0]["card_delivery_version"] == 1
-assert events[0]["payload"]["card_delivery_version"] == 1
+assert funding_request is not None
+assert funding_request.card_delivery_version == 0
+assert budget_request is not None
+assert budget_request.card_delivery_version == 0
 ```
 
-Add the budget assertion to the existing multi-account test that produces `signal["budget_requests"]`.
+These assertions are intentionally changed to generation 1 only in Task 9.
 
 - [ ] **Step 3: Run the red tests**
 
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py tests/test_signal_approval_handoff.py::test_run_signal_persists_funding_request_when_buy_only_cash_is_below_minimum tests/test_multi_account_contributions.py -q
+.venv/bin/pytest tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py -q
 ```
 
-Expected: FAIL because both models lack `card_delivery_version`, and newly persisted request payloads have no generation-1 field.
+Expected: FAIL because both models lack `card_delivery_version`.
 
-- [ ] **Step 4: Add the backward-compatible fields and explicit builder stamps**
+- [ ] **Step 4: Add only the backward-compatible model fields**
 
 Add this field to each request model immediately before `status`:
 
@@ -158,13 +169,7 @@ Add this field to each request model immediately before `status`:
 card_delivery_version: int = 0
 ```
 
-Add this explicit constructor argument in both builder return statements:
-
-```python
-card_delivery_version=1,
-```
-
-Do not add the field in `plan_contribution_request`, head payloads, claims, completions, or CAS keys.
+Do not add explicit builder arguments yet. Pydantic's default keeps both new-request builders at generation 0. Do not add the field in `plan_contribution_request`, head payloads, claims, completions, or CAS keys.
 
 - [ ] **Step 5: Run focused and adjacent tests**
 
@@ -174,13 +179,13 @@ Run:
 .venv/bin/pytest tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py tests/test_signal_approval_handoff.py tests/test_multi_account_contributions.py -q
 ```
 
-Expected: PASS. Existing direct model constructors continue to default to generation 0; orchestrator-built funding and budget requests persist generation 1.
+Expected: PASS. Missing persisted fields, direct constructors, and real builders all resolve to generation 0. This commit is safe with the still-active CLI sender because it does not claim Operator ownership.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/maestro/execution/funding_requests.py src/maestro/execution/budget_requests.py tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py tests/test_signal_approval_handoff.py tests/test_multi_account_contributions.py
-git commit -m "feat(3b): version funding card delivery ownership"
+git add src/maestro/execution/funding_requests.py src/maestro/execution/budget_requests.py tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py
+git commit -m "feat(3b): add legacy-safe card delivery generation"
 ```
 
 ### Task 2: Gate Successor Financial Admission on Predecessor Completion
@@ -304,9 +309,10 @@ git commit -m "fix(3b): gate successor actions on predecessor completion"
 **Files:**
 - Create: `src/maestro/integrations/telegram/ui/funding_workflow.py`
 - Create: `tests/test_funding_workflow_card_projection.py`
+- Modify: `tests/test_funding_workflow_resume.py`
 
 **Interfaces:**
-- Consumes: `StateStore.load_funding_workflow_head`, `load_request_payload`, `list_incomplete_workflows`, `funding_workflow_superseded`, `funding_workflow_claim`, `funding_workflow_completed`, and existing card-state read APIs.
+- Consumes: `StateStore.load_funding_workflow_head`, `load_request_payload`, `list_incomplete_workflows`, `funding_workflow_superseded`, `funding_workflow_claim`, `funding_workflow_completed`, and the existing recovery path's `funding_workflow_stalled_notice` / `funding_workflow_needs_attention` events.
 - Produces:
 
 ```python
@@ -358,6 +364,12 @@ class FundingWorkflowCardModel:
 def funding_workflow_card_key(workflow_id: str) -> str:
     return f"funding-workflow:{workflow_id}"
 
+def recovery_owned_incomplete_attempts(
+    store: StateStore,
+    workflow_id: str,
+) -> frozenset[tuple[str, FundingWorkflowPhase, int]]:
+    """Return exact (request_id, phase, attempt) identities already surfaced by recovery."""
+
 def project_funding_workflow_card(
     store: StateStore,
     workflow_id: str,
@@ -397,9 +409,13 @@ Cover these exact projections:
 
 - Funding A has an open claim, legitimate budget B is head, and A is not completed: B has `stage == "budget_pending"`, `attention == "predecessor_incomplete"`, `predecessor_completed is False`, and `financial_actions_allowed is False`.
 - After completing A: the same B has `attention is None`, `predecessor_completed is True`, and `financial_actions_allowed is True`.
-- An incomplete current funding or budget claim has `attention == "incomplete_transition"` while preserving its truthful in-progress stage.
+- An ordinary current funding confirm/cancel or budget confirm/cancel claim, with no existing recovery notice for its exact attempt, keeps its truthful in-progress stage and has `attention is None`.
+- In `tests/test_funding_workflow_resume.py`, create the same open claim, call the existing `_sweep_incomplete_workflows()` so the repository's current recovery path durably emits `funding_workflow_stalled_notice`, then project it and assert the in-progress stage is unchanged while `attention == "incomplete_transition"`. Add the exhausted-attempt twin using the existing `funding_workflow_needs_attention` path.
+- A recovery notice for another request, phase, workflow, or attempt does not add attention to the current claim.
 - The lineage tuple is current-first and follows `superseded_by` links, never event timestamps or event IDs.
 - A funding completion with an approval child but no budget successor remains `funding_completed`, not `budget_completed`.
+
+The repository has no durable "process is currently executing this claim" marker. `list_incomplete_workflows()` deliberately includes any claimed-but-uncompleted transition because the recovery UI is conservative about a process that may only look dead. Therefore raw list membership is not sufficient for monthly-card warning copy. Reusing the recovery sweep's exact-attempt notice event is the smallest deterministic boundary: it may delay the overlay until recovery has surfaced the attempt, but it neither labels normal in-call work as stalled nor creates a timeout or second recovery state machine.
 
 - [ ] **Step 3: Write the failing legacy/default and restart tests**
 
@@ -423,7 +439,8 @@ Implement read-only helpers inside the new file:
 - `_lineage(store, workflow_id, current_request_id) -> tuple[FundingWorkflowRequestRef, ...]` builds a predecessor map from exact `superseded_by` links and rejects cycles/ambiguous direct predecessors.
 - `_claims_by_identity(...)` and `_completions_by_identity(...)` join completion to its exact attempt; a terminal state without the corresponding claim raises `ValueError` rather than guessing from legacy ack/decision events.
 - `_required_funding_predecessor(...)` recognizes only the direct legitimate funding successor marker used by Task 2.
-- `project_funding_workflow_card(...)` validates the head phase/request/scope, derives the active claim/completion, applies the stage matrix, and overlays attention without writing it.
+- `recovery_owned_incomplete_attempts(...)` intersects `list_incomplete_workflows(store)` with exact `(workflow_id, request_id, phase, attempt)` identities already recorded by `funding_workflow_stalled_notice` or `funding_workflow_needs_attention`. It reads existing events only and returns an ephemeral set.
+- `project_funding_workflow_card(...)` validates the head phase/request/scope, derives the active claim/completion, applies the stage matrix, and overlays `incomplete_transition` only when the exact open claim is in `recovery_owned_incomplete_attempts(...)`. A raw open claim still produces the truthful in-progress stage but no warning.
 
 Do not consult `contribution_funding_request_ack` or `contribution_budget_request_decision` for terminal truth.
 
@@ -432,15 +449,15 @@ Do not consult `contribution_funding_request_ack` or `contribution_budget_reques
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_funding_workflow_card_projection.py tests/test_authoritative_funding_state.py tests/test_funding_workflow_head.py tests/test_funding_workflow_transitions.py -q
+.venv/bin/pytest tests/test_funding_workflow_card_projection.py tests/test_funding_workflow_resume.py tests/test_authoritative_funding_state.py tests/test_funding_workflow_head.py tests/test_funding_workflow_transitions.py -q
 ```
 
-Expected: PASS. No Phase 3a authority test changes.
+Expected: PASS. Ordinary in-flight claims are not mislabeled; only the existing recovery authority's durable exact-attempt evidence adds the attention overlay. No Phase 3a authority test changes.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/maestro/integrations/telegram/ui/funding_workflow.py tests/test_funding_workflow_card_projection.py
+git add src/maestro/integrations/telegram/ui/funding_workflow.py tests/test_funding_workflow_card_projection.py tests/test_funding_workflow_resume.py
 git commit -m "feat(3b): project monthly funding workflow cards"
 ```
 
@@ -536,12 +553,14 @@ git commit -m "feat(3b): render monthly funding workflow cards"
 
 **Files:**
 - Modify: `src/maestro/integrations/telegram/bot.py`
+- Modify: `src/maestro/integrations/telegram/ui/card_state.py`
 - Modify: `src/maestro/integrations/telegram/ui/lifecycle.py`
 - Modify: `tests/test_telegram_card_lifecycle.py`
+- Modify: `tests/test_telegram_card_state.py`
 - Modify: `tests/test_telegram_approval.py`
 
 **Interfaces:**
-- Consumes: Existing `TelegramApiRejected`, `CardLifecycleManager.refresh`, and operation-id intent/result/failure events.
+- Consumes: Existing `TelegramApiRejected`, `CardLifecycleManager.refresh`, `card_failure_event`, and operation-id intent/result/failure events stored as `telegram_ui_card` system events.
 - Produces:
 
 ```python
@@ -612,12 +631,36 @@ In `tests/test_telegram_card_lifecycle.py`, call `refresh(..., edit_replacement_
 
 Also retain the explicit send rejection retry and send timeout/no-replay tests.
 
+In `tests/test_telegram_card_state.py`, add direct event/fold regressions:
+
+```python
+legacy = card_failure_event("approval:a1", 100, "pending", "hash", "op-1", "rejected")
+enriched = card_failure_event(
+    "funding-workflow:w1",
+    100,
+    "budget_pending",
+    "hash-2",
+    "op-2",
+    "Bad Request: can't parse entities",
+    method="editMessageText",
+    error_code=400,
+    description="Bad Request: can't parse entities",
+)
+
+assert "method" not in legacy["payload"]
+assert enriched["payload"]["method"] == "editMessageText"
+assert enriched["payload"]["error_code"] == 400
+assert enriched["payload"]["description"] == "Bad Request: can't parse entities"
+```
+
+Persist and fold the enriched event after a confirmed copy. Assert delivery remains `failed`, the prior `message_id` remains available exactly as before, and the existing consecutive-failure count is unchanged except for the same increment the legacy failure event already caused. This proves metadata is diagnostic event payload only, does not alter card projection semantics, and cannot become financial authority.
+
 - [ ] **Step 3: Run the red lifecycle tests**
 
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_telegram_approval.py tests/test_telegram_card_lifecycle.py -q
+.venv/bin/pytest tests/test_telegram_approval.py tests/test_telegram_card_lifecycle.py tests/test_telegram_card_state.py -q
 ```
 
 Expected: FAIL because rejection metadata is discarded and every explicit edit rejection currently triggers a fresh send.
@@ -642,6 +685,29 @@ Keep the exception a `RuntimeError` subclass. Update its docstring to mean “Te
 
 - [ ] **Step 5: Implement strict edit classification without changing approval defaults**
 
+First extend `card_failure_event(...)` in `ui/card_state.py` with the exact optional keyword-only parameters shown in **Interfaces**. Add only non-`None` values to the existing `telegram_ui_card` event payload:
+
+```python
+payload = {"error": error}
+if method is not None:
+    payload["method"] = method
+if error_code is not None:
+    payload["error_code"] = error_code
+if description is not None:
+    payload["description"] = description
+return _event(
+    "failure",
+    card_key,
+    chat_id,
+    stage,
+    render_hash,
+    operation_id,
+    **payload,
+)
+```
+
+There is no SQLite schema change: these fields live only in the existing system-event JSON payload. Existing callers that pass only `error` keep byte-for-byte equivalent event payloads, and `resolve_card_copies` continues to fold on the existing operation/delivery fields without consulting rejection metadata.
+
 For `replace_on_target_absence`, classify only case-insensitive description evidence:
 
 - Contains `message is not modified` -> write `card_result_event` for the same message and desired hash; no send.
@@ -661,12 +727,12 @@ Run:
 .venv/bin/pytest tests/test_telegram_card_lifecycle.py tests/test_telegram_card_state.py tests/test_telegram_approval_card.py tests/test_telegram_approval_stage.py tests/test_telegram_operator_ui.py -q
 ```
 
-Expected: PASS. Strict replacement is opt-in; approval-card network behavior is unchanged.
+Expected: PASS. Strict replacement is opt-in; approval-card network behavior is unchanged. Legacy error-only callers, message-id preservation, and consecutive-failure folding remain backward-compatible, while rejection metadata survives only as diagnostic `telegram_ui_card` payload.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/maestro/integrations/telegram/bot.py src/maestro/integrations/telegram/ui/lifecycle.py tests/test_telegram_card_lifecycle.py tests/test_telegram_approval.py
+git add src/maestro/integrations/telegram/bot.py src/maestro/integrations/telegram/ui/card_state.py src/maestro/integrations/telegram/ui/lifecycle.py tests/test_telegram_card_lifecycle.py tests/test_telegram_card_state.py tests/test_telegram_approval.py
 git commit -m "fix(3b): classify telegram edit rejection evidence"
 ```
 
@@ -810,6 +876,8 @@ def TelegramOperatorCommandRouter._refresh_funding_workflow_card(
 def TelegramOperatorCommandRouter._sweep_funding_workflow_cards(self) -> None: ...
 ```
 
+- Shared migration fence: `_refresh_funding_workflow_card` is the only Phase 3b projection/delivery mutation entry and checks `_migration_block_reason()` before calling `project_funding_workflow_card` or `FundingWorkflowCardDelivery.sync`. When blocked, it returns `FundingWorkflowCardSyncResult(card_key=funding_workflow_card_key(workflow_id), outcomes={})`; `outcome_for(chat_id)` therefore returns `"blocked"` without creating an audience, adoption, intent, result, or failure event.
+
 - Construction: `TelegramOperatorCommandRouter.__init__` creates one `FundingWorkflowCardDelivery(self.store, self._card_manager)`.
 - Poll order after this task:
 
@@ -827,13 +895,17 @@ _converge_workflow_invariants
 In the new integration file, use the existing fake Telegram client/router pattern and assert:
 
 - Version 0 head + no request-scoped/workflow-scoped lifecycle evidence -> sweep sends nothing.
-- Version 1 head + no lifecycle evidence -> sweep sends exactly one workflow-scoped actionable card per configured chat.
+- A test fixture that explicitly persists a version 1 head + no lifecycle evidence -> sweep sends exactly one workflow-scoped actionable card per configured chat. Tasks 1-8 do not make production builders create this fixture state; this proves Operator capability before the atomic Task 9 activation.
 - Constructing a new router over the same SQLite database and sweeping again does not send a duplicate; it skips or edits the confirmed physical message according to the render hash.
 - The card key in projection state is exactly `funding-workflow:<canonical workflow id>`.
 
-- [ ] **Step 2: Write the failing migration and side-effect tests**
+- [ ] **Step 2: Write the failing shared-boundary migration and side-effect tests**
 
-Parameterize durable migration markers for `MIGRATING` and `INVALID`, then assert the sweep performs no send/edit and does not change card, request, head, claim, completion, cash-flow, child, or migration event counts.
+Parameterize durable migration markers for `MIGRATING` and `INVALID`. For each state, call `_refresh_funding_workflow_card(workflow_id)` **directly**, without going through the sweep, and assert `outcome_for(configured_chat_id) == "blocked"`, no send/edit occurs, and card audience, adoption, card-event, request, head, claim, completion, cash-flow, child, and migration event counts do not change. Repeat through `_sweep_funding_workflow_cards()` to prove both entry paths stand down.
+
+Add the deterministic race-shaped test: first persist a completed funding transition and its already-published budget successor while migration is normal; then persist the existing marker sequence that makes `load_migration_state` return `MIGRATING`; finally call `_refresh_funding_workflow_card(workflow_id)` directly. Assert the durable financial completion/head remain unchanged, but no edit exposes B's budget buttons and no workflow-card state/audience/adoption event is written. Add the `INVALID` direct-refresh twin. No real threads are needed because the safety boundary is the durable state observed immediately before UI refresh.
+
+The assertion is one-way: migration state does not roll back already durable financial truth; it only prevents Phase 3b UI mutation and new action exposure while migration authority says to stand down.
 
 For a normal migration state, monkeypatch these symbols to raise if called: `claim_workflow_attempt`, `_run_child_signal`, `complete_workflow`, cash-flow record helpers, and `converge_workflow_invariants`. The card sweep must still render/send.
 
@@ -855,10 +927,13 @@ Expected: FAIL because the router has no monthly workflow-card service or sweep.
 
 Implement `_refresh_funding_workflow_card` as the only handler entry that projects and synchronizes a workflow. Implement `_sweep_funding_workflow_cards` as:
 
-1. Return immediately for `_migration_block_reason()`.
-2. Iterate a stable sort of current heads by `workflow_id`.
-3. Call `_refresh_funding_workflow_card` inside a per-workflow `try`.
-4. Route exceptions through `_log_card_failure` and continue.
+1. In `_refresh_funding_workflow_card`, check `_migration_block_reason()` first and return the blocked result above before projection, audience resolution, adoption, or lifecycle delivery.
+2. In `_sweep_funding_workflow_cards`, retain an early return for the same migration reason as a scan optimization; this is not the safety boundary.
+3. Iterate a stable sort of current heads by `workflow_id`.
+4. Call `_refresh_funding_workflow_card` inside a per-workflow `try`.
+5. Route exceptions through `_log_card_failure` and continue.
+
+Every Phase 3b workflow-card mutation path, including the immediate refreshes added in Task 8, must cross this shared migration-aware method. Callers must not project or call `FundingWorkflowCardDelivery.sync` directly.
 
 Insert the sweep after `_sweep_lifecycle_cards`. Do not reorder any existing sweep. A convergence repair that occurs at the end of this poll appears on the next poll; this one-poll lag is safe because the card sweep writes no financial state and refuses malformed/missing authority rather than inventing it.
 
@@ -870,7 +945,7 @@ Run:
 .venv/bin/pytest tests/test_telegram_monthly_funding_workflow.py tests/test_migration_runtime_gates.py tests/test_telegram_operator_ui.py tests/test_telegram_approval_card.py tests/test_funding_workflow_resume.py -q
 ```
 
-Expected: PASS. Existing recovery and convergence ownership remains intact.
+Expected: PASS. Direct refresh, immediate callers, and periodic sweep share one stand-down fence; existing recovery and convergence ownership remains intact.
 
 - [ ] **Step 7: Commit**
 
@@ -879,7 +954,7 @@ git add src/maestro/integrations/telegram/handlers.py tests/test_telegram_monthl
 git commit -m "feat(3b): sweep monthly funding workflow cards"
 ```
 
-### Task 8: Route Child Handoff and Immediate Refresh through the Same Projection
+### Task 8: Route Immediate Refresh through the Shared Projection Boundary
 
 **Files:**
 - Modify: `src/maestro/integrations/telegram/handlers.py`
@@ -887,7 +962,7 @@ git commit -m "feat(3b): sweep monthly funding workflow cards"
 - Modify: `tests/test_telegram_monthly_funding_workflow.py`
 
 **Interfaces:**
-- Consumes: `_refresh_funding_workflow_card(workflow_id)`, `FundingWorkflowCardSyncResult.outcome_for(chat_id)`, `_require_card_delivered`, and Task 2 admission.
+- Consumes: Task 7's migration-aware `_refresh_funding_workflow_card(workflow_id)` and Task 2's predecessor admission guard.
 - Produces:
 
 ```python
@@ -898,100 +973,77 @@ def TelegramOperatorCommandRouter._refresh_request_workflow_card(
     return self._refresh_funding_workflow_card(workflow_id_from_request(request))
 ```
 
-- Handoff contract: `_require_card_delivered` accepts `sent`, `edited`, or `skipped` as confirmed physical delivery for the acting chat; `failed`, `unknown`, and `blocked` record `funding_request_card_undelivered` and keep the parent transition incomplete.
+- Safety boundary: this helper never calls the projector or delivery coordinator directly, so immediate callback/Resume refreshes cannot bypass Task 7's `MIGRATING` / `INVALID` fence.
+- Deployability boundary: builders still emit generation 0, CLI remains the top-level raw actionable sender, and `_deliver_child_signal_outcome` retains its existing request-scoped lifecycle send in this task. An absent generation-0 copy is still blocked, so this preparatory commit cannot create a second initial actionable card.
 
-- [ ] **Step 1: Write the failing pre-completion child handoff test**
+- [ ] **Step 1: Write failing immediate-refresh tests for every entry path**
 
-Use the existing `_stub_child_signal` fixture with funding A producing budget B in the same workflow. Assert the sequence:
+Spy on `_refresh_request_workflow_card` and cover funding complete/cancel callbacks, budget select/cancel callbacks, `/budget <request_id> <amount>`, funding/budget Resume, and a transition exception after claim. Assert the refresh runs after the transition call returns, preserves the truthful durable stage, and never changes the financial outcome when Telegram synchronization fails.
 
-1. B becomes head while A is claimed but incomplete.
-2. `_deliver_child_signal_outcome` synchronizes a buttonless B card with the predecessor-incomplete attention copy.
-3. `_require_card_delivered` observes the acting chat's confirmed outcome.
-4. A completion is then persisted.
-5. Immediate refresh edits the same message into actionable budget B with callbacks carrying B's `request_id`.
+The best-effort `_edit_callback_message` may remain for the clicked legacy message, but it must run before canonical refresh and must never derive canonical stage or route a stale request to the head.
 
-Assert there is one physical message, not one A message plus a newly sent B message.
+- [ ] **Step 2: Write the failing immediate-refresh migration race test**
 
-- [ ] **Step 2: Write failing immediate-refresh tests for every entry path**
+Wrap the real `complete_workflow` in the callback test so it first persists the financial completion, then writes the existing migration marker sequence that makes `load_migration_state` return `MIGRATING`, and then returns. Let the callback's real `finally` path call `_refresh_request_workflow_card`. Assert completion/head truth remains durable, while the shared refresh returns blocked and writes no audience/adoption/card event and performs no send/edit. Repeat with the existing contradictory markers that produce `INVALID`.
 
-Spy on `_refresh_request_workflow_card` and cover:
-
-- Funding complete and cancel callbacks.
-- Budget select and cancel callbacks.
-- `/budget <request_id> <amount>`.
-- Funding and budget Resume paths.
-- A transition exception after claim: refresh still runs and projects the truthful in-progress/attention state.
-
-The best-effort `_edit_callback_message` may remain for the clicked raw legacy message, but it must run before the canonical refresh and must never derive canonical stage or route a stale request to the head.
+This deterministic ordering models migration beginning after the financial lock is released but before UI refresh. Migration does not undo the completed financial transition; it prevents only Phase 3b UI mutation/action exposure.
 
 - [ ] **Step 3: Write failing ambiguity/crash-boundary integration tests**
 
-Cover:
-
-- Confirmed predecessor A + active budget B unknown + A incomplete: immediate/sweep refresh sends no B duplicate and does not promote A; the B callback is rejected before any B claim.
-- After A completion, the possibly existing original B callback can pass predecessor admission; B remains request-scoped. If B completes while its workflow card edit times out, `funding_workflow_completed` remains durable and the next sweep sends/edits no replacement.
-- Explicit Telegram rejection of a child card remains retryable and keeps the parent incomplete until a confirmed delivery.
-- Child-card send timeout remains unknown/no replay and keeps the parent incomplete.
-- Approval child handoff still uses approval cards; the monthly renderer contains no approval action.
+Cover current budget B unknown plus confirmed predecessor A, generic edit rejection, and edit timeout. Immediate refresh must use the same current-request-first adoption/no-replay rules as the sweep. If a financial completion is already durable when an edit times out, it remains durable and the next sweep sends/edits no replacement. Approval handoff remains on approval cards.
 
 - [ ] **Step 4: Run the red immediate-refresh tests**
 
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_funding_workflow_resume.py tests/test_telegram_monthly_funding_workflow.py -k "monthly or workflow_card or predecessor or child_card" -q
+.venv/bin/pytest tests/test_funding_workflow_resume.py tests/test_telegram_monthly_funding_workflow.py -k "workflow_card or immediate_refresh or migration or predecessor" -q
 ```
 
-Expected: FAIL because child outcomes still send request-scoped cards and callback/command paths do not invoke the monthly projection.
+Expected: FAIL because callback/command/Resume paths do not yet invoke the monthly refresh helper.
 
-- [ ] **Step 5: Replace request-scoped child sends with workflow synchronization**
+- [ ] **Step 5: Add canonical immediate refresh in `finally` blocks**
 
-In `_deliver_child_signal_outcome`, for every still-current funding/budget request:
+Once a request payload has been validated, wrap each financial transition entry so `_refresh_request_workflow_card(request)` runs after success, claim refusal, or transition failure. The helper always crosses `_refresh_funding_workflow_card`, which performs the migration check at call time. Log/isolate UI refresh exceptions with `_log_card_failure`; never convert a completed financial transition back to incomplete because Telegram refresh failed.
 
-```python
-result = self._refresh_request_workflow_card(request)
-self._require_card_delivered(
-    result.outcome_for(chat_id),
-    phase,
-    request,
-)
-```
+Do not replace `_deliver_child_signal_outcome`, `_send_funding_request`, `_send_budget_request`, or `_send_request_card` in this preparatory task. Their atomic ownership handoff belongs to Task 9.
 
-Remove `_send_funding_request`, `_send_budget_request`, and `_send_request_card` after their last call site disappears. Remove their raw formatter/markup imports from `handlers.py`. Keep `_request_still_needs_a_card`, `_require_card_delivered`, and the undelivered event/notice because they protect parent completion.
-
-- [ ] **Step 6: Add canonical immediate refresh in `finally` blocks**
-
-Once a request payload has been validated and migration has passed, wrap each financial transition entry so `_refresh_request_workflow_card(request)` runs after success, claim refusal, or transition failure. Log/isolate UI refresh exceptions with `_log_card_failure`; never convert a completed financial transition back to incomplete because Telegram refresh failed.
-
-For raw legacy callback-message cleanup, edit only the callback's own `chat_id/message_id`, remove buttons, and then let the canonical projector perform the final workflow-card update. Do not infer that the raw message was delivered in another chat.
-
-- [ ] **Step 7: Run focused and full funding workflow regressions**
+- [ ] **Step 6: Run focused and full funding workflow regressions**
 
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_funding_workflow_resume.py tests/test_funding_workflow_transitions.py tests/test_funding_workflow_head.py tests/test_telegram_monthly_funding_workflow.py tests/test_telegram_card_lifecycle.py -q
+.venv/bin/pytest tests/test_funding_workflow_resume.py tests/test_funding_workflow_transitions.py tests/test_funding_workflow_head.py tests/test_telegram_monthly_funding_workflow.py tests/test_telegram_card_lifecycle.py tests/test_migration_runtime_gates.py -q
 ```
 
-Expected: PASS. Parent handoff failure/unknown remains fail-closed; financial completion survives UI ambiguity.
+Expected: PASS. Immediate refresh shares the migration fence and projection semantics; existing generation-0 child delivery remains intact until cutover.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/maestro/integrations/telegram/handlers.py tests/test_funding_workflow_resume.py tests/test_telegram_monthly_funding_workflow.py
-git commit -m "feat(3b): refresh monthly cards across workflow transitions"
+git commit -m "feat(3b): refresh monthly cards after workflow transitions"
 ```
 
-### Task 9: Retire CLI Actionable Request-Card Delivery and Report Durable Requests
+### Task 9: Atomically Cut Over Actionable Card Delivery Ownership
 
 **Files:**
+- Modify: `src/maestro/execution/funding_requests.py`
+- Modify: `src/maestro/execution/budget_requests.py`
+- Modify: `src/maestro/integrations/telegram/handlers.py`
 - Modify: `src/maestro/cli.py`
+- Modify: `tests/test_contribution_funding_requests.py`
+- Modify: `tests/test_contribution_budget_requests.py`
+- Modify: `tests/test_funding_workflow_resume.py`
+- Modify: `tests/test_telegram_monthly_funding_workflow.py`
 - Modify: `tests/test_cli_no_action_notice.py`
 - Modify: `tests/test_signal_approval_handoff.py`
+- Modify: `tests/test_multi_account_contributions.py`
 
 **Interfaces:**
-- Consumes: `StateStore.load_signal_package(signal_run_id)`.
-- Removes: `RequestNotification`, `_NOTHING_REQUESTED`, `_send_signal_request_notifications`, `_send_signal_funding_request_notifications`, and `_send_signal_budget_request_notifications`.
+- Consumes: Task 1's default-0 model fields, Task 7's Operator sweep, Task 8's shared refresh helper, `FundingWorkflowCardSyncResult.outcome_for(chat_id)`, `_require_card_delivered`, and `StateStore.load_signal_package(signal_run_id)`.
+- Activates: both builders explicitly pass `card_delivery_version=1`.
+- Removes: CLI `RequestNotification`, `_NOTHING_REQUESTED`, `_send_signal_request_notifications`, `_send_signal_funding_request_notifications`, `_send_signal_budget_request_notifications`; Operator request-scoped `_send_funding_request`, `_send_budget_request`, and `_send_request_card` after their final child-handoff call sites disappear.
 - Produces:
 
 ```python
@@ -1002,36 +1054,64 @@ def _signal_request_presence(
     """Return (funding_requests_exist, budget_requests_exist)."""
 ```
 
-- Reporting contract: emit `funding_required` for durable funding requests and `budget_required` for durable budget requests; emit both when both exist. Emit neither `request_delivery_failed` nor actionable-card network delivery claims.
+- Ownership invariant: this is the **delivery ownership cutover commit**. The same commit makes every newly built funding/budget request generation 1, removes CLI actionable network delivery, and makes the workflow-scoped Operator lifecycle own initial and child-request delivery. It must never be split into separately deployable commits.
+- Reporting contract: emit `funding_required` and/or `budget_required` from durable request existence; emit neither `request_delivery_failed` nor actionable-card delivery claims. Daily summary and no-action informational notifications remain CLI-owned.
 
-- [ ] **Step 1: Rewrite the no-action fixture to persist request truth**
+- [ ] **Step 1: Write the failing atomic ownership proof**
 
-Replace `funding_sent`/`budget_sent` notifier stubs with `funding_requests`/`budget_requests`. Have the fake `run_signal` persist a signal package containing those lists under `_Summary.signal_run_id` before returning. Keep `_send_signal_summary_notification` stubbed so the tests isolate no-action/actionable ownership.
+In `tests/test_signal_approval_handoff.py`, use one shared temporary StateStore/config and the existing daily-signal fixture to produce a real funding or budget request. Patch only the informational summary sender; patch the actionable `TelegramBotAPIClient.send_message` boundary to fail the test if `_run_daily_signal_approval` invokes it. Then assert all three facts in one test:
 
-- [ ] **Step 2: Write failing CLI ownership/reporting tests**
+```python
+request = persisted_signal["funding_requests"][0]
+assert request["card_delivery_version"] == 1
+assert actionable_cli_calls == []
 
-Assert:
+client = FakeTelegramClient()
+router = TelegramOperatorCommandRouter(
+    config=signal_maestro_config,
+    store=store,
+    audit=AuditLogger(signal_maestro_config.audit.jsonl_path),
+    client=client,
+)
+router._sweep_funding_workflow_cards()
+assert client.sent_messages[0]["reply_markup"] is not None
+assert load_card_delivery_state(store, funding_workflow_card_key(workflow_id))
+```
 
-- A durable funding request prevents `no_action`, emits `funding_required`, and makes no actionable Telegram client call.
-- A durable budget request prevents `no_action`, emits `budget_required`, and makes no actionable Telegram client call.
-- Funding and budget in the same package emit both status lines and do not return after the first.
-- No request package preserves the informational `NO_ACTION_NOTICE` behavior and its per-chat at-most-once tests.
-- No output contains `request_delivery_failed`, `telegram_funding_request=`, or `telegram_budget_request=`.
-- The daily summary notification remains outside this ownership change.
+Parameterize the test for `funding` and `budget`. Assert the first actionable network intent/send belongs to `funding-workflow:<workflow_id>`, not a request-scoped CLI call. Retain the version-0/missing-field sweep regression: absent lifecycle state is not permission to send.
 
-- [ ] **Step 3: Run the red CLI tests**
+- [ ] **Step 2: Write failing builder and child-handoff cutover tests**
+
+Change Task 1's real-builder assertions from 0 to 1 and assert the persisted signal package contains explicit 1 for both funding and budget builders. Using the existing `_stub_child_signal` fixture, prove budget B is published as head while funding A is incomplete, `_deliver_child_signal_outcome` calls `_refresh_request_workflow_card(B)`, `_require_card_delivered` accepts only `sent`/`edited`/`skipped`, A completes only after confirmed delivery, and the same physical workflow message becomes actionable after A completion. Explicit rejection remains retryable; timeout remains unknown/no replay; either unconfirmed outcome keeps A incomplete.
+
+- [ ] **Step 3: Write failing CLI ownership/reporting tests**
+
+Replace notifier-result fixtures with persisted `funding_requests` / `budget_requests`. Assert funding prevents `no_action`, budget prevents `no_action`, both emit both status lines, no request preserves the existing informational `NO_ACTION_NOTICE`, daily summary remains unchanged, and no output contains `request_delivery_failed`, `telegram_funding_request=`, or `telegram_budget_request=`. Assert no actionable funding/budget formatter/markup/client path is called by daily approval.
+
+- [ ] **Step 4: Run the red cutover tests**
 
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_cli_no_action_notice.py tests/test_signal_approval_handoff.py -k "request or no_action or funding or budget" -q
+.venv/bin/pytest tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py tests/test_signal_approval_handoff.py tests/test_multi_account_contributions.py tests/test_cli_no_action_notice.py tests/test_funding_workflow_resume.py tests/test_telegram_monthly_funding_workflow.py -k "card_delivery_version or ownership or request or child_card or no_action or funding or budget" -q
 ```
 
-Expected: FAIL because `_run_daily_signal_approval` still calls both actionable network senders and reports delivery outcomes.
+Expected: FAIL because builders still emit 0, CLI still sends actionable cards, and child handoff still uses request-scoped delivery.
 
-- [ ] **Step 4: Implement persisted-request classification**
+- [ ] **Step 5: Activate generation 1 and replace child request delivery**
 
-Instantiate `StateStore` with the same state path/cash arguments used by the retired helper, load the signal package, and return:
+Add `card_delivery_version=1` to both builder return statements. In `_deliver_child_signal_outcome`, replace each still-current funding/budget request send with:
+
+```python
+result = self._refresh_request_workflow_card(request)
+self._require_card_delivered(result.outcome_for(chat_id), phase, request)
+```
+
+Remove `_send_funding_request`, `_send_budget_request`, and `_send_request_card` plus their now-unused raw formatter/markup imports. Keep `_request_still_needs_a_card`, `_require_card_delivered`, and the undelivered event/notice because they fence parent completion. `_require_card_delivered` accepts `sent`, `edited`, or `skipped`; `failed`, `unknown`, and `blocked` record `funding_request_card_undelivered` and keep the parent incomplete.
+
+- [ ] **Step 6: Retire CLI actionable sends and classify persisted requests**
+
+Delete the five CLI symbols listed in **Removes** and their CLI-only funding/budget formatter/markup imports. Keep `TelegramBotAPIClient` for daily summary, no-action, and failure informational messages. Implement `_signal_request_presence` by opening the same StateStore and returning:
 
 ```python
 return (
@@ -1040,27 +1120,31 @@ return (
 )
 ```
 
-In `_run_daily_signal_approval`, emit each applicable requirement line independently. Only call `_send_no_action_notice` when both booleans are false.
+Emit each applicable requirement line independently and call `_send_no_action_notice` only when both values are false. Apply Steps 5 and 6 before committing; there is no permitted intermediate commit between builder activation and sender retirement.
 
-- [ ] **Step 5: Remove actionable sender code and imports**
-
-Delete the five removed symbols and the CLI-only imports of funding/budget raw formatters/markup helpers. Do not remove `TelegramBotAPIClient`; daily summary, no-action, and failure informational notifications still use it.
-
-- [ ] **Step 6: Run CLI and signal-package regressions**
+- [ ] **Step 7: Run focused and adjacent cutover regressions**
 
 Run:
 
 ```bash
-.venv/bin/pytest tests/test_cli_no_action_notice.py tests/test_signal_approval_handoff.py tests/test_operator_deployment_wiring.py tests/test_multi_account_contributions.py -q
+.venv/bin/pytest tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py tests/test_signal_approval_handoff.py tests/test_multi_account_contributions.py tests/test_cli_no_action_notice.py tests/test_funding_workflow_resume.py tests/test_telegram_monthly_funding_workflow.py tests/test_operator_deployment_wiring.py tests/test_telegram_card_lifecycle.py -q
 ```
 
-Expected: PASS. Durable request existence, not Telegram delivery, determines the daily classification.
+Expected: PASS. New requests truthfully advertise generation 1 only in the binary where CLI raw delivery is gone and Operator workflow lifecycle owns first/child sends. Legacy generation 0 remains no-initial-send.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Audit and commit the indivisible cutover**
+
+Before staging, run:
 
 ```bash
-git add src/maestro/cli.py tests/test_cli_no_action_notice.py tests/test_signal_approval_handoff.py
-git commit -m "refactor(3b): retire cli request card delivery"
+rg -n "card_delivery_version=1|_send_signal_request_notifications|_send_signal_funding_request_notifications|_send_signal_budget_request_notifications|def _send_funding_request|def _send_budget_request|def _send_request_card" src tests
+```
+
+Expected: explicit generation-1 writes appear only in the two builders; removed sender definitions/call sites are absent; tests contain only assertions/negative checks. Then commit every cutover file together:
+
+```bash
+git add src/maestro/execution/funding_requests.py src/maestro/execution/budget_requests.py src/maestro/integrations/telegram/handlers.py src/maestro/cli.py tests/test_contribution_funding_requests.py tests/test_contribution_budget_requests.py tests/test_funding_workflow_resume.py tests/test_telegram_monthly_funding_workflow.py tests/test_cli_no_action_notice.py tests/test_signal_approval_handoff.py tests/test_multi_account_contributions.py
+git commit -m "feat(3b): cut over monthly card delivery ownership"
 ```
 
 ### Task 10: Synchronize Documentation and Verify the Complete Phase 3b Boundary
@@ -1126,15 +1210,15 @@ Record the audit in the commit message preparation notes and verify this mapping
 
 | Spec requirement | Implemented/tested by |
 |---|---|
-| B-1.1 single network owner | Tasks 7-9; CLI has no actionable sender and Operator sweep/child handoff owns delivery. |
-| B-1.2 delivery generation | Task 1 model/builder tests; Tasks 6-7 v0/v1 absent-state tests. |
+| B-1.1 single network owner | Tasks 7-8 prepare migration-fenced Operator synchronization; Task 9 atomically removes CLI/child request-scoped senders and activates Operator ownership. |
+| B-1.2 delivery generation | Task 1 adds default-0 compatibility; Tasks 6-7 prove v0/v1 absence semantics; Task 9 is the first and only builder activation to explicit 1. |
 | B-1.3 legacy adoption | Task 6 precedence, provenance, lineage, audience, and per-chat tests. |
 | B-1.4 logical/action identity | Tasks 3-4 key/callback tests; Task 8 stale callback coverage. |
-| B-1.5 truthful stages/admission | Tasks 2-4 stage matrix, attention, terminal copy, and pre-claim rejection tests. |
+| B-1.5 truthful stages/admission | Tasks 2-4 stage matrix, recovery-owned attention overlay, terminal copy, ordinary in-progress/no-warning cases, and pre-claim rejection tests. |
 | B-1.6 read model/sweep boundary | Tasks 3, 7, and 8 restart, no-side-effect, malformed isolation, and shared refresh tests. |
 | B-1.7 delivery failures | Tasks 5-6 send/edit rejection, timeout, no-replay, and target-absence tests. |
-| B-1.8 CLI retirement | Task 9 durable request reporting and informational notification preservation. |
-| B-1.9 migration stand-down | Task 7 MIGRATING/INVALID tests plus unchanged callback migration regression suite. |
+| B-1.8 CLI retirement | Task 9 atomic cutover, durable request reporting, and informational notification preservation. |
+| B-1.9 migration stand-down | Task 7 direct-refresh and sweep MIGRATING/INVALID tests; Task 8 deterministic post-financial/pre-refresh race test; unchanged callback migration regressions. |
 | B-1.10 scope | Global Constraints, Tasks 1-9, and the no-Phase-3a-authority regression commands. |
 
 Explicitly confirm during this audit:
@@ -1145,6 +1229,9 @@ Explicitly confirm during this audit:
 - Funding predecessor incomplete + budget head cannot enter a budget transition through a stale callback.
 - One chat's ambiguity does not suppress an independent safe chat.
 - Only Telegram Operator can send actionable funding/budget cards.
+- No commit before Task 9 writes generation 1, and Task 9 removes every CLI/request-scoped sender in the same commit that activates both builders.
+- Every periodic or immediate workflow-card mutation crosses `_refresh_funding_workflow_card` and its migration fence before projection, adoption, audience pinning, send, or edit.
+- Ordinary open claims have truthful in-progress stages without warning; `incomplete_transition` requires exact-attempt evidence already emitted by the existing recovery path.
 - Production/VPS migration and deployment remain separate work.
 
 - [ ] **Step 6: Inspect the final diff for surgical scope**
