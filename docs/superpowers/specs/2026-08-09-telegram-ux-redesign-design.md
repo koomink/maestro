@@ -16,6 +16,15 @@
 (구 `2026-08-16-upgrade-backfill-rollback-preflight.md`는 superseded — 그 문서의
 세 태스크는 있는 그대로 구현하면 안 된다),
 운영 절차 = `docs/rollback_and_upgrade_3a.md`
+개정 16차: 2026-08-28 — Phase 3b 리뷰 지적 4건 반영. (1) **현재 활성 요청의
+`unknown`이 입양·실행 가능성을 지배한다**: 그 요청의 두 번째 실행 가능한 물리
+표현을 만들지 않는다(「B-1.3」). 그리고 선행 완료 게이팅은 렌더러 관례가 아니라
+**콜백 admission 불변식**임을 명시했다(「B-1.5」). (2) 3a 절에 남아 있던 옛
+5단계 롤백 요약을 삭제하고 운영 정본을 `docs/rollback_and_upgrade_3a.md` 하나로
+확정했다 — 재부팅 안전 quiesce 이전의 서술이라 대안 절차로 오독될 수 있었다.
+(3) 일반 `🔍 자세히` 콜백 규칙에서 논리 card_key를 항상 callback_data에 담는다는
+함의를 제거했다. (4) 3a 이전 결함을 현재형으로 적어 둔 문단들을 과거형/구현
+완료로 명시했다
 개정 15차: 2026-08-28 — Phase 3b architecture reconciliation. 월간 자금 카드의
 아키텍처를 확정해 「B-1」로 편입했다: Telegram Operator 단독 전달 소유,
 `card_delivery_version` 세대 절단, legacy 요청 카드 입양, 워크플로우 범위 카드
@@ -208,7 +217,7 @@ user_id)별로 영속화해야 하며, 다중 운영자 환경에서는 게이�
 입금 요청/예산 선택 흐름을 하나의 라이프사이클로 통합:
 `📥 입금 필요 → 입금 확인 중 → 예산 선택 → ✅ 이번 달 예산 확정`.
 
-**안정적인 워크플로우 키**: 현재 흐름에서는 입금 확인 후 새 signal run이
+**안정적인 워크플로우 키**: 입금 확인 후에는 새 signal run이
 생성되고 별도의 `budget_<uuid>` 요청이 만들어지므로, 최초 요청 ID로 카드를
 고정하면 카드가 멈추거나 중복 생성된다. 이를 막기 위해 영속 키
 `funding_workflow_id`로 funding 요청·재생성된 signal run·budget 요청을
@@ -285,7 +294,7 @@ scope 필드들은 funding/budget 요청 payload에 이미 모두 존재하므�
 어느 단계로 갱신되었는가)만 남는다 — 「B-1.4」 참조.
 
 **요청 교체의 비원자성 대응 (영속 workflow 상태 머신)**: "교체된 request_id
-거절"은 UI 레이어만으로는 보장할 수 없다. 현재 funding 확인 흐름
+거절"은 UI 레이어만으로는 보장할 수 없다. **3a 이전의** funding 확인 흐름
 (`_confirm_funding_request`)은 **현금흐름 기록 → `run_signal()`(신규
 signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완료와 ack
 저장 사이에 프로세스가 종료되면 구 요청은 여전히 pending이고 신규 요청도
@@ -294,7 +303,8 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 생성할 수 있다 — UI 개편 이전부터 존재하는 결함이며, funding 카드가
 약속하는 상태 일관성의 전제이므로 단계 3a에서 함께 해결한다. 이 부분은
 **"비즈니스 로직 불변" 원칙(접근 A)의 명시적 예외**로, handlers의 funding
-확인 경로에 다음 규약을 도입한다:
+확인 경로에 다음 규약을 도입했다 (아래 1~8은 3a에서 **구현 완료**된
+현재 규약이다):
 
 > **읽는 법 (개정 15차).** 아래 1~8은 원래 미래형으로 쓰였지만, 3a-1~3a-5
 > 엔지니어링 종결로 **이미 구현된 선행 조건**이다. 3b는 이것들을 *소비*하며
@@ -328,7 +338,7 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    이므로, 여러 system event(신규 요청, 이전 요청 superseded, 새 head)를
    duplicate_key 조건과 함께 **하나의 DB 트랜잭션으로 커밋하는 StateStore
    API**(`save_system_events_atomic`)를 신설해 요청 생성·교체·head 전환을
-   원자화한다. 방어선으로, 복구 sweep가 재시작 시 불변식을 검사해
+   원자화했다. 방어선으로, 복구 sweep가 재시작 시 불변식을 검사해
    orphan pending 요청(head 미연결)은 `superseded`로, dangling head
    (요청 실체 없음)는 직전 버전으로 수렴시키고 audit 이벤트를 남긴다.
    단, 이 수렴은 **마이그레이션 cutoff 이후에 생성된 요청에만**
@@ -364,10 +374,10 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 3. **공통 상태 전이 `claimed → child_created → completed`**: funding과
    budget 전환 모두 이 3단계를 system event로 영속화한다. `completed`만이
    종결 상태다. 특히 **budget decision은 종결 ack가 아니라** 전환의 입력값
-   (선택 금액)일 뿐이다 — 현재 코드는 `contribution_budget_request_decision`
-   저장 즉시 요청을 pending에서 제외하므로, decision 직후
+   (선택 금액)일 뿐이다 — **3a 이전 코드는** `contribution_budget_request_decision`
+   저장 즉시 요청을 pending에서 제외했으므로, decision 직후
    refresh/config load/`run_signal()`에서 실패하면 child run 없이 요청이
-   종결돼 월간 투자가 조용히 멈춘다. 개편 후에는 decision이 저장돼도
+   종결돼 월간 투자가 조용히 멈췄다. **3a 구현 이후에는** decision이 저장돼도
    `completed` 이벤트가 없으면 워크플로우는 미완으로 취급되어 복구 대상이
    된다.
    **completed는 legacy 종결 이벤트와 원자적으로 dual-write한다**:
@@ -380,8 +390,8 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    budget은 `contribution_budget_request_decision`)와 **같은 원자 커밋**
    (`save_system_events_atomic`)으로 함께 기록해, 롤백 시 구버전이 추가
    조치 없이 종결로 인식하게 한다.
-4. **child run lineage 영속화 + 생성 유일성(get-or-create)**: 현재
-   `run_signal()`은 원천 request를 알지 못하므로 "claim 이후 생성된 run"을
+4. **child run lineage 영속화 + 생성 유일성(get-or-create)**: **3a 이전의**
+   `run_signal()`은 원천 request를 알지 못했으므로 "claim 이후 생성된 run"을
    같은 전략·scope의 다른 수동/예약 run과 구분할 수 없다. `run_signal()`에
    `source_request_id`(및 funding_workflow_id)를 전달해 signal run
    기록/package에 영속화하고, 복구 시 이 lineage로만 child run을 조회한다
@@ -410,19 +420,19 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    budget의 경우 저장된 decision 금액을 그대로 사용해 재개한다.
 6. **승인 dispatch의 idempotent resume**: "child run이 있으면 승인
    dispatch부터 재개"가 성립하려면 dispatch 자체가 재개 가능해야 한다.
-   현재 `dispatch_signal_approval`은 package를 **consumed로 먼저 기록한 뒤**
+   **3a 이전의** `dispatch_signal_approval`은 package를 **consumed로 먼저 기록한 뒤**
    그룹별 pending 이벤트 저장과 채팅별 Telegram 전송을 수행하므로,
    consumed 직후 또는 일부 그룹/채팅 전송 후 crash하면 재호출이
    "Signal package already consumed"로 거부되어 워크플로우가 영구 미완이
-   되거나 일부 승인 카드만 노출된다. 개편 후 규약:
+   되거나 일부 승인 카드만 노출됐다. **3a에서 구현된 현재 규약:**
    - consumed는 "dispatch 배타 시작" 표지로 재정의하고, **dispatch 완료
      판정과 분리**한다. 완료(`signal_approval_pending`)는 모든 그룹×채팅
      전송이 끝난 뒤에만 기록한다.
-   - **결정적 dispatch_group_id로 approval을 get-or-create한다**: 현재
+   - **결정적 dispatch_group_id로 approval을 get-or-create한다**: **3a 이전의**
      `ApprovalManager.create_request`는 매번 무작위 approval_id를
-     발급하므로, 일부 그룹 저장 후 crash한 재개 실행은 기존 그룹의
+     발급했으므로, 일부 그룹 저장 후 crash한 재개 실행은 기존 그룹의
      approval_id를 알 수 없어 같은 주문 그룹에 새 approval을 만들 수
-     있다. 이를 막기 위해 그룹 분할·순서를 결정적으로 만들고(정렬),
+     있었다. 이를 막기 위해 그룹 분할·순서를 결정적으로 만들고(정렬),
      `dispatch_group_id = <signal_run_id> + canonical 그룹 구성(정렬된
      전략 ID·계좌 ID)`을 정의한다. envelope 저장은
      `duplicate_key = dispatch-group:<dispatch_group_id>`의 유일성 제약
@@ -462,14 +472,14 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    - resume 진입 조건: consumed이지만 완료 이벤트가 없는 package.
    이 변경은 funding 재생성 run만이 아니라 승인 dispatch 전체에 적용되며,
    접근 A 예외 범위에 포함된다.
-7. **승인 결정의 2단계 영속화 (ack ≠ 종결)**: 현재
+7. **승인 결정의 2단계 영속화 (ack ≠ 종결)**: **3a 이전의**
    `_resolve_async_approval`은 `telegram_approval_ack`를 먼저 저장한 뒤
-   주문 해석(`resolve_pending_signal_approval`)을 수행하고,
+   주문 해석(`resolve_pending_signal_approval`)을 수행했고,
    `_pending_async_approval`과 `_sweep_pending_approvals`는 ack 존재만으로
-   승인을 종결로 간주한다. 따라서 ack 저장 직후 프로세스 종료·config load
+   승인을 종결로 간주했다. 따라서 ack 저장 직후 프로세스 종료·config load
    실패·broker timeout이 발생하면 운영자의 승인 의사는 기록됐지만 주문은
    생성되지 않고, callback 재클릭도 "already decided"로 거절되어 **승인이
-   영구 유실**된다. 개편 후 규약:
+   영구 유실**됐다. **3a에서 구현된 현재 규약:**
    - 승인 결정도 `decision_recorded → resolution_completed` 2단계로
      영속화한다. ack(=decision_recorded)는 운영자 의사의 기록일 뿐 종결이
      아니며, **pending envelope 제외 판정은 `resolution_completed`
@@ -502,19 +512,17 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    3a 이전 legacy ack는 자동 재집행하지 않되, 집행 증거(approvals 행 +
    `signal_approval_completed`)가 없는 건은 일회성 격리 통보를 보낸다.
 
-   **롤백은 조건부로만 안전하다**: 완료된 승인은 롤백해도 재집행되지 않지만,
-   `schema_version=2` ack가 있고 `resolution_completed`가 없는 상태에서 롤백하면
-   구버전이 ack만 보고 종결 처리해 승인된 주문이 유실된다. 롤백 절차는
-   quiesce 아래에서 이를 검사하는 5단계다: (1) **quiesce** — 타이머뿐 아니라
-   이미 실행 중인 서비스 인스턴스까지 모두 정지한다(타이머만 멈추면 실행
-   중인 인스턴스가 writer로 계속 남는다), (2) **장벽 확인** — writer를
-   되살릴 수 있는 유닛(`maestro-run-once` 포함)까지 정지 대상을 빠짐없이
-   열거하고 `systemctl is-active`로 전부 inactive임을 확인한다, (3) **검사**
-   — 위 위험 상태(및 다른 3a 미완 상태)가 하나도 없는지 확인한다. 이 검사는
-   다음 태스크가 `maestro approval-rollback-preflight` CLI로 제공하며,
-   인라인 쿼리가 아니다, (4) **구버전 배포** — 검사와 배포 사이 어떤 unit도
-   재시작하지 않는다, (5) **재개** — 구버전 기동을 확인한 뒤에만 타이머·
-   서비스를 재개한다. (3)에서 위험 상태가 하나라도 발견되면 롤백하지 않는다.
+   **왜 이 상태가 롤백에 위험한가**: 완료된 승인은 롤백해도 재집행되지
+   않지만, `schema_version=2` ack가 있고 `resolution_completed`가 없는
+   상태에서 롤백하면 구버전이 ack만 보고 종결 처리해 승인된 주문이 유실된다.
+   이 위험 상태는 현재 롤백 preflight의 `R3_approval_unresolved`가 검출한다.
+
+   **이 문서는 롤백 절차를 서술하지 않는다 (개정 16차).** 이전 개정이 여기에
+   적어 둔 5단계 요약은 3a-5의 최종 설계 — 재부팅 안전(reboot-safe) quiesce
+   장벽 — 이전의 것이라 지금은 대안 운영 절차로 오독될 수 있어 삭제했다.
+   `systemctl is-active`만으로는 장벽이 증명되지 않으며(enabled 유닛은 재부팅
+   시 되살아난다), preflight도 더 이상 "다음 태스크"가 아니라 이미 구현된
+   읽기 전용 검사다. 절차의 정본은 `docs/rollback_and_upgrade_3a.md` 하나뿐이다.
 8. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
    duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
 
@@ -581,25 +589,71 @@ CLI는 더 이상 두 번째 실행 카드 전송자가 아니다(「B-1.8」). 
 입양의 provenance(무엇을 어디서 물려받았는지)는 반드시 남긴다. 정확한
 이벤트명·스키마는 구현 계획의 몫이다.
 
+**현재 활성 요청의 `unknown`이 입양을 지배한다 (지배 규칙).** 이것이 이 절의
+가장 중요한 불변식이다:
+
+> **어떤 chat에서든 현재 활성(head) 요청의 legacy 복사본이 `unknown`인 동안,
+> 3b는 그 요청의 실행 가능한 표현을 하나 더 만들지 않는다.** 다른 알려진
+> 선행자 메시지를 그 요청의 실행 가능한 카드로 승격(edit)해서도 안 되고, 새
+> 카드를 보내서도 안 된다.
+
+왜 필요한가. 다음 중단 형태를 보자:
+
+```
+funding A 카드 = confirmed, message_id 알려짐
+        ↓ 운영자가 A를 확인
+자식 신호가 budget B를 만들고 HEAD = budget B
+        ↓
+budget B 카드 전송이 Telegram에 닿았지만 결과 기록이 유실(타임아웃)
+        → legacy budget B 복사본 = unknown, 물리 B 카드는 실제로 존재할 수 있다
+        ↓
+funding A 부모 전이의 완료 기록은 아직 미완
+```
+
+여기서 3b가 "confirmed 선행자 A를 입양해 B 카드로 edit한다"를 적용하면
+Telegram에는 **같은 활성 요청 B의 실행 가능한 물리 표현이 둘** 생길 수 있다 —
+존재할지 모르는 원래 B 카드와, B 액션을 달게 된 A 메시지. request_id/head/claim
+fencing이 **금융 중복 효과**는 막지만, 그것은 두 번째 실행 카드를 만들어도
+좋다는 **전달 증거가 아니다.** 「B-1.7」의 "모르는 것을 안다고 취급하지
+않는다"가 여기에도 그대로 적용된다.
+
+**과일반화 금지.** 이 규칙의 대상은 **현재 실행 가능한 요청의 unknown 복사본**
+이다. 이미 밀려난 선행 요청의 unknown 복사본은 계속 드러내야 할 모호성이지만,
+그 낡은 버튼은 request/head 권위가 이미 금융적으로 막고 있으므로 워크플로우의
+모든 향후 카드를 영구히 막지 않는다. "워크플로우 어딘가의 unknown 하나가 모든
+카드를 영원히 봉인한다"로 읽어서는 안 된다.
+
 **워크플로우 × chat 단위 우선순위:**
 
 1. **이미 존재하는 워크플로우 범위 라이프사이클 상태** — 즉시 이긴다. 한 번
    생기면 legacy 요청 범위 상태는 **다시는 권위로 조회되지 않는다.**
-2. **legacy `confirmed`** — 알려진 `message_id`를 입양한다. 새 전송 없음.
-   이후 워크플로우 카드 갱신은 **그 물리 메시지를 edit**한다.
-3. **legacy `unknown`** — 모호성을 워크플로우 카드로 그대로 옮긴다. 자동 전송
-   없음. 기존 버튼 없는 모호성/운영자 안내를 그대로 쓴다.
-4. **legacy `failed`** — 미전달이 증명된 경우다. 워크플로우 범위
-   라이프사이클 아래에서 재시도해도 안전하다.
-5. **legacy 증거 없음** — `card_delivery_version == 0`이면 보내지 않는다.
-   `== 1`이면 최초 전송이 허용된다(「B-1.2」).
+2. **선행자를 고르기 전에 먼저 현재 head 요청의 라이프사이클 증거를 본다.**
+   아래 3~5는 *현재 head 요청 자신의* 복사본에 대한 판정이다.
+3. **head 요청에 legacy `confirmed` 복사본이 있으면** — 바로 그 물리 메시지를
+   입양한다. 새 전송 없음. 이후 갱신은 그 메시지를 edit한다.
+4. **head 요청에 legacy `unknown` 복사본이 있으면** — 위 지배 규칙이 걸린다:
+   모호성을 워크플로우 범위 카드로 보존·전파하고, 그 활성 요청에 대해 **새
+   실행 카드를 보내지 않으며**, **confirmed 선행자를 그 요청의 실행 가능한
+   표현으로 edit하지도 않는다.** 기존 버튼 없는 모호성/운영자 안내를 쓰고,
+   맹목적 재생 대신 **사람의 확인 / 이후의 명시적 복구**를 요구한다.
+5. **head 요청에 legacy `failed` 복사본이 있으면** — 그 복사본에 한해 미전달이
+   증명됐다. 기존 chat/청중 규칙에 따라 안전하게 재시도할 수 있다.
+6. **head 요청에 라이프사이클 복사본이 전혀 없을 때에만** 입양 로직이
+   **confirmed 영속 선행자**를 이어서 edit할 물리 메시지 후보로 고려한다.
+   그때도 legacy 증거가 아예 없으면 「B-1.2」가 적용된다 —
+   `card_delivery_version == 0`이면 보내지 않고, `== 1`이면 최초 전송이
+   허용된다.
 
-**한 워크플로우/chat에 알려진 legacy 카드가 여럿이면**, 정본 물리 메시지는
-**영속 워크플로우 lineage**로 고른다: 현재 head의 요청 카드를 먼저, 없으면
-supersession lineage를 따라 가장 가까운 영속 선행자를. **최신 시각으로 고르지
-않는다** — recency는 어느 카드가 이 워크플로우의 현재 진실을 담고 있는지에
-대해 아무것도 말해 주지 않으며, 3a-5가 head 소유권을 recency가 아니라 영속
-증명으로 결정한 것과 같은 이유다.
+**6에서 후보가 여럿이면**, 정본 물리 메시지는 **영속 워크플로우 lineage**로
+고른다: 현재 head의 요청 카드를 먼저, 없으면 supersession lineage를 따라 가장
+가까운 영속 선행자를. **최신 시각으로 고르지 않는다** — recency는 어느 카드가
+이 워크플로우의 현재 진실을 담고 있는지에 대해 아무것도 말해 주지 않으며,
+3a-5가 head 소유권을 recency가 아니라 영속 증명으로 결정한 것과 같은 이유다.
+
+**열린 운영 항목:** `unknown`이 걸린 활성 요청의 모호성을 사람이 어떤 절차로
+해소하고 정상 실행 가능 상태로 되돌리는지는 저장소에 아직 메커니즘이 없다.
+여기서 새 하위 시스템을 발명하지 않는다 — 구현 계획이 다룰 **열린 운영/구현
+항목**으로 남긴다. 그때까지의 기본값은 fail-closed다.
 
 정본이 아닌 것으로 판정된 알려진 legacy 카드는 **best-effort edit**로 낡은
 버튼을 걷어낼 수 있다. 다만 그 정리의 실패가 금융 워크플로우를 막아서는 안
@@ -659,6 +713,30 @@ head phase · 열린 claim · 완료된 completed · 미완 전이의 조합이�
 > head가 budget으로 옮겨갔다 ≠ budget 버튼을 내놓아도 안전하다.
 
 budget 액션은 **선행 funding 전이가 영속적으로 완료된 뒤에만** 실행 가능해진다.
+
+**이것은 렌더러 관례가 아니라 액션 admission 불변식이다.** 버튼을 숨기는 것은
+안전 경계가 아니다 — 낡은/legacy Telegram 메시지에는 새 렌더러가 감춘 budget
+콜백이 그대로 남아 있을 수 있고, 사용자는 그것을 누를 수 있다. 따라서:
+
+> **선행 전이가 아직 영속적으로 완료되지 않은 후속 요청의 금융 콜백은, 새
+> 금융 claim을 얻거나 전이에 진입하기 전에 fail-closed로 거절되어야 한다.**
+
+요구되는 순서:
+
+```
+후속자 콜백
+   ↓ 기존 마이그레이션 / head / request 권위 검증
+   ↓ 필요한 선행 전이의 영속적 완료 검증   ← 3b가 추가하는 admission 전제
+   ↓ 그때에만 후속 금융 전이 진입이 허용된다
+```
+
+특히 이 조합에서 중요하다: **funding A 미완 + budget B가 이미 head + legacy B
+버튼 클릭.** request와 head는 유효한데 선행 완료 전제는 아직 아니다 — 이때
+콜백은 A가 영속적으로 완료될 때까지 거절된다.
+
+이것은 `funding_workflow_claim`의 재설계도, 3a head/CAS의 재정의도 아니다.
+기존 금융 권위 **위에 얹히는 3b의 admission 전제**다. 판정을 수행할 함수명과
+위치는 구현 계획의 몫이며 여기서 정하지 않는다.
 
 **월간 카드 복구와 금융 복구는 분리된 채로 둔다.**
 
@@ -821,6 +899,8 @@ operator로 옮기지 않는다.
 - 월간 워크플로우 카드 스윕
 - 같은 투영을 쓰는 콜백 직후 즉시 갱신
 - 진실된 단계·종결 상태·attention 오버레이
+- 선행 전이 완료를 전제로 하는 **후속자 금융 콜백 admission 게이트**
+  (기존 금융 권위 위에 얹히는 3b 전제 — 「B-1.5」)
 - 증거 기반 edit 대체
 - CLI 실행 요청 카드 전송자 은퇴
 - 마이그레이션 게이트 stand-down
@@ -956,8 +1036,18 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
 - 카드마다 `[🔍 자세히]` 버튼 → 같은 메시지를 펼친 뷰로 edit (종목코드, 지정가
   전체 자릿수, approval_id, run_id, 계좌 ID 등), 버튼은 `[접기]`로 변경.
 - 새 메시지를 만들지 않아 채팅방이 지저분해지지 않는다.
-- callback data는 `ui:detail:<card_key>` 형식으로 기존 `operator:` prefix 체계와
-  구분하며 Telegram 64바이트 제한을 준수한다.
+- 접기/펼치기 콜백은 기존 `operator:` prefix 체계와 구분되는 `ui:` 계열을
+  쓰고, **카드 유형에 맞는 유계(bounded) 콜백 신원**을 실어 Telegram의 64바이트
+  제한 안에 머문다. **논리 card_key를 언제나 그대로 담는다는 뜻이 아니다**
+  (개정 16차 교정): 월간 자금 카드의 `funding_workflow_id`는 canonical 직렬화된
+  원시 scope 전체 + 월이라 길 수 있으므로 **callback_data에 넣지 않는다.**
+- 어떤 유계 신원을 쓸지는 구현 계획의 몫이다 — 이미 존재하는 유계 요청/메시지/
+  카드 식별자 재사용, `(chat_id, message_id)` 기준 조회, 또는 필요가 **증명된**
+  경우에 한한 유계 토큰 등. 지금 하나를 고르지 않는다. 필요가 증명되지 않은
+  워크플로우 토큰 레지스트리는 도입하지 않는다(「B-1.4」).
+- 어느 경우에도 이 표시/조회용 식별자는 **금융 권위가 되지 않는다.** 금융
+  액션은 `request_id`에 바인딩되고, `funding_workflow_id`는 논리 월간 카드·DB
+  신원으로 남는다.
 
 ## 언어·포맷 규칙 (catalog.py의 헌법)
 
@@ -1129,7 +1219,20 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
 - legacy `unknown` 요청 카드 → 워크플로우 카드도 unknown이 되고 재전송하지 않는다
 - legacy `failed` 요청 카드 → 재시도가 허용된다
 - 알려진 legacy `confirmed` 카드가 여럿 → 정본 선택이 head/lineage로 결정되고
-  **최신 시각으로 결정되지 않는다**
+  **최신 시각으로 결정되지 않는다** (단, 이 선택은 head 요청 자신의 복사본이
+  없을 때에만 도달한다)
+- **현재 활성 요청 unknown 지배 (핵심 시나리오)**: confirmed funding 선행자 A
+  + budget B가 현재 head + legacy budget B 전달이 `unknown` + funding A 선행
+  완료가 아직 미완인 상태에서 —
+  - B의 모호성이 보존된다
+  - **A의 confirmed 물리 메시지가 두 번째 실행 가능 B 카드로 승격되지 않는다**
+  - **새 실행 가능 B 전송이 일어나지 않는다**
+  - A 완료 전에 낡은/존재할 수 있는 B 콜백을 눌러도 **금융 전이 진입 이전에**
+    거절된다
+  - 선행 완료와 명시적·안전한 운영자 경로에 따른 모호성 해소 이후에야 정상 B
+    실행 가능성이 재개된다
+- 이미 밀려난 선행 요청의 unknown 복사본은 모호성으로 드러나지만, 워크플로우의
+  향후 카드를 영구히 봉인하지는 않는다
 - legacy 청중은 새로 설정된 chat으로 확장되지 않는다
 - 워크플로우 범위 상태가 한 번 생긴 뒤에는 나중에 도착한 legacy 이벤트가
   권위를 되찾지 못한다
@@ -1142,6 +1245,9 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
 **단계 투영과 attention**
 
 - funding 선행자 미완 + budget 후속자가 head → **budget 버튼은 비활성**
+- **콜백 admission**: budget B가 유효한 현재 head인데 funding 선행자가 미완이면
+  budget 콜백이 거절되고 **새 budget claim·자식 run·현금흐름 등 어떤 금융
+  부작용도 남지 않는다** (버튼을 숨기는 것만으로는 검증되지 않는다)
 - 선행자 완료 → budget 버튼이 실행 가능해진다
 - 취소/확인 종결 문구가 사실대로다 (입금 취소 ≠ 예산 확정)
 - budget 후속자 없는 funding 확인 완료가 "예산을 골랐다"고 말하지 않는다
@@ -1241,15 +1347,17 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
 - 단계 3a는 새 불변식(claim, 2단계 승인 종결, dispatch manifest)을 남기므로
   **아무 때나 되돌릴 수 없다.** 기본 대응은 여전히 수정 배포(roll-forward)다.
 - 그러나 **롤백 창이 열려 있고**(legacy 종결 이벤트 dual-write와 롤백 호환
-  투영이 아직 제거되지 않았고), **quiesce·preflight 호환성 검사를 통과하는
-  한** 롤백은 지원된다. 3a-5는 이를 위해 읽기 전용 롤백 preflight(R0–R4)와
-  quiesce 장벽 검증을 실제로 구현했다.
+  투영이 아직 제거되지 않았고), 정본 3a-5 런북의 **재부팅 안전(reboot-safe)
+  quiesce 장벽**과 **읽기 전용 롤백 preflight**가 **둘 다** 허용하는 경우에만
+  롤백은 지원된다. 3a-5는 이를 위해 preflight(R0–R4)와 장벽 검증
+  (`maestro quiesce-status`)을 실제로 구현했다.
 - preflight는 **검사기지 복구 도구가 아니다.** 위험 상태를 발견하면 고치지
   않고 거절한다.
 
-**롤백 알고리즘 전체를 이 문서에 복제하지 않는다.** 정지 대상 유닛 목록,
-quiesce 검증, R0–R4의 정확한 판정, 롤백 후 재업그레이드 경로, 롤백 창을 닫는
-조건은 다음이 소유한다:
+**이 UX 스펙은 롤백 운영 절차를 복제하지 않는다.** systemd 명령 순서, 정지·
+disable 대상 유닛 목록, 재부팅 안전 조건 검사, R0–R4의 정확한 판정, 롤백 후
+재업그레이드 경로, 롤백 창을 닫는 조건의 **유일한 운영 정본은
+`docs/rollback_and_upgrade_3a.md`다.** 소유 관계:
 
 - 운영 절차: `docs/rollback_and_upgrade_3a.md`
 - 설계/구현 계획: `docs/superpowers/plans/2026-08-24-upgrade-backfill-rollback-preflight-v2.md`
