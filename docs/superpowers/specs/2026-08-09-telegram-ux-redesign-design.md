@@ -1,11 +1,31 @@
 # Telegram UI/UX 전면 개편 설계
 
 날짜: 2026-08-09
-상태: 단계 1·2 구현 완료, 3a-1·3a-2·3a-3(범위 A)·4a 구현 완료 (2026-08-16 기준).
-남은 단계: 3a-4·3a-5, 3b, 4b, 5 — 아래 「마이그레이션 순서」 표 참조
+상태 (2026-08-28 기준): 단계 1 완료, 단계 2 완료, 단계 3a-1~3a-5 **GitHub
+코드베이스 엔지니어링 종결 완료**, 단계 4a 완료.
+다음 아키텍처/구현 단계: **3b** (아키텍처 확정, 구현 계획 미작성) → 4b → 5.
+
+> **이 상태 표기는 GitHub 개발 체크아웃에 대한 것이다.** 운영 서비스는 별도
+> VPS에서 돌고 있고, VPS 운영 DB가 3a-5 마이그레이션을 수행했는지 여부는 이
+> 문서가 주장하지 않으며 이 문서로 확인할 수도 없다. 엔지니어링 종결은
+> 배포·마이그레이션 완료와 같은 말이 아니다. 운영 상태 판정과 절차는
+> `docs/rollback_and_upgrade_3a.md`가 소유한다.
+
 계획서: 3a-4 = `docs/superpowers/plans/2026-08-16-funding-workflow-head-cas.md`,
-3a-5 = `docs/superpowers/plans/2026-08-16-upgrade-backfill-rollback-preflight.md`
-(3a-5는 3a-4 머지를 선행 조건으로 한다)
+3a-5 = `docs/superpowers/plans/2026-08-24-upgrade-backfill-rollback-preflight-v2.md`
+(구 `2026-08-16-upgrade-backfill-rollback-preflight.md`는 superseded — 그 문서의
+세 태스크는 있는 그대로 구현하면 안 된다),
+운영 절차 = `docs/rollback_and_upgrade_3a.md`
+개정 15차: 2026-08-28 — Phase 3b architecture reconciliation. 월간 자금 카드의
+아키텍처를 확정해 「B-1」로 편입했다: Telegram Operator 단독 전달 소유,
+`card_delivery_version` 세대 절단, legacy 요청 카드 입양, 워크플로우 범위 카드
+식별자 + 요청 범위 금융 콜백, 권위 상태 → 사용자 단계 투영과 attention
+오버레이, 파생 read model + 스윕 권한 경계, unknown 무재전송 정본화와 증거
+기반 edit 대체, CLI 실행 카드 전송자 은퇴, 마이그레이션 게이트 stand-down.
+3a 규약은 재설계하지 않고 3b가 **소비하는 이미 구현된 선행 조건**으로 다시
+썼다. 함께 정리: 짧은 워크플로우 토큰 레지스트리 의무화 철회, `at-least-once
++ 중복 카드 정리` 문구 철회, `3a는 roll-forward-only` 문구를 조건부 롤백으로
+교정, `telegram_ui_card` 이벤트 키를 실제 `operation_id` 모델에 맞춤
 개정 14차: 2026-08-15 — 예외 카드에 **배치 부분 집행**을 추가하고(「C-1」),
 단계 4를 4a(분류·종결 CLI)와 4b(카드 UX)로 분리해 4a를 3a-4·3b 앞으로
 당겼다. 근거: 반쯤 실행된 로테이션이 2026-08-11·08-12 두 번 발생했고
@@ -19,17 +39,20 @@ scope 복합 키로 재정의, 액션 라우팅은 request_id에만 바인딩
 개정 4차: 2026-08-09 Codex 적대적 리뷰 4차 반영 — child run lineage 영속화,
 funding/budget 공통 상태 전이(claimed→child_created→completed), budget
 decision의 비종결화, 단계 3 roll-forward-only 명시
+(roll-forward-only는 **개정 15차에서 조건부 롤백으로 교정됨**)
 개정 5차: 2026-08-09 Codex 적대적 리뷰 5차 반영 — 워크플로우 head/version
 CAS로 단일 활성 요청 보장, 승인 dispatch의 idempotent resume
 (consumed와 dispatch 완료 분리)
 개정 6차: 2026-08-09 Codex 적대적 리뷰 6차 반영 — head 갱신의 트랜잭션
 결합 + 수렴 sweep, claim의 attempt 기반 재개(fencing), Telegram 전송
-exactly-once 포기(at-least-once + 중복 카드 정리), 단계 3을 3a/3b로 분리
+exactly-once 포기, 단계 3을 3a/3b로 분리 (당시의 `at-least-once + 중복 카드
+정리`는 **개정 15차에서 철회**되고 무재전송이 정본이 됨)
 개정 7차: 2026-08-09 Codex 적대적 리뷰 7차 반영 — head 검증·claim 삽입을
 조건부 트랜잭션으로 결합(TOCTOU 차단), child 생성의
 (source_request_id, phase) 유일성 + lock 경계 내 재검증
 개정 8차: 2026-08-09 Codex 적대적 리뷰 8차 반영 — 워크플로우 영속 식별자를
-전체 정규화 scope로 변경(해시는 표시용 토큰으로 격하), 유실 카드
+canonical 직렬화 scope 전체로 변경(해시는 표시용 토큰으로 격하 — 표시용 토큰
+의무화는 **개정 15차에서 철회**), 유실 카드
 자동 정리 불가 불변식 + callback self-heal
 개정 9차: 2026-08-09 Codex 적대적 리뷰 9차 반영 — 승인 결정의 2단계
 영속화(ack ≠ 종결, resolution 재개 규약), scope 직렬화를 타입 보존
@@ -80,7 +103,8 @@ async 전환 리스크가 과도해 기각. 문구만 교체(방안 C)는 구조
 
 ```
 src/maestro/integrations/telegram/
-├── bot.py               (기존 — HTTP 클라이언트, 변경 없음)
+├── bot.py               (기존 — HTTP 클라이언트. 단계 1·2는 무변경.
+│                        3b는 거부 사유 메타데이터 보존만 최소 추가 — 「B-1.7」)
 ├── handlers.py          (기존 — 비즈니스 로직 유지, 텍스트 생성만 ui/로 위임)
 └── ui/                  (신규)
     ├── catalog.py       # 메시지 카탈로그: 모든 한글 문구·템플릿
@@ -106,8 +130,15 @@ execution을 임포트하지 않는다. `execution/budget_requests.py`,
 execution 모듈은 데이터만 넘긴다.
 
 기존 `TelegramBotClient`가 이미 `edit_message_text`,
-`edit_message_reply_markup`, `set_my_commands`를 지원하므로 클라이언트 변경은
-없다.
+`edit_message_reply_markup`, `set_my_commands`를 지원하므로 단계 1·2에서
+클라이언트 변경은 없었다.
+
+**단, 3b에서 `bot.py`는 더 이상 "변경 없음"이 아니다.** 현재
+`TelegramApiRejected`는 실패 사실만 남기고 Telegram이 돌려준 `error_code`·
+`description`을 버린다(bot.py:181). 3b의 edit 대체 판정은 "이미 원하는 상태",
+"대상 메시지가 없음이 증명됨", "이유 불명의 거부"를 **구분할 수 있어야**
+성립하므로, 3b는 메서드명·error_code·description을 예외에 보존하는 최소 변경을
+허용한다. 그 이상의 클라이언트 재작성은 3b 범위가 아니다 — 「B-1.7」 참조.
 
 ## 카드 체계 (4종)
 
@@ -214,20 +245,28 @@ account/group/sleeve는 일반 str로 이를 금지하지 않음)끼리 같은 I
 테스트를 명시한다.
 
 **영속 식별자에 해시를 쓰지 않는다**: head/claim/lineage 등 정합성을
-결정하는 모든 system event는 `funding_workflow_id`를 **전체 정규화 scope
-문자열 그대로** 사용한다. 짧은 해시(예: sha1 앞 8자리)는 32비트 식별
+결정하는 모든 system event는 `funding_workflow_id`를 **canonical 직렬화된
+원시 scope 문자열 그대로** 사용한다 (유니코드 코드포인트 보존, 정규화 없음 —
+"정규화된 scope"라는 표현을 쓰지 않는 이유가 바로 위 문단이다). 짧은 해시(예: sha1 앞 8자리)는 32비트 식별
 공간이라 서로 다른 scope가 같은 head/CAS를 공유하는 충돌이 가능하고,
 충돌하면 한 scope의 요청 생성이 다른 scope를 superseded 처리해 월간
 투자가 누락될 수 있다. system event payload에는 길이 제한이 없으므로
 전체 키를 쓰는 데 비용이 없다. 방어선으로 head/claim 처리 시 payload에
 저장된 원본 scope 튜플을 기대 scope와 비교해 불일치하면 거부한다.
 
-**callback data 64바이트 제한은 토큰 매핑으로 해결한다**: card_key가
-callback data에 들어가야 하는 경우(`ui:detail:...`)에는 워크플로우 식별을
-전체 키로 하지 않고, 카드 생성 시 발급하는 **짧은 불투명 토큰**(예: 8자
-무작위)을 쓴다. 토큰 → funding_workflow_id 매핑은 `telegram_ui_card`
-이벤트에 기록하며, 토큰 발급은 duplicate_key get-or-create로 충돌 없이
-1:1을 보장한다. 토큰은 표시·조회 전용이고 정합성 판단에는 쓰지 않는다.
+**callback data 64바이트 제한 (개정 15차에서 완화)**: 이전 개정은 짧은
+워크플로우 토큰 레지스트리를 **의무**로 요구했다. 그 요구는 철회한다.
+`funding_workflow_id`는 DB·논리 카드 키일 뿐 **금융 콜백 payload가 아니므로**
+내부적으로 길어도 무방하다. 금융 콜백은 지금처럼 request_id에 바인딩되어
+있고(`operator:funding:complete:<request_id>`,
+`operator:budget:sel:<request_id>:<choice>` 등) 64바이트 안에 들어간다.
+
+따라서 이 설계는 새 워크플로우 토큰 테이블/레지스트리를 도입하지 **않는다**.
+`ui:detail:...` 같은 비금융 접기/펼치기 콜백이 실제로 64바이트를 넘는다는
+것을 **구체적인 바이트 길이 테스트가 증명하는 경우에만** 구현 계획이 유계
+식별자(이미 존재하는 짧은 식별자 재사용 등)를 고르며, 그 선택은 구현 계획의
+몫이지 이 아키텍처 문서가 미리 못박을 사항이 아니다. 어느 경우에도 그런
+토큰은 표시·조회 전용이고 정합성 판단에 쓰지 않는다.
 
 scope 필드들은 funding/budget 요청 payload에 이미 모두 존재하므로
 **비즈니스 로직 변경 없이 UI 계층에서 파생 가능**하다 (접근 A 원칙 유지).
@@ -236,9 +275,14 @@ scope 필드들은 funding/budget 요청 payload에 이미 모두 존재하므�
 식별·집계 전용이며, 버튼 callback은 항상 구체적인 `request_id`를 담는다.
 교체·만료된 request_id의 callback은 활성 요청으로 위임하지 않고 "이미
 지난 요청이에요. 최신 카드를 확인해 주세요."로 거절한다 — 구 버튼이 다른
-요청을 취소/선택하는 오동작을 원천 차단한다. 카드 상태에는 **현재 활성
-request_id와 요청 교체 이력**을 기록하여, 어떤 단계에서 요청이 재발급되어도
-같은 카드가 이어서 갱신된다.
+요청을 취소/선택하는 오동작을 원천 차단한다.
+
+**카드 상태는 활성 request_id를 소유하지 않는다 (개정 15차 교정).** 이전
+개정은 "현재 활성 request_id와 요청 교체 이력을 카드 상태에 기록한다"고
+적었는데, 그것은 금융 진실의 두 번째 정의를 UI 계층에 만드는 것이다. 활성
+요청은 `funding_workflow_head`가 단독으로 소유하고, UI는 매번 그 권위 상태에서
+**파생**한다. `telegram_ui_card`에는 전달 사실(어느 chat의 어느 message_id가
+어느 단계로 갱신되었는가)만 남는다 — 「B-1.4」 참조.
 
 **요청 교체의 비원자성 대응 (영속 workflow 상태 머신)**: "교체된 request_id
 거절"은 UI 레이어만으로는 보장할 수 없다. 현재 funding 확인 흐름
@@ -251,6 +295,22 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
 약속하는 상태 일관성의 전제이므로 단계 3a에서 함께 해결한다. 이 부분은
 **"비즈니스 로직 불변" 원칙(접근 A)의 명시적 예외**로, handlers의 funding
 확인 경로에 다음 규약을 도입한다:
+
+> **읽는 법 (개정 15차).** 아래 1~8은 원래 미래형으로 쓰였지만, 3a-1~3a-5
+> 엔지니어링 종결로 **이미 구현된 선행 조건**이다. 3b는 이것들을 *소비*하며
+> 재정의하거나 약화하지 않는다. 현재 구현은
+> `src/maestro/state/funding_workflow.py`(head/claim/child/completed/superseded,
+> `converge_workflow_invariants`, `list_incomplete_workflows`),
+> `src/maestro/state/migration_state.py`(NOT_STARTED/MIGRATING/COMPLETED/INVALID
+> 게이트), `src/maestro/state/rollback_preflight.py`(R0–R4, 읽기 전용)에 있다.
+> 3b가 전제하는 불변식은 다음과 같고, 이 목록은 3b에서 **열지 않는다**:
+> 워크플로우당 권위 있는 `funding_workflow_head` 하나 · 기존 CAS/precondition
+> 규칙 아래에서만 이뤄지는 요청·head 발행 · `funding_workflow_claim`의 attempt
+> fencing · 영속적인 정당 후속자 증명 · 영속 child lineage와 get-or-create ·
+> 완료 권위로서의 `funding_workflow_completed` · 롤백 호환을 위한 completed +
+> legacy 종결 dual-write · 운영자 승인 기반 미완 워크플로우 복구(자동 금융
+> 재개 없음) · 권위 있는 마이그레이션 fence · 모호한 금융 이력의 fail-closed ·
+> **증거가 없다는 것이 외부 부작용이 없었다는 증명은 아니라는 것.**
 
 1. **워크플로우 head와 원자적 교체(CAS)**: request_id별 claim만으로는
    부족하다 — 같은 scope/month에 pending 요청 두 개가 공존하면(중단 후
@@ -370,13 +430,19 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
      approval_id를 발급하지 않고 저장된 envelope(approval_id·**최초
      만료시각 포함**)을 그대로 재사용한다. 같은 주문 그룹에 승인 카드나
      결정 경로가 둘 이상 생기는 일이 DB 수준에서 차단된다.
-   - **전송은 exactly-once가 아니라 at-least-once**: sendMessage 성공과
-     성공 이벤트 저장 사이의 중단은 원리적으로 구분할 수 없으므로
-     "미전송 채팅만 정확히 발송"은 보장 대상이 아니다. 채팅별로 전송
-     **intent**(`intent:<approval_id>:<chat_id>`)를 먼저 영속화하고,
-     sendMessage 성공 후 결과(message_id)를 기록한다. 재개 시 intent도
-     없는 채팅만 새로 발송하고, intent는 있으나 결과가 없는 **ambiguous
-     채팅은 재발송한다** — 중복 카드가 생길 수 있음을 수용한다.
+   - **전송은 exactly-once가 아니라 intent 우선 + 모호성 보존이다**
+     (개정 15차 정본 교정): sendMessage 성공과 성공 이벤트 저장 사이의
+     중단은 원리적으로 구분할 수 없다. 채팅별로 전송 **intent**를 먼저
+     영속화하고 성공 후 결과(message_id)를, Telegram이 `ok=false`로 명시
+     거부하면 실패를 기록한다. 재개 시 **intent도 없는 채팅만** 새로
+     발송한다. intent는 있으나 결과가 없는 **ambiguous 채팅은 재발송하지
+     않는다** — 이전 개정의 "at-least-once + 중복 카드 정리"는 철회한다.
+     버튼 달린 카드의 중복은 운영자에게 "두 개의 살아 있는 결정"으로
+     보이고, 두 번째 탭이 claim에 거부되는 모습은 중복이 아니라 고장으로
+     읽힌다. 모호한 복사본은 버튼 없는 안내로 에스컬레이션하고
+     `telegram_ui` 헬스에 반영한다. 이것이 구현의 실제 동작이며(
+     `ui/lifecycle.py`의 `deliver_once`·`refresh`), 「C-1」의 "모르는 것을
+     안다고 취급하지 않는다"와도 같은 규칙이다.
    - **중복 카드는 안전하지만, 유실 카드의 자동 정리는 불가능하다
      (불변식)**: sendMessage 성공과 message_id 저장 사이에 중단되면 그
      카드의 message_id는 영구 유실된다. Telegram은 봇에게 메시지 이력
@@ -451,6 +517,330 @@ signal/요청 영속화) → funding ack 저장** 순서라서, `run_signal` 완
    서비스를 재개한다. (3)에서 위험 상태가 하나라도 발견되면 롤백하지 않는다.
 8. **현금흐름 기록 멱등화**: 전환 내 현금흐름 기록도 request_id 기반
    duplicate_key로 멱등 처리하여, 복구 재시도 시 중복 기록되지 않는다.
+
+### B-1. Phase 3b: 월간 워크플로우 카드 아키텍처 (개정 15차 확정)
+
+「B」가 그리는 하나의 월간 라이프사이클을 실제로 세우는 단계가 3b다. 아래는
+확정된 아키텍처이며, **구현 계획은 아직 쓰지 않았다.** 스키마·이벤트명·함수명
+가운데 저장소에 이미 존재하지 않는 것은 의도적으로 열어 둔다 — 여기서 이름을
+지어 두면 구현 계획과 이 문서가 곧바로 두 개의 정본이 된다.
+
+3b는 「위 1~8」의 3a 불변식 위에 **얹히기만 한다.** head/CAS, claim fencing,
+lineage, completed 권위, dual-write, 운영자 승인 복구, 마이그레이션 fence,
+fail-closed 규칙 중 어느 것도 3b가 다시 열지 않는다.
+
+#### B-1.1 네트워크 전달 소유자는 하나다
+
+**실행 가능한(버튼 달린) funding/budget 카드의 네트워크 전달 소유자는
+Telegram Operator 단독이다.** 목표 흐름:
+
+```
+daily-signal-approval / run_signal
+  → 영속 request + workflow head + signal package
+  → StateStore
+  → Telegram Operator 스윕
+  → 월간 워크플로우 카드 전송/갱신
+```
+
+CLI는 더 이상 두 번째 실행 카드 전송자가 아니다(「B-1.8」). **CLI와 operator가
+둘 다 보낼 수 있게 하려고 새 프로세스 간 전달 CAS/리스 하위 시스템을 만드는
+길은 택하지 않는다** — 그것은 이미 어려운 금융 CAS 옆에 두 번째 분산 합의를
+세우는 일이고, 전달 소유자를 하나로 줄이면 애초에 필요가 없다.
+
+조용한 날 안내나 일간 요약 같은 **비실행 정보성 알림은 3b가 자동으로 가져오지
+않는다.** 3b는 "버튼이 달린 것"의 소유권만 옮긴다.
+
+#### B-1.2 명시적 전달 세대 절단: `card_delivery_version`
+
+`ContributionFundingRequest`와 `ContributionBudgetRequest` 양쪽에
+`card_delivery_version`을 둔다. 의미는 승인 envelope에 이미 있는 같은 이름의
+필드와 동일하다(`approval/models.py`, `handlers.py`의 `< 1` 게이트) — 저장소에
+검증된 관용구가 있으므로 새 개념을 발명하지 않는다.
+
+| 값 | 뜻 | 라이프사이클 상태가 없을 때의 해석 |
+|---|---|---|
+| `0` (기본·누락) | legacy 세대. CLI가 raw 전송해 message_id를 남기지 않았을 수 있다 | **최초 전송을 허가하지 않는다.** 상태의 부재가 미전송의 증거가 아니다 |
+| `1` | Telegram Operator/lifecycle 소유 세대. 전송 **전에** intent를 남긴다 | 상태의 부재는 곧 **전송이 시작되지도 않았다는 적극적 증거**다. 스윕이 최초 전송을 대신할 수 있다 |
+
+- 모델 기본값은 하위 호환을 위해 **`0`을 유지한다.**
+- 3b 이후 새로 만들어지는 요청은 **명시적으로 `1`을 쓴다.**
+- 이 값은 **Telegram 전달의 provenance 표지일 뿐이다.** `funding_workflow_head.version`
+  이 아니며 금융 CAS에 참여하지 않는다. 두 version을 같은 축으로 읽는 순간
+  전달 실패가 금융 상태를 되돌릴 수 있게 된다.
+- 타임스탬프나 배포 시각 추론보다 **명시적 영속 세대 표지를 택한다.** 시각
+  비교는 재기동·시계 이동·백필 앞에서 조용히 틀린다.
+
+#### B-1.3 legacy 요청 카드 입양
+
+3b는 논리 카드 신원을 요청 범위(`funding-request:<request_id>`,
+`budget-request:<request_id>`)에서 **워크플로우 범위 월간 카드 하나**로 바꾼다.
+따라서 이미 나가 있는 legacy 요청 카드를 어떻게 이어받을지가 설계 사항이다.
+
+**입양은 새 전송이 아니다.** 입양을 "워크플로우 카드를 보냈다"로 기록하면
+보내지 않은 것을 보냈다고 적는 것이고, 그 기록은 이후 모든 판단의 근거가 된다.
+입양의 provenance(무엇을 어디서 물려받았는지)는 반드시 남긴다. 정확한
+이벤트명·스키마는 구현 계획의 몫이다.
+
+**워크플로우 × chat 단위 우선순위:**
+
+1. **이미 존재하는 워크플로우 범위 라이프사이클 상태** — 즉시 이긴다. 한 번
+   생기면 legacy 요청 범위 상태는 **다시는 권위로 조회되지 않는다.**
+2. **legacy `confirmed`** — 알려진 `message_id`를 입양한다. 새 전송 없음.
+   이후 워크플로우 카드 갱신은 **그 물리 메시지를 edit**한다.
+3. **legacy `unknown`** — 모호성을 워크플로우 카드로 그대로 옮긴다. 자동 전송
+   없음. 기존 버튼 없는 모호성/운영자 안내를 그대로 쓴다.
+4. **legacy `failed`** — 미전달이 증명된 경우다. 워크플로우 범위
+   라이프사이클 아래에서 재시도해도 안전하다.
+5. **legacy 증거 없음** — `card_delivery_version == 0`이면 보내지 않는다.
+   `== 1`이면 최초 전송이 허용된다(「B-1.2」).
+
+**한 워크플로우/chat에 알려진 legacy 카드가 여럿이면**, 정본 물리 메시지는
+**영속 워크플로우 lineage**로 고른다: 현재 head의 요청 카드를 먼저, 없으면
+supersession lineage를 따라 가장 가까운 영속 선행자를. **최신 시각으로 고르지
+않는다** — recency는 어느 카드가 이 워크플로우의 현재 진실을 담고 있는지에
+대해 아무것도 말해 주지 않으며, 3a-5가 head 소유권을 recency가 아니라 영속
+증명으로 결정한 것과 같은 이유다.
+
+정본이 아닌 것으로 판정된 알려진 legacy 카드는 **best-effort edit**로 낡은
+버튼을 걷어낼 수 있다. 다만 그 정리의 실패가 금융 워크플로우를 막아서는 안
+된다 — 정리는 위생이지 안전 조건이 아니다.
+
+**legacy/version 0 입양에서 청중을 넓히지 않는다.** 새로 설정된 chat에 입양을
+빌미로 카드를 보내지 않고, 알려진 legacy 청중/복사본만 보존한다. 반면 새
+version 1 워크플로우 카드는 최초 라이프사이클 생성 시점에 **현재 설정된 정상
+청중을 pin**할 수 있다(기존 `record_card_audience` 규약).
+
+#### B-1.4 논리 카드 신원 vs 금융 액션 신원
+
+두 신원은 다른 층이며 섞이면 안 된다.
+
+| | 무엇을 식별하나 | 어디에 실리나 |
+|---|---|---|
+| `funding_workflow_id` | **논리 카드** — 이 달, 이 scope의 카드 하나 | 카드 키·DB. 금융 콜백 payload에는 싣지 않는다 |
+| `request_id` | **금융 액션** — 지금 동의하는 구체적 요청 | 모든 금융 콜백 |
+
+모든 금융 콜백은 현재와 개념적으로 동일하게 유지한다: funding
+완료/취소 → funding request_id, budget 선택/취소 → budget request_id.
+
+**낡은 요청의 콜백을 현재 head로 라우팅하지 않는다.** head가 B인데 사용자가
+요청 A의 낡은 버튼을 눌렀다면, 시스템은 **A를 시도하고** 기존 head/claim
+권위에 의해 거절되어야 한다. 그것을 B에 대한 동의로 해석하는 경로는 존재해서는
+안 된다 — 사용자는 B를 본 적이 없다.
+
+UI는 활성 요청을 **권위 있는 워크플로우 상태에서 파생**한다.
+`active_request_id`나 요청 교체 이력을 Telegram 카드 상태에 **독립적인 금융
+권위로 저장하지 않는다.**
+
+#### B-1.5 권위 상태 → 사용자에게 보이는 월간 단계
+
+「B」의 `📥 → ⏳ → 💰 → ✅` 4단 선형 모델은 지나친 단순화다. 실제 권위 상태는
+head phase · 열린 claim · 완료된 completed · 미완 전이의 조합이고, 카드는 그
+조합의 **진실된 투영**이어야 한다.
+
+| 권위 상태 | 사용자에게 보이는 단계 | 금융 버튼 |
+|---|---|---|
+| funding head, claim 없음 | `📥 입금이 필요해요` | 입금 완료 / 취소 |
+| funding 확인 claim 열림 | `⏳ 입금을 확인하고 있어요` | 없음 |
+| funding 취소 claim 열림 | `⏳ 취소를 처리하고 있어요` | 없음 |
+| budget head **이고** 선행 funding 전이가 영속적으로 완료됨 | `💰 이번 달 예산을 선택해 주세요` | 최소 / 추천 / 전액 / 취소 |
+| budget 확인 claim 열림 | `⏳ 예산을 적용하고 있어요` | 없음 |
+| budget 취소 claim 열림 | `⏳ 취소를 처리하고 있어요` | 없음 |
+| funding 취소 완료 | 입금 취소됨을 사실대로 | 없음 |
+| budget 취소 완료 | 예산 취소됨을 사실대로 | 없음 |
+| budget 확인 완료 | `✅ 이번 달 예산을 확정했어요` | 없음. 선택 금액은 **완료된 claim의 입력값 그대로** 표시할 수 있다 |
+| funding 확인 완료 + budget 후속자 없음 | `✅ 자금 확인을 마쳤어요` | 없음. **월간 예산을 골랐다고 말하지 않는다** |
+
+**미완/정체 전이는 두 번째 금융 상태 머신이 아니라 attention 오버레이로
+표현한다.** 정당한 후속자가 이미 head인데 선행 전이의 완료 기록이 아직 미완일
+수 있다(3a가 명시적으로 허용하는 상태다). 그 경우 카드는 "마무리 중 ·
+확인이 필요해요"를 보일 수 있지만, **선행 전이의 완료가 영속화되기 전에는
+후속자의 금융 버튼을 노출하지 않는다.**
+
+> head가 budget으로 옮겨갔다 ≠ budget 버튼을 내놓아도 안전하다.
+
+budget 액션은 **선행 funding 전이가 영속적으로 완료된 뒤에만** 실행 가능해진다.
+
+**월간 카드 복구와 금융 복구는 분리된 채로 둔다.**
+
+- 월간 카드 = 현재 워크플로우의 진실을 **보여 준다.**
+- 기존 미완 워크플로우 복구 UI = 명시적 [재개]를 **제안한다.**
+- 3b의 월간 카드는 4b의 예외 마법사가 **아니다.**
+
+승인도 마찬가지로 분리한다. 월간 카드는 "워크플로우가 투자/승인 단계로
+넘어갔다"고 말할 수 있지만, 승인/거절 버튼은 승인 카드에 남는다. 월간 카드를
+두 번째 승인 권위로 만들지 않는다.
+
+종결/결과 투영은 현재 워크플로우 권위에서 파생한다 — `funding_workflow_completed`
+와 그에 정확히 대응하는 claim attempt. **legacy `contribution_funding_request_ack`
+/ `contribution_budget_request_decision`을 3b 라이프사이클 권위로 쓰지 않는다.**
+그것들은 롤백 호환 투영으로 남아 있을 뿐이다(`docs/rollback_and_upgrade_3a.md`
+「1. 권위 있는 상태 모델」).
+
+#### B-1.6 파생 read model과 operator 스윕
+
+3b는 월간 카드의 **read model 경계**를 정의한다. 개념적으로
+`FundingWorkflowCardModel`에 해당하는 **일회성(ephemeral) 객체**를 다음에서
+조립한다:
+
+- `funding_workflow_head`
+- 활성 요청 payload
+- `funding_workflow_superseded`
+- `funding_workflow_claim`
+- `funding_workflow_completed`
+- 미완 워크플로우 정보
+- Telegram 라이프사이클/전달 투영
+
+담을 수 있는 파생 표현 사실: 워크플로우 id·scope·월, 렌더링 대상 phase/요청,
+사용자에게 보이는 단계, attention 상태, 금융 액션 렌더 가능 여부, 영속적으로
+알려진 선택 예산, 전달 세대, legacy 입양 후보.
+
+**그러나 이것은 파생 read model이지 영속 금융 권위가 아니다.** 재시작 후
+권위 있는 영속 이벤트만으로 다시 조립할 수 있어야 한다. 조립 결과를 금융
+판단의 근거로 저장하는 순간 head의 두 번째 정의가 생긴다.
+
+**같은 투영 로직을 두 진입점이 공유한다**: 주기적 Telegram Operator 스윕,
+그리고 운영자 콜백/자식 전이 직후의 즉시 갱신. 두 경로가 다른 로직을 쓰면
+"카드가 콜백 직후엔 맞다가 다음 스윕에 틀려지는" 상태가 생긴다.
+
+월간 카드 스윕이 **할 수 있는 것**: 권위 상태 읽기, 모델 파생, 입양, 안전할
+때의 최초 전송, 갱신/edit, 전달 모호성·실패의 에스컬레이션.
+
+월간 카드 스윕이 **하면 안 되는 것**: `claim_workflow_attempt`, 자식 신호
+실행, 현금흐름 기록, `complete_workflow`, 미완 금융 전이의 자동 재개,
+워크플로우 head 수리. 이 책임들은 기존 수렴 sweep과 미완 워크플로우 복구가
+계속 소유한다. **스윕은 렌더러이지 실행자가 아니다.**
+
+워크플로우 단위로 실패를 격리한다 — 한 워크플로우가 망가져도 나머지
+워크플로우 카드의 전달·갱신이 멈추지 않아야 한다.
+
+기존 poll 루프 스윕들을 미관을 이유로 광범위하게 재정렬/리팩터링하지 않는다.
+증명된 안전 제약이 요구하는 **최소 순서 변경**만 한다.
+
+#### B-1.7 전달 실패 의미론
+
+정본은 **intent 우선 · 모호성 보존 · 무재전송(no blind replay)** 이다.
+
+**최초 전송**
+
+- Telegram이 미전달을 명시적으로 증명(`ok=false`) → `failed` → 재시도 허용.
+- 타임아웃 / 연결 끊김 / 수락 이후일 수 있는 해석 불가 응답 → `unknown`.
+- **`unknown`은 절대 자동 재전송하지 않는다.** 버튼 없는 모호성 안내를 쓰고,
+  `telegram_ui` 헬스가 unknown 복사본을 반영한다.
+
+이전 개정의 "모호한 카드 재전송" 및 "at-least-once + 중복 카드 정리" 문구는
+이 정책과 충돌하므로 철회한다. 3b가 승인 카드의 기존 unknown 동작을 약화하는
+일도 없다.
+
+**edit 동작은 "거부되면 무조건 새 전송"보다 정밀해야 한다.** Telegram이 돌려준
+거부 정보를 분류 가능한 형태로 보존해 최소 다음을 구분한다:
+
+| 증거 | 판정 | 행동 |
+|---|---|---|
+| 사실상 이미 원하는 상태 (`message is not modified`) | 수렴 | confirmed로 수렴. 대체 전송 없음 |
+| 물리 대상의 부재가 증명됨 (`message to edit not found` 또는 동급의 강한 증거) | 대상 소실 | 대체 전송 허용 |
+| 이유 불명의 명시적 edit 거부 (구 메시지가 살아 있을 수 있음) | 불명 | **edit가 실패했다는 이유만으로 새 실행 카드를 만들지 않는다.** 실패/재시도/폴백 의미론은 유지하되 대체하지 않는다 |
+| edit 중 전송 모호 | 적용됐을 수 있음 | unknown으로 표시/유지. 이후 자동 전송·edit 재생 없음 |
+
+이 분류가 성립하려면 `TelegramApiRejected`가 지금처럼 메서드·error_code·
+description을 버려서는 안 된다. 따라서 3b는 `bot.py`의 최소 변경을 허용한다
+(「아키텍처」의 단서 참조).
+
+**UI 전달 실패가 금융 진실을 되돌리지 않는다.** 예산 선택이 금융적으로
+완료됐는데 종결 카드 edit가 unknown이 되면, 금융은 완료로 남고 UI가 모호해질
+뿐이다.
+
+**단, 기존의 더 강한 handoff 규칙은 그대로 유지한다.** 어떤 전이의 완료가
+후속자/운영자 handoff 전달을 영속적으로 셈하는 것을 조건으로 삼고 있는 곳
+(handlers의 요청 카드 전달이 `sent`/`skipped`가 아니면 워크플로우 완료를
+거부하고 `funding_request_card_undelivered`를 남기는 경로)은 fail-closed로
+남는다. 3b 카드를 매끄럽게 만들려고 이 불변식을 약화하지 않는다.
+
+#### B-1.8 CLI 실행 카드 전송자 은퇴
+
+`_send_signal_request_notifications`,
+`_send_signal_funding_request_notifications`,
+`_send_signal_budget_request_notifications`의 **실행 카드 네트워크 전송자
+역할**을 은퇴시킨다.
+
+3b 이후 CLI 보고는 두 가지를 구분해야 한다:
+
+> **영속 요청의 존재** ≠ **Telegram 전달 상태**
+
+`daily-signal-approval`은 하루를 **영속화된 signal package의 요청**으로
+분류한다. Telegram 전달 성공 여부로 분류하지 않는다. `action_required == false`
+일 때 영속 signal package를 본다:
+
+- funding 요청이 있으면 → 조용한 날이 아니다
+- budget 요청이 있으면 → 조용한 날이 아니다
+- 둘 다 없으면 → 조용한 날 / no-action 경로
+
+`SignalRunSummary`가 Telegram 전달 권위가 될 필요는 없다. **CLI가 더 이상
+소유하지 않는 전달 시도를 근거로 `request_delivery_failed`를 내지 않는다.**
+Telegram 전달의 confirmed/failed/unknown/재시도/헬스는 전적으로 Telegram
+Operator/lifecycle의 것이다.
+
+진실된 운영 보고는 유지한다:
+
+- `funding_required` = 영속 funding 요청이 존재하고 운영자 조치가 필요하다
+- `budget_required` = 영속 budget 요청이 존재하고 운영자 조치가 필요하다
+
+이 상태들은 **Telegram 전달을 약속하지 않는다.** 그리고 한 signal run에
+funding과 budget 요청이 **둘 다** 있으면 둘 다 보고한다 — 현재 코드는 budget을
+보고한 뒤 반환해 funding을 가린다(cli.py의 `budget_sent` 분기). 두 진실 중
+하나를 감추는 것은 조용한 날 오보와 같은 종류의 거짓말이다.
+
+기존 **조용한 날 정보성 알림은 CLI에 남겨도 된다.** 실행 가능하지 않고 자체
+at-most-once 의미론을 가진다. 3b를 빌미로 모든 Telegram 정보성 메시지를
+operator로 옮기지 않는다.
+
+#### B-1.9 마이그레이션 게이트 stand-down
+
+3b는 3a의 기존 마이그레이션 게이트를 **소비한다.** `MIGRATING` 또는 `INVALID`
+동안:
+
+- 새 실행 funding/budget 카드를 전송하지 않는다
+- 새 금융 액션을 노출하게 될 갱신을 하지 않는다
+- 콜백은 기존 마이그레이션 게이트를 통해 계속 fail-closed로 거절된다
+- 3b는 마이그레이션 상태·워크플로우 head·legacy 이력을 **수리하지 않는다**
+
+3b를 위한 새 마이그레이션 권위를 만들지 않는다. 판정은
+`state/migration_state.py`가 단독으로 소유한다.
+
+#### B-1.10 3b의 범위
+
+**IN (3b가 한다)**
+
+- 통합 월간 워크플로우 카드 렌더러
+- 워크플로우 → UI read model 투영
+- 워크플로우 범위 카드 신원
+- 요청 범위 금융 콜백
+- Telegram Operator 단독 실행 카드 전달 소유
+- 전달 세대 절단(`card_delivery_version`)
+- legacy 요청 카드 입양
+- unknown/무재전송 정책의 정본화
+- 월간 워크플로우 카드 스윕
+- 같은 투영을 쓰는 콜백 직후 즉시 갱신
+- 진실된 단계·종결 상태·attention 오버레이
+- 증거 기반 edit 대체
+- CLI 실행 요청 카드 전송자 은퇴
+- 마이그레이션 게이트 stand-down
+- 위에 해당하는 렌더러·라이프사이클·CLI 테스트
+
+**OUT (3b가 하지 않는다)**
+
+- funding head/CAS 재설계
+- claim/fencing 재설계
+- child lineage 재설계
+- 자동 금융 복구
+- legacy dual-write 제거
+- 롤백 preflight R4 제거
+- 단계 3a-6 (현재 단계가 아니다. legacy dual-write와 롤백 호환은 **의도적으로**
+  남아 있다)
+- 운영/VPS 실거래 사고 수습
+- 단계 4b 예외 마법사
+- 단계 5 전역 Telegram 정리
+- 무관한 광범위 리팩터링
+- 필요가 증명되지 않은 워크플로우 토큰 레지스트리 의무화
 
 ### C. 예외 카드 (가이드형 마법사)
 
@@ -596,8 +986,18 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
    영원히 낡은 화면으로 남는다. 되돌리려면 이미 쌓인 기록을 마이그레이션해야 한다.
 
    **전송 전에 intent를 먼저 기록한다.** 순서는
-   `intent → 텔레그램 호출 → result`이며, `(card_key, chat_id, 단계)`가
-   intent의 키다. `message_id`는 텔레그램이 응답해야 존재하므로 result에만 있다.
+   `intent → 텔레그램 호출 → result`(또는 명시 거부 시 `failure`)이며,
+   `message_id`는 텔레그램이 응답해야 존재하므로 result에만 있다.
+
+   **이벤트의 유일성 키는 `(card_key, chat_id, 단계)`가 아니다** (개정 15차
+   교정). 그 셋만으로 키를 만들면 같은 단계의 두 번째 시도가 쓰기 자체를
+   거부당한다 — `system_events`의 `duplicate_key`에는 UNIQUE 제약이 있다.
+   현 구현은 시도마다 **`operation_id`**를 발급해
+   `telegram-ui-card:<phase>:<card_key>:<chat_id>:<stage>:<operation_id>`로
+   기록하므로, 재시도는 각자의 intent/result/failure를 남길 수 있다. 반면
+   **투영의 키는 `(card_key, chat_id)`**이며, 이벤트를 오래된 것부터 접어
+   현재 복사본 하나를 만든다(`ui/card_state.py`의 `resolve_card_copies`).
+   즉 "시도의 신원"과 "현재 복사본의 신원"은 다른 층이다.
 
    이 순서가 아니면 — 즉 전송 후에만 기록하면 — `sendMessage`가 성공하고
    이벤트를 쓰기 전에 프로세스가 죽었을 때 **텔레그램에는 카드가 있는데 우리
@@ -613,10 +1013,16 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
    `card_key`는 카드 유형별 원천 ID로 정한다:
    승인 카드 = `approval:<approval_id>` (유일한 액션 카드),
    데일리 요약 카드 = `daily:<signal_run_id>` (읽기 전용 집계),
-   월간 자금 카드 = funding_workflow_id
-   (`funding:<정규화 scope 전체>:<YYYY-MM>`; 이벤트 payload에는 전체 키,
-   callback data에는 발급 토큰만 — 토큰↔키 매핑은 `telegram_ui_card`에 기록),
+   월간 자금 카드 = `funding_workflow_id`
+   (`funding:<canonical 직렬화 원시 scope>:<YYYY-MM>` — 유니코드 정규화 없음;
+   이벤트 payload에 전체 키를 그대로 쓴다. **금융 콜백은 이 키를 싣지 않고
+   request_id를 싣는다** — 「B-1.4」),
    예외 카드 = `<유형>:<원천 event id>`.
+
+   3b 이전에 쓰이던 요청 범위 키 `funding-request:<request_id>` /
+   `budget-request:<request_id>`는 legacy 세대의 카드 신원이다. 3b는 이를
+   워크플로우 범위 카드로 **입양**하며, 입양은 새 전송이 아니다 —
+   「B-1.3」.
 2. poll 루프 sweep에 `_sweep_lifecycle_cards()` 추가: 활성 카드의 원천 이벤트
    (승인 ack, 주문 상태, 정산 결과)를 조회해 단계 변화 시 re-render →
    `edit_message_text`.
@@ -625,8 +1031,12 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
 
 ## 에러 처리
 
-- **edit 실패 → 새 메시지 폴백** 후 message_id 갱신 (48시간 경과, 메시지 삭제
-  등). 기존 `_edit_callback_message` 폴백 패턴 재사용.
+- **edit 실패의 처리는 증거로 나눈다 (개정 15차 교정).** 이전 개정의
+  "edit 실패 → 무조건 새 메시지"는 철회한다. edit가 거부됐다는 사실만으로
+  새 카드를 보내면, 원본이 멀쩡히 살아 있는 경우 버튼 달린 카드가 두 장
+  된다. 3b의 요구는 Telegram이 돌려준 거부 정보를 **분류 가능한 형태로
+  보존**하는 것이다 — 「B-1.7」의 네 갈래(이미 원하는 상태 / 대상 부재가
+  증명됨 / 이유 불명 거부 / 전송 중 모호).
 - **UI 렌더링 실패는 거래 로직을 막지 않지만, 조용히 사라지지도 않는다**:
   카드 갱신 실패는 audit 이벤트를 남기고 다음 sweep에서 재시도하되,
   같은 카드가 **연속 3회 이상 렌더/edit에 실패하면** 렌더러를 거치지 않는
@@ -668,16 +1078,18 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
   - **dispatch crash 주입**: consumed 직후 / 각 그룹 pending 이벤트 저장
     전후 / 각 채팅 전송 전후에 중단 후 재개 — dispatch_group_id
     get-or-create에 의해 기존 approval_id·envelope·최초 만료시각이
-    재사용되고(일부 그룹만 저장된 상태 포함), intent 없는 채팅은 발송·ambiguous 채팅은 재발송(중복 허용)
-    되며, message_id가 알려진 중복 복사본은 무력화 edit로 정리되고,
+    재사용되고(일부 그룹만 저장된 상태 포함), **intent 없는 채팅만 발송되고
+    ambiguous 채팅은 재발송되지 않으며**(버튼 없는 안내로 에스컬레이션),
+    message_id가 알려진 중복 복사본은 무력화 edit로 정리되고,
     message_id가 유실된 복사본은 클릭 시 self-heal(그 메시지가 즉시 최종
     상태로 edit되고 추적 목록에 등록)되며, 승인 callback은 어느 카드에서
     눌러도 한 번만 처리되고, 전부 끝난 뒤에야 dispatch 완료가 기록된다
   - **scope 불일치 방어**: head/claim 이벤트 payload의 원본 scope가 기대
     scope와 다르면(식별자 오염 가정) 처리가 거부된다
   - **scope 직렬화 충돌**: null vs 문자열 `-`, 구분자(`:` 등)를 포함한
-    식별자, NFC 정규화 전후가 다른 유니코드 문자열로 구성된 서로 다른
-    scope 쌍이 서로 다른 funding_workflow_id로 직렬화된다
+    식별자, NFC 등가이지만 코드포인트가 다른 유니코드 문자열로 구성된 서로
+    다른 scope 쌍이 서로 다른 funding_workflow_id로 직렬화된다 (정규화를
+    하지 않으므로 등가 문자열은 합쳐지지 않는다)
   - **승인 resolution crash-boundary**: ack 저장 직후·주문 해석 도중·완료
     직전 각 지점에서 중단 — ack-only 승인이 종결로 오인되지 않고 sweep이
     기록된 결정으로 재개하며, 주문이 중복 생성되지 않고, 카드는
@@ -698,22 +1110,93 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
 - **기존 handlers 테스트 유지**: 비즈니스 로직 불변이 원칙이므로 기존 테스트가
   깨지면 로직을 건드렸다는 경고 신호.
 
+### 단계 3b 테스트 범위 (개정 15차)
+
+기존 3a 테스트와 불변식은 그대로 둔다. 아래는 3b가 **추가로** 덮어야 하는
+범위이며, 파일 배치와 픽스처 구성은 구현 계획의 몫이다.
+
+**전달 세대 (`card_delivery_version`)**
+
+- 요청 모델에 `card_delivery_version`이 없으면 legacy 세대 `0`으로 읽힌다
+- 3b가 새로 만든 funding/budget 요청은 `1`이다
+- version 0 + 라이프사이클 상태 없음 → **자동 전송하지 않는다**
+- version 1 + 라이프사이클 상태 없음 → 최초 전송이 허용된다
+
+**legacy 요청 카드 입양**
+
+- legacy `confirmed` 요청 카드 → 알려진 message_id를 입양하고 새 전송을 하지
+  않으며, 이후 갱신이 그 물리 메시지를 edit한다
+- legacy `unknown` 요청 카드 → 워크플로우 카드도 unknown이 되고 재전송하지 않는다
+- legacy `failed` 요청 카드 → 재시도가 허용된다
+- 알려진 legacy `confirmed` 카드가 여럿 → 정본 선택이 head/lineage로 결정되고
+  **최신 시각으로 결정되지 않는다**
+- legacy 청중은 새로 설정된 chat으로 확장되지 않는다
+- 워크플로우 범위 상태가 한 번 생긴 뒤에는 나중에 도착한 legacy 이벤트가
+  권위를 되찾지 못한다
+
+**신원**
+
+- `funding_workflow_id`가 카드 신원이고 콜백은 `request_id`에 바인딩된 채로 남는다
+- 낡은 요청의 콜백이 현재 head로 재라우팅되지 않는다 (A를 시도해 거절된다)
+
+**단계 투영과 attention**
+
+- funding 선행자 미완 + budget 후속자가 head → **budget 버튼은 비활성**
+- 선행자 완료 → budget 버튼이 실행 가능해진다
+- 취소/확인 종결 문구가 사실대로다 (입금 취소 ≠ 예산 확정)
+- budget 후속자 없는 funding 확인 완료가 "예산을 골랐다"고 말하지 않는다
+- 승인 handoff는 승인 카드에 남는다 (월간 카드는 승인 권위가 아니다)
+
+**스윕 권한 경계**
+
+- 월간 카드 스윕이 claim / run_signal / 현금흐름 / complete_workflow /
+  head 수리 중 **어떤 부작용도 내지 않는다**
+- 워크플로우 하나가 malformed여도 다른 워크플로우 카드의 전달·갱신이 멈추지 않는다
+
+**전달 실패 의미론**
+
+- 최초 전송의 명시적 거부(`ok=false`)는 재시도된다
+- 최초 전송의 unknown은 재생되지 않는다
+- edit 대상 부재가 증명되면 대체 전송이 허용된다
+- 대상 소실 증거 없는 edit 거부는 **두 번째 실행 카드를 만들지 않는다**
+- edit 중 전송 모호는 재생되지 않는다
+- `message is not modified`는 대체 없이 수렴한다
+- UI 모호성이 영속 금융 완료를 되돌리지 않는다
+- 기존 후속자 handoff 규칙이 적용되는 자리에서는 전달 실패/unknown이
+  **여전히 부모 전이를 미완으로 남긴다**
+
+**CLI**
+
+- CLI가 더 이상 funding/budget 실행 카드를 보내지 않는다
+- 조용한 날 분류가 **영속 요청의 존재**에서 나온다 (전달 성공 여부가 아니다)
+- 한 run에 funding과 budget이 모두 있으면 **둘 다** 보고된다
+- no-action 정보성 알림 동작은 그대로 유지된다
+
+**마이그레이션**
+
+- `MIGRATING` / `INVALID`에서는 새 실행 카드 전달과 금융 액션이 차단된다
+
+
 ## 마이그레이션 순서 (단계별 독립 배포, 롤백 규칙은 단계별로 명시)
 
 | 단계 | 내용 | 효과 |
 |---|---|---|
 | 1 ✅ | `ui/` 모듈 신설 + 승인 카드 교체 + 자세히 토글 + 메뉴 5개 등록 | 가장 자주 보는 메시지 즉시 개선 |
 | 2 ✅ | 라이프사이클 카드 매니저 + 승인/데일리 카드 + 노옵 한 줄 + fallback 알림 경로 | 구조 개편의 핵심 |
-| 3a (1·2·3 완료) | **정합성 기반 작업 (UI 아님, 접근 A 예외)**: StateStore 원자 커밋 API, 워크플로우 head/CAS, attempt 기반 claim·재개, lineage, dispatch idempotent resume, 승인 결정 2단계 영속화, 수렴 sweep | 기존 교체 경합·중단 복구 결함 해소 (독립 배포·검증) |
+| 3a-1~3a-5 ✅(엔지니어링) | **정합성 기반 작업 (UI 아님, 접근 A 예외)**: StateStore 원자 커밋 API, 워크플로우 head/CAS, attempt 기반 claim·재개, lineage, dispatch idempotent resume, 승인 결정 2단계 영속화, 수렴 sweep, 업그레이드 backfill · 마이그레이션 상태 머신 · 롤백 preflight | 기존 교체 경합·중단 복구 결함 해소. **GitHub 코드베이스 기준 종결이며 VPS 운영 마이그레이션 수행 여부는 별건이다** |
 | 4a ✅ | **배치 집행 결과 분류 + 승인 종결 (CLI)** — 「C-1」 참조. 3a-4·3b보다 **먼저** 갔다 | 닫지 못하는 승인 2건을 닫고, 4b·3a-5의 토대가 된다 |
-| 3b | 월간 자금 카드 (funding_workflow_id 기반 입금·예산 통합, 3a 위에 구축) — **선행 조건 2건은 「3b 선행 조건」 참조** | 월초 경험 개선 |
+| 3b ← **다음** | 월간 워크플로우 카드 (`funding_workflow_id` 기반 입금·예산 통합, 3a 위에 구축) — 아키텍처는 「B-1」 확정, 구현 계획 미작성 | 월초 경험 개선 + 실행 카드 전달 소유자 단일화 |
 | 4b | 예외 마법사 (배치 부분 집행 카드, 재주문·cash drift·복구·안전 정지) | 장애 대응 경험 개선 |
 | 5 | 조회 카드 5종 + 구 명령어 메뉴 숨김 + 구 알림 경로 제거 | 마무리 |
 
-### 3b 선행 조건 (3a-4 최종 리뷰에서 이관, 2026-08-19)
+### 3b 선행 조건 (3a-4 최종 리뷰에서 이관, 2026-08-19 — **개정 15차에서 결론 확정**)
 
 3a-4는 handlers의 funding 확인 경로만 건드리기로 한 단계라 아래 둘을 열어
 두었다. 3b가 이 카드들을 lifecycle 카드로 대체하므로 그때 함께 닫는다.
+**두 항목의 결론은 「B-1」에서 확정됐다**: (1)은 「B-1.1」·「B-1.2」·「B-1.8」
+— CLI의 실행 카드 전송자 역할을 은퇴시키고 `card_delivery_version`으로 세대를
+절단한다. (2)는 「B-1.7」 — **무재전송이 정본이다.** 아래 서술은 그 결론에
+이르게 된 문제 진술로 남겨 둔다.
 
 1. **`cli.py`의 최초 카드 발송이 lifecycle 밖에 있다.**
    `_send_signal_request_notifications`는 raw `client.send_message`를 쓰므로
@@ -736,56 +1219,50 @@ run을 만들고, 그 결과를 새 승인 카드로 띄운다** — 즉 정상 
    규칙"이라며 구현 쪽을 인용한다. 구현은 승인 카드·요청 카드 모두
    재전송하지 않는다.
 
-   요청 카드에 한해서는 재전송이 안전하다 — head+claim이 두 번째 탭을
-   거부하므로 중복 카드가 중복 결정이 되지 않는다. 승인 카드는 그 논거가
-   그대로 적용되지 않는다. 어느 쪽이 정본인지 3b에서 정하고, 정한 쪽으로
-   스펙을 고친다.
+   **결론 (개정 15차): 무재전송이 정본이다.** 요청 카드의 재전송이 중복
+   *결정*을 만들지 않는 것은 맞지만(head+claim이 두 번째 탭을 거부한다),
+   그것은 안전의 증명이지 좋음의 증명이 아니다. 운영자에게는 살아 있는
+   버튼이 두 개로 보이고, 두 번째 탭이 거부되는 모습은 중복이 아니라 고장으로
+   읽힌다. 승인 카드에는 그 논거조차 적용되지 않는다. 따라서 승인 카드·요청
+   카드 모두 `unknown`을 재전송하지 않으며 — 이미 구현이 그렇게 동작한다 —
+   이 문서의 반대 문구(개정 6차의 `at-least-once + 중복 카드 정리`, 단계 2
+   항목의 `ambiguous 채팅은 재발송한다`)는 철회했다. 「B-1.7」이 정본이다.
 
 **단계 2의 안전망**: 개별 주문 알림·미체결 경고·halt·정산 불일치 알림의
 **기존 전송 경로는 단계 2에서 제거하지 않고 카드와 병행 유지**한다.
 카드 전달 성공률이 실운영에서 검증된 후(아래 승인 조건 충족) 단계 5에서
 구 경로를 제거한다.
 
-**단계 3a는 roll-forward-only**: 단계 1·2·3b·4·5는 UI 전용이므로 코드
-롤백만으로 안전하게 되돌릴 수 있지만, 단계 3a는 다르다. 새 코드가 남긴
-`funding_workflow_claim`을 구 handlers는 확인하지 않으므로, claim 이후
-`completed` 이전 상태에서 구버전으로 롤백하면
-`_load_pending_funding_request()`가 요청을 다시 pending으로 간주해
-`run_signal()`을 중복 실행할 수 있다 — 즉 장애 시점의 롤백이 새 불변식을
-제거한다. 따라서 단계 3a 이후에는 **버그 대응도 수정 배포(roll-forward)로만
-진행**하고, 부득이하게 롤백해야 하면 **quiesce 장벽 아래에서 롤백
-preflight**를 통과한 뒤에만 롤백한다. preflight를 정지 없이 실행하면 검사
-직후 구버전 기동 전까지 callback·sweep·예약 run이 새 미완 상태를 만들 수
-있어 통과가 무의미해지므로, 롤백은 다음 순서를 강제한다:
+**단계 3a의 롤백은 조건부로만 안전하다 (개정 15차 교정).** 이전 개정은
+"단계 3a는 roll-forward-only"라고 단정했지만, 3a-5 이후의 설계는 그렇지 않다.
+정확한 진술은 이렇다:
 
-1. **quiesce**: telegram-operator 서비스와 per-market signal 타이머 등
-   state store에 쓰는 모든 systemd unit을 정지해 writer와 callback 유입을
-   차단한다.
-2. **최종 preflight**: 정지 상태에서 DB 배타 lock을 잡고 실행한다.
-   아래 미완 상태가 모두 0건임을 확인한다 (하나라도 있으면 먼저 수동
-   종결 후 재검사):
+- 단계 1·2·3b·4·5는 UI 전용이므로 코드 롤백만으로 되돌릴 수 있다.
+- 단계 3a는 새 불변식(claim, 2단계 승인 종결, dispatch manifest)을 남기므로
+  **아무 때나 되돌릴 수 없다.** 기본 대응은 여전히 수정 배포(roll-forward)다.
+- 그러나 **롤백 창이 열려 있고**(legacy 종결 이벤트 dual-write와 롤백 호환
+  투영이 아직 제거되지 않았고), **quiesce·preflight 호환성 검사를 통과하는
+  한** 롤백은 지원된다. 3a-5는 이를 위해 읽기 전용 롤백 preflight(R0–R4)와
+  quiesce 장벽 검증을 실제로 구현했다.
+- preflight는 **검사기지 복구 도구가 아니다.** 위험 상태를 발견하면 고치지
+  않고 거절한다.
 
-- 미완 funding/budget 전이 (claim은 있으나 `completed` 없음)
-- consumed이지만 dispatch 완료(`signal_approval_pending`)가 없는
-  signal package — 구버전은 이를 영구 consumed로 취급해 승인 카드가
-  유실된다
-- `decision_recorded`는 있으나 `resolution_completed`가 없는 승인 —
-  구 handler는 ack만으로 영구 종결로 취급해 승인된 주문이 유실된다
-- `completed`이지만 대응하는 legacy 종결 이벤트(funding ack / budget
-  decision)가 없는 요청 — dual-write 규약 위반이며, 발견 시 롤백 CLI가
-  legacy 이벤트를 멱등 backfill한 뒤 재검사한다
+**롤백 알고리즘 전체를 이 문서에 복제하지 않는다.** 정지 대상 유닛 목록,
+quiesce 검증, R0–R4의 정확한 판정, 롤백 후 재업그레이드 경로, 롤백 창을 닫는
+조건은 다음이 소유한다:
 
-3. **구버전 배포**: preflight 통과 후, unit이 정지된 상태 그대로 구버전
-   코드를 배포한다. preflight와 배포 사이에 어떤 unit도 재시작하지
-   않는다 — 장벽은 구버전 기동이 완료될 때까지 유지된다.
-4. **재개**: 구버전 기동을 확인한 뒤에만 타이머·서비스를 재개한다.
+- 운영 절차: `docs/rollback_and_upgrade_3a.md`
+- 설계/구현 계획: `docs/superpowers/plans/2026-08-24-upgrade-backfill-rollback-preflight-v2.md`
+- 코드: `src/maestro/state/rollback_preflight.py`, `src/maestro/ops/quiesce.py`,
+  `src/maestro/state/migration_state.py`
 
-preflight 검사와 미완 상태의 수동 종결을 수행하는 운영 도구(CLI 점검
-명령)를 3a에 포함하고, 각 미완 상태에서의 롤백 시나리오와 quiesce 순서
-위반(정지 없이 preflight만 통과) 시의 위험을 테스트로 문서화한다.
-이 절차는 운영 문서에 명시한다.
+**3b는 이 롤백 창을 유지한다.** legacy dual-write 제거도, R4 검사 제거도 3b의
+범위가 아니다(「B-1.10」). 그것은 단계 3a-6의 일이고, 3a-6은 현재 단계가 아니다.
 
-**3a 업그레이드 backfill**: 새 불변식은 3a 이전에 쌓인 상태를 모르므로,
+**3a 업그레이드 backfill** (아래는 3a-5로 **구현 완료된** 설계다. 실제 코드는
+`state/migration_state.py`·`state/upgrade_backfill.py`이고, 절차의 정본은
+`docs/rollback_and_upgrade_3a.md`다 — 여기 남긴 서술은 왜 그렇게 만들었는지의
+근거다): 새 불변식은 3a 이전에 쌓인 상태를 모르므로,
 backfill 없이 켜면 두 가지 오판이 발생한다 — (a) 기존 pending
 funding/budget 요청은 head가 없어 수렴 sweep이 orphan으로 오판해
 supersede할 수 있고, (b) 기존에 정상 완료된 승인 ack는
@@ -841,8 +1318,9 @@ telegram-operator와 per-market signal 타이머 등 여러 writer가 있으므�
   동시 중복 callback은 claim에 의해 한 건만 처리되고, 중단된 워크플로우는
   복구 대상으로 잡혀 재개된다.
 - 승인 dispatch 중단(consumed 직후, 그룹 이벤트 전후, 채팅 전송 전후) 후
-  재개 시 approval이 중복 생성되지 않고, message_id가 알려진 중복 복사본은
-  정리되며 유실 복사본은 클릭 시 self-heal되고 승인 callback은 멱등하며,
+  재개 시 approval이 중복 생성되지 않고, ambiguous 채팅이 재발송되지 않으며,
+  message_id가 알려진 중복 복사본은 정리되고 유실 복사본은 클릭 시
+  self-heal되며 승인 callback은 멱등하고,
   같은 scope/month의 병행 pending 요청 경쟁에서 head인 요청만 처리된다.
 - claim-only 상태의 워크플로우가 복구 카드 [재개]로 정확히 한 번 재개되고,
   orphan 요청/dangling head가 sweep에서 수렴된다.
@@ -850,7 +1328,8 @@ telegram-operator와 per-market signal 타이머 등 여러 writer가 있으므�
   기록된 결정으로 재개하고, 주문은 중복 생성되지 않으며, 반복 실패는
   ⚠️ 복구 카드로 노출된다.
 - (단계 3a) claim-only 상태에서 구버전으로 롤백하는 시나리오를 검증해
-  중복 실행 위험을 확인하고, roll-forward-only 운영 절차가 문서화되어 있다.
+  중복 실행 위험을 확인하고, 조건부 롤백 절차(quiesce → 읽기 전용 preflight
+  → 배포 → 재개)가 `docs/rollback_and_upgrade_3a.md`에 문서화되어 있다.
 - (단계 3a) 구버전 DB fixture로 업그레이드 backfill을 검증한다: 기존
   pending 요청이 v1 head로 연결되어 유지되고, 완료된 legacy 승인이
   재집행되지 않으며, 모호 케이스(복수 pending, 증거 불충분 ack)는 자동
