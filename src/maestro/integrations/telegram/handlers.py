@@ -96,6 +96,14 @@ from maestro.integrations.telegram.ui.cards import (
     render_approval_stage_card,
     render_daily_card,
 )
+from maestro.integrations.telegram.ui.funding_workflow import (
+    funding_workflow_card_key,
+    project_funding_workflow_card,
+)
+from maestro.integrations.telegram.ui.funding_workflow_delivery import (
+    FundingWorkflowCardDelivery,
+    FundingWorkflowCardSyncResult,
+)
 from maestro.integrations.telegram.ui.lifecycle import CardLifecycleManager
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.monitoring.health import HealthService
@@ -239,6 +247,7 @@ class TelegramOperatorCommandRouter:
             client,
             chat_ids=[int(chat_id) for chat_id in config.approval.telegram_allowed_chat_ids],
         )
+        self._funding_delivery = FundingWorkflowCardDelivery(self.store, self._card_manager)
 
     def process_update(self, update: Mapping[str, Any]) -> bool:
         callback = update.get("callback_query")
@@ -2668,6 +2677,45 @@ class TelegramOperatorCommandRouter:
             self._card_manager.record_render_failure(run_id, card_key, stage, str(exc))
         except Exception as record_exc:  # noqa: BLE001 - 저장까지 깨진 경우
             self._log_card_failure(record_exc)
+
+    def _refresh_funding_workflow_card(
+        self,
+        workflow_id: str,
+    ) -> FundingWorkflowCardSyncResult:
+        """Project and synchronize a monthly funding workflow card across configured chats.
+
+        This is the shared Phase 3b projection/delivery mutation entry and checks
+        _migration_block_reason() before calling project_funding_workflow_card or
+        FundingWorkflowCardDelivery.sync. When blocked, it returns a blocked result
+        without creating any audience, adoption, or card lifecycle events.
+        """
+        if self._migration_block_reason() is not None:
+            return FundingWorkflowCardSyncResult(
+                card_key=funding_workflow_card_key(workflow_id),
+                outcomes={},
+            )
+        model = project_funding_workflow_card(self.store, workflow_id)
+        return self._funding_delivery.sync(new_run_id(), model)
+
+    def _sweep_funding_workflow_cards(self) -> None:
+        """Sweep and refresh all known funding workflow cards.
+
+        Scans current funding workflow heads in stable workflow_id order, refreshing
+        each workflow card through _refresh_funding_workflow_card. Isolated so that
+        an error on one malformed workflow does not prevent others from updating.
+        """
+        if self._migration_block_reason() is not None:
+            return
+        heads = self.store.list_funding_workflow_heads()
+        heads_sorted = sorted(heads, key=lambda h: str(h.get("workflow_id") or ""))
+        for head in heads_sorted:
+            workflow_id = head.get("workflow_id")
+            if not workflow_id:
+                continue
+            try:
+                self._refresh_funding_workflow_card(str(workflow_id))
+            except Exception as exc:  # noqa: BLE001 - one bad workflow must not wedge the sweep
+                self._log_card_failure(exc)
 
     def _resolution_failed_approval_ids(self, approval_ids: Collection[str]) -> set[str]:
         """집행이 실패로 끝난 승인. 3a-1이 이미 남기고 있던 기록이다.
