@@ -1,12 +1,15 @@
 from datetime import datetime
 
+from maestro.config.execution import ExecutionConfig
 from maestro.core.ids import new_budget_request_id
 from maestro.execution.budget_requests import (
     ContributionBudgetRequest,
     budget_request_reply_markup,
+    build_contribution_budget_request,
     format_contribution_budget_request,
     selected_budget_from_request,
 )
+from maestro.state.models import PortfolioState
 
 
 def test_budget_request_message_and_markup_include_presets():
@@ -90,3 +93,55 @@ def test_selected_budget_accepts_short_and_legacy_selection_keys():
     assert selected_budget_from_request(request, "min") == 1_660_000.0
     assert selected_budget_from_request(request, "recommended") == 4_000_000.0
     assert selected_budget_from_request(request, "full") == 8_000_000.0
+
+
+def test_missing_card_delivery_version_is_legacy_generation():
+    request = ContributionBudgetRequest(
+        request_id="budget_legacy",
+        source_signal_run_id="signal_1",
+        strategy_ids=["tranquillo"],
+        account_id="kis_ps",
+        execution_sleeve="tranquillo_ps",
+        currency="KRW",
+        available_cash=2_000_000.0,
+        min_monthly_budget=1_000_000.0,
+        recommended_budget=1_500_000.0,
+        selectable_max_budget=2_000_000.0,
+        month_key="2026-08",
+        created_at=datetime(2026, 8, 1),
+        expires_at=datetime(2026, 8, 2),
+    )
+    payload = request.model_dump(mode="json")
+    payload.pop("card_delivery_version", None)
+
+    restored = ContributionBudgetRequest.model_validate(payload)
+
+    assert restored.card_delivery_version == 0
+
+
+def test_build_contribution_budget_request_emits_legacy_delivery_version():
+    config = ExecutionConfig(
+        order_generation_mode="buy_only_contribution",
+        contribution={
+            "enabled": True,
+            "currency": "KRW",
+            "min_monthly_budget": 1_000_000.0,
+            "monthly_budget": 1_500_000.0,
+            "budget_request": {"enabled": True},
+        },
+    )
+    state = PortfolioState(cash=2_000_000.0, cash_by_currency={"KRW": 2_000_000.0})
+    budget_request = build_contribution_budget_request(
+        source_signal_run_id="signal_1",
+        strategy_ids=["tranquillo"],
+        account_id="kis_ps",
+        execution_sleeve="tranquillo_ps",
+        execution_config=config,
+        state=state,
+        month_key="2026-08",
+        created_at=datetime(2026, 8, 1),
+        expires_after_seconds=86400,
+    )
+    assert budget_request is not None
+    assert budget_request.card_delivery_version == 0
+

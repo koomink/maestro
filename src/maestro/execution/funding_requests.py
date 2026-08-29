@@ -27,6 +27,7 @@ class ContributionFundingRequest(BaseModel):
     month_key: str
     created_at: datetime
     expires_at: datetime
+    card_delivery_version: int = 0
     status: FundingRequestStatus = "pending"
 
 
