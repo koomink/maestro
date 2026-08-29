@@ -125,6 +125,7 @@ from maestro.state.funding_workflow import (
     list_incomplete_workflows,
     load_migration_cutoff,
     load_request_payload,
+    require_completed_predecessor,
     workflow_id_from_request,
 )
 from maestro.state.migration_state import MigrationPhase, load_migration_state
@@ -3619,6 +3620,12 @@ class TelegramOperatorCommandRouter:
         validate_selected_budget(request, selected_budget)
         workflow_id = workflow_id_from_request(request)
         request_id = str(request["request_id"])
+        require_completed_predecessor(
+            self.store,
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="budget",
+        )
         # The claim (carrying selected_budget) has to land before any side
         # effect -- the portfolio refresh, run_signal(), the decision -- for
         # the same reason as the funding path: two callbacks racing on the
@@ -4598,6 +4605,12 @@ class TelegramOperatorCommandRouter:
         """
         workflow_id = workflow_id_from_request(request)
         request_id = str(request["request_id"])
+        require_completed_predecessor(
+            self.store,
+            workflow_id=workflow_id,
+            request_id=request_id,
+            phase="budget",
+        )
         claim = claim_workflow_attempt(
             self.store,
             new_run_id(),
@@ -5903,6 +5916,17 @@ def _funding_claim_refusal_response(
             "longer be actioned from this card. The next scheduled signal run will "
             "publish an equivalent request.",
             "claim_no_head",
+        )
+    if reason == "predecessor_incomplete":
+        return (
+            "Funding confirmation is still finishing; budget selection is not active yet. "
+            "Check its status before acting again.",
+            "claim_predecessor_incomplete",
+        )
+    if reason == "predecessor_ambiguous":
+        return (
+            "This request's predecessor lineage is ambiguous and needs manual inspection.",
+            "claim_predecessor_ambiguous",
         )
     return (
         f"This {request_noun} request was already processed or superseded.",

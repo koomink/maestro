@@ -494,6 +494,48 @@ class WorkflowClaimRefused(RuntimeError):
         self.reason = reason
 
 
+def require_completed_predecessor(
+    store: StateStore,
+    *,
+    workflow_id: str,
+    request_id: str,
+    phase: str,
+) -> None:
+    """Fail closed before claim when a legitimate successor's predecessor is incomplete."""
+    _require_phase(phase)
+    head = store.load_funding_workflow_head(workflow_id)
+    if head is None:
+        raise WorkflowClaimRefused("no_head")
+    if str(head.get("request_id") or "") != request_id:
+        raise WorkflowClaimRefused("not_head")
+    if phase != "budget":
+        return
+
+    predecessor_request_ids: set[str] = set()
+    for row in store.list_system_events_by_type("funding_workflow_superseded", limit=None):
+        payload = row.get("payload") or {}
+        if (
+            payload.get("workflow_id") == workflow_id
+            and str(payload.get("superseded_by") or "") == request_id
+            and payload.get("legitimate_successor") is True
+            and str(payload.get("successor_of_phase") or "") == "funding"
+        ):
+            pred_req_id = str(payload.get("request_id") or "")
+            if pred_req_id:
+                predecessor_request_ids.add(pred_req_id)
+
+    if not predecessor_request_ids:
+        return
+    if len(predecessor_request_ids) > 1:
+        raise WorkflowClaimRefused("predecessor_ambiguous")
+
+    predecessor_request_id = next(iter(predecessor_request_ids))
+    if not store.duplicate_key_exists(
+        completed_key(workflow_id, predecessor_request_id, "funding")
+    ):
+        raise WorkflowClaimRefused("predecessor_incomplete")
+
+
 def claim_workflow_attempt(
     store: StateStore,
     run_id: str,
@@ -1174,6 +1216,7 @@ __all__ = [
     "plan_contribution_request",
     "publish_contribution_request",
     "request_terminal_state",
+    "require_completed_predecessor",
     "scope_prefix",
     "superseded_key",
     "workflow_id_from_request",

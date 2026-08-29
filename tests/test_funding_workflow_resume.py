@@ -42,6 +42,7 @@ from maestro.state.funding_workflow import (
     load_migration_cutoff,
     load_workflow_child,
     publish_contribution_request,
+    require_completed_predecessor,
     workflow_id_from_request,
 )
 from maestro.state.models import PortfolioState
@@ -2155,3 +2156,238 @@ def test_a_parent_workflow_survives_a_crash_after_its_legitimate_successor_advan
     assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-2"
     # req-1 has disappeared from the recovery list now that it is done.
     assert list_incomplete_workflows(store) == []
+
+
+def test_valid_head_with_incomplete_funding_predecessor_refuses_budget_confirm_and_cancel_callbacks(
+    operator_bot, monkeypatch
+):
+    """A valid budget head that is a legitimate successor of an incomplete
+    funding predecessor fails closed before claim admission and before any
+    downstream child signal, broker refresh, or cash-flow side effect.
+    """
+    store = operator_bot.store
+    workflow_id = _workflow_id_of("req-a")
+
+    # 1. Publish funding request A and claim it (attempt 1), leaving it incomplete
+    publish_contribution_request(store, "run-1", _request("req-a"), phase="funding")
+    claim_a = claim_workflow_attempt(
+        store,
+        "run-claim-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+    )
+    assert claim_a["claimed"] is True
+
+    # 2. Publish budget B as A's legitimate successor (moves head to req-b)
+    publish_res = publish_contribution_request(
+        store,
+        "run-2",
+        _budget_request("req-b"),
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
+    assert publish_res["committed"] is True
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-b"
+
+    # Spy on side-effect boundaries
+    before_claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    monkeypatch.setattr(operator_bot, "_run_child_signal", pytest.fail)
+    monkeypatch.setattr(operator_bot, "_refresh_portfolio_from_broker_snapshot", pytest.fail)
+
+    # 3. Invoke the real B confirm callback
+    handled = operator_bot.process_update(
+        callback_update("operator:budget:sel:req-b:r")
+    )
+    assert handled is True
+
+    after_claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    assert after_claims == before_claims
+    assert store.list_system_events_by_type("account_cash_flow", limit=None) == []
+    assert store.list_system_events_by_type("strategy_cash_flow", limit=None) == []
+    assert _budget_statuses_for(store, "/budget_select") == ["claim_predecessor_incomplete"]
+
+    # Verify operator message is fail-closed and contains no success acknowledgement
+    edited_text = operator_bot.client.edited_messages[-1]["text"]
+    assert "Budget selected" not in edited_text
+    assert "Funding confirmation is still finishing" in edited_text
+
+    # 4. Invoke the real B cancel callback (cancellation twin)
+    before_claims_cancel = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    handled_cancel = operator_bot.process_update(
+        callback_update("operator:budget:cancel:req-b")
+    )
+    assert handled_cancel is True
+
+    after_claims_cancel = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    assert after_claims_cancel == before_claims_cancel
+    assert _budget_statuses_for(store, "/budget_cancel") == ["claim_predecessor_incomplete"]
+    answer_text = operator_bot.client.answered_callbacks[-1]["text"]
+    assert "Funding confirmation is still finishing" in answer_text
+    assert "Budget request canceled" not in answer_text
+
+
+def test_budget_admission_allowed_once_funding_predecessor_completed(
+    operator_bot, monkeypatch
+):
+    """Completing predecessor A after B has become head unlocks B's admission.
+    Calling require_completed_predecessor returns cleanly, and B can claim
+    its first attempt and proceed without a permanent workflow freeze.
+    """
+    store = operator_bot.store
+    workflow_id = _workflow_id_of("req-a")
+
+    # 1. Publish funding A, claim it
+    publish_contribution_request(store, "run-1", _request("req-a"), phase="funding")
+    claim_a = claim_workflow_attempt(
+        store,
+        "run-claim-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+    )
+    assert claim_a["claimed"] is True
+
+    # 2. Publish budget B as legitimate successor (B is head)
+    publish_contribution_request(
+        store,
+        "run-2",
+        _budget_request("req-b"),
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-b"
+
+    # Predecessor A is incomplete: require_completed_predecessor raises
+    with pytest.raises(WorkflowClaimRefused) as exc_info:
+        require_completed_predecessor(
+            store,
+            workflow_id=workflow_id,
+            request_id="req-b",
+            phase="budget",
+        )
+    assert exc_info.value.reason == "predecessor_incomplete"
+
+    # 3. Complete A with its exact attempt
+    complete_workflow(
+        store,
+        "run-complete-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-a", "status": "confirmed"},
+    )
+
+    # 4. Now require_completed_predecessor must return cleanly
+    require_completed_predecessor(
+        store,
+        workflow_id=workflow_id,
+        request_id="req-b",
+        phase="budget",
+    )
+
+    # 5. Stub B transition downstream work and assert B creates its first claim
+    _stub_child_signal(
+        monkeypatch,
+        operator_bot,
+        source_request_id="req-b",
+        source_phase="budget",
+    )
+    handled = operator_bot.process_update(
+        callback_update("operator:budget:sel:req-b:r")
+    )
+    assert handled is True
+    assert _budget_statuses_for(store, "/budget_select") == ["selected"]
+    claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
+    b_claims = [c for c in claims if c["payload"]["request_id"] == "req-b"]
+    assert len(b_claims) == 1
+    assert b_claims[0]["payload"]["attempt"] == 1
+
+
+def test_require_completed_predecessor_unit_semantics(operator_bot):
+    store = operator_bot.store
+    workflow_id = _workflow_id_of("req-1")
+
+    # 1. Invalid phase raises ValueError
+    with pytest.raises(ValueError, match="unknown funding workflow phase"):
+        require_completed_predecessor(
+            store, workflow_id=workflow_id, request_id="req-1", phase="invalid"
+        )
+
+    # 2. No head raises no_head
+    with pytest.raises(WorkflowClaimRefused) as exc:
+        require_completed_predecessor(
+            store, workflow_id=workflow_id, request_id="req-1", phase="budget"
+        )
+    assert exc.value.reason == "no_head"
+
+    # 3. Head is different request raises not_head
+    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
+    with pytest.raises(WorkflowClaimRefused) as exc:
+        require_completed_predecessor(
+            store, workflow_id=workflow_id, request_id="req-other", phase="budget"
+        )
+    assert exc.value.reason == "not_head"
+
+    # 4. Non-budget phase returns None (no predecessor gate for funding)
+    publish_contribution_request(store, "run-2", _request("req-fund"), phase="funding")
+    require_completed_predecessor(
+        store, workflow_id=workflow_id, request_id="req-fund", phase="funding"
+    )
+
+    # 5. Direct budget head without predecessor marker returns None
+    publish_contribution_request(store, "run-3", _budget_request("req-direct"), phase="budget")
+    require_completed_predecessor(
+        store, workflow_id=workflow_id, request_id="req-direct", phase="budget"
+    )
+
+    # 6. Ambiguous predecessor (multiple distinct predecessor requests) raises predecessor_ambiguous
+    store.save_system_events_atomic(
+        "run-ambig",
+        [
+            {
+                "event_type": "funding_workflow_superseded",
+                "payload": {
+                    "duplicate_key": "wf-superseded-1",
+                    "workflow_id": workflow_id,
+                    "request_id": "req-p1",
+                    "superseded_by": "req-ambig",
+                    "legitimate_successor": True,
+                    "successor_of_phase": "funding",
+                },
+            },
+            {
+                "event_type": "funding_workflow_superseded",
+                "payload": {
+                    "duplicate_key": "wf-superseded-2",
+                    "workflow_id": workflow_id,
+                    "request_id": "req-p2",
+                    "superseded_by": "req-ambig",
+                    "legitimate_successor": True,
+                    "successor_of_phase": "funding",
+                },
+            },
+            {
+                "event_type": "funding_workflow_head",
+                "payload": {
+                    "duplicate_key": "head-ambig",
+                    "workflow_id": workflow_id,
+                    "version": 99,
+                    "request_id": "req-ambig",
+                    "phase": "budget",
+                    "status": "pending",
+                },
+            },
+        ],
+    )
+    with pytest.raises(WorkflowClaimRefused) as exc:
+        require_completed_predecessor(
+            store, workflow_id=workflow_id, request_id="req-ambig", phase="budget"
+        )
+    assert exc.value.reason == "predecessor_ambiguous"
+
