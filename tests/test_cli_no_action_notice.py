@@ -5,14 +5,16 @@
 """
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 from maestro import cli as _cli
-from maestro.cli import RequestNotification, _run_daily_signal_approval
+from maestro.cli import _run_daily_signal_approval
 from maestro.config.loader import load_config
 from maestro.integrations.telegram.ui.catalog import NO_ACTION_NOTICE
+from maestro.state.store import StateStore
 
 
 def _telegram_config(tmp_path):
@@ -46,8 +48,10 @@ def _drive_no_action_day(
     monkeypatch,
     config,
     *,
-    funding_sent=False,
-    budget_sent=False,
+    funding_present=False,
+    budget_present=False,
+    funding_requests: list[dict[str, Any]] | None = None,
+    budget_requests: list[dict[str, Any]] | None = None,
     strategies=("tranquillo",),
     failing_chats=(),
     order=None,
@@ -79,6 +83,19 @@ def _drive_no_action_day(
             del kwargs
             return _Summary(strategies)
 
+    # Seed signal package in StateStore based on funding_present / budget_present
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    frs = funding_requests if funding_requests is not None else ([{"request_id": "fund_1", "card_delivery_version": 1}] if funding_present else [])
+    brs = budget_requests if budget_requests is not None else ([{"request_id": "budget_1", "card_delivery_version": 1}] if budget_present else [])
+    store.save_signal_package(
+        "signal_quiet",
+        {
+            "orders_preview": [],
+            "funding_requests": frs,
+            "budget_requests": brs,
+        },
+    )
+
     monkeypatch.setenv(config.approval.telegram_bot_token_env, "test-token")
     monkeypatch.setattr("maestro.cli._load_operator_config", lambda path: (config, None))
     monkeypatch.setattr("maestro.cli._refresh_daily_readonly", lambda config, identity: None)
@@ -94,27 +111,6 @@ def _drive_no_action_day(
     monkeypatch.setattr("maestro.cli.save_audited_system_event", traced_save)
     monkeypatch.setattr(
         "maestro.cli._send_signal_summary_notification", lambda config, summary: None
-    )
-    # The notifiers report three things now (requested / delivered / failed),
-    # because "nothing to send" and "something that did not go out" are
-    # opposite answers to "was today quiet?" and a single count collapsed
-    # both to zero. These stubs stand in for a clean send of one request.
-    def _outcome(raised) -> RequestNotification:
-        if isinstance(raised, RequestNotification):
-            return raised
-        return RequestNotification(
-            requested=1 if raised else 0,
-            delivered=1 if raised else 0,
-            failed=False,
-        )
-
-    monkeypatch.setattr(
-        "maestro.cli._send_signal_budget_request_notifications",
-        lambda config, signal_run_id: _outcome(budget_sent),
-    )
-    monkeypatch.setattr(
-        "maestro.cli._send_signal_funding_request_notifications",
-        lambda config, signal_run_id: _outcome(funding_sent),
     )
 
     try:
@@ -139,21 +135,46 @@ def test_a_quiet_day_still_says_something(monkeypatch, tmp_path):
     assert sent == [(100, NO_ACTION_NOTICE), (200, NO_ACTION_NOTICE)]
 
 
-def test_a_funding_request_day_is_not_a_no_action_day(monkeypatch, tmp_path):
-    """요청을 보낸 날에 '매매할 것이 없어요'를 덧붙이면 서로 모순된다."""
+def test_a_funding_request_day_is_not_a_no_action_day(monkeypatch, tmp_path, capsys):
+    """요청이 있는 날에는 '매매할 것이 없어요'를 보내지 않는다."""
     config = _telegram_config(tmp_path)
 
-    sent = _drive_no_action_day(monkeypatch, config, funding_sent=True)
+    sent = _drive_no_action_day(monkeypatch, config, funding_present=True)
 
     assert sent == []
+    out = capsys.readouterr().out
+    assert "status=funding_required" in out
+    assert "status=no_action" not in out
+    assert "request_delivery_failed" not in out
+    assert "telegram_funding_request=" not in out
+    assert "telegram_budget_request=" not in out
 
 
-def test_a_budget_request_day_is_not_a_no_action_day(monkeypatch, tmp_path):
+def test_a_budget_request_day_is_not_a_no_action_day(monkeypatch, tmp_path, capsys):
     config = _telegram_config(tmp_path)
 
-    sent = _drive_no_action_day(monkeypatch, config, budget_sent=True)
+    sent = _drive_no_action_day(monkeypatch, config, budget_present=True)
 
     assert sent == []
+    out = capsys.readouterr().out
+    assert "status=budget_required" in out
+    assert "status=no_action" not in out
+    assert "request_delivery_failed" not in out
+    assert "telegram_funding_request=" not in out
+    assert "telegram_budget_request=" not in out
+
+
+def test_both_funding_and_budget_requests_emit_both_statuses(monkeypatch, tmp_path, capsys):
+    config = _telegram_config(tmp_path)
+
+    sent = _drive_no_action_day(monkeypatch, config, funding_present=True, budget_present=True)
+
+    assert sent == []
+    out = capsys.readouterr().out
+    assert "status=budget_required" in out
+    assert "status=funding_required" in out
+    assert "status=no_action" not in out
+    assert "request_delivery_failed" not in out
 
 
 def test_the_notice_is_one_line_and_names_no_internals():
@@ -242,36 +263,3 @@ def test_a_chat_that_failed_is_not_resent_the_next_run(monkeypatch, tmp_path):
     sent = _drive_no_action_day(monkeypatch, config)
 
     assert sent == []
-
-
-def test_a_day_whose_request_card_failed_is_not_a_quiet_day(monkeypatch, tmp_path):
-    """전송 실패는 "보낼 게 없었다"가 아니다.
-
-    두 발송 함수가 실패할 때도 0을 돌려주던 시절에는, 호출자가 그 0을
-    "오늘 아무것도 올라오지 않았다"로 읽고 "오늘은 매매할 것이 없어요"를
-    보냈다. 입금이 필요한 날에 아무 일 없다고 알리는 것은 카드가 안 오는
-    것보다 나쁘다 -- 운영자가 확인할 이유 자체를 없앤다.
-    """
-    config = _telegram_config(tmp_path)
-    sent = _drive_no_action_day(
-        monkeypatch,
-        config,
-        funding_sent=RequestNotification(requested=1, delivered=0, failed=True),
-    )
-
-    assert sent == []
-
-
-def test_a_delivery_failure_is_reported_as_its_own_status(monkeypatch, tmp_path, capsys):
-    config = _telegram_config(tmp_path)
-    _drive_no_action_day(
-        monkeypatch,
-        config,
-        funding_sent=RequestNotification(requested=1, delivered=0, failed=True),
-    )
-
-    out = capsys.readouterr().out
-    assert "status=request_delivery_failed kinds=funding" in out
-    # 요청이 있었으므로 그날의 결론은 여전히 funding_required다.
-    assert "status=funding_required" in out
-    assert "status=no_action" not in out

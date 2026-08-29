@@ -106,16 +106,18 @@ class FakeTelegramClient:
         return {"ok": True}
 
     def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
-        self.edited_messages.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+        self.edited_messages.append(
+            {"chat_id": chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup}
+        )
         return {"ok": True}
 
 
 def callback_update(
     data: str,
     *,
-    update_id: int = 2,
-    chat_id: int = 100,
-    user_id: int = 100,
+    update_id: int = 1,
+    chat_id: int = 1,
+    user_id: int = 2,
 ) -> dict[str, Any]:
     return {
         "update_id": update_id,
@@ -136,8 +138,8 @@ def message_update(
     text: str,
     *,
     update_id: int = 1,
-    chat_id: int = 100,
-    user_id: int = 100,
+    chat_id: int = 1,
+    user_id: int = 2,
 ) -> dict[str, Any]:
     return {
         "update_id": update_id,
@@ -165,8 +167,8 @@ def _readonly_config_path(tmp_path) -> Path:
         "enabled": True,
         "provider": "telegram",
         "require_approval": True,
-        "telegram_allowed_chat_ids": [100],
-        "whitelisted_user_ids": [100],
+        "telegram_allowed_chat_ids": [1],
+        "whitelisted_user_ids": [1, 2],
     }
     config_path = tmp_path / "readonly.yaml"
     config_path.write_text(yaml.safe_dump(raw))
@@ -183,8 +185,8 @@ def _signal_config_path(tmp_path) -> Path:
         "provider": "telegram",
         "require_approval": False,
         "default_decision": "approved",
-        "telegram_allowed_chat_ids": [100],
-        "whitelisted_user_ids": [100],
+        "telegram_allowed_chat_ids": [1],
+        "whitelisted_user_ids": [1, 2],
         "telegram_poll_interval_seconds": 0.0,
     }
     raw["strategies"] = [
@@ -272,6 +274,7 @@ def _request(request_id: str) -> dict[str, Any]:
         "status": "pending",
         "strategy_ids": ["tranquillo"],
         "required_shortfall": 1_000_000.0,
+        "card_delivery_version": 1,
     }
 
 
@@ -298,6 +301,7 @@ def _budget_request(request_id: str) -> dict[str, Any]:
         "month_key": "2026-08",
         "status": "pending",
         "strategy_ids": ["tranquillo"],
+        "card_delivery_version": 1,
     }
 
 
@@ -620,9 +624,8 @@ def test_a_superseded_budget_request_via_text_command_reports_superseded(operato
 
     assert operator_bot.process_update(message_update("/budget req-1 500000"))
 
-    text = operator_bot.client.sent_messages[-1]["text"]
-    assert "already processed or superseded" in text
-    assert "out of range or invalid" not in text
+    assert any("already processed or superseded" in m["text"] for m in operator_bot.client.sent_messages)
+    assert not any("out of range or invalid" in m["text"] for m in operator_bot.client.sent_messages)
     assert _budget_statuses(store) == ["claim_superseded"]
 
 
@@ -644,9 +647,8 @@ def test_a_stuck_budget_claim_via_text_command_reports_in_flight(operator_bot):
 
     assert operator_bot.process_update(message_update("/budget req-1 500000"))
 
-    text = operator_bot.client.sent_messages[-1]["text"]
-    assert "already being processed" in text
-    assert "superseded" not in text
+    assert any("already being processed" in m["text"] for m in operator_bot.client.sent_messages)
+    assert not any("superseded" in m["text"] for m in operator_bot.client.sent_messages)
     assert _budget_statuses(store) == ["claim_in_flight"]
 
 
@@ -1681,63 +1683,135 @@ def _request_cards(operator_bot, request_id: str) -> list[dict[str, Any]]:
         and message.get("reply_markup") is not None
     ]
 
-def test_a_follow_up_request_card_is_delivered_once_per_chat(operator_bot):
-    """Re-review Important 3: the delivery is replayed, the card must not be.
+def test_removed_request_scoped_senders(operator_bot):
+    assert hasattr(operator_bot, "_send_budget_request") is False
+    assert hasattr(operator_bot, "_send_funding_request") is False
+    assert hasattr(operator_bot, "_send_request_card") is False
 
-    Completion happens after delivery, so a crash in between means a resume
-    runs the delivery again. A plain send would leave two live decision
-    buttons in the chat for a request that accepts exactly one decision --
-    and the second tap is then refused by the claim, which reads as a
-    malfunction rather than as the duplicate card it is.
-    """
-    request = _request("req-1")
 
-    operator_bot._send_funding_request(100, request)
-    operator_bot._send_funding_request(100, request)
+def test_legacy_failed_single_owner_regression(operator_bot, monkeypatch):
+    from maestro.integrations.telegram.ui.card_state import (
+        card_failure_event,
+        card_intent_event,
+    )
+    from maestro.integrations.telegram.ui.funding_workflow import funding_workflow_card_key
 
-    assert len(_request_cards(operator_bot, "req-1")) == 1
+    store = operator_bot.store
+    workflow_id = _workflow_id_of("req-a")
 
-def test_the_same_request_still_reaches_a_second_chat(operator_bot):
-    """Deduplicated per chat, not per request: a chat with no copy has not
-    been told anything yet."""
-    request = _request("req-1")
+    # 1. Publish funding A and claim it (incomplete)
+    publish_contribution_request(store, "run-1", _request("req-a"), phase="funding")
+    claim_a = claim_workflow_attempt(
+        store,
+        "run-claim-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+    assert claim_a["claimed"] is True
 
-    operator_bot._send_funding_request(100, request)
-    operator_bot._send_funding_request(200, request)
+    # 2. Publish budget B as A's legitimate successor
+    publish_contribution_request(
+        store,
+        "run-2",
+        _budget_request("req-b"),
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
 
-    assert [card["chat_id"] for card in _request_cards(operator_bot, "req-1")] == [100, 200]
+    # 3. Seed request-scoped legacy evidence with card_intent_event followed by card_failure_event under budget-request:req-b
+    legacy_key = "budget-request:req-b"
+    store.record_card_event(
+        "run-legacy-fail",
+        card_intent_event(
+            legacy_key,
+            1,
+            "pending",
+            "legacy_hash",
+            "op_legacy",
+        ),
+    )
+    store.record_card_event(
+        "run-legacy-fail",
+        card_failure_event(
+            legacy_key,
+            1,
+            "pending",
+            "legacy_hash",
+            "op_legacy",
+            "TelegramApiRejected",
+            description="telegram rejected request-scoped card",
+        ),
+    )
 
-def test_a_card_whose_delivery_is_unknown_is_not_sent_again(operator_bot):
-    """A send that died mid-call is not proof of non-delivery, and Telegram
-    offers no way to ask. Sending again is how the duplicate is created, so
-    the copy stays unknown and the operator is told in plain text instead."""
-    request = _request("req-1")
-    original_send = operator_bot.client.send_message
+    intents_before = len([
+        e for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
+        if e["payload"].get("card_key") == legacy_key and e["payload"].get("phase") == "intent"
+    ])
+    assert intents_before == 1
 
-    def die_mid_call(*args, **kwargs):
-        raise TimeoutError("connection dropped after Telegram accepted it")
+    # Assert old request-scoped sender methods are removed
+    assert hasattr(operator_bot, "_send_budget_request") is False
+    assert hasattr(operator_bot, "_send_funding_request") is False
+    assert hasattr(operator_bot, "_send_request_card") is False
 
-    operator_bot.client.send_message = die_mid_call
-    operator_bot._send_funding_request(100, request)
-    operator_bot.client.send_message = original_send
+    # 4. Invoke the activated workflow synchronization
+    sync_result = operator_bot._refresh_request_workflow_card(_budget_request("req-b"))
+    assert sync_result.outcome_for(1) == "sent"
 
-    operator_bot._send_funding_request(100, request)
+    wf_card_states = store.load_card_delivery_state(funding_workflow_card_key(workflow_id))
+    assert len(wf_card_states) == 1
+    assert wf_card_states[0]["delivery"] == "confirmed"
 
-    assert _request_cards(operator_bot, "req-1") == []
-    notices = [
-        message
-        for message in operator_bot.client.sent_messages
-        if message.get("reply_markup") is None
+    adoptions = [
+        e for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
+        if e["payload"].get("phase") == "adoption"
     ]
-    assert notices, "the operator must hear about a copy we cannot account for"
+    assert len(adoptions) == 1
+    assert adoptions[0]["payload"]["adopted_from_card_key"] == legacy_key
 
-def test_a_budget_card_is_also_delivered_only_once(operator_bot):
-    request = _budget_request("req-1")
+    # Fake client has exactly one successful send_message for B and B card is buttonless while predecessor A is incomplete
+    assert len(operator_bot.client.sent_messages) == 1
+    sent_msg = operator_bot.client.sent_messages[0]
+    assert sent_msg["chat_id"] == 1
+    assert sent_msg.get("reply_markup") is None or sent_msg["reply_markup"].get("inline_keyboard") == []
 
-    operator_bot._send_budget_request(100, request)
-    operator_bot._send_budget_request(100, request)
+    # 5. Continue the real parent Resume/transition path
+    _stub_child_signal(
+        monkeypatch,
+        operator_bot,
+        budget_requests=[_budget_request("req-b")],
+        source_request_id="req-a",
+        source_phase="funding",
+    )
 
-    assert len(_request_cards(operator_bot, "req-1")) == 1
+    handled_resume = operator_bot.process_update(
+        callback_update("operator:wfresume:funding:req-a")
+    )
+    assert handled_resume is True
+
+    # 6. Assert budget-request:req-b intent count is unchanged (no request-scoped retry)
+    intents_after = len([
+        e for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
+        if e["payload"].get("card_key") == legacy_key and e["payload"].get("phase") == "intent"
+    ])
+    assert intents_after == intents_before
+
+    # 7. Assert Resume/continuation durably completes A
+    completed_events = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert any(e["payload"]["request_id"] == "req-a" for e in completed_events)
+
+    # 8. Assert activated finally refresh edits the same workflow-scoped physical message into the live actionable B representation
+    assert len(operator_bot.client.sent_messages) == 1  # still only one send_message
+    assert len(operator_bot.client.edited_messages) >= 1
+    edited_for_wf = [
+        m for m in operator_bot.client.edited_messages
+        if m.get("reply_markup") and any("req-b" in str(b.get("callback_data")) for row in m["reply_markup"].get("inline_keyboard", []) for b in row)
+    ]
+    assert len(edited_for_wf) >= 1
 
 
 def _stub_child_signal(

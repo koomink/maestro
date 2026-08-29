@@ -67,6 +67,7 @@ def build_contribution_budget_request(
         month_key=month_key,
         created_at=created_at,
         expires_at=created_at + timedelta(seconds=expires_after_seconds),
+        card_delivery_version=1,
     )
 
 

@@ -15,8 +15,6 @@ from maestro.approval.models import (
 )
 from maestro.cli import (
     _run_daily_signal_approval,
-    _send_signal_budget_request_notifications,
-    _send_signal_funding_request_notifications,
     app,
 )
 from maestro.config.loader import load_config, load_config_with_identity
@@ -38,8 +36,9 @@ from maestro.execution.live_orders import (
     PartialFillSummary,
 )
 from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
-from maestro.integrations.telegram.bot import TelegramApiRejected
+from maestro.integrations.telegram.bot import TelegramApiRejected, TelegramBotAPIClient
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
+from maestro.integrations.telegram.ui.funding_workflow import funding_workflow_card_key
 from maestro.monitoring.audit_logger import AuditLogger
 from maestro.orchestration.dispatch_group import dispatch_group_id
 from maestro.orchestration.orchestrator import (
@@ -55,6 +54,7 @@ from maestro.sdk import (
     StrategyManifest,
     TargetAllocationResult,
 )
+from maestro.state.funding_workflow import workflow_id_from_request
 from maestro.state.models import PortfolioState
 from maestro.state.store import StateStore
 
@@ -155,145 +155,124 @@ def test_run_signal_persists_funding_request_when_buy_only_cash_is_below_minimum
     assert events[0]["payload"]["status"] == "pending"
 
 
-def test_a_funding_request_that_cannot_be_sent_is_not_reported_as_nothing(
-    monkeypatch,
-    tmp_path,
-):
-    """요청이 있었다는 사실은 채널 상태와 무관하게 보고돼야 한다.
+@pytest.mark.parametrize("kind", ["funding", "budget"])
+def test_atomic_card_delivery_ownership_cutover(monkeypatch, tmp_path, kind):
+    from contribution_fixtures import _multi_account_raw, _save_account_snapshot
 
-    이 함수들이 실패에도 0을 돌려주던 시절에는 호출자가 그것을 "오늘은
-    올라온 게 없다"로 읽었다. 채널 검사가 패키지 로드보다 앞에 있었기
-    때문에, 토큰이 없는 날은 요청을 세어 보지도 못했다.
-    """
-    config = _buy_only_funding_config(tmp_path, funding_request_enabled=True)
-    config.approval.provider = "telegram"
-    config.approval.telegram_allowed_chat_ids = [100]
-    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["buy_only_funding"])
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    config_path = tmp_path / f"signal_{kind}.yaml"
+    raw = _multi_account_raw(tmp_path)
+    if kind == "funding":
+        isa_cash = 1_000_000
+        raw["execution_sleeves"]["accounts"]["kis_ps"]["tranquillo_ps"]["contribution"]["funding_request"] = {"enabled": False}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["funding_request"] = {"enabled": True}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["budget_request"] = {"enabled": False}
+    else:
+        isa_cash = 8_000_000
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["funding_request"] = {"enabled": False}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["budget_request"] = {"enabled": True}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["monthly_budget"] = 4_000_000
 
-    sent = _send_signal_funding_request_notifications(config, summary.signal_run_id)
+    raw["state"]["sqlite_path"] = str(tmp_path / f"state_{kind}.db")
+    raw["audit"]["jsonl_path"] = str(tmp_path / f"audit_{kind}.jsonl")
+    raw["approval"] = {
+        "enabled": True,
+        "provider": "telegram",
+        "require_approval": True,
+        "telegram_allowed_chat_ids": [100],
+        "whitelisted_user_ids": [100],
+        "telegram_poll_interval_seconds": 0.0,
+    }
+    config_path.write_text(yaml.safe_dump(raw))
+    config = load_config(config_path)
 
-    assert sent.requested == 1
-    assert sent.delivered == 0
-    assert sent.failed is True
-    assert bool(sent) is True
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    ps_cash = 0 if kind == "funding" else 500_000
+    _save_account_snapshot(store, "kis_ps", cash=ps_cash, positions={})
+    _save_account_snapshot(store, "kis_isa", cash=isa_cash, positions={})
 
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
+    monkeypatch.setattr("maestro.cli._send_signal_summary_notification", lambda c, s: None)
 
-def test_a_partly_sent_funding_notification_counts_what_actually_went_out(
-    monkeypatch,
-    tmp_path,
-):
-    """delivered는 실제로 반환된 전송만 센다.
+    actionable_cli_calls = []
 
-    예전에는 루프가 끝난 뒤 요청수 x 채팅수로 계산해서, 중간에 예외가 나면
-    이미 성공한 전송까지 없던 일이 됐다.
-    """
-    config = _buy_only_funding_config(tmp_path, funding_request_enabled=True)
-    config.approval.provider = "telegram"
-    config.approval.telegram_allowed_chat_ids = [100, 200]
-    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["buy_only_funding"])
-
-    class HalfDeadClient(FakeTelegramClient):
+    class GuardedCliClient(FakeTelegramClient):
         def send_message(self, chat_id, text, reply_markup=None):
-            if chat_id == 200:
-                raise RuntimeError("telegram unreachable")
+            if reply_markup is not None:
+                actionable_cli_calls.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
+                raise AssertionError("CLI daily signal approval must not send actionable request cards")
             return super().send_message(chat_id, text, reply_markup=reply_markup)
 
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
-    monkeypatch.setattr(
-        "maestro.cli.TelegramBotAPIClient",
-        lambda **kwargs: HalfDeadClient(),
+    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", lambda **kwargs: GuardedCliClient())
+    monkeypatch.setattr("maestro.cli._refresh_daily_readonly", lambda config, identity: None)
+
+    _run_daily_signal_approval(
+        readonly_config=config_path,
+        signal_config=config_path,
+        approval_config=config_path,
+        stop_telegram_operator=False,
+        telegram_operator_service="maestro-telegram-operator.service",
+        strategy_ids=["tranquillo"],
+        contribution_override=True,
     )
 
-    sent = _send_signal_funding_request_notifications(config, summary.signal_run_id)
+    store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
+    signals = store.list_system_events_by_type("signal_package")
+    assert len(signals) >= 1
+    signal_run_id = signals[-1]["payload"]["signal_run_id"]
+    persisted_signal = store.load_signal_package(signal_run_id)
 
-    assert (sent.requested, sent.delivered, sent.failed) == (1, 1, True)
+    if kind == "funding":
+        requests = persisted_signal.get("funding_requests") or []
+        assert len(requests) == 1
+        request = requests[0]
+    else:
+        requests = persisted_signal.get("budget_requests") or []
+        assert len(requests) == 1
+        request = requests[0]
 
+    assert request["card_delivery_version"] == 1
+    assert actionable_cli_calls == []
 
-def test_signal_budget_request_notification_sends_telegram_message(
-    monkeypatch,
-    tmp_path,
-):
-    """예산 요청 발송 경로에는 직접 테스트가 없었다.
+    workflow_id = workflow_id_from_request(request)
 
-    패키지를 직접 써 넣는다 -- 검증 대상은 예산 요청을 만들어내는 전략
-    설정이 아니라 발송 함수 자체이고, 그쪽은 이미 별도로 덮여 있다.
-    """
-    config = _buy_only_funding_config(tmp_path, funding_request_enabled=True)
-    config.approval.provider = "telegram"
-    config.approval.telegram_allowed_chat_ids = [100]
-    store = StateStore(
-        config.state.sqlite_path,
-        config.portfolio.initial_cash,
-        config.portfolio.cash_by_currency,
+    client = FakeTelegramClient()
+    router = TelegramOperatorCommandRouter(
+        config=config,
+        store=store,
+        audit=AuditLogger(config.audit.jsonl_path),
+        client=client,
     )
-    store.save_signal_package(
-        "signal-budget",
-        {
-            "orders_preview": [],
-            "budget_requests": [
-                {
-                    "request_id": "budget_req_1",
-                    "source_signal_run_id": "signal-budget",
-                    "strategy_ids": ["buy_only_funding"],
-                    "account_id": "paper_cash",
-                    "execution_sleeve": "krw_contribution",
-                    "currency": "KRW",
-                    "available_cash": 2_000_000.0,
-                    "min_monthly_budget": 200_000.0,
-                    "recommended_budget": 400_000.0,
-                    "selectable_max_budget": 1_000_000.0,
-                    "month_key": "2026-08",
-                    "status": "pending",
-                }
-            ],
-        },
-    )
-    fake_clients: list[FakeTelegramClient] = []
 
-    def fake_client_factory(**kwargs):
-        del kwargs
-        client = FakeTelegramClient()
-        fake_clients.append(client)
-        return client
+    sweep_order = []
+    real_sweeps = {
+        "_sweep_pending_approvals": router._sweep_pending_approvals,
+        "_sweep_recovery_notifications": router._sweep_recovery_notifications,
+        "_sweep_lifecycle_cards": router._sweep_lifecycle_cards,
+        "_sweep_funding_workflow_cards": router._sweep_funding_workflow_cards,
+        "_sweep_incomplete_workflows": router._sweep_incomplete_workflows,
+        "_converge_workflow_invariants": router._converge_workflow_invariants,
+    }
+    for name, fn in real_sweeps.items():
+        def make_spy(n, orig_fn):
+            def spy():
+                sweep_order.append(n)
+                return orig_fn()
+            return spy
+        monkeypatch.setattr(router, name, make_spy(name, fn))
 
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
-    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
+    router.poll_once()
 
-    sent = _send_signal_budget_request_notifications(config, "signal-budget")
-
-    assert (sent.requested, sent.delivered, sent.failed) == (1, 1, False)
-    assert "Maestro budget request" in fake_clients[0].sent_messages[0]["text"]
-
-
-def test_signal_funding_request_notification_sends_telegram_message(
-    monkeypatch,
-    tmp_path,
-):
-    config = _buy_only_funding_config(tmp_path, funding_request_enabled=True)
-    config.approval.provider = "telegram"
-    config.approval.telegram_allowed_chat_ids = [100]
-    summary = MaestroOrchestrator(config).run_signal(strategy_ids=["buy_only_funding"])
-    fake_clients: list[FakeTelegramClient] = []
-
-    def fake_client_factory(*, token_env: str, timeout_seconds: float) -> FakeTelegramClient:
-        assert token_env == "TELEGRAM_BOT_TOKEN"
-        assert timeout_seconds == 10.0
-        client = FakeTelegramClient()
-        fake_clients.append(client)
-        return client
-
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-token")
-    monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", fake_client_factory)
-
-    sent = _send_signal_funding_request_notifications(config, summary.signal_run_id)
-
-    assert (sent.requested, sent.delivered, sent.failed) == (1, 1, False)
-    assert fake_clients[0].sent_messages[0]["chat_id"] == 100
-    assert "Maestro funding request" in fake_clients[0].sent_messages[0]["text"]
-    assert "shortfall: 1,000,000 KRW" in fake_clients[0].sent_messages[0]["text"]
-    keyboard = fake_clients[0].sent_messages[0]["reply_markup"]["inline_keyboard"]
-    assert keyboard[0][0]["text"] == "입금 완료"
+    assert sweep_order == [
+        "_sweep_pending_approvals",
+        "_sweep_recovery_notifications",
+        "_sweep_lifecycle_cards",
+        "_sweep_funding_workflow_cards",
+        "_sweep_incomplete_workflows",
+        "_converge_workflow_invariants",
+    ]
+    assert len(client.sent_messages) == 1
+    assert client.sent_messages[0]["reply_markup"] is not None
+    assert store.load_card_delivery_state(funding_workflow_card_key(workflow_id))
 
 
 def test_run_signal_keeps_no_action_when_funding_request_opt_in_is_disabled(tmp_path):
@@ -2819,7 +2798,10 @@ class FakeTelegramClient:
 
     def send_message(self, chat_id: int, text: str, reply_markup=None):
         self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
-        return {"ok": True}
+        return {"ok": True, "result": {"message_id": len(self.sent_messages)}}
+
+    def get_updates(self, *args, **kwargs):
+        return {"ok": True, "result": []}
 
 
 class CountingLiveOrderClient(LiveOrderClient):

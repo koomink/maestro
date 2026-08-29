@@ -33,7 +33,7 @@ def test_missing_card_delivery_version_is_legacy_generation():
     assert restored.card_delivery_version == 0
 
 
-def test_build_contribution_funding_request_emits_legacy_delivery_version():
+def test_build_contribution_funding_request_emits_delivery_version_one():
     config = ExecutionConfig(
         order_generation_mode="buy_only_contribution",
         contribution={
@@ -57,7 +57,7 @@ def test_build_contribution_funding_request_emits_legacy_delivery_version():
         expires_after_seconds=86400,
     )
     assert funding_request is not None
-    assert funding_request.card_delivery_version == 0
+    assert funding_request.card_delivery_version == 1
 
 
 def test_funding_request_message_and_markup():

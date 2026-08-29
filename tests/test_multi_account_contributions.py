@@ -98,6 +98,7 @@ def test_tranquillo_multi_account_isa_cash_below_minimum_creates_range_funding_r
     isa_request = next(request for request in requests if request["account_id"] == "kis_isa")
     assert signal["status"] == "action_required"
     assert isa_request["execution_sleeve"] == "tranquillo_isa"
+    assert isa_request["card_delivery_version"] == 1
     assert isa_request["available_cash"] == 1_000_000
     assert isa_request["min_monthly_budget"] == 1_660_000
     assert isa_request["required_shortfall"] == 660_000
@@ -126,6 +127,7 @@ def test_tranquillo_multi_account_isa_budget_request_blocks_isa_orders_only(
     assert orders[0]["notional"] == pytest.approx(500_000)
     assert requests[0]["account_id"] == "kis_isa"
     assert requests[0]["execution_sleeve"] == "tranquillo_isa"
+    assert requests[0]["card_delivery_version"] == 1
     assert requests[0]["available_cash"] == 8_000_000
     assert requests[0]["min_monthly_budget"] == 1_660_000
     assert requests[0]["recommended_budget"] == 4_000_000

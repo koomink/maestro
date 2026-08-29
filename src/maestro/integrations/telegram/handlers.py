@@ -49,8 +49,6 @@ from maestro.execution.brokers.readonly_factory import (
 )
 from maestro.execution.budget_requests import (
     BUDGET_SELECTION_KEYS,
-    budget_request_reply_markup,
-    format_contribution_budget_request,
     selected_budget_from_request,
     validate_selected_budget,
 )
@@ -59,10 +57,6 @@ from maestro.execution.cash_flow_candidates import (
     PROXY_CASH,
     CashFlowCandidateDetector,
     FxConversionCandidate,
-)
-from maestro.execution.funding_requests import (
-    format_contribution_funding_request,
-    funding_request_reply_markup,
 )
 from maestro.execution.live_order_factory import build_live_approval_dependencies
 from maestro.execution.live_order_models import (
@@ -356,6 +350,7 @@ class TelegramOperatorCommandRouter:
             self._sweep_pending_approvals,
             self._sweep_recovery_notifications,
             self._sweep_lifecycle_cards,
+            self._sweep_funding_workflow_cards,
             self._sweep_incomplete_workflows,
             self._converge_workflow_invariants,
         ):
@@ -3302,70 +3297,76 @@ class TelegramOperatorCommandRouter:
             self._answer(callback, "This funding request is no longer active.")
             self._record("/funding", chat_id, user_id, username, "stale_callback")
             return True
-        if transition == "cancel":
-            try:
-                self._cancel_funding_request(request, user_id=user_id, username=username)
-            except WorkflowClaimRefused as exc:
-                answer_text, status = _funding_claim_refusal_response(exc.reason)
-                self._answer(callback, answer_text)
-                self._record("/funding_cancel", chat_id, user_id, username, status)
+        try:
+            if transition == "cancel":
+                try:
+                    self._cancel_funding_request(request, user_id=user_id, username=username)
+                except WorkflowClaimRefused as exc:
+                    answer_text, status = _funding_claim_refusal_response(exc.reason)
+                    self._answer(callback, answer_text)
+                    self._record("/funding_cancel", chat_id, user_id, username, status)
+                    return True
+                except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                    self._answer(callback, "Funding cancellation failed.")
+                    text = "\n".join(
+                        [
+                            "Funding cancellation failed",
+                            f"request_id: {request_id}",
+                            f"message: {exc}",
+                        ]
+                    )
+                    self._record("/funding_cancel", chat_id, user_id, username, "failed")
+                    self._edit_callback_message(callback, text)
+                    return True
+                self._answer(callback, "Funding request canceled.")
+                self._edit_callback_message(callback, "Funding request canceled.")
+                self._record("/funding_cancel", chat_id, user_id, username, "canceled")
                 return True
-            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-                self._answer(callback, "Funding cancellation failed.")
+            self._answer(callback, "Funding request confirmed.")
+            try:
+                text = self._confirm_funding_request(
+                    request,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                )
+            except WorkflowClaimRefused as exc:
+                # The claim (not run_signal or the ack write) is what refuses this,
+                # and exc.reason says which of two very different situations this
+                # is: "not_head"/"no_head"/"head_moved" means a newer request
+                # replaced this one -- nothing is wrong. "already_claimed" means an
+                # earlier attempt on *this* request claimed and never finished
+                # (e.g. it died between the claim and the ack, the scenario this
+                # retry is walking into): the claim key already exists, so
+                # reporting "already processed" here would be false -- the
+                # request is stuck, not done, and a human needs to look at it
+                # rather than keep tapping the button.
+                confirm_text, status = _funding_claim_refusal_response(exc.reason)
                 text = "\n".join(
                     [
-                        "Funding cancellation failed",
+                        confirm_text,
+                        f"request_id: {request_id}",
+                    ]
+                )
+                self._record("/funding_complete", chat_id, user_id, username, status)
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                text = "\n".join(
+                    [
+                        "Funding confirmation failed",
                         f"request_id: {request_id}",
                         f"message: {exc}",
                     ]
                 )
-                self._record("/funding_cancel", chat_id, user_id, username, "failed")
-                self._edit_callback_message(callback, text)
-                return True
-            self._answer(callback, "Funding request canceled.")
-            self._edit_callback_message(callback, "Funding request canceled.")
-            self._record("/funding_cancel", chat_id, user_id, username, "canceled")
+                self._record("/funding_complete", chat_id, user_id, username, "failed")
+            else:
+                self._record("/funding_complete", chat_id, user_id, username, "confirmed")
+            self._edit_callback_message(callback, text)
             return True
-        self._answer(callback, "Funding request confirmed.")
-        try:
-            text = self._confirm_funding_request(
-                request,
-                chat_id=chat_id,
-                user_id=user_id,
-                username=username,
-            )
-        except WorkflowClaimRefused as exc:
-            # The claim (not run_signal or the ack write) is what refuses this,
-            # and exc.reason says which of two very different situations this
-            # is: "not_head"/"no_head"/"head_moved" means a newer request
-            # replaced this one -- nothing is wrong. "already_claimed" means an
-            # earlier attempt on *this* request claimed and never finished
-            # (e.g. it died between the claim and the ack, the scenario this
-            # retry is walking into): the claim key already exists, so
-            # reporting "already processed" here would be false -- the
-            # request is stuck, not done, and a human needs to look at it
-            # rather than keep tapping the button.
-            confirm_text, status = _funding_claim_refusal_response(exc.reason)
-            text = "\n".join(
-                [
-                    confirm_text,
-                    f"request_id: {request_id}",
-                ]
-            )
-            self._record("/funding_complete", chat_id, user_id, username, status)
-        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-            text = "\n".join(
-                [
-                    "Funding confirmation failed",
-                    f"request_id: {request_id}",
-                    f"message: {exc}",
-                ]
-            )
-            self._record("/funding_complete", chat_id, user_id, username, "failed")
-        else:
-            self._record("/funding_complete", chat_id, user_id, username, "confirmed")
-        self._edit_callback_message(callback, text)
-        return True
+        finally:
+            try:
+                self._refresh_request_workflow_card(request)
+            except Exception as exc:  # noqa: BLE001
+                self._log_card_failure(exc)
 
     def _process_budget_callback(
         self,
@@ -3395,71 +3396,77 @@ class TelegramOperatorCommandRouter:
             self._answer(callback, "This budget request is no longer active.")
             self._record("/budget", chat_id, user_id, username, "stale_callback")
             return True
-        if transition == "cancel":
+        try:
+            if transition == "cancel":
+                try:
+                    self._cancel_budget_request(request, user_id=user_id, username=username)
+                except WorkflowClaimRefused as exc:
+                    answer_text, status = _funding_claim_refusal_response(
+                        exc.reason, request_noun="budget"
+                    )
+                    self._answer(callback, answer_text)
+                    self._record("/budget_cancel", chat_id, user_id, username, status)
+                    return True
+                except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                    self._answer(callback, "Budget cancellation failed.")
+                    text = "\n".join(
+                        [
+                            "Budget cancellation failed",
+                            f"request_id: {request_id}",
+                            f"message: {exc}",
+                        ]
+                    )
+                    self._record("/budget_cancel", chat_id, user_id, username, "failed")
+                    self._edit_callback_message(callback, text)
+                    return True
+                self._answer(callback, "Budget request canceled.")
+                self._edit_callback_message(callback, "Budget request canceled.")
+                self._record("/budget_cancel", chat_id, user_id, username, "canceled")
+                return True
             try:
-                self._cancel_budget_request(request, user_id=user_id, username=username)
+                amount = selected_budget_from_request(request, parts[3])
+                text = self._confirm_budget_request(
+                    request,
+                    selected_budget=amount,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                )
             except WorkflowClaimRefused as exc:
-                answer_text, status = _funding_claim_refusal_response(
+                # Same distinction the funding path draws: "already_claimed"
+                # means an earlier attempt on this request is stuck mid-flight,
+                # not superseded -- see _funding_claim_refusal_response.
+                confirm_text, status = _funding_claim_refusal_response(
                     exc.reason, request_noun="budget"
                 )
-                self._answer(callback, answer_text)
-                self._record("/budget_cancel", chat_id, user_id, username, status)
-                return True
-            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-                self._answer(callback, "Budget cancellation failed.")
                 text = "\n".join(
                     [
-                        "Budget cancellation failed",
+                        confirm_text,
+                        f"request_id: {request_id}",
+                    ]
+                )
+                self._answer(callback, "Budget selection failed.")
+                self._record("/budget_select", chat_id, user_id, username, status)
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                self._answer(callback, "Budget selection failed.")
+                text = "\n".join(
+                    [
+                        "Budget selection failed",
                         f"request_id: {request_id}",
                         f"message: {exc}",
                     ]
                 )
-                self._record("/budget_cancel", chat_id, user_id, username, "failed")
-                self._edit_callback_message(callback, text)
-                return True
-            self._answer(callback, "Budget request canceled.")
-            self._edit_callback_message(callback, "Budget request canceled.")
-            self._record("/budget_cancel", chat_id, user_id, username, "canceled")
+                self._record("/budget_select", chat_id, user_id, username, "failed")
+            else:
+                self._answer(callback, "Budget selected.")
+                self._record("/budget_select", chat_id, user_id, username, "selected")
+            self._edit_callback_message(callback, text)
             return True
-        try:
-            amount = selected_budget_from_request(request, parts[3])
-            text = self._confirm_budget_request(
-                request,
-                selected_budget=amount,
-                chat_id=chat_id,
-                user_id=user_id,
-                username=username,
-            )
-        except WorkflowClaimRefused as exc:
-            # Same distinction the funding path draws: "already_claimed"
-            # means an earlier attempt on this request is stuck mid-flight,
-            # not superseded -- see _funding_claim_refusal_response.
-            confirm_text, status = _funding_claim_refusal_response(
-                exc.reason, request_noun="budget"
-            )
-            text = "\n".join(
-                [
-                    confirm_text,
-                    f"request_id: {request_id}",
-                ]
-            )
-            self._answer(callback, "Budget selection failed.")
-            self._record("/budget_select", chat_id, user_id, username, status)
-        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-            self._answer(callback, "Budget selection failed.")
-            text = "\n".join(
-                [
-                    "Budget selection failed",
-                    f"request_id: {request_id}",
-                    f"message: {exc}",
-                ]
-            )
-            self._record("/budget_select", chat_id, user_id, username, "failed")
-        else:
-            self._answer(callback, "Budget selected.")
-            self._record("/budget_select", chat_id, user_id, username, "selected")
-        self._edit_callback_message(callback, text)
-        return True
+        finally:
+            try:
+                self._refresh_request_workflow_card(request)
+            except Exception as exc:  # noqa: BLE001
+                self._log_card_failure(exc)
 
     def _process_workflow_resume_callback(
         self,
@@ -3505,97 +3512,103 @@ class TelegramOperatorCommandRouter:
             self._answer(callback, "This request is no longer active.")
             self._record("/wfresume", chat_id, user_id, username, "stale_callback")
             return True
-        next_attempt = stalled["attempt"] + 1
-        if next_attempt > _MAX_WORKFLOW_RESUME_ATTEMPT:
-            # An old Resume card is still sitting in the chat after the sweep
-            # stopped offering new ones. Without this the operator can keep
-            # burning attempts from it, and each one writes a claim that
-            # nothing will ever complete.
-            self._answer(callback, "This workflow needs manual attention.")
-            self._notify_workflow_needs_attention(stalled)
-            self._record("/wfresume", chat_id, user_id, username, "resume_budget_exhausted")
-            self._edit_callback_message(
-                callback,
-                "\n".join(
-                    [
-                        ui_catalog.WORKFLOW_NEEDS_ATTENTION_TEMPLATE.format(
-                            request_id=request_id, phase=phase
-                        ),
-                        f"request_id: {request_id}",
-                    ]
-                ),
-            )
-            return True
-        intent = str(stalled["intent"])
-        self._answer(callback, "Resuming...")
         try:
-            # 재개는 phase가 아니라 claim에 기록된 intent로 갈라진다.
-            # phase만 보고 confirm으로 이어 달리면, 운영자가 취소한 요청이
-            # 재개 한 번으로 이번 달 투자로 뒤집힌다.
-            if intent not in {"confirm", "cancel"}:
-                raise ValueError(f"stalled workflow has an unknown intent: {intent!r}")
-            if intent == "cancel":
-                if phase == "funding":
-                    self._cancel_funding_request(
+            next_attempt = stalled["attempt"] + 1
+            if next_attempt > _MAX_WORKFLOW_RESUME_ATTEMPT:
+                # An old Resume card is still sitting in the chat after the sweep
+                # stopped offering new ones. Without this the operator can keep
+                # burning attempts from it, and each one writes a claim that
+                # nothing will ever complete.
+                self._answer(callback, "This workflow needs manual attention.")
+                self._notify_workflow_needs_attention(stalled)
+                self._record("/wfresume", chat_id, user_id, username, "resume_budget_exhausted")
+                self._edit_callback_message(
+                    callback,
+                    "\n".join(
+                        [
+                            ui_catalog.WORKFLOW_NEEDS_ATTENTION_TEMPLATE.format(
+                                request_id=request_id, phase=phase
+                            ),
+                            f"request_id: {request_id}",
+                        ]
+                    ),
+                )
+                return True
+            intent = str(stalled["intent"])
+            self._answer(callback, "Resuming...")
+            try:
+                # 재개는 phase가 아니라 claim에 기록된 intent로 갈라진다.
+                # phase만 보고 confirm으로 이어 달리면, 운영자가 취소한 요청이
+                # 재개 한 번으로 이번 달 투자로 뒤집힌다.
+                if intent not in {"confirm", "cancel"}:
+                    raise ValueError(f"stalled workflow has an unknown intent: {intent!r}")
+                if intent == "cancel":
+                    if phase == "funding":
+                        self._cancel_funding_request(
+                            request,
+                            user_id=user_id,
+                            username=username,
+                            attempt=next_attempt,
+                        )
+                        text = "Funding request canceled."
+                    else:
+                        self._cancel_budget_request(
+                            request,
+                            user_id=user_id,
+                            username=username,
+                            attempt=next_attempt,
+                        )
+                        text = "Budget request canceled."
+                elif phase == "funding":
+                    text = self._confirm_funding_request(
                         request,
+                        chat_id=chat_id,
                         user_id=user_id,
                         username=username,
                         attempt=next_attempt,
                     )
-                    text = "Funding request canceled."
                 else:
-                    self._cancel_budget_request(
+                    # A resumed budget confirmation must not ask the operator
+                    # again -- it replays the amount that was already recorded in
+                    # the stalled claim. Only a confirm needs one; a cancel never
+                    # carried an amount and must not be blocked for lacking it.
+                    selected_budget = stalled.get("selected_budget")
+                    if selected_budget is None:
+                        raise ValueError(
+                            "stalled budget workflow has no stored selected_budget"
+                        )
+                    text = self._confirm_budget_request(
                         request,
+                        selected_budget=float(selected_budget),
+                        chat_id=chat_id,
                         user_id=user_id,
                         username=username,
                         attempt=next_attempt,
                     )
-                    text = "Budget request canceled."
-            elif phase == "funding":
-                text = self._confirm_funding_request(
-                    request,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    username=username,
-                    attempt=next_attempt,
+            except WorkflowClaimRefused as exc:
+                confirm_text, status = _funding_claim_refusal_response(
+                    exc.reason, request_noun=phase
                 )
+                text = "\n".join([confirm_text, f"request_id: {request_id}"])
+                self._record("/wfresume", chat_id, user_id, username, status)
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                text = "\n".join(
+                    [
+                        "Resume failed",
+                        f"request_id: {request_id}",
+                        f"message: {exc}",
+                    ]
+                )
+                self._record("/wfresume", chat_id, user_id, username, "failed")
             else:
-                # A resumed budget confirmation must not ask the operator
-                # again -- it replays the amount that was already recorded in
-                # the stalled claim. Only a confirm needs one; a cancel never
-                # carried an amount and must not be blocked for lacking it.
-                selected_budget = stalled.get("selected_budget")
-                if selected_budget is None:
-                    raise ValueError(
-                        "stalled budget workflow has no stored selected_budget"
-                    )
-                text = self._confirm_budget_request(
-                    request,
-                    selected_budget=float(selected_budget),
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    username=username,
-                    attempt=next_attempt,
-                )
-        except WorkflowClaimRefused as exc:
-            confirm_text, status = _funding_claim_refusal_response(
-                exc.reason, request_noun=phase
-            )
-            text = "\n".join([confirm_text, f"request_id: {request_id}"])
-            self._record("/wfresume", chat_id, user_id, username, status)
-        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-            text = "\n".join(
-                [
-                    "Resume failed",
-                    f"request_id: {request_id}",
-                    f"message: {exc}",
-                ]
-            )
-            self._record("/wfresume", chat_id, user_id, username, "failed")
-        else:
-            self._record("/wfresume", chat_id, user_id, username, "resumed")
-        self._edit_callback_message(callback, text)
-        return True
+                self._record("/wfresume", chat_id, user_id, username, "resumed")
+            self._edit_callback_message(callback, text)
+            return True
+        finally:
+            try:
+                self._refresh_request_workflow_card(request)
+            except Exception as exc:  # noqa: BLE001
+                self._log_card_failure(exc)
 
     def _process_budget_command(
         self,
@@ -3619,29 +3632,36 @@ class TelegramOperatorCommandRouter:
             self._record("/budget", chat_id, user_id, username, "stale")
             return
         try:
-            amount = float(parts[2].replace(",", ""))
-            text = self._confirm_budget_request(
-                request,
-                selected_budget=amount,
-                chat_id=chat_id,
-                user_id=user_id,
-                username=username,
-            )
-        except WorkflowClaimRefused as exc:
-            # WorkflowClaimRefused subclasses RuntimeError, so this branch
-            # must come before the generic except below -- otherwise a claim
-            # refusal (stuck-in-flight or superseded) is misreported as an
-            # invalid amount, same as the callback path this mirrors.
-            send_text, status = _funding_claim_refusal_response(exc.reason, request_noun="budget")
-            self._send(chat_id, send_text)
-            self._record("/budget", chat_id, user_id, username, status)
-            return
-        except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
-            self._send(chat_id, f"Budget amount out of range or invalid: {exc}")
-            self._record("/budget", chat_id, user_id, username, "failed")
-            return
-        self._send(chat_id, text)
-        self._record("/budget", chat_id, user_id, username, "selected")
+            try:
+                amount = float(parts[2].replace(",", ""))
+                text = self._confirm_budget_request(
+                    request,
+                    selected_budget=amount,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                )
+            except WorkflowClaimRefused as exc:
+                # WorkflowClaimRefused subclasses RuntimeError, so this branch
+                # must come before the generic except below -- otherwise a claim
+                # refusal (stuck-in-flight or superseded) is misreported as an
+                # invalid amount, same as the callback path this mirrors.
+                send_text, status = _funding_claim_refusal_response(exc.reason, request_noun="budget")
+                self._send(chat_id, send_text)
+                self._record("/budget", chat_id, user_id, username, status)
+                return
+            except (RuntimeError, TimeoutError, TypeError, ValueError) as exc:
+                self._send(chat_id, f"Budget amount out of range or invalid: {exc}")
+                self._record("/budget", chat_id, user_id, username, "failed")
+                return
+            else:
+                self._send(chat_id, text)
+                self._record("/budget", chat_id, user_id, username, "selected")
+        finally:
+            try:
+                self._refresh_request_workflow_card(request)
+            except Exception as exc:  # noqa: BLE001
+                self._log_card_failure(exc)
 
     def _confirm_budget_request(
         self,
@@ -3867,15 +3887,13 @@ class TelegramOperatorCommandRouter:
         for budget_request in budget_requests:
             if not self._request_still_needs_a_card(budget_request, phase="budget"):
                 continue
-            self._require_card_delivered(
-                self._send_budget_request(chat_id, budget_request), "budget", budget_request
-            )
+            result = self._refresh_request_workflow_card(budget_request)
+            self._require_card_delivered(result.outcome_for(chat_id), "budget", budget_request)
         for funding_request in funding_requests:
             if not self._request_still_needs_a_card(funding_request, phase="funding"):
                 continue
-            self._require_card_delivered(
-                self._send_funding_request(chat_id, funding_request), "funding", funding_request
-            )
+            result = self._refresh_request_workflow_card(funding_request)
+            self._require_card_delivered(result.outcome_for(chat_id), "funding", funding_request)
         if budget_requests:
             return ["approval_status: budget_still_required"]
         if funding_requests:
@@ -3929,7 +3947,7 @@ class TelegramOperatorCommandRouter:
     ) -> None:
         """Refuse to let a caller treat an unconfirmed card as delivered.
 
-        "sent" and "skipped" (the operator already holds a confirmed copy)
+        "sent", "edited", and "skipped" (the operator already holds a confirmed copy)
         are the only outcomes that mean the operator can act on this request.
         "failed" means Telegram explicitly refused every chat; "unknown"
         means a timeout or dropped connection left delivery unaccountable --
@@ -3950,7 +3968,7 @@ class TelegramOperatorCommandRouter:
         fact being reported is "this request has no card", which stays true
         however many times delivery is retried.
         """
-        if outcome in ("sent", "skipped"):
+        if outcome in ("sent", "edited", "skipped"):
             return
         request_id = str(request.get("request_id") or "")
         self._record_undelivered_request_card(request_id, phase=phase, delivery=outcome)
@@ -4566,64 +4584,6 @@ class TelegramOperatorCommandRouter:
                 "decided_by": username or str(user_id),
                 **extra,
             },
-        )
-
-    def _send_funding_request(self, chat_id: int, request: dict[str, Any]) -> str:
-        request_id = str(request.get("request_id") or "")
-        return self._send_request_card(
-            chat_id,
-            request_id,
-            phase="funding",
-            text=format_contribution_funding_request(request),
-            reply_markup=funding_request_reply_markup(request_id),
-        )
-
-    def _send_budget_request(self, chat_id: int, request: dict[str, Any]) -> str:
-        return self._send_request_card(
-            chat_id,
-            str(request.get("request_id") or ""),
-            phase="budget",
-            text=format_contribution_budget_request(request),
-            reply_markup=budget_request_reply_markup(request),
-        )
-
-    def _send_request_card(
-        self,
-        chat_id: int,
-        request_id: str,
-        *,
-        phase: str,
-        text: str,
-        reply_markup: dict[str, Any] | None,
-    ) -> str:
-        """Deliver an actionable request card at most once per chat.
-
-        A request card is a live decision button, and the transition behind it
-        accepts exactly one decision. The delivery is reached again whenever
-        the workflow that produced it is resumed -- completion happens after
-        delivery, so a crash in between replays this -- and a plain send would
-        put a second button-bearing card for the same request in the chat.
-        Recording the intent before the call and the result after is what lets
-        the replay tell "already sent" from "never sent".
-
-        A request with no id cannot be keyed, so it falls back to a plain
-        send: an un-keyed card delivered twice is better than one that is
-        deduplicated against an unrelated card.
-
-        Returns the delivery outcome ("sent", "skipped", "failed" or
-        "unknown") rather than swallowing it -- a caller that completes a
-        workflow on the strength of this call must be able to tell a
-        confirmed delivery from one Telegram refused or left ambiguous.
-        """
-        if not request_id:
-            self._send(chat_id, text, reply_markup=reply_markup)
-            return "sent"
-        return self._card_manager.deliver_once(
-            new_run_id(),
-            f"{phase}-request:{request_id}",
-            "pending",
-            RenderedCard(text=text, reply_markup=reply_markup),
-            chat_id=chat_id,
         )
 
     def _load_pending_budget_request(self, request_id: str) -> dict[str, Any] | None:

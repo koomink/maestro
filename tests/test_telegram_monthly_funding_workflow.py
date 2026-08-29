@@ -194,7 +194,7 @@ def test_sweep_v0_head_without_evidence_sends_nothing(tmp_path: Path) -> None:
     assert client.edited == []
 
 
-def test_v0_head_with_failed_evidence_adopts_and_retries_on_direct_invocation_not_poll_once(
+def test_v0_head_with_failed_evidence_adopts_and_retries_on_poll_once(
     tmp_path: Path,
 ) -> None:
     router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
@@ -216,17 +216,11 @@ def test_v0_head_with_failed_evidence_adopts_and_retries_on_direct_invocation_no
         ),
     )
 
-    # poll_once must NOT invoke the helper or send anything
+    # poll_once executes _sweep_funding_workflow_cards, which adopts and retries under the workflow key
     router.poll_once()
-    assert client.sent == []
-    assert client.edited == []
-
-    # Direct test invocation adopts and retries under the workflow key
-    res = router._refresh_funding_workflow_card(wf_id)
-    assert res.outcome_for(100) == "sent"
-    assert res.outcome_for(200) == "blocked"
     assert len(client.sent) == 1
     assert client.sent[0]["chat_id"] == 100
+    assert client.edited == []
 
 
 def test_sweep_v1_head_sends_workflow_scoped_card_to_all_configured_chats(tmp_path: Path) -> None:
@@ -474,23 +468,6 @@ def test_sweep_isolates_malformed_workflow_and_logs_failure(tmp_path: Path) -> N
     assert "ValueError" in [e["payload"].get("error_type") for e in error_events]
 
 
-def test_poll_once_does_not_call_funding_workflow_sweep_yet(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    router, _, _ = _setup_router(tmp_path)
-    called: list[bool] = []
-    monkeypatch.setattr(router, "_sweep_funding_workflow_cards", lambda: called.append(True))
-
-    router.poll_once()
-
-    assert called == []
-
-
-# ---------------------------------------------------------------------------
-# Step 4 (Task 8 Step 1): Request-to-workflow immediate refresh seam tests
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("req_factory", "phase"),
     [
@@ -524,78 +501,6 @@ def test_refresh_request_workflow_card_delegates_to_refresh_funding_workflow_car
     assert result.card_key == funding_workflow_card_key(expected_wf_id)
     assert result.outcome_for(100) == "sent"
     assert result.outcome_for(200) == "sent"
-
-
-def test_no_production_runtime_path_calls_refresh_request_workflow_card_yet(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
-
-    called_requests: list[Mapping[str, Any]] = []
-    if hasattr(router, "_refresh_request_workflow_card"):
-        orig = router._refresh_request_workflow_card
-
-        def spy(req: Mapping[str, Any]):
-            called_requests.append(req)
-            return orig(req)
-
-        monkeypatch.setattr(router, "_refresh_request_workflow_card", spy)
-    else:
-
-        def fail_helper(req: Mapping[str, Any]):
-            called_requests.append(req)
-            return getattr(router, "_refresh_funding_workflow_card")(
-                workflow_id_from_request(req)
-            )
-
-        monkeypatch.setattr(
-            router, "_refresh_request_workflow_card", fail_helper, raising=False
-        )
-
-    # 1. poll_once
-    router.poll_once()
-    assert called_requests == []
-
-    # 2. Funding callback path
-    req_f = _funding_req("req-f", card_delivery_version=1)
-    publish_contribution_request(store, "run-f", req_f, phase="funding")
-    cb_f = {
-        "id": "cb-f",
-        "data": "funding:cancel:req-f",
-        "message": {"chat": {"id": 100}, "message_id": 10},
-        "from": {"id": 100, "username": "operator"},
-    }
-    router._process_funding_callback(cb_f, "funding:cancel:req-f", 100, 100, "operator")
-    assert called_requests == []
-
-    # 3. Budget callback path
-    req_b = _budget_req("req-b", card_delivery_version=1)
-    publish_contribution_request(store, "run-b", req_b, phase="budget")
-    cb_b = {
-        "id": "cb-b",
-        "data": "budget:cancel:req-b",
-        "message": {"chat": {"id": 100}, "message_id": 10},
-        "from": {"id": 100, "username": "operator"},
-    }
-    router._process_budget_callback(cb_b, "budget:cancel:req-b", 100, 100, "operator")
-    assert called_requests == []
-
-    # 4. /budget command path
-    req_b2 = _budget_req("req-b2", card_delivery_version=1)
-    publish_contribution_request(store, "run-b2", req_b2, phase="budget")
-    router._process_budget_command("/budget req-b2 400000", 100, 100, "operator")
-    assert called_requests == []
-
-    # 5. Child handoff path
-    dummy_summary = SignalRunSummary(
-        signal_run_id="sig-dummy",
-        loaded_strategies=["tranquillo"],
-        action_required=False,
-        orders_preview_count=0,
-    )
-    router._deliver_child_signal_outcome(100, dummy_summary)
-    assert called_requests == []
 
 
 # ---------------------------------------------------------------------------
@@ -898,3 +803,271 @@ def test_refresh_request_workflow_card_edit_timeout_preserves_durable_financial_
 
     # Head and financial truth remain untouched
     assert store.load_funding_workflow_head(wf_id) == head_before
+
+
+def test_all_live_transitions_delegate_immediate_refresh_through_shared_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100,))
+    raw_signal = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw_signal["portfolio"]["initial_cash"] = 5_000_000
+    raw_signal["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw_signal["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    sig_path = tmp_path / "signal.yaml"
+    sig_path.write_text(yaml.safe_dump(raw_signal))
+    router.signal_config_path = sig_path
+
+    refreshed_workflows: list[str] = []
+    real_refresh = router._refresh_funding_workflow_card
+
+    def spy_refresh(wf_id: str):
+        refreshed_workflows.append(wf_id)
+        return real_refresh(wf_id)
+
+    monkeypatch.setattr(router, "_refresh_funding_workflow_card", spy_refresh)
+    monkeypatch.setattr(
+        router,
+        "_run_child_signal",
+        lambda req, wf_id, attempt=1, phase="funding": SignalRunSummary(
+            signal_run_id="signal-child",
+            loaded_strategies=["tranquillo"],
+            action_required=False,
+            orders_preview_count=0,
+        ),
+    )
+
+    # 1. funding cancel callback
+    req_f1 = _funding_req("req-f1", card_delivery_version=1)
+    publish_contribution_request(store, "run-f1", req_f1, phase="funding")
+    router.process_update({
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb-1",
+            "data": "operator:funding:cancel:req-f1",
+            "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 1
+    assert "2026-08" in refreshed_workflows[-1]
+
+    # 2. funding complete callback
+    req_f2 = _funding_req("req-f2", card_delivery_version=1)
+    publish_contribution_request(store, "run-f2", req_f2, phase="funding")
+    router.process_update({
+        "update_id": 2,
+        "callback_query": {
+            "id": "cb-2",
+            "data": "operator:funding:complete:req-f2",
+            "message": {"chat": {"id": 100}, "message_id": 11, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 2
+
+    # 3. budget cancel callback
+    req_b1 = _budget_req("req-b1", card_delivery_version=1)
+    publish_contribution_request(store, "run-b1", req_b1, phase="budget")
+    router.process_update({
+        "update_id": 3,
+        "callback_query": {
+            "id": "cb-3",
+            "data": "operator:budget:cancel:req-b1",
+            "message": {"chat": {"id": 100}, "message_id": 12, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 3
+
+    # 4. budget select callback
+    req_b2 = _budget_req("req-b2", card_delivery_version=1)
+    publish_contribution_request(store, "run-b2", req_b2, phase="budget")
+    router.process_update({
+        "update_id": 4,
+        "callback_query": {
+            "id": "cb-4",
+            "data": "operator:budget:sel:req-b2:r",
+            "message": {"chat": {"id": 100}, "message_id": 13, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 4
+
+    # 5. /budget command
+    req_b3 = _budget_req("req-b3", card_delivery_version=1)
+    publish_contribution_request(store, "run-b3", req_b3, phase="budget")
+    router.process_update({
+        "update_id": 5,
+        "message": {
+            "chat": {"id": 100},
+            "from": {"id": 100, "username": "op"},
+            "text": "/budget req-b3 300000",
+        },
+    })
+    assert len(refreshed_workflows) == 5
+
+    # 6. funding resume callback
+    req_f3 = _funding_req("req-f3", card_delivery_version=1)
+    pub_f3 = publish_contribution_request(store, "run-f3", req_f3, phase="funding")
+    claim_workflow_attempt(
+        store,
+        "run-claim-f3",
+        workflow_id=pub_f3["workflow_id"],
+        request_id="req-f3",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "cancel"},
+    )
+    router.process_update({
+        "update_id": 6,
+        "callback_query": {
+            "id": "cb-6",
+            "data": "operator:wfresume:funding:req-f3",
+            "message": {"chat": {"id": 100}, "message_id": 14, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 6
+
+    # 7. budget resume callback
+    req_b4 = _budget_req("req-b4", card_delivery_version=1)
+    pub_b4 = publish_contribution_request(store, "run-b4", req_b4, phase="budget")
+    claim_workflow_attempt(
+        store,
+        "run-claim-b4",
+        workflow_id=pub_b4["workflow_id"],
+        request_id="req-b4",
+        phase="budget",
+        attempt=1,
+        extra={"intent": "cancel"},
+    )
+    router.process_update({
+        "update_id": 7,
+        "callback_query": {
+            "id": "cb-7",
+            "data": "operator:wfresume:budget:req-b4",
+            "message": {"chat": {"id": 100}, "message_id": 15, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 7
+
+    # 8. child handoff
+    req_f4 = _funding_req("req-f4", card_delivery_version=1)
+    publish_contribution_request(store, "run-f4", req_f4, phase="funding")
+    store.save_signal_package(
+        "signal-child-handoff",
+        {"orders_preview": [], "funding_requests": [req_f4], "budget_requests": []},
+    )
+    router._deliver_child_signal_outcome(
+        100,
+        SignalRunSummary(
+            signal_run_id="signal-child-handoff",
+            loaded_strategies=["tranquillo"],
+            action_required=False,
+            orders_preview_count=0,
+        ),
+    )
+    assert len(refreshed_workflows) == 8
+
+    # 9. transition exception after claim in finally
+    req_f5 = _funding_req("req-f5", card_delivery_version=1)
+    publish_contribution_request(store, "run-f5", req_f5, phase="funding")
+    monkeypatch.setattr(
+        router,
+        "_run_child_signal",
+        pytest.fail,
+    )
+    router.process_update({
+        "update_id": 9,
+        "callback_query": {
+            "id": "cb-9",
+            "data": "operator:funding:complete:req-f5",
+            "message": {"chat": {"id": 100}, "message_id": 16, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+    assert len(refreshed_workflows) == 9
+
+
+def test_migration_race_through_callback_finally_migrating_blocks_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100,))
+    raw_signal = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw_signal["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw_signal["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    sig_path = tmp_path / "signal.yaml"
+    sig_path.write_text(yaml.safe_dump(raw_signal))
+    router.signal_config_path = sig_path
+
+    req = _funding_req("req-f-mig", card_delivery_version=1)
+    pub = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = pub["workflow_id"]
+
+    import maestro.integrations.telegram.handlers as handlers_mod
+    real_complete = handlers_mod.complete_workflow
+
+    def racing_complete(*args, **kwargs):
+        res = real_complete(*args, **kwargs)
+        _start_migration(store)
+        return res
+
+    monkeypatch.setattr(handlers_mod, "complete_workflow", racing_complete)
+
+    router.process_update({
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb-1",
+            "data": "operator:funding:cancel:req-f-mig",
+            "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+
+    # Financial completion / head truth remains durable
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert any(e["payload"]["request_id"] == "req-f-mig" for e in completed)
+
+    # Workflow card delivery state was blocked by migration (not created/projected)
+    assert store.load_card_delivery_state(funding_workflow_card_key(wf_id)) == []
+
+
+def test_migration_race_through_callback_finally_invalid_blocks_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100,))
+    raw_signal = yaml.safe_load(Path("configs/paper.yaml").read_text())
+    raw_signal["state"]["sqlite_path"] = str(tmp_path / "state.db")
+    raw_signal["audit"]["jsonl_path"] = str(tmp_path / "audit.jsonl")
+    sig_path = tmp_path / "signal.yaml"
+    sig_path.write_text(yaml.safe_dump(raw_signal))
+    router.signal_config_path = sig_path
+
+    req = _funding_req("req-f-inv", card_delivery_version=1)
+    pub = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = pub["workflow_id"]
+
+    import maestro.integrations.telegram.handlers as handlers_mod
+    real_complete = handlers_mod.complete_workflow
+
+    def racing_complete(*args, **kwargs):
+        res = real_complete(*args, **kwargs)
+        _make_invalid_migration(store)
+        return res
+
+    monkeypatch.setattr(handlers_mod, "complete_workflow", racing_complete)
+
+    router.process_update({
+        "update_id": 1,
+        "callback_query": {
+            "id": "cb-1",
+            "data": "operator:funding:cancel:req-f-inv",
+            "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
+            "from": {"id": 100, "username": "op"},
+        },
+    })
+
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    assert any(e["payload"]["request_id"] == "req-f-inv" for e in completed)
+    assert store.load_card_delivery_state(funding_workflow_card_key(wf_id)) == []
