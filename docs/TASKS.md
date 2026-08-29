@@ -840,6 +840,17 @@
       terminal index. See
       [specs/2026-08-09-telegram-ux-redesign-design.md](superpowers/specs/2026-08-09-telegram-ux-redesign-design.md)
       stage 2; the legacy notification paths stay in parallel until stage 5
+- [x] Monthly funding workflow card redesign (Phase 3b): deliver workflow-scoped
+      lifecycle-managed cards (`funding_workflow:<scope_key>`) with delivery
+      generation cutover (`card_delivery_version=1`), authoritative event
+      projection to user-facing stages without storing UI truth, legacy request card
+      adoption with strict provenance precedence, strict unknown non-resend policy
+      with per-chat independence, background Telegram Operator sweep and immediate
+      refresh synchronization, predecessor/successor admission gating on financial
+      callbacks, and atomic retirement of CLI card senders while preserving durable
+      request reporting and daily no-action notices. See
+      [specs/2026-08-09-telegram-ux-redesign-design.md](superpowers/specs/2026-08-09-telegram-ux-redesign-design.md)
+      Phase 3b (B-1).
 - [ ] Price rotation orders off the Toss order book (`/api/v1/orderbook`), walking
       to the level where cumulative volume covers the order and capping at
       `max_quote_deviation_pct`, to raise the sell fill rate. See

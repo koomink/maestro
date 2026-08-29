@@ -1359,6 +1359,9 @@ freshness, and Virtuoso app tabs generate one app signal at a time.
 ## Telegram Philosophy
 
 Telegram is the approval, urgent notification, and limited operator UI channel.
+Actionable monthly funding and contribution budget cards are workflow-scoped,
+lifecycle-managed, and sent only by the long-running Telegram Operator service;
+scheduled daily CLI runs still own informational summary and no-action messages.
 
 Initial allowed actions:
 

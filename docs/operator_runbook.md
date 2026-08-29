@@ -224,43 +224,60 @@ chats.
 ## Telegram card delivery
 
 `maestro health` reports `telegram_ui` in two ways, and they mean different
-things.
+things:
 
-`N card copies failing` means Telegram refused those sends and answered so.
-The card is retried, the counter resets on the first success, and after three
-straight refusals the operator gets the same content as plain text. Nothing to
-do unless it persists.
+- `N card copies failing` means Telegram refused those API calls with an explicit
+  rejection response. The card copy is retried during periodic operator sweeps,
+  the counter resets on the first successful delivery, and after three consecutive
+  failures the operator receives plain-text fallback content.
+- `N unaccounted` means a send or edit was dispatched but its network outcome was
+  never acknowledged (e.g., HTTP timeout, dropped connection). Under the strict
+  unknown policy, that copy is **never resent or replayed**: Telegram provides no
+  query API to check whether a message was displayed, and resending risks creating
+  a duplicate actionable button or multiple conflicting messages for one request.
 
-`N unaccounted` means a send started and we never learned its outcome — a
-timeout, a dropped connection. That copy is **never re-sent**: Telegram offers
-no way to ask whether a message arrived, and sending again is how a second
-live decision button is created for one request. It also has no failure
-counter, so unlike a refusal it cannot clear itself. It stays until a person
-looks.
+### Strict Unknown Policy and Per-Chat Independence
 
-When you see it:
+For monthly funding workflows (`funding_workflow:<scope_key>`):
+
+- **Current-active-request unknown dominance:** When a workflow's current active
+  request has an `unknown` delivery state in a given chat, that unknown state
+  dominates delivery for that chat. The system will not send a replacement card or
+  edit that card in that chat while the request remains in unknown delivery status.
+- **Per-chat independence:** Card delivery is tracked per target chat
+  (`(card_key, chat_id)`). Delivery failure or `unknown` ambiguity in one chat
+  never suppresses or blocks independent delivery or updates to other safe chats.
+- **No manual clear, reset, or force-send command:** By design, **no command
+  exists** to clear unknown delivery state, reset delivery counters, or force-send
+  a workflow card. Operators must **never** infer absence from missing evidence
+  (e.g., searching a chat history and assuming a message was never delivered
+  because it is not visible). Authoritative truth is held by the workflow head and
+  system events; an interrupted workflow is naturally progressed by subsequent
+  workflow transitions or superseded by future scheduled signal runs.
+
+### Health Inspection
+
+When `maestro health` reports unaccounted or failing cards:
 
 ```bash
 maestro health --config <config>
 ```
 
-The `unaccounted` detail names `<card_key>@<chat_id>`. Check the chat for that
-card. If it is there, act on it normally — the button works, and the workflow
-behind it completes as usual. If it is not there, the request is still live
-and the next scheduled signal run publishes a replacement and sends a fresh
-card; nothing needs to be forced.
+The health check details list affected targets as `<card_key>@<chat_id>` (for
+example, `funding_workflow:deposit:manual:2026-08@123456789` or
+`approval:<signal_run_id>:<group_id>@123456789`).
 
 Two related notices can arrive in Telegram:
 
-- `⚠️ 입금/예산 요청 카드를 전달하지 못했어요` — that request has no card in
-  front of anyone. The event `funding_request_card_undelivered` records it
-  even when the notice itself could not be delivered.
-- `⚠️ 재개를 여러 번 시도했지만 끝내지 못했어요` — the workflow spent its
+- `⚠️ 입금/예산 요청 카드를 전달하지 못했어요` — the workflow request had delivery
+  failures across all target chats. The event `funding_request_card_undelivered`
+  records it even when the alert notice itself cannot be delivered.
+- `⚠️ 재개를 여러 번 시도했지만 끝내지 못했어요` — the workflow exhausted its
   resume budget. Resume is no longer offered for it, and tapping an older
-  Resume card is refused. This one needs a person; do **not** look for a
-  command to force it closed, because none exists by design — a funding
-  workflow that cannot finish is superseded by the next scheduled run rather
-  than settled by hand.
+  Resume card is refused. This condition requires operator review; do **not** look
+  for a command to force it closed, because none exists by design — a funding
+  workflow that cannot finish is superseded by the next scheduled run rather than
+  settled by hand.
 
 ## 3a 업그레이드 / 롤백
 

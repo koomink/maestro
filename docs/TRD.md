@@ -173,7 +173,17 @@ maestro/
 │       │       ├── __init__.py
 │       │       ├── bot.py
 │       │       ├── formatter.py
-│       │       └── handlers.py
+│       │       ├── handlers.py
+│       │       └── ui/
+│       │           ├── __init__.py
+│       │           ├── cards.py
+│       │           ├── catalog.py
+│       │           ├── format.py
+│       │           ├── approval_stage.py
+│       │           ├── card_state.py
+│       │           ├── lifecycle.py
+│       │           ├── funding_workflow.py
+│       │           └── funding_workflow_delivery.py
 │       ├── dashboard/
 │       │   ├── __init__.py
 │       │   └── app.py
@@ -1348,7 +1358,16 @@ approval/
 integrations/telegram/
 ├── bot.py
 ├── formatter.py
-└── handlers.py
+├── handlers.py
+└── ui/
+    ├── approval_stage.py
+    ├── card_state.py
+    ├── cards.py
+    ├── catalog.py
+    ├── format.py
+    ├── funding_workflow.py
+    ├── funding_workflow_delivery.py
+    └── lifecycle.py
 ```
 
 Requirements:
@@ -1392,6 +1411,22 @@ Requirements:
   dry-run mode, change risk limits, resume paused execution, or release a kill
   switch. Recovery may run only its fixed snapshot/fill/reconciliation
   preflight and cannot bypass ordinary live gates.
+- Project authoritative monthly funding workflow events (`funding_workflow_head`
+  and system events) into user-facing card stages via `ui/funding_workflow.py`
+  without persisting workflow or financial truth in UI state.
+- Bind actionable funding and budget inline buttons to immutable `request_id`
+  references for financial callbacks, keeping card identity workflow-scoped
+  (`funding_workflow:<scope_key>`).
+- Enforce predecessor admission on budget decision callbacks: require predecessor
+  completion evidence (`funding_claim_completed` or equivalent) before entering
+  budget state transitions.
+- Reuse existing card-state persistence tables (`telegram_ui_card_state`,
+  `telegram_ui_card_audience`, and `telegram_ui_card_event`) with
+  `card_delivery_version=1`, adopting legacy request cards by strict provenance
+  precedence without adding new monthly card tables.
+- Route all card delivery and immediate sync through `ui/funding_workflow_delivery.py`
+  under single Telegram Operator ownership, enforcing strict non-resend on unknown
+  delivery and per-chat independence.
 
 ## 16. KIS Adapter Future Design
 

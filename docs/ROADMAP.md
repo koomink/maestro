@@ -602,14 +602,23 @@ Delivered:
   cards while a send interrupted partway still finishes; a third table
   (`telegram_ui_settled_run`) records signal runs whose cards are finished so
   the poll sweep's cost tracks open approvals rather than operating days.
-- Stages 3a-1 and 3a-2 (consistency groundwork, taken out of order after
-  production incidents): two-phase approval persistence and
-  `save_system_events_atomic`.
+- Stages 3a-1 through 3a-5 (authoritative funding workflow consistency groundwork,
+  head CAS, claim fencing, child run lineage, upgrade backfill, and rollback preflight):
+  two-phase approval persistence, `save_system_events_atomic`, workflow head CAS,
+  and safe upgrade/rollback migration tooling.
+- Stage 3b (monthly funding workflow cards): workflow-scoped lifecycle-managed
+  Korean cards for contribution funding and budget requests, authoritative event
+  projection, legacy card adoption, strict unknown non-resend policy, Telegram Operator
+  single delivery ownership, and retirement of CLI card senders.
 
-Remaining: 3a-3 through 3a-5, the monthly funding card (3b), the exception
-wizard (4), and the lookup cards plus removal of the legacy notification paths
-(5). The legacy per-order notifications run **in parallel** with cards until
-stage 5, by design.
+> Note: Status reflects completed GitHub codebase engineering in this repository.
+> It does not assert that production VPS deployment, systemd updates, or VPS live DB
+> migration have been completed. Operational migration and verification remain
+> separate runtime procedures (see `docs/rollback_and_upgrade_3a.md`).
+
+Remaining: exception wizard and batch execution card UX (4b), and lookup cards plus
+removal of the legacy notification paths (5). The legacy per-order notifications run
+**in parallel** with cards until stage 5, by design.
 
 ## Post-v1.1 — KIS Performance Tracking & Analytics Dashboard
 
