@@ -264,24 +264,39 @@ def _claims_and_completions(
     return claims, completions
 
 
-def project_funding_workflow_card(
-    store: StateStore,
-    workflow_id: str,
-) -> FundingWorkflowCardModel:
-    """Project authoritative durable events for a workflow into an ephemeral card model."""
+def _parse_card_delivery_version(raw: Any) -> int:
+    if raw is None:
+        return 0
+    if type(raw) is int and raw in (0, 1):
+        return raw
+    raise ValueError(f"invalid card_delivery_version: {raw!r}")
+
+
+def _parse_claim_intent(raw_intent: Any) -> Literal["confirm", "cancel"]:
+    if raw_intent is None:
+        return "confirm"
+    if raw_intent == "confirm":
+        return "confirm"
+    if raw_intent == "cancel":
+        return "cancel"
+    raise ValueError(f"invalid claim intent: {raw_intent!r}")
+
+
+def project_funding_workflow_card(store: StateStore, workflow_id: str) -> FundingWorkflowCardModel:
+    """Project the current truthful state of a funding workflow card."""
     head = store.load_funding_workflow_head(workflow_id)
     if head is None:
-        raise ValueError(f"workflow {workflow_id} has no head")
+        raise ValueError(f"funding workflow head not found for {workflow_id}")
 
     request_id = str(head.get("request_id") or "")
-    phase_raw = head.get("phase")
-    if not request_id or phase_raw not in ("funding", "budget"):
-        raise ValueError(f"head for workflow {workflow_id} is missing request_id or valid phase")
-    phase: FundingWorkflowPhase = "budget" if phase_raw == "budget" else "funding"
+    phase_raw = str(head.get("phase") or "")
+    if phase_raw not in ("funding", "budget"):
+        raise ValueError(f"invalid workflow head phase {phase_raw}")
+    phase: FundingWorkflowPhase = phase_raw  # type: ignore[assignment]
 
     scope_raw = head.get("scope")
-    if scope_raw is None or not isinstance(scope_raw, (list, tuple)) or len(scope_raw) != 4:
-        raise ValueError(f"head for workflow {workflow_id} has invalid scope")
+    if not isinstance(scope_raw, (list, tuple)) or len(scope_raw) != 4:
+        raise ValueError(f"invalid workflow head scope {scope_raw}")
     scope = (scope_raw[0], scope_raw[1], scope_raw[2], scope_raw[3])
 
     if not workflow_id.startswith(scope_prefix(scope)):
@@ -295,7 +310,9 @@ def project_funding_workflow_card(
     if not month_key:
         raise ValueError(f"request payload {request_id} missing month_key")
 
-    card_delivery_version = int(request_payload.get("card_delivery_version") or 0)
+    card_delivery_version = _parse_card_delivery_version(
+        request_payload.get("card_delivery_version")
+    )
 
     lineage = _lineage(store, workflow_id, request_id)
     predecessor_request_id, predecessor_completed = _required_funding_predecessor(
@@ -308,11 +325,11 @@ def project_funding_workflow_card(
 
     if active_completion is not None:
         comp_attempt = int(active_completion.get("attempt") or 0)
+        if comp_attempt not in claims:
+            raise ValueError(f"completed attempt {comp_attempt} has no matching claim")
         completed_claim = claims[comp_attempt]
         raw_intent = completed_claim.get("intent")
-        terminal_intent: Literal["confirm", "cancel"] | None = (
-            "cancel" if raw_intent == "cancel" else "confirm"
-        )
+        terminal_intent = _parse_claim_intent(raw_intent)
         raw_budget = completed_claim.get("selected_budget")
         selected_budget = float(raw_budget) if raw_budget is not None else None
         financial_actions_allowed = False
@@ -326,7 +343,7 @@ def project_funding_workflow_card(
 
     elif active_claim is not None:
         raw_intent = active_claim.get("intent")
-        terminal_intent = "cancel" if raw_intent == "cancel" else "confirm"
+        terminal_intent = _parse_claim_intent(raw_intent)
         raw_budget = active_claim.get("selected_budget")
         selected_budget = float(raw_budget) if raw_budget is not None else None
         financial_actions_allowed = False

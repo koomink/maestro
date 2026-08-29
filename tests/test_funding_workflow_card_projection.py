@@ -15,6 +15,7 @@ from maestro.integrations.telegram.ui.funding_workflow import (
     recovery_owned_incomplete_attempts,
 )
 from maestro.state.funding_workflow import (
+    claim_key,
     claim_workflow_attempt,
     complete_workflow,
     completed_key,
@@ -693,4 +694,145 @@ def test_corrupt_terminal_state_without_claim_raises(store: StateStore):
     )
 
     with pytest.raises(ValueError, match="completed attempt 1 has no matching claim"):
+        project_funding_workflow_card(store, wf_id)
+
+
+@pytest.mark.parametrize(
+    ("raw_version", "expected_version"),
+    [
+        (None, 0),
+        (0, 0),
+        (1, 1),
+    ],
+)
+def test_card_delivery_version_valid_provenance(
+    store: StateStore, raw_version: Any, expected_version: int
+):
+    req = _funding_req("req-1", card_delivery_version=raw_version)
+    res = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = res["workflow_id"]
+
+    model = project_funding_workflow_card(store, wf_id)
+    assert model.card_delivery_version == expected_version
+
+
+@pytest.mark.parametrize(
+    "malformed_version",
+    [
+        "1",
+        "0",
+        True,
+        False,
+        1.0,
+        1.5,
+        2,
+        -1,
+        {"nested": "value"},
+        [1],
+    ],
+)
+def test_card_delivery_version_malformed_provenance_rejected(
+    store: StateStore, malformed_version: Any
+):
+    req = _funding_req("req-1", card_delivery_version=None)
+    # Save system event directly to simulate schema-less raw payload
+    req["card_delivery_version"] = malformed_version
+    res = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = res["workflow_id"]
+
+    with pytest.raises(ValueError, match="invalid card_delivery_version"):
+        project_funding_workflow_card(store, wf_id)
+
+
+def test_claim_intent_legacy_missing_is_confirm(store: StateStore):
+    req = _funding_req("req-1")
+    res = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = res["workflow_id"]
+
+    # Claim without "intent" field in payload (legacy pre-intent claim)
+    store.save_system_event(
+        "run-claim",
+        "funding_workflow_claim",
+        {
+            "duplicate_key": claim_key(wf_id, "funding", "req-1", 1),
+            "workflow_id": wf_id,
+            "request_id": "req-1",
+            "phase": "funding",
+            "attempt": 1,
+            "head_version": 1,
+        },
+    )
+
+    model = project_funding_workflow_card(store, wf_id)
+    assert model.stage == "funding_confirming"
+    assert model.terminal_intent == "confirm"
+
+    # Now complete it
+    complete_workflow(
+        store,
+        "run-complete",
+        workflow_id=wf_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+    model_completed = project_funding_workflow_card(store, wf_id)
+    assert model_completed.stage == "funding_completed"
+    assert model_completed.terminal_intent == "confirm"
+
+
+@pytest.mark.parametrize("malformed_intent", ["sideways", 123, True, False, ""])
+def test_claim_intent_malformed_active_rejected(store: StateStore, malformed_intent: Any):
+    req = _funding_req("req-1")
+    res = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = res["workflow_id"]
+
+    store.save_system_event(
+        "run-claim",
+        "funding_workflow_claim",
+        {
+            "duplicate_key": claim_key(wf_id, "funding", "req-1", 1),
+            "workflow_id": wf_id,
+            "request_id": "req-1",
+            "phase": "funding",
+            "attempt": 1,
+            "head_version": 1,
+            "intent": malformed_intent,
+        },
+    )
+
+    with pytest.raises(ValueError, match="invalid claim intent"):
+        project_funding_workflow_card(store, wf_id)
+
+
+def test_claim_intent_malformed_completed_rejected(store: StateStore):
+    req = _funding_req("req-1")
+    res = publish_contribution_request(store, "run-1", req, phase="funding")
+    wf_id = res["workflow_id"]
+
+    store.save_system_event(
+        "run-claim",
+        "funding_workflow_claim",
+        {
+            "duplicate_key": claim_key(wf_id, "funding", "req-1", 1),
+            "workflow_id": wf_id,
+            "request_id": "req-1",
+            "phase": "funding",
+            "attempt": 1,
+            "head_version": 1,
+            "intent": "sideways",
+        },
+    )
+    complete_workflow(
+        store,
+        "run-complete",
+        workflow_id=wf_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-1", "status": "confirmed"},
+    )
+
+    with pytest.raises(ValueError, match="invalid claim intent"):
         project_funding_workflow_card(store, wf_id)

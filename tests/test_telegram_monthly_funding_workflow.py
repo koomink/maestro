@@ -467,6 +467,87 @@ def test_sweep_isolates_malformed_workflow_and_logs_failure(tmp_path: Path) -> N
     assert "ValueError" in [e["payload"].get("error_type") for e in error_events]
 
 
+def test_sweep_isolates_malformed_card_delivery_version_and_sends_nothing(tmp_path: Path) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
+
+    # 1. One valid workflow
+    req_valid = _funding_req("req-valid", month_key="2026-08", card_delivery_version=1)
+    pub_valid = publish_contribution_request(store, "run-valid", req_valid, phase="funding")
+    wf_valid = pub_valid["workflow_id"]
+
+    # 2. One malformed card_delivery_version workflow in a distinct month/workflow
+    req_malformed = _budget_req("req-malformed", month_key="2026-09", card_delivery_version=0)
+    req_malformed["card_delivery_version"] = "1"  # string "1" is malformed provenance
+    pub_malformed = publish_contribution_request(
+        store, "run-malformed", req_malformed, phase="budget"
+    )
+    wf_malformed = pub_malformed["workflow_id"]
+
+    router._sweep_funding_workflow_cards()
+
+    # Valid workflow card was still processed and delivered
+    valid_card_key = funding_workflow_card_key(wf_valid)
+    assert set(store.load_card_audience(valid_card_key)) == {100, 200}
+    assert len(client.sent) == 2
+
+    # Malformed workflow has NO audience, NO card events, NO client send
+    malformed_card_key = funding_workflow_card_key(wf_malformed)
+    assert store.load_card_audience(malformed_card_key) == []
+    assert store.load_card_delivery_state(malformed_card_key) == []
+
+    # Error logged for malformed workflow
+    error_events = [
+        e
+        for e in store.list_system_events_by_type("telegram_command", limit=None)
+        if e["payload"].get("status") == "error"
+    ]
+    assert any("ValueError" == e["payload"].get("error_type") for e in error_events)
+
+
+def test_sweep_isolates_malformed_claim_intent_and_sends_nothing(tmp_path: Path) -> None:
+    from maestro.state.funding_workflow import claim_key
+
+    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
+
+    # 1. One valid workflow
+    req_valid = _funding_req("req-valid", month_key="2026-08", card_delivery_version=1)
+    pub_valid = publish_contribution_request(store, "run-valid", req_valid, phase="funding")
+    wf_valid = pub_valid["workflow_id"]
+
+    # 2. One malformed intent claim workflow in a distinct month/workflow
+    req_malformed = _funding_req("req-bad-intent", month_key="2026-09", card_delivery_version=1)
+    pub_malformed = publish_contribution_request(
+        store, "run-bad-intent", req_malformed, phase="funding"
+    )
+    wf_malformed = pub_malformed["workflow_id"]
+
+    store.save_system_event(
+        "run-claim-bad",
+        "funding_workflow_claim",
+        {
+            "duplicate_key": claim_key(wf_malformed, "funding", "req-bad-intent", 1),
+            "workflow_id": wf_malformed,
+            "request_id": "req-bad-intent",
+            "phase": "funding",
+            "attempt": 1,
+            "head_version": 1,
+            "intent": "sideways",
+        },
+    )
+
+    router._sweep_funding_workflow_cards()
+
+    # Valid workflow card was still processed and delivered
+    valid_card_key = funding_workflow_card_key(wf_valid)
+    assert set(store.load_card_audience(valid_card_key)) == {100, 200}
+    assert len(client.sent) == 2
+
+    # Malformed workflow has NO audience, NO card events, NO client send
+    malformed_card_key = funding_workflow_card_key(wf_malformed)
+    assert store.load_card_audience(malformed_card_key) == []
+    assert store.load_card_delivery_state(malformed_card_key) == []
+
+
 @pytest.mark.parametrize(
     ("req_factory", "phase"),
     [
