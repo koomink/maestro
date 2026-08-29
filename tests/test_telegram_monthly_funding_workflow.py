@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -14,12 +15,14 @@ from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.integrations.telegram.ui.card_state import (
     card_failure_event,
+    card_intent_event,
     card_result_event,
 )
 from maestro.integrations.telegram.ui.funding_workflow import (
     funding_workflow_card_key,
 )
 from maestro.monitoring.audit_logger import AuditLogger
+from maestro.orchestration.orchestrator import SignalRunSummary
 from maestro.state import migration_state as ms
 from maestro.state.funding_workflow import (
     claim_workflow_attempt,
@@ -47,13 +50,21 @@ def _telegram_config_path(tmp_path: Path, *, chat_ids: tuple[int, ...] = (100, 2
 
 
 class FakeTelegramClient:
-    def __init__(self, *, reject_for: set[int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        reject_for: set[int] | None = None,
+        timeout_for: set[int] | None = None,
+    ) -> None:
         self.sent: list[dict[str, Any]] = []
         self.edited: list[dict[str, Any]] = []
         self.reject_for = reject_for or set()
+        self.timeout_for = timeout_for or set()
         self.next_message_id = 5000
 
     def send_message(self, chat_id: int, text: str, reply_markup: Any = None) -> dict[str, Any]:
+        if chat_id in self.timeout_for:
+            raise TimeoutError(f"telegram timeout chat {chat_id}")
         if chat_id in self.reject_for:
             raise TelegramApiRejected(f"telegram refused chat {chat_id}")
         self.next_message_id += 1
@@ -63,6 +74,8 @@ class FakeTelegramClient:
     def edit_message_text(
         self, chat_id: int, message_id: int, text: str, reply_markup: Any = None
     ) -> dict[str, Any]:
+        if chat_id in self.timeout_for:
+            raise TimeoutError(f"telegram timeout edit in chat {chat_id}")
         if chat_id in self.reject_for:
             raise TelegramApiRejected(f"telegram refused edit in chat {chat_id}")
         self.edited.append(
@@ -471,3 +484,417 @@ def test_poll_once_does_not_call_funding_workflow_sweep_yet(
     router.poll_once()
 
     assert called == []
+
+
+# ---------------------------------------------------------------------------
+# Step 4 (Task 8 Step 1): Request-to-workflow immediate refresh seam tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("req_factory", "phase"),
+    [
+        (_funding_req, "funding"),
+        (_budget_req, "budget"),
+    ],
+)
+def test_refresh_request_workflow_card_delegates_to_refresh_funding_workflow_card(
+    tmp_path: Path,
+    req_factory: Any,
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
+    req = req_factory("req-1", card_delivery_version=1)
+    publish_contribution_request(store, "run-pub", req, phase=phase)
+
+    expected_wf_id = workflow_id_from_request(req)
+    spy_calls: list[str] = []
+    orig_refresh = router._refresh_funding_workflow_card
+
+    def spy_refresh(wf_id: str):
+        spy_calls.append(wf_id)
+        return orig_refresh(wf_id)
+
+    monkeypatch.setattr(router, "_refresh_funding_workflow_card", spy_refresh)
+
+    result = router._refresh_request_workflow_card(req)
+
+    assert spy_calls == [expected_wf_id]
+    assert result.card_key == funding_workflow_card_key(expected_wf_id)
+    assert result.outcome_for(100) == "sent"
+    assert result.outcome_for(200) == "sent"
+
+
+def test_no_production_runtime_path_calls_refresh_request_workflow_card_yet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
+
+    called_requests: list[Mapping[str, Any]] = []
+    if hasattr(router, "_refresh_request_workflow_card"):
+        orig = router._refresh_request_workflow_card
+
+        def spy(req: Mapping[str, Any]):
+            called_requests.append(req)
+            return orig(req)
+
+        monkeypatch.setattr(router, "_refresh_request_workflow_card", spy)
+    else:
+
+        def fail_helper(req: Mapping[str, Any]):
+            called_requests.append(req)
+            return getattr(router, "_refresh_funding_workflow_card")(
+                workflow_id_from_request(req)
+            )
+
+        monkeypatch.setattr(
+            router, "_refresh_request_workflow_card", fail_helper, raising=False
+        )
+
+    # 1. poll_once
+    router.poll_once()
+    assert called_requests == []
+
+    # 2. Funding callback path
+    req_f = _funding_req("req-f", card_delivery_version=1)
+    publish_contribution_request(store, "run-f", req_f, phase="funding")
+    cb_f = {
+        "id": "cb-f",
+        "data": "funding:cancel:req-f",
+        "message": {"chat": {"id": 100}, "message_id": 10},
+        "from": {"id": 100, "username": "operator"},
+    }
+    router._process_funding_callback(cb_f, "funding:cancel:req-f", 100, 100, "operator")
+    assert called_requests == []
+
+    # 3. Budget callback path
+    req_b = _budget_req("req-b", card_delivery_version=1)
+    publish_contribution_request(store, "run-b", req_b, phase="budget")
+    cb_b = {
+        "id": "cb-b",
+        "data": "budget:cancel:req-b",
+        "message": {"chat": {"id": 100}, "message_id": 10},
+        "from": {"id": 100, "username": "operator"},
+    }
+    router._process_budget_callback(cb_b, "budget:cancel:req-b", 100, 100, "operator")
+    assert called_requests == []
+
+    # 4. /budget command path
+    req_b2 = _budget_req("req-b2", card_delivery_version=1)
+    publish_contribution_request(store, "run-b2", req_b2, phase="budget")
+    router._process_budget_command("/budget req-b2 400000", 100, 100, "operator")
+    assert called_requests == []
+
+    # 5. Child handoff path
+    dummy_summary = SignalRunSummary(
+        signal_run_id="sig-dummy",
+        loaded_strategies=["tranquillo"],
+        action_required=False,
+        orders_preview_count=0,
+    )
+    router._deliver_child_signal_outcome(100, dummy_summary)
+    assert called_requests == []
+
+
+# ---------------------------------------------------------------------------
+# Step 5 (Task 8 Step 2): Direct-seam migration fence tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("marker_type", ["MIGRATING", "INVALID"])
+def test_request_workflow_card_refresh_blocked_when_migrating_or_invalid(
+    tmp_path: Path, marker_type: str
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
+
+    # Persist financial completion and head state
+    req_f = _funding_req("req-f", card_delivery_version=1)
+    pub_f = publish_contribution_request(store, "run-f", req_f, phase="funding")
+    wf_id = pub_f["workflow_id"]
+
+    claim_res = claim_workflow_attempt(
+        store,
+        "run-claim",
+        workflow_id=wf_id,
+        request_id="req-f",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+    assert claim_res["claimed"]
+
+    complete_res = complete_workflow(
+        store,
+        "run-comp",
+        workflow_id=wf_id,
+        request_id="req-f",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-f", "status": "acknowledged"},
+    )
+    assert complete_res["committed"]
+
+    req_b = _budget_req("req-b", card_delivery_version=1)
+    pub_b = publish_contribution_request(
+        store,
+        "run-b",
+        req_b,
+        phase="budget",
+        successor_of_request_id="req-f",
+        successor_of_phase="funding",
+    )
+    assert pub_b["committed"]
+
+    head_before = store.load_funding_workflow_head(wf_id)
+    assert head_before is not None
+    assert head_before["request_id"] == "req-b"
+    assert head_before["phase"] == "budget"
+
+    # Set migration state to MIGRATING or INVALID
+    if marker_type == "MIGRATING":
+        _start_migration(store)
+    else:
+        _make_invalid_migration(store)
+
+    events_before = _event_count(store)
+    target_card_key = funding_workflow_card_key(wf_id)
+
+    # Call _refresh_request_workflow_card directly
+    res = router._refresh_request_workflow_card(req_b)
+
+    # Assert blocked outcome
+    assert res.outcome_for(100) == "blocked"
+    assert res.outcome_for(200) == "blocked"
+    assert client.sent == []
+    assert client.edited == []
+
+    # Durable financial truth preserved and no card events / audience recorded
+    head_after = store.load_funding_workflow_head(wf_id)
+    assert head_after == head_before
+    assert _event_count(store) == events_before
+    assert store.load_card_audience(target_card_key) == []
+    assert store.load_card_delivery_state(target_card_key) == []
+
+
+# ---------------------------------------------------------------------------
+# Step 6 (Task 8 Step 3): Ambiguity and crash-boundary integration tests
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_request_workflow_card_unknown_current_request_with_confirmed_predecessor(
+    tmp_path: Path,
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100,))
+
+    # 1. Predecessor funding request A confirmed
+    req_a = _funding_req("req-a", card_delivery_version=1)
+    pub_a = publish_contribution_request(store, "run-a", req_a, phase="funding")
+    wf_id = pub_a["workflow_id"]
+
+    store.record_card_event(
+        "run-0",
+        card_intent_event("funding-request:req-a", 100, "pending", "hash-a", "op-a"),
+    )
+    store.record_card_event(
+        "run-0",
+        card_result_event(
+            "funding-request:req-a", 100, "pending", "hash-a", "op-a", message_id=4001
+        ),
+    )
+
+    claim_res = claim_workflow_attempt(
+        store,
+        "run-claim",
+        workflow_id=wf_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+    assert claim_res["claimed"]
+
+    complete_res = complete_workflow(
+        store,
+        "run-comp",
+        workflow_id=wf_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-a", "status": "acknowledged"},
+    )
+    assert complete_res["committed"]
+
+    # 2. Current budget request B has intent only (unknown delivery)
+    req_b = _budget_req("req-b", card_delivery_version=1)
+    pub_b = publish_contribution_request(
+        store,
+        "run-b",
+        req_b,
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
+    assert pub_b["committed"]
+
+    store.record_card_event(
+        "run-1",
+        card_intent_event("budget-request:req-b", 100, "budget_pending", "hash-b", "op-b"),
+    )
+
+    # 3. Direct seam invocation
+    res = router._refresh_request_workflow_card(req_b)
+
+    # Adopts current unknown dominance -> outcome unknown, no edit to predecessor 4001, ambiguity notice sent
+    assert res.outcome_for(100) == "unknown"
+    assert len(client.edited) == 0
+    assert len(client.sent) == 1
+    assert client.sent[0]["chat_id"] == 100
+    assert "⚠️" in client.sent[0]["text"]
+
+    target_card_key = funding_workflow_card_key(wf_id)
+    delivery_states = store.load_card_delivery_state(target_card_key)
+    assert len(delivery_states) == 1
+    assert delivery_states[0]["delivery"] == "unknown"
+
+
+def test_refresh_request_workflow_card_generic_edit_rejection(tmp_path: Path) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100,))
+
+    # 1. Publish funding request A and deliver card
+    req_a = _funding_req("req-a", card_delivery_version=1)
+    pub_a = publish_contribution_request(store, "run-a", req_a, phase="funding")
+    wf_id = pub_a["workflow_id"]
+
+    res_a = router._refresh_request_workflow_card(req_a)
+    assert res_a.outcome_for(100) == "sent"
+    assert len(client.sent) == 1
+
+    # 2. Transition: complete funding A, publish budget B
+    claim_res = claim_workflow_attempt(
+        store,
+        "run-claim",
+        workflow_id=wf_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+    assert claim_res["claimed"]
+
+    complete_res = complete_workflow(
+        store,
+        "run-comp",
+        workflow_id=wf_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-a", "status": "acknowledged"},
+    )
+    assert complete_res["committed"]
+
+    req_b = _budget_req("req-b", card_delivery_version=1)
+    pub_b = publish_contribution_request(
+        store,
+        "run-b",
+        req_b,
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
+    assert pub_b["committed"]
+
+    # 3. Telegram rejects edit in chat 100
+    client.reject_for.add(100)
+
+    res_b = router._refresh_request_workflow_card(req_b)
+    assert res_b.outcome_for(100) == "failed"
+    assert len(client.edited) == 0
+
+    target_card_key = funding_workflow_card_key(wf_id)
+    delivery_states = store.load_card_delivery_state(target_card_key)
+    assert len(delivery_states) == 1
+    assert delivery_states[0]["delivery"] == "failed"
+
+
+def test_refresh_request_workflow_card_edit_timeout_preserves_durable_financial_truth_and_subsequent_sweep_does_not_resend(
+    tmp_path: Path,
+) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100,))
+
+    # 1. Publish funding request A and deliver card
+    req_a = _funding_req("req-a", card_delivery_version=1)
+    pub_a = publish_contribution_request(store, "run-a", req_a, phase="funding")
+    wf_id = pub_a["workflow_id"]
+
+    res_a = router._refresh_request_workflow_card(req_a)
+    assert res_a.outcome_for(100) == "sent"
+    assert len(client.sent) == 1
+
+    # 2. Transition: complete funding A, publish budget B
+    claim_res = claim_workflow_attempt(
+        store,
+        "run-claim",
+        workflow_id=wf_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+    assert claim_res["claimed"]
+
+    complete_res = complete_workflow(
+        store,
+        "run-comp",
+        workflow_id=wf_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-a", "status": "acknowledged"},
+    )
+    assert complete_res["committed"]
+
+    req_b = _budget_req("req-b", card_delivery_version=1)
+    pub_b = publish_contribution_request(
+        store,
+        "run-b",
+        req_b,
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
+    assert pub_b["committed"]
+
+    head_before = store.load_funding_workflow_head(wf_id)
+    assert head_before is not None
+    assert head_before["phase"] == "budget"
+    assert head_before["request_id"] == "req-b"
+
+    # 3. Telegram edit times out in chat 100
+    client.timeout_for.add(100)
+
+    res_b = router._refresh_request_workflow_card(req_b)
+    assert res_b.outcome_for(100) == "unknown"
+
+    # 4. Assert durable financial truth is preserved
+    head_after = store.load_funding_workflow_head(wf_id)
+    assert head_after == head_before
+    target_card_key = funding_workflow_card_key(wf_id)
+    delivery_states = store.load_card_delivery_state(target_card_key)
+    assert len(delivery_states) == 1
+    assert delivery_states[0]["delivery"] == "unknown"
+
+    # 5. Subsequent directly invoked sweep does NOT resend replacement card
+    client.timeout_for.clear()
+    sent_count_before_sweep = len(client.sent)
+    edited_count_before_sweep = len(client.edited)
+
+    router._sweep_funding_workflow_cards()
+
+    assert len(client.edited) == edited_count_before_sweep
+    # Sweep sends at most an ambiguity notice if not already present, but never a replacement card
+    assert not any("신규" in s.get("text", "") for s in client.sent[sent_count_before_sweep:])
+
+    # Head and financial truth remain untouched
+    assert store.load_funding_workflow_head(wf_id) == head_before

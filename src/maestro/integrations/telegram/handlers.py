@@ -2697,6 +2697,12 @@ class TelegramOperatorCommandRouter:
         model = project_funding_workflow_card(self.store, workflow_id)
         return self._funding_delivery.sync(new_run_id(), model)
 
+    def _refresh_request_workflow_card(
+        self,
+        request: Mapping[str, Any],
+    ) -> FundingWorkflowCardSyncResult:
+        return self._refresh_funding_workflow_card(workflow_id_from_request(request))
+
     def _sweep_funding_workflow_cards(self) -> None:
         """Sweep and refresh all known funding workflow cards.
 
