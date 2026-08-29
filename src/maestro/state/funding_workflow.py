@@ -503,11 +503,6 @@ def require_completed_predecessor(
 ) -> None:
     """Fail closed before claim when a legitimate successor's predecessor is incomplete."""
     _require_phase(phase)
-    head = store.load_funding_workflow_head(workflow_id)
-    if head is None:
-        raise WorkflowClaimRefused("no_head")
-    if str(head.get("request_id") or "") != request_id:
-        raise WorkflowClaimRefused("not_head")
     if phase != "budget":
         return
 

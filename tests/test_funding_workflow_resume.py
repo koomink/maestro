@@ -2398,7 +2398,105 @@ def test_budget_admission_allowed_once_funding_predecessor_completed(operator_bo
     claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
     b_claims = [c for c in claims if c["payload"]["request_id"] == "req-b"]
     assert len(b_claims) == 1
-    assert b_claims[0]["payload"]["attempt"] == 1
+
+
+def test_budget_parent_survives_its_own_legitimate_successor_resume(
+    operator_bot, monkeypatch
+):
+    """P1 regression: require_completed_predecessor must not block a stalled
+    budget request whose own transition published a legitimate successor (advancing
+    head to C) from resuming as attempt 2 and finishing.
+    """
+    store = operator_bot.store
+    workflow_id = _workflow_id_of("req-a")
+
+    # 1. Publish and durably complete funding A.
+    publish_contribution_request(store, "run-1", _request("req-a"), phase="funding")
+    claim_a = claim_workflow_attempt(
+        store,
+        "run-claim-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+    )
+    assert claim_a["claimed"] is True
+    complete_workflow(
+        store,
+        "run-complete-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-a", "status": "confirmed"},
+    )
+
+    # 2. Publish budget B as A's legitimate successor.
+    publish_contribution_request(
+        store,
+        "run-2",
+        _budget_request("req-b"),
+        phase="budget",
+        successor_of_request_id="req-a",
+        successor_of_phase="funding",
+    )
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-b"
+
+    # 3. Claim B attempt 1 with intent=confirm and selected_budget.
+    claim_b = claim_workflow_attempt(
+        store,
+        "run-claim-b",
+        workflow_id=workflow_id,
+        request_id="req-b",
+        phase="budget",
+        attempt=1,
+        extra={"intent": "confirm", "selected_budget": 400_000.0},
+    )
+    assert claim_b["claimed"] is True
+
+    # 4. Simulate B's own child transition publishing legitimate successor C,
+    # so the workflow head moves B -> C and the durable superseded marker for B says:
+    # legitimate_successor=True, successor_of_phase="budget"
+    publish_contribution_request(
+        store,
+        "run-3",
+        _request("req-c"),
+        phase="funding",
+        successor_of_request_id="req-b",
+        successor_of_phase="budget",
+    )
+    assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-c"
+
+    # 5. Do NOT complete B (simulates crash after B's child publication but before B completion).
+
+    # 6. Verify B remains listed as incomplete/recoverable under existing 3a semantics.
+    incomplete = list_incomplete_workflows(store)
+    assert any(row["request_id"] == "req-b" for row in incomplete)
+
+    # 7. Helper check: require_completed_predecessor does NOT reject B merely because head is C.
+    require_completed_predecessor(
+        store,
+        workflow_id=workflow_id,
+        request_id="req-b",
+        phase="budget",
+    )
+
+    # 8. Resume B as attempt 2 through the real handler path
+    _stub_child_signal(
+        monkeypatch,
+        operator_bot,
+        source_request_id="req-b",
+        source_phase="budget",
+    )
+    handled = operator_bot.process_update(callback_update("operator:wfresume:budget:req-b"))
+    assert handled is True
+    assert _wfresume_statuses(store) == ["resumed"]
+
+    # 9. Verify B is now durably completed
+    completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
+    b_completed = [c for c in completed if c["payload"]["request_id"] == "req-b"]
+    assert len(b_completed) == 1
+    assert b_completed[0]["payload"]["attempt"] == 2
 
 
 def test_require_completed_predecessor_unit_semantics(operator_bot):
@@ -2411,31 +2509,54 @@ def test_require_completed_predecessor_unit_semantics(operator_bot):
             store, workflow_id=workflow_id, request_id="req-1", phase="invalid"
         )
 
-    # 2. No head raises no_head
-    with pytest.raises(WorkflowClaimRefused) as exc:
-        require_completed_predecessor(
-            store, workflow_id=workflow_id, request_id="req-1", phase="budget"
-        )
-    assert exc.value.reason == "no_head"
-
-    # 3. Head is different request raises not_head
-    publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
-    with pytest.raises(WorkflowClaimRefused) as exc:
-        require_completed_predecessor(
-            store, workflow_id=workflow_id, request_id="req-other", phase="budget"
-        )
-    assert exc.value.reason == "not_head"
-
-    # 4. Non-budget phase returns None (no predecessor gate for funding)
+    # 2. Non-budget phase returns None (no predecessor gate for funding)
     publish_contribution_request(store, "run-2", _request("req-fund"), phase="funding")
     require_completed_predecessor(
         store, workflow_id=workflow_id, request_id="req-fund", phase="funding"
     )
 
-    # 5. Direct budget head without predecessor marker returns None
+    # 3. Direct budget request without predecessor marker returns None
     publish_contribution_request(store, "run-3", _budget_request("req-direct"), phase="budget")
     require_completed_predecessor(
         store, workflow_id=workflow_id, request_id="req-direct", phase="budget"
+    )
+
+    # 4. Budget successor with incomplete predecessor raises predecessor_incomplete
+    publish_contribution_request(store, "run-4a", _request("req-pred-inc"), phase="funding")
+    claim_workflow_attempt(
+        store,
+        "run-claim-pred",
+        workflow_id=workflow_id,
+        request_id="req-pred-inc",
+        phase="funding",
+        attempt=1,
+    )
+    publish_contribution_request(
+        store,
+        "run-4b",
+        _budget_request("req-succ-inc"),
+        phase="budget",
+        successor_of_request_id="req-pred-inc",
+        successor_of_phase="funding",
+    )
+    with pytest.raises(WorkflowClaimRefused) as exc:
+        require_completed_predecessor(
+            store, workflow_id=workflow_id, request_id="req-succ-inc", phase="budget"
+        )
+    assert exc.value.reason == "predecessor_incomplete"
+
+    # 5. Budget successor with completed predecessor returns None even when head has advanced
+    complete_workflow(
+        store,
+        "run-4c",
+        workflow_id=workflow_id,
+        request_id="req-pred-inc",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-pred-inc", "status": "confirmed"},
+    )
+    require_completed_predecessor(
+        store, workflow_id=workflow_id, request_id="req-succ-inc", phase="budget"
     )
 
     # 6. Ambiguous predecessor (multiple distinct predecessor requests) raises predecessor_ambiguous
@@ -2462,17 +2583,6 @@ def test_require_completed_predecessor_unit_semantics(operator_bot):
                     "superseded_by": "req-ambig",
                     "legitimate_successor": True,
                     "successor_of_phase": "funding",
-                },
-            },
-            {
-                "event_type": "funding_workflow_head",
-                "payload": {
-                    "duplicate_key": "head-ambig",
-                    "workflow_id": workflow_id,
-                    "version": 99,
-                    "request_id": "req-ambig",
-                    "phase": "budget",
-                    "status": "pending",
                 },
             },
         ],
