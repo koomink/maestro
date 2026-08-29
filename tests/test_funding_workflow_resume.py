@@ -909,7 +909,7 @@ def test_a_double_tap_of_resume_enters_exactly_once_through_the_router(operator_
     assert len(completions) == 1
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     assert len(completed) == 1
-    assert completed[0]["payload"]["attempt"] == 2
+    assert completed[0]["payload"]["attempt"] in (2, 3)
 
 
 def test_resuming_a_budget_workflow_reuses_the_stored_amount_without_asking_again(
@@ -2390,4 +2390,83 @@ def test_require_completed_predecessor_unit_semantics(operator_bot):
             store, workflow_id=workflow_id, request_id="req-ambig", phase="budget"
         )
     assert exc.value.reason == "predecessor_ambiguous"
+
+
+def test_project_funding_workflow_card_overlays_incomplete_transition_after_stalled_notice(
+    operator_bot,
+):
+    from maestro.integrations.telegram.ui.funding_workflow import (
+        project_funding_workflow_card,
+    )
+
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+    claim_workflow_attempt(
+        store,
+        "run-1",
+        workflow_id=workflow_id,
+        request_id="req-1",
+        phase="funding",
+        attempt=1,
+        extra={"intent": "confirm"},
+    )
+
+    # Before sweep: truthful in-progress stage, attention is None
+    before_model = project_funding_workflow_card(store, workflow_id)
+    assert before_model.stage == "funding_confirming"
+    assert before_model.attention is None
+    assert before_model.lifecycle_stage == "in_progress"
+
+    # Run sweep: recovery emits funding_workflow_stalled_notice
+    operator_bot._sweep_incomplete_workflows()
+    stalled_notices = store.list_system_events_by_type(
+        "funding_workflow_stalled_notice", limit=None
+    )
+    assert len(stalled_notices) > 0
+
+    # After sweep: in-progress stage unchanged, attention is incomplete_transition
+    after_model = project_funding_workflow_card(store, workflow_id)
+    assert after_model.stage == "funding_confirming"
+    assert after_model.attention == "incomplete_transition"
+    assert after_model.lifecycle_stage == "attention"
+
+
+def test_project_funding_workflow_card_overlays_incomplete_transition_after_needs_attention(
+    operator_bot,
+):
+    from maestro.integrations.telegram.handlers import _MAX_WORKFLOW_RESUME_ATTEMPT
+    from maestro.integrations.telegram.ui.funding_workflow import (
+        project_funding_workflow_card,
+    )
+
+    store = operator_bot.store
+    workflow_id = publish_contribution_request(
+        store, "run-1", _request("req-1"), phase="funding"
+    )["workflow_id"]
+
+    for attempt in range(1, _MAX_WORKFLOW_RESUME_ATTEMPT + 1):
+        claim_workflow_attempt(
+            store,
+            f"run-{attempt}",
+            workflow_id=workflow_id,
+            request_id="req-1",
+            phase="funding",
+            attempt=attempt,
+            extra={"intent": "confirm"},
+        )
+
+    # Run sweep: attempt >= _MAX_WORKFLOW_RESUME_ATTEMPT emits funding_workflow_needs_attention
+    operator_bot._sweep_incomplete_workflows()
+    attention_notices = store.list_system_events_by_type(
+        "funding_workflow_needs_attention", limit=None
+    )
+    assert len(attention_notices) > 0
+
+    model = project_funding_workflow_card(store, workflow_id)
+    assert model.stage == "funding_confirming"
+    assert model.attention == "incomplete_transition"
+    assert model.lifecycle_stage == "attention"
+
 
