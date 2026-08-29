@@ -145,8 +145,7 @@ def test_every_chat_gets_its_own_copy(tmp_path):
     copies = _copies_from_store(store)
     assert sorted(chat_id for _, chat_id in copies) == [100, 200]
     assert (
-        copies[("approval:appr_1", 100)].message_id
-        != copies[("approval:appr_1", 200)].message_id
+        copies[("approval:appr_1", 100)].message_id != copies[("approval:appr_1", 200)].message_id
     )
 
 
@@ -377,7 +376,9 @@ def test_edit_rejection_message_not_found_replaces_once(tmp_path):
 
 
 def test_generic_edit_rejection_records_failure_and_retries_edit(tmp_path):
-    """replace_on_target_absence: generic rejection records failure, keeps message_id, retries edit on next sweep."""
+    """replace_on_target_absence: generic rejection records failure, keeps message_id,
+    retries edit on next sweep.
+    """
     should_reject = True
 
     class GenericRejectingClient(FakeClient):
@@ -499,13 +500,13 @@ def test_refresh_chat_ids_intersects_with_pinned_audience(tmp_path):
     assert [c[0] for c in client.edited] == [100]
 
 
-
 def test_three_consecutive_rejections_send_a_plain_text_fallback(tmp_path):
     """The operator must not lose the thread because the card path is broken.
 
     The fallback deliberately does not go through cards.py: if rendering is
     what fails, rendering the fallback would fail too.
     """
+
     class CardRejectingClient(FakeClient):
         """Rejects this card's content, accepts anything else.
 

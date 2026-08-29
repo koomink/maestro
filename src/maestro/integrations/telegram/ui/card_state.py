@@ -47,9 +47,7 @@ def new_operation_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def _duplicate_key(
-    phase: str, card_key: str, chat_id: int, stage: str, operation_id: str
-) -> str:
+def _duplicate_key(phase: str, card_key: str, chat_id: int, stage: str, operation_id: str) -> str:
     # operation_id is what makes a retry writable at all: system_events has a
     # UNIQUE index on duplicate_key (store.py:203), so a key that stopped at
     # the stage would make the second attempt raise IntegrityError.
@@ -166,7 +164,9 @@ def card_adoption_event(
         "adopted_from_operation_id": source.operation_id,
         "adopted_from_request_id": source_request_id,
         "adopted_from_phase": source_phase,
-        "duplicate_key": f"telegram-ui-card:adoption:{card_key}:{chat_id}:{source.card_key}:{source.operation_id}",
+        "duplicate_key": (
+            f"telegram-ui-card:adoption:{card_key}:{chat_id}:{source.card_key}:{source.operation_id}"
+        ),
     }
 
 
@@ -198,9 +198,7 @@ def resolve_card_copies(
         if phase == "adoption":
             raw_delivery = str(event.get("delivery") or "")
             delivery = (
-                raw_delivery
-                if raw_delivery in ("confirmed", "failed", "unknown")
-                else "unknown"
+                raw_delivery if raw_delivery in ("confirmed", "failed", "unknown") else "unknown"
             )
         else:
             delivery = _PHASE_DELIVERY.get(phase, "unknown")

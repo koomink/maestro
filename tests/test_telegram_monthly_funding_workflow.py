@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -166,9 +165,7 @@ def _start_migration(store: StateStore) -> None:
 
 
 def _make_invalid_migration(store: StateStore) -> None:
-    store.save_system_event(
-        "r", ms.STARTED_EVENT, {"cutoff": "x", "duplicate_key": ms.STARTED_KEY}
-    )
+    store.save_system_event("r", ms.STARTED_EVENT, {"cutoff": "x", "duplicate_key": ms.STARTED_KEY})
 
 
 # ---------------------------------------------------------------------------
@@ -199,8 +196,7 @@ def test_v0_head_with_failed_evidence_adopts_and_retries_on_poll_once(
 ) -> None:
     router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
     req = _funding_req("req-1", card_delivery_version=0)
-    outcome = publish_contribution_request(store, "run-pub", req, phase="funding")
-    wf_id = outcome["workflow_id"]
+    publish_contribution_request(store, "run-pub", req, phase="funding")
 
     # Record request-scoped failed delivery evidence for chat 100 only
     req_card_key = "funding-request:req-1"
@@ -216,7 +212,8 @@ def test_v0_head_with_failed_evidence_adopts_and_retries_on_poll_once(
         ),
     )
 
-    # poll_once executes _sweep_funding_workflow_cards, which adopts and retries under the workflow key
+    # poll_once executes _sweep_funding_workflow_cards, which adopts and retries
+    # under the workflow key
     router.poll_once()
     assert len(client.sent) == 1
     assert client.sent[0]["chat_id"] == 100
@@ -387,7 +384,9 @@ def test_sweep_does_not_invoke_financial_side_effects(
 
     def _fail_side_effect(name: str) -> Any:
         def _raise(*args: Any, **kwargs: Any) -> None:
-            pytest.fail(f"Financial side effect '{name}' was unexpectedly invoked during card sweep")
+            pytest.fail(
+                f"Financial side effect '{name}' was unexpectedly invoked during card sweep"
+            )
 
         return _raise
 
@@ -651,7 +650,8 @@ def test_refresh_request_workflow_card_unknown_current_request_with_confirmed_pr
     # 3. Direct seam invocation
     res = router._refresh_request_workflow_card(req_b)
 
-    # Adopts current unknown dominance -> outcome unknown, no edit to predecessor 4001, ambiguity notice sent
+    # Adopts current unknown dominance -> outcome unknown, no edit to predecessor 4001,
+    # ambiguity notice sent
     assert res.outcome_for(100) == "unknown"
     assert len(client.edited) == 0
     assert len(client.sent) == 1
@@ -723,7 +723,7 @@ def test_refresh_request_workflow_card_generic_edit_rejection(tmp_path: Path) ->
     assert delivery_states[0]["delivery"] == "failed"
 
 
-def test_refresh_request_workflow_card_edit_timeout_preserves_durable_financial_truth_and_subsequent_sweep_does_not_resend(
+def test_refresh_request_workflow_card_edit_timeout_preserves_truth_no_resend(
     tmp_path: Path,
 ) -> None:
     router, store, client = _setup_router(tmp_path, chat_ids=(100,))
@@ -839,71 +839,81 @@ def test_all_live_transitions_delegate_immediate_refresh_through_shared_helper(
     # 1. funding cancel callback
     req_f1 = _funding_req("req-f1", card_delivery_version=1)
     publish_contribution_request(store, "run-f1", req_f1, phase="funding")
-    router.process_update({
-        "update_id": 1,
-        "callback_query": {
-            "id": "cb-1",
-            "data": "operator:funding:cancel:req-f1",
-            "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb-1",
+                "data": "operator:funding:cancel:req-f1",
+                "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 1
     assert "2026-08" in refreshed_workflows[-1]
 
     # 2. funding complete callback
     req_f2 = _funding_req("req-f2", card_delivery_version=1)
     publish_contribution_request(store, "run-f2", req_f2, phase="funding")
-    router.process_update({
-        "update_id": 2,
-        "callback_query": {
-            "id": "cb-2",
-            "data": "operator:funding:complete:req-f2",
-            "message": {"chat": {"id": 100}, "message_id": 11, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 2,
+            "callback_query": {
+                "id": "cb-2",
+                "data": "operator:funding:complete:req-f2",
+                "message": {"chat": {"id": 100}, "message_id": 11, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 2
 
     # 3. budget cancel callback
     req_b1 = _budget_req("req-b1", card_delivery_version=1)
     publish_contribution_request(store, "run-b1", req_b1, phase="budget")
-    router.process_update({
-        "update_id": 3,
-        "callback_query": {
-            "id": "cb-3",
-            "data": "operator:budget:cancel:req-b1",
-            "message": {"chat": {"id": 100}, "message_id": 12, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 3,
+            "callback_query": {
+                "id": "cb-3",
+                "data": "operator:budget:cancel:req-b1",
+                "message": {"chat": {"id": 100}, "message_id": 12, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 3
 
     # 4. budget select callback
     req_b2 = _budget_req("req-b2", card_delivery_version=1)
     publish_contribution_request(store, "run-b2", req_b2, phase="budget")
-    router.process_update({
-        "update_id": 4,
-        "callback_query": {
-            "id": "cb-4",
-            "data": "operator:budget:sel:req-b2:r",
-            "message": {"chat": {"id": 100}, "message_id": 13, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 4,
+            "callback_query": {
+                "id": "cb-4",
+                "data": "operator:budget:sel:req-b2:r",
+                "message": {"chat": {"id": 100}, "message_id": 13, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 4
 
     # 5. /budget command
     req_b3 = _budget_req("req-b3", card_delivery_version=1)
     publish_contribution_request(store, "run-b3", req_b3, phase="budget")
-    router.process_update({
-        "update_id": 5,
-        "message": {
-            "chat": {"id": 100},
-            "from": {"id": 100, "username": "op"},
-            "text": "/budget req-b3 300000",
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 5,
+            "message": {
+                "chat": {"id": 100},
+                "from": {"id": 100, "username": "op"},
+                "text": "/budget req-b3 300000",
+            },
+        }
+    )
     assert len(refreshed_workflows) == 5
 
     # 6. funding resume callback
@@ -918,15 +928,17 @@ def test_all_live_transitions_delegate_immediate_refresh_through_shared_helper(
         attempt=1,
         extra={"intent": "cancel"},
     )
-    router.process_update({
-        "update_id": 6,
-        "callback_query": {
-            "id": "cb-6",
-            "data": "operator:wfresume:funding:req-f3",
-            "message": {"chat": {"id": 100}, "message_id": 14, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 6,
+            "callback_query": {
+                "id": "cb-6",
+                "data": "operator:wfresume:funding:req-f3",
+                "message": {"chat": {"id": 100}, "message_id": 14, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 6
 
     # 7. budget resume callback
@@ -941,15 +953,17 @@ def test_all_live_transitions_delegate_immediate_refresh_through_shared_helper(
         attempt=1,
         extra={"intent": "cancel"},
     )
-    router.process_update({
-        "update_id": 7,
-        "callback_query": {
-            "id": "cb-7",
-            "data": "operator:wfresume:budget:req-b4",
-            "message": {"chat": {"id": 100}, "message_id": 15, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 7,
+            "callback_query": {
+                "id": "cb-7",
+                "data": "operator:wfresume:budget:req-b4",
+                "message": {"chat": {"id": 100}, "message_id": 15, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 7
 
     # 8. child handoff
@@ -978,15 +992,17 @@ def test_all_live_transitions_delegate_immediate_refresh_through_shared_helper(
         "_run_child_signal",
         pytest.fail,
     )
-    router.process_update({
-        "update_id": 9,
-        "callback_query": {
-            "id": "cb-9",
-            "data": "operator:funding:complete:req-f5",
-            "message": {"chat": {"id": 100}, "message_id": 16, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 9,
+            "callback_query": {
+                "id": "cb-9",
+                "data": "operator:funding:complete:req-f5",
+                "message": {"chat": {"id": 100}, "message_id": 16, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
     assert len(refreshed_workflows) == 9
 
 
@@ -1006,6 +1022,7 @@ def test_migration_race_through_callback_finally_migrating_blocks_refresh(
     wf_id = pub["workflow_id"]
 
     import maestro.integrations.telegram.handlers as handlers_mod
+
     real_complete = handlers_mod.complete_workflow
 
     def racing_complete(*args, **kwargs):
@@ -1015,15 +1032,17 @@ def test_migration_race_through_callback_finally_migrating_blocks_refresh(
 
     monkeypatch.setattr(handlers_mod, "complete_workflow", racing_complete)
 
-    router.process_update({
-        "update_id": 1,
-        "callback_query": {
-            "id": "cb-1",
-            "data": "operator:funding:cancel:req-f-mig",
-            "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb-1",
+                "data": "operator:funding:cancel:req-f-mig",
+                "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
 
     # Financial completion / head truth remains durable
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
@@ -1049,6 +1068,7 @@ def test_migration_race_through_callback_finally_invalid_blocks_refresh(
     wf_id = pub["workflow_id"]
 
     import maestro.integrations.telegram.handlers as handlers_mod
+
     real_complete = handlers_mod.complete_workflow
 
     def racing_complete(*args, **kwargs):
@@ -1058,15 +1078,17 @@ def test_migration_race_through_callback_finally_invalid_blocks_refresh(
 
     monkeypatch.setattr(handlers_mod, "complete_workflow", racing_complete)
 
-    router.process_update({
-        "update_id": 1,
-        "callback_query": {
-            "id": "cb-1",
-            "data": "operator:funding:cancel:req-f-inv",
-            "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
-            "from": {"id": 100, "username": "op"},
-        },
-    })
+    router.process_update(
+        {
+            "update_id": 1,
+            "callback_query": {
+                "id": "cb-1",
+                "data": "operator:funding:cancel:req-f-inv",
+                "message": {"chat": {"id": 100}, "message_id": 10, "text": "test"},
+                "from": {"id": 100, "username": "op"},
+            },
+        }
+    )
 
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     assert any(e["payload"]["request_id"] == "req-f-inv" for e in completed)

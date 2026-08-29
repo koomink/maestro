@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
-
 from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.ui.card_state import (
     CardCopy,
@@ -18,11 +16,9 @@ from maestro.integrations.telegram.ui.card_state import (
 from maestro.integrations.telegram.ui.funding_workflow import (
     FundingWorkflowCardModel,
     FundingWorkflowRequestRef,
-    funding_workflow_card_key,
 )
 from maestro.integrations.telegram.ui.funding_workflow_delivery import (
     FundingWorkflowCardDelivery,
-    FundingWorkflowCardSyncResult,
 )
 from maestro.integrations.telegram.ui.lifecycle import CardLifecycleManager
 from maestro.monitoring.audit_logger import AuditLogger
@@ -203,7 +199,9 @@ def test_card_adoption_event_structure_and_fold():
 
 
 def test_adopt_current_request_confirmed(tmp_path):
-    """Current request confirmed -> adopt its message_id, edit to workflow projection, send nothing."""
+    """Current request confirmed -> adopt its message_id, edit to workflow
+    projection, send nothing.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100,))
 
     # Setup legacy confirmed copy
@@ -275,7 +273,9 @@ def test_adopt_current_request_failed_allows_retry(tmp_path):
 
 
 def test_adopt_current_request_unknown_blocks_resend_and_predecessor_promotion(tmp_path):
-    """Current request unknown -> adopt unknown, emit buttonless ambiguity notice, do not send, do not edit predecessor."""
+    """Current request unknown -> adopt unknown, emit buttonless ambiguity notice,
+    do not send, do not edit predecessor.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100,))
 
     # Setup confirmed predecessor
@@ -357,7 +357,9 @@ def test_no_current_copy_adopts_nearest_confirmed_predecessor(tmp_path):
 
 
 def test_superseded_predecessor_unknown_does_not_block_current_generation_1_send(tmp_path):
-    """Superseded predecessor unknown + current generation 1 with no current evidence -> legacy unknown remains visible, current sent."""
+    """Superseded predecessor unknown + current generation 1 with no current evidence
+    -> legacy unknown remains visible, current sent.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100,))
 
     # Predecessor left as unknown
@@ -389,7 +391,9 @@ def test_superseded_predecessor_unknown_does_not_block_current_generation_1_send
 
 
 def test_multiple_confirmed_predecessors_picks_smallest_lineage_distance(tmp_path):
-    """Multiple confirmed predecessors -> choose smallest lineage_distance even if older candidate has newer event."""
+    """Multiple confirmed predecessors -> choose smallest lineage_distance even
+    if older candidate has newer event.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100,))
 
     # Older lineage (distance 2, req_0) recorded with later message_id / timestamp
@@ -437,7 +441,9 @@ def test_multiple_confirmed_predecessors_picks_smallest_lineage_distance(tmp_pat
 
 
 def test_existing_workflow_scoped_copy_wins_over_request_events(tmp_path):
-    """Existing workflow-scoped copy in a chat -> ignore every request-scoped event for that chat."""
+    """Existing workflow-scoped copy in a chat -> ignore every request-scoped
+    event for that chat.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100,))
 
     # Pre-existing workflow copy
@@ -486,7 +492,9 @@ def test_existing_workflow_scoped_copy_wins_over_request_events(tmp_path):
 
 
 def test_generation_0_with_no_evidence_is_blocked(tmp_path):
-    """Generation 0 with no lifecycle evidence -> every configured chat outcome is blocked; no audience or send."""
+    """Generation 0 with no lifecycle evidence -> every configured chat outcome is
+    blocked; no audience or send.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100, 200))
 
     model = _make_model(request_id="req_1", card_delivery_version=0)
@@ -501,7 +509,9 @@ def test_generation_0_with_no_evidence_is_blocked(tmp_path):
 
 
 def test_generation_1_with_no_evidence_pins_audience_and_sends(tmp_path):
-    """Generation 1 with no lifecycle evidence -> current configured audience is pinned and each chat gets initial send."""
+    """Generation 1 with no lifecycle evidence -> current configured audience is
+    pinned and each chat gets initial send.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100, 200))
 
     model = _make_model(request_id="req_1", card_delivery_version=1)
@@ -514,7 +524,9 @@ def test_generation_1_with_no_evidence_pins_audience_and_sends(tmp_path):
 
 
 def test_generation_0_with_evidence_in_one_chat_only_updates_that_chat(tmp_path):
-    """Generation 0 with evidence in chat 100 and newly configured chat 200 -> only chat 100 is pinned/updated; chat 200 blocked."""
+    """Generation 0 with evidence in chat 100 and newly configured chat 200 ->
+    only chat 100 is pinned/updated; chat 200 blocked.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100, 200))
 
     # Evidence only in chat 100
@@ -541,7 +553,9 @@ def test_generation_0_with_evidence_in_one_chat_only_updates_that_chat(tmp_path)
 
 
 def test_current_unknown_in_one_chat_and_no_evidence_in_second_chat_gen1(tmp_path):
-    """Current request unknown in chat 100 and no evidence in chat 200 for generation 1 -> 100 unknown, 200 sent."""
+    """Current request unknown in chat 100 and no evidence in chat 200 for
+    generation 1 -> 100 unknown, 200 sent.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100, 200))
 
     # Chat 100 has unknown current copy
@@ -567,7 +581,9 @@ def test_current_unknown_in_one_chat_and_no_evidence_in_second_chat_gen1(tmp_pat
 
 
 def test_per_chat_independent_handling_confirmed_and_failed(tmp_path):
-    """Current confirmed copy in chat 100 and current failed copy in chat 200 -> adopt/edit 100 and retry 200 independently."""
+    """Current confirmed copy in chat 100 and current failed copy in chat 200 ->
+    adopt/edit 100 and retry 200 independently.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100, 200))
 
     # Chat 100 confirmed
@@ -606,7 +622,9 @@ def test_per_chat_independent_handling_confirmed_and_failed(tmp_path):
 
 
 def test_workflow_state_in_one_chat_does_not_prevent_adoption_in_other_chat(tmp_path):
-    """A workflow-scoped state in chat 100 prevents legacy reclaim only in chat 100; chat 200 follows precedence."""
+    """A workflow-scoped state in chat 100 prevents legacy reclaim only in chat 100;
+    chat 200 follows precedence.
+    """
     store, lifecycle, delivery, client = _setup_delivery(tmp_path, chat_ids=(100, 200))
 
     # Chat 100 has workflow-scoped copy

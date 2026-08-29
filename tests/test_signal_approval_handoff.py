@@ -36,7 +36,7 @@ from maestro.execution.live_orders import (
     PartialFillSummary,
 )
 from maestro.execution.reconciliation import ReconciliationIssue, ReconciliationResult
-from maestro.integrations.telegram.bot import TelegramApiRejected, TelegramBotAPIClient
+from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.handlers import TelegramOperatorCommandRouter
 from maestro.integrations.telegram.ui.funding_workflow import funding_workflow_card_key
 from maestro.monitoring.audit_logger import AuditLogger
@@ -163,14 +163,26 @@ def test_atomic_card_delivery_ownership_cutover(monkeypatch, tmp_path, kind):
     raw = _multi_account_raw(tmp_path)
     if kind == "funding":
         isa_cash = 1_000_000
-        raw["execution_sleeves"]["accounts"]["kis_ps"]["tranquillo_ps"]["contribution"]["funding_request"] = {"enabled": False}
-        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["funding_request"] = {"enabled": True}
-        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["budget_request"] = {"enabled": False}
+        raw["execution_sleeves"]["accounts"]["kis_ps"]["tranquillo_ps"]["contribution"][
+            "funding_request"
+        ] = {"enabled": False}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
+            "funding_request"
+        ] = {"enabled": True}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
+            "budget_request"
+        ] = {"enabled": False}
     else:
         isa_cash = 8_000_000
-        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["funding_request"] = {"enabled": False}
-        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["budget_request"] = {"enabled": True}
-        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"]["monthly_budget"] = 4_000_000
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
+            "funding_request"
+        ] = {"enabled": False}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
+            "budget_request"
+        ] = {"enabled": True}
+        raw["execution_sleeves"]["accounts"]["kis_isa"]["tranquillo_isa"]["contribution"][
+            "monthly_budget"
+        ] = 4_000_000
 
     raw["state"]["sqlite_path"] = str(tmp_path / f"state_{kind}.db")
     raw["audit"]["jsonl_path"] = str(tmp_path / f"audit_{kind}.jsonl")
@@ -198,8 +210,12 @@ def test_atomic_card_delivery_ownership_cutover(monkeypatch, tmp_path, kind):
     class GuardedCliClient(FakeTelegramClient):
         def send_message(self, chat_id, text, reply_markup=None):
             if reply_markup is not None:
-                actionable_cli_calls.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
-                raise AssertionError("CLI daily signal approval must not send actionable request cards")
+                actionable_cli_calls.append(
+                    {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
+                )
+                raise AssertionError(
+                    "CLI daily signal approval must not send actionable request cards"
+                )
             return super().send_message(chat_id, text, reply_markup=reply_markup)
 
     monkeypatch.setattr("maestro.cli.TelegramBotAPIClient", lambda **kwargs: GuardedCliClient())
@@ -253,11 +269,14 @@ def test_atomic_card_delivery_ownership_cutover(monkeypatch, tmp_path, kind):
         "_converge_workflow_invariants": router._converge_workflow_invariants,
     }
     for name, fn in real_sweeps.items():
+
         def make_spy(n, orig_fn):
             def spy():
                 sweep_order.append(n)
                 return orig_fn()
+
             return spy
+
         monkeypatch.setattr(router, name, make_spy(name, fn))
 
     router.poll_once()
@@ -842,9 +861,11 @@ def test_a_resume_blocks_only_the_group_capacity_now_refuses(monkeypatch, tmp_pa
     # Resume with capacity now refusing MOCK_ETF_B -- whichever group that is
     # (the two accounts' strategies race in unspecified order), the surviving
     # envelope above already tells us which group made it through.
-    blocked_symbol = "MOCK_ETF_A" if "MOCK_ETF_A" not in {
-        order["symbol"] for order in surviving["orders"]
-    } else "MOCK_ETF_B"
+    blocked_symbol = (
+        "MOCK_ETF_A"
+        if "MOCK_ETF_A" not in {order["symbol"] for order in surviving["orders"]}
+        else "MOCK_ETF_B"
+    )
     result = _dispatch_orchestrator_with_capacity(
         config, FakeTelegramClient(), _capacity_lookup(blocked_symbols=frozenset({blocked_symbol}))
     ).dispatch_signal_approval(signal_summary.signal_run_id)
@@ -1003,9 +1024,7 @@ def test_a_capacity_block_disposition_reaches_the_audit_log(monkeypatch, tmp_pat
     assert audited_types_after.count("live_order_capacity_blocked") == 1
 
 
-def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(
-    monkeypatch, tmp_path
-):
+def test_a_lost_race_for_the_blocked_disposition_uses_the_winning_content(monkeypatch, tmp_path):
     """TOCTOU: this call's own capacity computation may lose the race to
     commit the group's blocked disposition -- a concurrent writer's decision
     can land first under the same group key. The accepted set used to build
@@ -1190,9 +1209,7 @@ def test_repeated_resumes_under_unchanged_capacity_are_idempotent(monkeypatch, t
 
     manifests = store.list_system_events_by_type("signal_dispatch_manifest")
     assert len(manifests) == 1
-    assert store.load_system_event_payload_by_duplicate_key(manifest_key) == manifests[0][
-        "payload"
-    ]
+    assert store.load_system_event_payload_by_duplicate_key(manifest_key) == manifests[0]["payload"]
     assert len(store.list_system_events_by_type("telegram_approval_pending")) == 2
     assert len(store.list_system_events_by_type("signal_approval_pending")) == 1
     assert len(store.list_system_events_by_type("dispatch_group_capacity_blocked")) == 0
@@ -1307,9 +1324,7 @@ def test_a_crash_after_the_block_disposition_commits_only_retries_notification(
     assert len(store.list_system_events_by_type("live_order_capacity_block_notified")) == 1
 
 
-def test_a_capacity_blocked_order_never_appears_in_its_own_approval_envelope(
-    monkeypatch, tmp_path
-):
+def test_a_capacity_blocked_order_never_appears_in_its_own_approval_envelope(monkeypatch, tmp_path):
     """Mutual exclusion: a manifest order that is durably capacity-blocked
     (and therefore a live, operator-visible recovery candidate) must never
     simultaneously sit inside a normal approval envelope -- the two are the
@@ -1427,9 +1442,7 @@ def test_a_repeated_resume_does_not_resend_the_capacity_block_notification(monke
     assert len(telegram_2.sent_messages) == 1
 
 
-def test_a_notification_that_reaches_no_chat_is_retried_not_marked_notified(
-    monkeypatch, tmp_path
-):
+def test_a_notification_that_reaches_no_chat_is_retried_not_marked_notified(monkeypatch, tmp_path):
     """Every chat rejecting the capacity-block message must not be recorded
     as delivered -- the old code wrote the 'notified' marker unconditionally
     after calling _notify_capacity_block, which swallows send failures per
@@ -2092,9 +2105,7 @@ def test_approve_signal_cli_keep_telegram_operator_does_not_call_systemctl(
     assert calls == []
 
 
-def test_approve_signal_cli_continues_when_telegram_operator_stop_fails(
-    tmp_path, monkeypatch
-):
+def test_approve_signal_cli_continues_when_telegram_operator_stop_fails(tmp_path, monkeypatch):
     config_path = _paper_approval_config_path(tmp_path, "approved")
     calls: list[tuple[str, str]] = []
 
@@ -2961,9 +2972,10 @@ def _mock_kis_snapshot_refresh(monkeypatch) -> None:
         self.instruments = instruments or []
         self.logical_account_id = logical_account_id
         self.client = client
-        if logical_account_id and state_store.load_latest_account_portfolio_state(
+        if (
             logical_account_id
-        ) is None:
+            and state_store.load_latest_account_portfolio_state(logical_account_id) is None
+        ):
             baseline = PortfolioState(
                 cash=10_000_000.0,
                 cash_by_currency={"KRW": 10_000_000.0},
@@ -2977,9 +2989,7 @@ def _mock_kis_snapshot_refresh(monkeypatch) -> None:
             state_store.save_portfolio_snapshot("run_mock_ledger_baseline", baseline)
 
     def fetch_snapshot(self: KISReadOnlyService, symbols: list[str]) -> KISReadOnlySnapshot:
-        portfolio = self.state_store.load_latest_account_portfolio_state(
-            self.logical_account_id
-        )
+        portfolio = self.state_store.load_latest_account_portfolio_state(self.logical_account_id)
         cash = portfolio.cash if portfolio is not None else 10_000_000.0
         account = KISAccountSnapshot(
             account_id=self.config.account_id or "MOCK-LIVE",
@@ -3292,9 +3302,7 @@ def test_a_dispatch_time_capacity_block_still_creates_recovery_ownership(monkeyp
     assert store.list_system_events_by_type("dispatch_group_capacity_blocked") != []
 
 
-def test_a_race_between_two_resolution_attempts_cannot_create_dual_ownership(
-    monkeypatch, tmp_path
-):
+def test_a_race_between_two_resolution_attempts_cannot_create_dual_ownership(monkeypatch, tmp_path):
     """TOCTOU: two resolution attempts for the same approval evaluate
     capacity around the same time and both find it sufficient. DB-level
     fencing on the approvals table (not a process-local lock) must ensure

@@ -85,8 +85,16 @@ def _drive_no_action_day(
 
     # Seed signal package in StateStore based on funding_present / budget_present
     store = StateStore(config.state.sqlite_path, config.portfolio.initial_cash)
-    frs = funding_requests if funding_requests is not None else ([{"request_id": "fund_1", "card_delivery_version": 1}] if funding_present else [])
-    brs = budget_requests if budget_requests is not None else ([{"request_id": "budget_1", "card_delivery_version": 1}] if budget_present else [])
+    frs = (
+        funding_requests
+        if funding_requests is not None
+        else ([{"request_id": "fund_1", "card_delivery_version": 1}] if funding_present else [])
+    )
+    brs = (
+        budget_requests
+        if budget_requests is not None
+        else ([{"request_id": "budget_1", "card_delivery_version": 1}] if budget_present else [])
+    )
     store.save_signal_package(
         "signal_quiet",
         {

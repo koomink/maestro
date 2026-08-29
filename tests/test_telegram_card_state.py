@@ -158,9 +158,7 @@ def test_card_failure_event_preserves_rejection_metadata():
 
 def test_card_failure_event_with_metadata_persists_and_folds_in_store(tmp_path):
     store = StateStore(str(tmp_path / "state.db"))
-    confirmed = card_result_event(
-        "funding-workflow:w1", 100, "pending", "hash-1", "op-1", 5001
-    )
+    confirmed = card_result_event("funding-workflow:w1", 100, "pending", "hash-1", "op-1", 5001)
     store.record_card_event("run-1", confirmed)
     copy = store.load_card_delivery_state("funding-workflow:w1")[0]
     assert copy["delivery"] == "confirmed"
@@ -192,4 +190,3 @@ def test_card_failure_event_with_metadata_persists_and_folds_in_store(tmp_path):
     copies = resolve_card_copies([row["payload"] for row in reversed(rows)])
     assert copies[("funding-workflow:w1", 100)].delivery == "failed"
     assert copies[("funding-workflow:w1", 100)].message_id == 5001
-

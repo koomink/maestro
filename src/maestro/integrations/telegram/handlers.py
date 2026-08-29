@@ -1650,9 +1650,7 @@ class TelegramOperatorCommandRouter:
         # 권위 있는 설명을 바꿔치기한다. 유일성은 키가 아니라 승인 단위여야 한다.
         stored, created = self.store.insert_approval_resolution(envelope.run_id, payload)
         if created:
-            self.audit.log(
-                envelope.run_id, "telegram_approval_resolution_completed", payload
-            )
+            self.audit.log(envelope.run_id, "telegram_approval_resolution_completed", payload)
             return
         if stored.get("duplicate_key") == payload["duplicate_key"]:
             # 이 재개가 남긴 기록이 이미 있다. 종결 기록 직후 죽었다가 다시 온
@@ -1881,9 +1879,7 @@ class TelegramOperatorCommandRouter:
 
     def _run_dispatch(self, signal_run_id: str) -> None:
         """Seam: the orchestrator call the resume sweep drives."""
-        approval_config, approval_identity = load_config_with_identity(
-            self.approval_config_path
-        )
+        approval_config, approval_identity = load_config_with_identity(self.approval_config_path)
         MaestroOrchestrator(
             approval_config,
             telegram_client=self.client,
@@ -2500,15 +2496,12 @@ class TelegramOperatorCommandRouter:
             # 승인에 대한 것이므로, 열린 승인이 없으면 읽을 것도 없다.
             return
         envelopes = [
-            (int(row["id"]), PendingApprovalEnvelope.model_validate(row["payload"]))
-            for row in rows
+            (int(row["id"]), PendingApprovalEnvelope.model_validate(row["payload"])) for row in rows
         ]
         # 이력 조회는 전부 열려 있는 승인으로 한정한다. 전체를 읽어 접으면
         # 종결 인덱스로 줄인 비용이 그대로 돌아온다.
         open_approval_ids = {envelope.approval_id for _, envelope in envelopes}
-        acks = self.store.latest_payloads_by_approval_id(
-            "telegram_approval_ack", open_approval_ids
-        )
+        acks = self.store.latest_payloads_by_approval_id("telegram_approval_ack", open_approval_ids)
         completions = self.store.latest_payloads_by_approval_id(
             "signal_approval_completed", open_approval_ids
         )
@@ -2531,9 +2524,7 @@ class TelegramOperatorCommandRouter:
             signal_run_id = envelope.signal_run_id
             card_key = f"approval:{approval_id}"
             run_settled.setdefault(signal_run_id, True)
-            run_max_event_id[signal_run_id] = max(
-                run_max_event_id.get(signal_run_id, 0), event_id
-            )
+            run_max_event_id[signal_run_id] = max(run_max_event_id.get(signal_run_id, 0), event_id)
             run_approval_ids[signal_run_id].add(approval_id)
             run_order_ids[signal_run_id] |= self._envelope_order_ids(envelope)
             copies = self._card_manager.copies(card_key)
@@ -3574,9 +3565,7 @@ class TelegramOperatorCommandRouter:
                     # carried an amount and must not be blocked for lacking it.
                     selected_budget = stalled.get("selected_budget")
                     if selected_budget is None:
-                        raise ValueError(
-                            "stalled budget workflow has no stored selected_budget"
-                        )
+                        raise ValueError("stalled budget workflow has no stored selected_budget")
                     text = self._confirm_budget_request(
                         request,
                         selected_budget=float(selected_budget),
@@ -3646,7 +3635,9 @@ class TelegramOperatorCommandRouter:
                 # must come before the generic except below -- otherwise a claim
                 # refusal (stuck-in-flight or superseded) is misreported as an
                 # invalid amount, same as the callback path this mirrors.
-                send_text, status = _funding_claim_refusal_response(exc.reason, request_noun="budget")
+                send_text, status = _funding_claim_refusal_response(
+                    exc.reason, request_noun="budget"
+                )
                 self._send(chat_id, send_text)
                 self._record("/budget", chat_id, user_id, username, status)
                 return
@@ -3942,9 +3933,7 @@ class TelegramOperatorCommandRouter:
             return True
         return str(head.get("request_id") or "") == request_id
 
-    def _require_card_delivered(
-        self, outcome: str, phase: str, request: Mapping[str, Any]
-    ) -> None:
+    def _require_card_delivered(self, outcome: str, phase: str, request: Mapping[str, Any]) -> None:
         """Refuse to let a caller treat an unconfirmed card as delivered.
 
         "sent", "edited", and "skipped" (the operator already holds a confirmed copy)
@@ -5790,9 +5779,7 @@ class TelegramOperatorCommandRouter:
             )
         }
         terminal = set(completed)
-        for row in self.store.list_system_events_by_type(
-            "telegram_approval_ack", limit=None
-        ):
+        for row in self.store.list_system_events_by_type("telegram_approval_ack", limit=None):
             payload = row["payload"]
             approval_id = str(payload.get("approval_id"))
             if not isinstance(payload.get("schema_version"), int):
@@ -5808,9 +5795,7 @@ class TelegramOperatorCommandRouter:
         """
         return {
             str(row["payload"].get("approval_id"))
-            for row in self.store.list_system_events_by_type(
-                "telegram_approval_ack", limit=None
-            )
+            for row in self.store.list_system_events_by_type("telegram_approval_ack", limit=None)
             if isinstance(row["payload"].get("schema_version"), int)
         }
 

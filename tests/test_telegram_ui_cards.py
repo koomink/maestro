@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
+
 from maestro.approval.models import ApprovalRequest
 from maestro.core.ids import new_budget_request_id, new_funding_request_id
 from maestro.integrations.telegram.ui import catalog
@@ -22,7 +24,6 @@ from maestro.integrations.telegram.ui.funding_workflow import (
     FundingWorkflowPhase,
     FundingWorkflowRequestRef,
 )
-import pytest
 
 
 def _request() -> ApprovalRequest:
@@ -313,12 +314,12 @@ def test_collapsed_card_stays_within_telegram_limit():
 
 
 def test_decision_and_reminder_texts():
-    assert approval_decision_text(
-        "approved", "appr_x", orders_submitted=2, orders_failed=0
-    ) == ("✅ 승인 완료 — 주문 2건을 접수했어요.")
-    assert approval_decision_text(
-        "rejected", "appr_x", orders_submitted=0, orders_failed=0
-    ) == ("❌ 거절했어요 — 이번 제안은 실행되지 않아요.")
+    assert approval_decision_text("approved", "appr_x", orders_submitted=2, orders_failed=0) == (
+        "✅ 승인 완료 — 주문 2건을 접수했어요."
+    )
+    assert approval_decision_text("rejected", "appr_x", orders_submitted=0, orders_failed=0) == (
+        "❌ 거절했어요 — 이번 제안은 실행되지 않아요."
+    )
     reminder = approval_reminder_text(30, "카드 본문")
     assert reminder == "⏰ 아직 응답을 기다리고 있어요 (30분 경과)\n\n카드 본문"
     assert catalog.STALE_CALLBACK_TEXT == "이미 처리됐거나 만료된 요청이에요."
@@ -462,12 +463,16 @@ def _funding_workflow_card_model(
         stage=stage,
         attention=attention,
         financial_actions_allowed=financial_actions_allowed,
-        terminal_intent="cancel" if "canceled" in stage else ("confirm" if "completed" in stage else None),
+        terminal_intent="cancel"
+        if "canceled" in stage
+        else ("confirm" if "completed" in stage else None),
         selected_budget=selected_budget,
         predecessor_request_id=None,
         predecessor_completed=None,
         card_delivery_version=0,
-        lineage=(FundingWorkflowRequestRef(request_id=request_id, phase=phase, lineage_distance=0),),
+        lineage=(
+            FundingWorkflowRequestRef(request_id=request_id, phase=phase, lineage_distance=0),
+        ),
     )
 
 
@@ -628,7 +633,9 @@ def test_funding_workflow_card_no_detail_or_fold_button():
         assert "접기" not in card.text
         assert "자세히" not in card.text
         if card.reply_markup is not None:
-            callbacks = [b["callback_data"] for row in card.reply_markup["inline_keyboard"] for b in row]
+            callbacks = [
+                b["callback_data"] for row in card.reply_markup["inline_keyboard"] for b in row
+            ]
             button_texts = [b["text"] for row in card.reply_markup["inline_keyboard"] for b in row]
             assert "접기" not in button_texts
             assert "자세히" not in button_texts
@@ -650,4 +657,3 @@ def test_funding_workflow_card_stays_within_telegram_limit():
     )
     rendered = render_funding_workflow_card(model)
     assert telegram_text_length(rendered.text) <= TELEGRAM_TEXT_LIMIT
-

@@ -122,9 +122,7 @@ class CardLifecycleManager:
             return "unknown"
         self.store.record_card_event(
             run_id,
-            card_result_event(
-                card_key, chat_id, stage, render_hash, operation_id, message_id
-            ),
+            card_result_event(card_key, chat_id, stage, render_hash, operation_id, message_id),
         )
         return "sent"
 
@@ -209,7 +207,9 @@ class CardLifecycleManager:
             # and writing this on each pass is a transaction per second per
             # open approval for a fact that never changes.
             self.store.record_card_audience(card_key, audience)
-        target_audience = [cid for cid in audience if cid in set(chat_ids)] if chat_ids is not None else audience
+        target_audience = (
+            [cid for cid in audience if cid in set(chat_ids)] if chat_ids is not None else audience
+        )
         for chat_id in target_audience:
             copy = copies.get((card_key, chat_id))
             if (
@@ -229,9 +229,7 @@ class CardLifecycleManager:
                 self._escalate_ambiguous(run_id, card_key, chat_id, stage)
                 continue
             if copy is None or copy.message_id is None:
-                outcome = self._deliver_one(
-                    run_id, card_key, stage, rendered, render_hash, chat_id
-                )
+                outcome = self._deliver_one(run_id, card_key, stage, rendered, render_hash, chat_id)
                 {"sent": sent, "failed": failed, "unknown": ambiguous}[outcome].append(chat_id)
                 continue
             operation_id = new_operation_id()
@@ -275,7 +273,9 @@ class CardLifecycleManager:
                         outcome = self._deliver_one(
                             run_id, card_key, stage, rendered, render_hash, chat_id
                         )
-                        {"sent": sent, "failed": failed, "unknown": ambiguous}[outcome].append(chat_id)
+                        {"sent": sent, "failed": failed, "unknown": ambiguous}[outcome].append(
+                            chat_id
+                        )
                         continue
                     # Generic explicit rejection: record failure without replacement send
                     self.store.record_card_event(
@@ -312,9 +312,7 @@ class CardLifecycleManager:
                         description=exc.description,
                     ),
                 )
-                outcome = self._deliver_one(
-                    run_id, card_key, stage, rendered, render_hash, chat_id
-                )
+                outcome = self._deliver_one(run_id, card_key, stage, rendered, render_hash, chat_id)
                 {"sent": sent, "failed": failed, "unknown": ambiguous}[outcome].append(chat_id)
                 continue
             except Exception:  # noqa: BLE001 - transport: we do not know
@@ -335,9 +333,7 @@ class CardLifecycleManager:
             "ambiguous": tuple(ambiguous),
         }
 
-    def record_render_failure(
-        self, run_id: str, card_key: str, stage: str, error: str
-    ) -> None:
+    def record_render_failure(self, run_id: str, card_key: str, stage: str, error: str) -> None:
         """A card we could not even produce, counted like a refused send.
 
         Rendering is what the fallback exists for: the spec asks for plain text
@@ -415,9 +411,7 @@ class CardLifecycleManager:
         copy = self.copies(card_key).get((card_key, chat_id))
         return copy.consecutive_failures if copy is not None else 0
 
-    def _escalate_ambiguous(
-        self, run_id: str, card_key: str, chat_id: int, stage: str
-    ) -> None:
+    def _escalate_ambiguous(self, run_id: str, card_key: str, chat_id: int, stage: str) -> None:
         """Tell the operator, once, that we cannot account for this copy.
 
         Plain text with no buttons on purpose. Re-rendering the card is exactly
@@ -439,8 +433,7 @@ class CardLifecycleManager:
         self.store.save_system_event(
             run_id,
             "telegram_ui_card_ambiguous",
-            {"card_key": card_key, "chat_id": chat_id, "stage": stage,
-             "duplicate_key": notice_key},
+            {"card_key": card_key, "chat_id": chat_id, "stage": stage, "duplicate_key": notice_key},
         )
 
     def _escalate_repeated_failures(
@@ -463,8 +456,7 @@ class CardLifecycleManager:
         self.store.save_system_event(
             run_id,
             "telegram_ui_card_fallback",
-            {"card_key": card_key, "chat_id": chat_id, "stage": stage,
-             "duplicate_key": notice_key},
+            {"card_key": card_key, "chat_id": chat_id, "stage": stage, "duplicate_key": notice_key},
         )
 
     def _send(self, chat_id: int, rendered: RenderedCard) -> Mapping[str, Any] | None:

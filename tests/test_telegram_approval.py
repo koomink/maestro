@@ -830,7 +830,9 @@ def test_telegram_bot_api_client_preserves_rejection_metadata_on_200_ok_false(
         def __exit__(self, *args):
             pass
 
-    body = b'{"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found"}'
+    body = (
+        b'{"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found"}'
+    )
     monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: DummyResponse(body))
     monkeypatch.setenv("TEST_TG_TOKEN", "123:test")
     client = TelegramBotAPIClient(token_env="TEST_TG_TOKEN")
@@ -848,7 +850,9 @@ def test_telegram_bot_api_client_preserves_rejection_metadata_on_200_ok_false(
 def test_telegram_bot_api_client_preserves_rejection_metadata_on_http_error(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    body = b'{"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found"}'
+    body = (
+        b'{"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found"}'
+    )
     http_error = urllib.error.HTTPError(
         url="https://api.telegram.org/bot123:test/editMessageText",
         code=400,
@@ -884,10 +888,13 @@ def test_telegram_bot_api_client_http_error_with_non_json_body_raises_runtime_er
         hdrs={},  # type: ignore[arg-type]
         fp=io.BytesIO(b"<html>502 Bad Gateway</html>"),
     )
-    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: (_ for _ in ()).throw(http_error))
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda req, timeout=None: (_ for _ in ()).throw(http_error)
+    )
     monkeypatch.setenv("TEST_TG_TOKEN", "123:test")
     client = TelegramBotAPIClient(token_env="TEST_TG_TOKEN")
 
-    with pytest.raises(RuntimeError, match="Telegram Bot API unavailable for method: editMessageText"):
+    with pytest.raises(
+        RuntimeError, match="Telegram Bot API unavailable for method: editMessageText"
+    ):
         client.edit_message_text(chat_id=100, message_id=50, text="hello")
-

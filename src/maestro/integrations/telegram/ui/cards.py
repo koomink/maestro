@@ -446,9 +446,8 @@ def _total_label(request: ApprovalRequest) -> str:
     if not totals:
         return money_kr(request.estimated_notional, None)
     return ", ".join(
-        money_kr(value, currency) for currency, value in sorted(
-            totals.items(), key=lambda item: str(item[0])
-        )
+        money_kr(value, currency)
+        for currency, value in sorted(totals.items(), key=lambda item: str(item[0]))
     )
 
 
@@ -485,9 +484,7 @@ def render_funding_workflow_card(model: FundingWorkflowCardModel) -> RenderedCar
     if model.attention == "predecessor_incomplete":
         first_line = catalog.FUNDING_WORKFLOW_ATTENTION_PREDECESSOR_INCOMPLETE
     else:
-        default_stage = (
-            "funding_pending" if model.phase == "funding" else "budget_pending"
-        )
+        default_stage = "funding_pending" if model.phase == "funding" else "budget_pending"
         first_line = catalog.FUNDING_WORKFLOW_STAGE_COPY.get(
             model.stage,
             catalog.FUNDING_WORKFLOW_STAGE_COPY[default_stage],
@@ -555,4 +552,3 @@ def render_funding_workflow_card(model: FundingWorkflowCardModel) -> RenderedCar
             reply_markup = budget_request_reply_markup(dict(model.request))
 
     return RenderedCard(text=_clamp("\n".join(lines)), reply_markup=reply_markup)
-

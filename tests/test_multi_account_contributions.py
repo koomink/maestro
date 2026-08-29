@@ -182,4 +182,3 @@ def test_tranquillo_multi_account_budget_decision_can_exceed_legacy_max(
     assert signal["budget_requests"] == []
     assert sum(order["notional"] for order in isa_orders) == pytest.approx(8_000_000)
     assert sum(order["notional"] for order in signal["orders_preview"]) == pytest.approx(8_500_000)
-

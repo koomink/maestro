@@ -21,9 +21,7 @@ if TYPE_CHECKING:
     from maestro.integrations.telegram.ui.lifecycle import CardLifecycleManager
     from maestro.state.store import StateStore
 
-WorkflowCardSyncOutcome = Literal[
-    "sent", "edited", "skipped", "failed", "unknown", "blocked"
-]
+WorkflowCardSyncOutcome = Literal["sent", "edited", "skipped", "failed", "unknown", "blocked"]
 
 
 @dataclass(frozen=True)
@@ -98,7 +96,8 @@ class FundingWorkflowCardDelivery:
             if adopted:
                 continue
 
-            # 1.4 Only when current evidence is absent, scan lineage[1:] for nearest confirmed predecessor
+            # 1.4 Only when current evidence is absent, scan lineage[1:] for nearest
+            # confirmed predecessor
             if model.lineage and len(model.lineage) > 1:
                 for pred_ref in model.lineage[1:]:
                     pred_card_key = _request_card_key(pred_ref.request_id, pred_ref.phase)

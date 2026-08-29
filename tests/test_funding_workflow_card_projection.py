@@ -7,8 +7,6 @@ from typing import Any
 import pytest
 
 from maestro.integrations.telegram.ui.funding_workflow import (
-    FundingWorkflowAttention,
-    FundingWorkflowCardModel,
     FundingWorkflowCardStage,
     FundingWorkflowPhase,
     FundingWorkflowRequestRef,
@@ -17,14 +15,11 @@ from maestro.integrations.telegram.ui.funding_workflow import (
     recovery_owned_incomplete_attempts,
 )
 from maestro.state.funding_workflow import (
-    claim_key,
     claim_workflow_attempt,
     complete_workflow,
     completed_key,
-    funding_workflow_id,
     publish_contribution_request,
     superseded_key,
-    workflow_id_from_request,
 )
 from maestro.state.store import StateStore
 
@@ -128,7 +123,11 @@ def test_projects_truthful_monthly_stage(
         assert claim_res["claimed"]
 
         if completed:
-            legacy_status = "canceled" if intent == "cancel" else ("confirmed" if phase == "funding" else "selected")
+            legacy_status = (
+                "canceled"
+                if intent == "cancel"
+                else ("confirmed" if phase == "funding" else "selected")
+            )
             legacy_payload: dict[str, Any] = {
                 "request_id": "req-1",
                 "status": legacy_status,
@@ -322,7 +321,7 @@ def test_recovery_notice_for_different_attempt_or_request_does_not_affect_curren
                     "request_id": "req-1",
                     "phase": "funding",
                     "attempt": 1,
-                    "duplicate_key": f"funding-workflow-stalled:funding:req-1:a1:100",
+                    "duplicate_key": "funding-workflow-stalled:funding:req-1:a1:100",
                     "chat_id": 100,
                 },
             }
@@ -340,7 +339,7 @@ def test_recovery_notice_for_different_attempt_or_request_does_not_affect_curren
                     "request_id": "req-other",
                     "phase": "funding",
                     "attempt": 2,
-                    "duplicate_key": f"funding-workflow-stalled:funding:req-other:a2:100",
+                    "duplicate_key": "funding-workflow-stalled:funding:req-other:a2:100",
                     "chat_id": 100,
                 },
             }
@@ -519,7 +518,7 @@ def test_funding_completed_with_child_remains_funding_completed(store: StateStor
             {
                 "event_type": "funding_workflow_child_created",
                 "payload": {
-                    "duplicate_key": f"child:req-1:funding",
+                    "duplicate_key": "child:req-1:funding",
                     "signal_run_id": "signal-child-1",
                     "workflow_id": wf_id,
                     "request_id": "req-1",
@@ -647,16 +646,14 @@ def test_recovery_owned_incomplete_attempts_helper(store: StateStore):
                     "request_id": "req-1",
                     "phase": "funding",
                     "attempt": 1,
-                    "duplicate_key": f"funding-workflow-stalled:funding:req-1:a1:100",
+                    "duplicate_key": "funding-workflow-stalled:funding:req-1:a1:100",
                     "chat_id": 100,
                 },
             }
         ],
     )
 
-    assert recovery_owned_incomplete_attempts(store, wf_id) == frozenset(
-        {("req-1", "funding", 1)}
-    )
+    assert recovery_owned_incomplete_attempts(store, wf_id) == frozenset({("req-1", "funding", 1)})
 
     # Complete it
     complete_workflow(

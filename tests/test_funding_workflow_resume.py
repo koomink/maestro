@@ -93,9 +93,7 @@ class FakeTelegramClient:
         self.edited_messages: list[dict] = []
 
     def send_message(self, chat_id, text, reply_markup=None):
-        self.sent_messages.append(
-            {"chat_id": chat_id, "text": text, "reply_markup": reply_markup}
-        )
+        self.sent_messages.append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"result": {"message_id": len(self.sent_messages)}}
 
     def get_updates(self, *, offset=None, timeout_seconds=0, allowed_updates=None):
@@ -107,7 +105,12 @@ class FakeTelegramClient:
 
     def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
         self.edited_messages.append(
-            {"chat_id": chat_id, "message_id": message_id, "text": text, "reply_markup": reply_markup}
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "reply_markup": reply_markup,
+            }
         )
         return {"ok": True}
 
@@ -309,9 +312,7 @@ def test_a_confirmed_funding_request_records_claim_child_and_completed(operator_
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
 
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
 
     types = [
         row["event_type"]
@@ -326,9 +327,7 @@ def test_a_confirmed_funding_request_records_claim_child_and_completed(operator_
 def test_a_duplicate_callback_is_refused_before_any_side_effect(operator_bot):
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
 
     with pytest.raises(WorkflowClaimRefused):
         operator_bot._confirm_funding_request(
@@ -415,9 +414,7 @@ def test_the_legacy_ack_is_written_so_a_rollback_sees_the_request_as_done(operat
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
 
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
 
     assert operator_bot._load_pending_funding_request("req-1") is None
     ack_events = store.list_system_events_by_type("contribution_funding_request_ack", limit=10)
@@ -576,9 +573,7 @@ def test_a_completed_budget_workflow_writes_the_legacy_decision(operator_bot):
     operator_bot._confirm_budget_request(
         _budget_request("req-1"), selected_budget=500000.0, chat_id=1, user_id=2, username="op"
     )
-    decisions = store.list_system_events_by_type(
-        "contribution_budget_request_decision", limit=None
-    )
+    decisions = store.list_system_events_by_type("contribution_budget_request_decision", limit=None)
     assert decisions[0]["payload"]["selected_budget"] == 500000.0
     assert operator_bot._load_pending_budget_request("req-1") is None
 
@@ -624,8 +619,12 @@ def test_a_superseded_budget_request_via_text_command_reports_superseded(operato
 
     assert operator_bot.process_update(message_update("/budget req-1 500000"))
 
-    assert any("already processed or superseded" in m["text"] for m in operator_bot.client.sent_messages)
-    assert not any("out of range or invalid" in m["text"] for m in operator_bot.client.sent_messages)
+    assert any(
+        "already processed or superseded" in m["text"] for m in operator_bot.client.sent_messages
+    )
+    assert not any(
+        "out of range or invalid" in m["text"] for m in operator_bot.client.sent_messages
+    )
     assert _budget_statuses(store) == ["claim_superseded"]
 
 
@@ -662,9 +661,9 @@ def _wfresume_statuses(store) -> list[str]:
 
 def test_a_claim_without_completion_shows_up_as_incomplete(operator_bot):
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -674,18 +673,16 @@ def test_a_claim_without_completion_shows_up_as_incomplete(operator_bot):
 def test_a_completed_workflow_is_not_incomplete(operator_bot):
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
     assert list_incomplete_workflows(store) == []
 
 
 def test_an_incomplete_workflow_is_never_resumed_automatically(operator_bot):
     """The sweep only surfaces; it must never re-enter the transition itself."""
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -771,9 +768,9 @@ def test_the_sweep_sends_a_resume_card_whose_button_fits_telegrams_limit(operato
 
 def test_a_second_sweep_does_not_resend_the_same_attempts_notice(operator_bot):
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -815,9 +812,9 @@ def test_the_operator_resume_button_enters_exactly_once(operator_bot):
     import threading
 
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -857,9 +854,9 @@ def test_a_double_tap_of_resume_enters_exactly_once_through_the_router(operator_
     import threading
 
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -937,9 +934,7 @@ def test_resuming_a_budget_workflow_reuses_the_stored_amount_without_asking_agai
     monkeypatch.undo()
     assert operator_bot.process_update(callback_update("operator:wfresume:budget:req-1"))
 
-    decisions = store.list_system_events_by_type(
-        "contribution_budget_request_decision", limit=None
-    )
+    decisions = store.list_system_events_by_type("contribution_budget_request_decision", limit=None)
     assert decisions[0]["payload"]["selected_budget"] == 500000.0
     assert _wfresume_statuses(store) == ["resumed"]
 
@@ -948,9 +943,7 @@ def test_a_stale_resume_callback_for_a_non_stalled_workflow_is_refused(operator_
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")
 
-    assert operator_bot.process_update(
-        callback_update("operator:wfresume:funding:req-1")
-    )
+    assert operator_bot.process_update(callback_update("operator:wfresume:funding:req-1"))
 
     text = operator_bot.client.answered_callbacks[-1]["text"]
     assert "no longer stalled" in text
@@ -989,9 +982,9 @@ def test_a_pending_request_before_the_cutoff_is_left_alone(operator_bot):
 
 def test_a_head_pointing_at_nothing_falls_back_to_the_previous_version(operator_bot):
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     store.save_system_events_atomic(
         "run-2",
         [
@@ -1034,9 +1027,9 @@ def test_a_normal_replacement_is_not_treated_as_an_orphan_by_the_sweep(operator_
 
 def test_converging_a_rolled_back_head_twice_changes_nothing_the_second_time(operator_bot):
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     store.save_system_events_atomic(
         "run-2",
         [
@@ -1128,9 +1121,9 @@ def test_a_request_recorded_between_the_snapshot_and_the_rollback_is_not_discard
     choice and the write must stop the rollback, not be discarded by it.
     """
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     store.save_system_events_atomic(
         "run-2",
         [
@@ -1181,7 +1174,6 @@ def test_a_request_recorded_between_the_snapshot_and_the_rollback_is_not_discard
     assert head["version"] == 2
 
 
-
 # --- final review fixes -------------------------------------------------
 
 
@@ -1229,9 +1221,7 @@ def test_a_second_budget_amount_on_the_same_attempt_is_refused_not_raised(
     assert excinfo.value.reason == "already_claimed"
 
 
-def test_changing_the_budget_amount_on_the_same_card_reports_in_flight(
-    operator_bot, monkeypatch
-):
+def test_changing_the_budget_amount_on_the_same_card_reports_in_flight(operator_bot, monkeypatch):
     store = operator_bot.store
     publish_contribution_request(store, "run-1", _budget_request("req-1"), phase="budget")
 
@@ -1240,9 +1230,7 @@ def test_changing_the_budget_amount_on_the_same_card_reports_in_flight(
 
     monkeypatch.setattr(operator_bot, "_run_child_signal", boom)
     assert operator_bot.process_update(callback_update("operator:budget:sel:req-1:r"))
-    assert operator_bot.process_update(
-        callback_update("operator:budget:sel:req-1:f", update_id=3)
-    )
+    assert operator_bot.process_update(callback_update("operator:budget:sel:req-1:f", update_id=3))
 
     text = operator_bot.client.edited_messages[-1]["text"]
     assert "already being processed" in text
@@ -1312,9 +1300,7 @@ def test_resuming_a_stalled_budget_cancel_needs_no_stored_amount(operator_bot, m
     )
 
     assert _wfresume_statuses(store) == ["resumed"]
-    decisions = store.list_system_events_by_type(
-        "contribution_budget_request_decision", limit=None
-    )
+    decisions = store.list_system_events_by_type("contribution_budget_request_decision", limit=None)
     assert [row["payload"]["status"] for row in decisions] == ["canceled"]
     assert store.list_system_events_by_type("signal_package", limit=None) == []
 
@@ -1324,9 +1310,9 @@ def test_a_claim_recorded_before_intent_existed_resumes_as_confirm(operator_bot)
     the only transition the old resume path could perform, so that is what a
     missing intent has to mean."""
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -1341,9 +1327,9 @@ def test_a_claim_recorded_before_intent_existed_resumes_as_confirm(operator_bot)
 
 def test_an_unknown_recorded_intent_is_not_silently_treated_as_confirm(operator_bot):
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store,
         "run-1",
@@ -1374,9 +1360,9 @@ def test_a_claim_survived_by_its_own_legitimate_successor_stays_incomplete(opera
     req-1's claim is still open.
     """
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store, "run-1", workflow_id=workflow_id, request_id="req-1", phase="funding"
     )
@@ -1419,9 +1405,7 @@ def test_a_request_that_predates_the_workflow_upgrade_says_so(operator_bot):
     assert _funding_complete_statuses(store) == ["claim_no_head"]
 
 
-def test_an_unexpected_supersede_conflict_is_counted_and_logged_as_an_error(
-    operator_bot, caplog
-):
+def test_an_unexpected_supersede_conflict_is_counted_and_logged_as_an_error(operator_bot, caplog):
     """Final review section (d): a content conflict on a key this sweep
     believes it owns is a concurrent-writer disagreement, not routine noise."""
     import logging
@@ -1464,6 +1448,7 @@ def _live_approval_config_path(tmp_path) -> Path:
     config_path.write_text(yaml.safe_dump(raw))
     return config_path
 
+
 def test_a_crash_before_the_next_card_leaves_the_funding_workflow_recoverable(
     operator_bot, monkeypatch
 ):
@@ -1500,6 +1485,7 @@ def test_a_crash_before_the_next_card_leaves_the_funding_workflow_recoverable(
     # The resume reuses the child the crashed attempt already built.
     assert len(store.list_system_events_by_type("signal_package", limit=None)) == 1
 
+
 def test_a_crash_before_the_next_card_leaves_the_budget_workflow_recoverable(
     operator_bot, monkeypatch
 ):
@@ -1525,11 +1511,10 @@ def test_a_crash_before_the_next_card_leaves_the_budget_workflow_recoverable(
     monkeypatch.undo()
     assert operator_bot.process_update(callback_update("operator:wfresume:budget:req-1"))
 
-    decisions = store.list_system_events_by_type(
-        "contribution_budget_request_decision", limit=None
-    )
+    decisions = store.list_system_events_by_type("contribution_budget_request_decision", limit=None)
     assert [row["payload"]["selected_budget"] for row in decisions] == [500_000.0]
     assert list_incomplete_workflows(store) == []
+
 
 def test_the_next_request_card_is_sent_before_the_workflow_is_closed(operator_bot, monkeypatch):
     """The ordering itself, not just its consequence under a crash."""
@@ -1545,12 +1530,11 @@ def test_the_next_request_card_is_sent_before_the_workflow_is_closed(operator_bo
         return original(*args, **kwargs)
 
     monkeypatch.setattr(operator_bot, "_deliver_child_signal_outcome", recording)
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
 
     assert completed_when_delivering == [0]
     assert len(store.list_system_events_by_type("funding_workflow_completed", limit=None)) == 1
+
 
 def test_a_budget_selection_without_a_signal_config_is_refused_not_completed(operator_bot):
     """Critical 3: the selection is an input, so it cannot stand alone.
@@ -1582,9 +1566,8 @@ def test_a_budget_selection_without_a_signal_config_is_refused_not_completed(ope
     assert store.list_system_events_by_type("funding_workflow_claim", limit=None) == []
     assert operator_bot._load_pending_budget_request("req-1") is not None
 
-def test_a_resumed_attempt_adopts_an_approval_run_that_reported_completion(
-    operator_bot, tmp_path
-):
+
+def test_a_resumed_attempt_adopts_an_approval_run_that_reported_completion(operator_bot, tmp_path):
     """A resume re-enters the delivery step, and approve_signal refuses a
     package it already consumed. Without adopting the finished outcome the
     resume could never finish, and the workflow would stay stalled over work
@@ -1603,9 +1586,8 @@ def test_a_resumed_attempt_adopts_an_approval_run_that_reported_completion(
         "approval_status: already_approved"
     ]
 
-def test_a_consumed_approval_that_never_completed_is_not_adopted_as_success(
-    operator_bot, tmp_path
-):
+
+def test_a_consumed_approval_that_never_completed_is_not_adopted_as_success(operator_bot, tmp_path):
     """Re-review Critical 2: consumed is not completed.
 
     approve_signal marks the package consumed before placing a single order
@@ -1622,6 +1604,7 @@ def test_a_consumed_approval_that_never_completed_is_not_adopted_as_success(
 
     with pytest.raises(ValueError, match="never reported completion"):
         operator_bot._dispatch_child_approval("signal-child")
+
 
 def test_a_child_needing_approval_without_an_approval_config_stays_recoverable(
     operator_bot, monkeypatch
@@ -1657,6 +1640,7 @@ def test_a_child_needing_approval_without_an_approval_config_stays_recoverable(
     assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
     assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
 
+
 def test_a_resumed_attempt_adopts_a_dispatch_that_already_settled(operator_bot, tmp_path):
     """The same adoption for the live_approval/Telegram path, where
     dispatch_signal_approval is what refuses a package whose approvals were
@@ -1679,9 +1663,9 @@ def _request_cards(operator_bot, request_id: str) -> list[dict[str, Any]]:
     return [
         message
         for message in operator_bot.client.sent_messages
-        if request_id in str(message.get("text") or "")
-        and message.get("reply_markup") is not None
+        if request_id in str(message.get("text") or "") and message.get("reply_markup") is not None
     ]
+
 
 def test_removed_request_scoped_senders(operator_bot):
     assert hasattr(operator_bot, "_send_budget_request") is False
@@ -1722,7 +1706,8 @@ def test_legacy_failed_single_owner_regression(operator_bot, monkeypatch):
         successor_of_phase="funding",
     )
 
-    # 3. Seed request-scoped legacy evidence with card_intent_event followed by card_failure_event under budget-request:req-b
+    # 3. Seed request-scoped legacy evidence with card_intent_event followed by
+    # card_failure_event under budget-request:req-b
     legacy_key = "budget-request:req-b"
     store.record_card_event(
         "run-legacy-fail",
@@ -1747,10 +1732,13 @@ def test_legacy_failed_single_owner_regression(operator_bot, monkeypatch):
         ),
     )
 
-    intents_before = len([
-        e for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
-        if e["payload"].get("card_key") == legacy_key and e["payload"].get("phase") == "intent"
-    ])
+    intents_before = len(
+        [
+            e
+            for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
+            if e["payload"].get("card_key") == legacy_key and e["payload"].get("phase") == "intent"
+        ]
+    )
     assert intents_before == 1
 
     # Assert old request-scoped sender methods are removed
@@ -1767,17 +1755,22 @@ def test_legacy_failed_single_owner_regression(operator_bot, monkeypatch):
     assert wf_card_states[0]["delivery"] == "confirmed"
 
     adoptions = [
-        e for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
+        e
+        for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
         if e["payload"].get("phase") == "adoption"
     ]
     assert len(adoptions) == 1
     assert adoptions[0]["payload"]["adopted_from_card_key"] == legacy_key
 
-    # Fake client has exactly one successful send_message for B and B card is buttonless while predecessor A is incomplete
+    # Fake client has exactly one successful send_message for B and B card is buttonless
+    # while predecessor A is incomplete
     assert len(operator_bot.client.sent_messages) == 1
     sent_msg = operator_bot.client.sent_messages[0]
     assert sent_msg["chat_id"] == 1
-    assert sent_msg.get("reply_markup") is None or sent_msg["reply_markup"].get("inline_keyboard") == []
+    assert (
+        sent_msg.get("reply_markup") is None
+        or sent_msg["reply_markup"].get("inline_keyboard") == []
+    )
 
     # 5. Continue the real parent Resume/transition path
     _stub_child_signal(
@@ -1788,28 +1781,36 @@ def test_legacy_failed_single_owner_regression(operator_bot, monkeypatch):
         source_phase="funding",
     )
 
-    handled_resume = operator_bot.process_update(
-        callback_update("operator:wfresume:funding:req-a")
-    )
+    handled_resume = operator_bot.process_update(callback_update("operator:wfresume:funding:req-a"))
     assert handled_resume is True
 
     # 6. Assert budget-request:req-b intent count is unchanged (no request-scoped retry)
-    intents_after = len([
-        e for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
-        if e["payload"].get("card_key") == legacy_key and e["payload"].get("phase") == "intent"
-    ])
+    intents_after = len(
+        [
+            e
+            for e in store.list_system_events_by_type("telegram_ui_card", limit=None)
+            if e["payload"].get("card_key") == legacy_key and e["payload"].get("phase") == "intent"
+        ]
+    )
     assert intents_after == intents_before
 
     # 7. Assert Resume/continuation durably completes A
     completed_events = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     assert any(e["payload"]["request_id"] == "req-a" for e in completed_events)
 
-    # 8. Assert activated finally refresh edits the same workflow-scoped physical message into the live actionable B representation
+    # 8. Assert activated finally refresh edits the same workflow-scoped physical message
+    # into the live actionable B representation
     assert len(operator_bot.client.sent_messages) == 1  # still only one send_message
     assert len(operator_bot.client.edited_messages) >= 1
     edited_for_wf = [
-        m for m in operator_bot.client.edited_messages
-        if m.get("reply_markup") and any("req-b" in str(b.get("callback_data")) for row in m["reply_markup"].get("inline_keyboard", []) for b in row)
+        m
+        for m in operator_bot.client.edited_messages
+        if m.get("reply_markup")
+        and any(
+            "req-b" in str(b.get("callback_data"))
+            for row in m["reply_markup"].get("inline_keyboard", [])
+            for b in row
+        )
     ]
     assert len(edited_for_wf) >= 1
 
@@ -1908,6 +1909,7 @@ def _stub_child_signal(
 
     monkeypatch.setattr(operator_bot, "_run_child_signal", run_child)
 
+
 def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
     operator_bot, monkeypatch
 ):
@@ -1951,11 +1953,10 @@ def test_a_telegram_rejected_follow_up_card_leaves_the_workflow_incomplete(
     # retries delivering req-2's card, via the same _deliver_child_signal_
     # outcome step req-1's own confirm already runs.
     assert [row["request_id"] for row in list_incomplete_workflows(store)] == ["req-1"]
-    undelivered = store.list_system_events_by_type(
-        "funding_request_card_undelivered", limit=None
-    )
+    undelivered = store.list_system_events_by_type("funding_request_card_undelivered", limit=None)
     assert [row["payload"]["request_id"] for row in undelivered] == ["req-2"]
     assert undelivered[0]["payload"]["delivery"] == "failed"
+
 
 def test_a_telegram_timeout_on_a_follow_up_card_leaves_the_workflow_incomplete(
     operator_bot, monkeypatch
@@ -1999,9 +2000,7 @@ def test_a_telegram_timeout_on_a_follow_up_card_leaves_the_workflow_incomplete(
         )
 
     assert store.list_system_events_by_type("funding_workflow_completed", limit=None) == []
-    undelivered = store.list_system_events_by_type(
-        "funding_request_card_undelivered", limit=None
-    )
+    undelivered = store.list_system_events_by_type("funding_request_card_undelivered", limit=None)
     assert [row["payload"]["request_id"] for row in undelivered] == ["req-2"]
     assert undelivered[0]["payload"]["delivery"] == "unknown"
     notices = [
@@ -2059,9 +2058,7 @@ def test_a_follow_up_already_decided_is_not_re_delivered(operator_bot, monkeypat
     )
     before = len(operator_bot.client.sent_messages)
 
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
 
     assert operator_bot.client.sent_messages[before:] == []
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
@@ -2076,14 +2073,10 @@ def test_a_follow_up_already_replaced_is_not_re_delivered(operator_bot, monkeypa
     follow_up = _other_scope_request("req-2")
     _stub_child_signal(monkeypatch, operator_bot, funding_requests=[follow_up])
     publish_contribution_request(store, "run-x", follow_up, phase="funding")
-    publish_contribution_request(
-        store, "run-y", _other_scope_request("req-3"), phase="funding"
-    )
+    publish_contribution_request(store, "run-y", _other_scope_request("req-3"), phase="funding")
     before = len(operator_bot.client.sent_messages)
 
-    operator_bot._confirm_funding_request(
-        _request("req-1"), chat_id=1, user_id=2, username="op"
-    )
+    operator_bot._confirm_funding_request(_request("req-1"), chat_id=1, user_id=2, username="op")
 
     assert operator_bot.client.sent_messages[before:] == []
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
@@ -2272,9 +2265,7 @@ def test_valid_head_with_incomplete_funding_predecessor_refuses_budget_confirm_a
     monkeypatch.setattr(operator_bot, "_refresh_portfolio_from_broker_snapshot", pytest.fail)
 
     # 3. Invoke the real B confirm callback
-    handled = operator_bot.process_update(
-        callback_update("operator:budget:sel:req-b:r")
-    )
+    handled = operator_bot.process_update(callback_update("operator:budget:sel:req-b:r"))
     assert handled is True
 
     after_claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
@@ -2290,9 +2281,7 @@ def test_valid_head_with_incomplete_funding_predecessor_refuses_budget_confirm_a
 
     # 4. Invoke the real B cancel callback (cancellation twin)
     before_claims_cancel = store.list_system_events_by_type("funding_workflow_claim", limit=None)
-    handled_cancel = operator_bot.process_update(
-        callback_update("operator:budget:cancel:req-b")
-    )
+    handled_cancel = operator_bot.process_update(callback_update("operator:budget:cancel:req-b"))
     assert handled_cancel is True
 
     after_claims_cancel = store.list_system_events_by_type("funding_workflow_claim", limit=None)
@@ -2303,9 +2292,7 @@ def test_valid_head_with_incomplete_funding_predecessor_refuses_budget_confirm_a
     assert "Budget request canceled" not in answer_text
 
 
-def test_budget_admission_allowed_once_funding_predecessor_completed(
-    operator_bot, monkeypatch
-):
+def test_budget_admission_allowed_once_funding_predecessor_completed(operator_bot, monkeypatch):
     """Completing predecessor A after B has become head unlocks B's admission.
     Calling require_completed_predecessor returns cleanly, and B can claim
     its first attempt and proceed without a permanent workflow freeze.
@@ -2372,9 +2359,7 @@ def test_budget_admission_allowed_once_funding_predecessor_completed(
         source_request_id="req-b",
         source_phase="budget",
     )
-    handled = operator_bot.process_update(
-        callback_update("operator:budget:sel:req-b:r")
-    )
+    handled = operator_bot.process_update(callback_update("operator:budget:sel:req-b:r"))
     assert handled is True
     assert _budget_statuses_for(store, "/budget_select") == ["selected"]
     claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
@@ -2474,9 +2459,9 @@ def test_project_funding_workflow_card_overlays_incomplete_transition_after_stal
     )
 
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
     claim_workflow_attempt(
         store,
         "run-1",
@@ -2516,9 +2501,9 @@ def test_project_funding_workflow_card_overlays_incomplete_transition_after_need
     )
 
     store = operator_bot.store
-    workflow_id = publish_contribution_request(
-        store, "run-1", _request("req-1"), phase="funding"
-    )["workflow_id"]
+    workflow_id = publish_contribution_request(store, "run-1", _request("req-1"), phase="funding")[
+        "workflow_id"
+    ]
 
     for attempt in range(1, _MAX_WORKFLOW_RESUME_ATTEMPT + 1):
         claim_workflow_attempt(
@@ -2542,5 +2527,3 @@ def test_project_funding_workflow_card_overlays_incomplete_transition_after_need
     assert model.stage == "funding_confirming"
     assert model.attention == "incomplete_transition"
     assert model.lifecycle_stage == "attention"
-
-

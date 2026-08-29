@@ -222,7 +222,9 @@ class TelegramBotAPIClient:
     def _handle_decoded_payload(self, method: str, decoded: Mapping[str, Any]) -> Mapping[str, Any]:
         if not decoded.get("ok"):
             raw_code = decoded.get("error_code")
-            error_code = raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
+            error_code = (
+                raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
+            )
             raw_description = decoded.get("description")
             description = raw_description if isinstance(raw_description, str) else None
             raise TelegramApiRejected(
@@ -543,22 +545,16 @@ def _format_live_order_batch(result: LiveOrderBatchLifecycleResult) -> str:
                 f"{index}. {request.account_id or 'default'} {request.symbol}",
                 f"broker_order_id: {lifecycle.broker_order_id or 'pending'}",
                 f"status: {lifecycle.final_status.value}",
-                (
-                    f"quantity: {request.quantity:g} filled: {filled:g} "
-                    f"remaining: {remaining:g}"
-                ),
+                (f"quantity: {request.quantity:g} filled: {filled:g} remaining: {remaining:g}"),
                 f"limit_price: {request.limit_price:g}",
             ]
         )
         if (
             lifecycle.broker_order_id
             and remaining > 0
-            and lifecycle.final_status
-            in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}
+            and lifecycle.final_status in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED}
         ):
-            modify_commands.append(
-                f"/modify {lifecycle.broker_order_id} <price> {remaining:g}"
-            )
+            modify_commands.append(f"/modify {lifecycle.broker_order_id} <price> {remaining:g}")
     if modify_commands:
         lines.extend(["", "Remaining orders can be modified with:", *modify_commands])
     return "\n".join(lines)
