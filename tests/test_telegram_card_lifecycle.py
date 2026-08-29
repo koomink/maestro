@@ -292,8 +292,8 @@ def test_a_card_older_than_any_event_window_is_still_found(tmp_path):
     assert len(client.sent) == sent_before
 
 
-def test_an_edit_rejection_falls_back_to_a_new_message(tmp_path):
-    """48h expiry or a deleted message must not strand the card."""
+def test_an_edit_rejection_falls_back_to_a_new_message_under_default_policy(tmp_path):
+    """Under default replace_on_rejection policy, any edit rejection triggers replacement."""
 
     class EditRejectingClient(FakeClient):
         def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
@@ -309,6 +309,195 @@ def test_an_edit_rejection_falls_back_to_a_new_message(tmp_path):
     assert result["sent"] == (100,)
     copies = manager.copies("approval:appr_1")
     assert copies[("approval:appr_1", 100)].message_id == client.next_message_id
+
+
+def test_edit_rejection_message_not_modified_converges_without_send(tmp_path):
+    """replace_on_target_absence: 'message is not modified' converges on existing message_id."""
+
+    class NotModifiedClient(FakeClient):
+        def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            raise TelegramApiRejected(
+                method="editMessageText",
+                error_code=400,
+                description="Bad Request: message is not modified",
+            )
+
+    client = NotModifiedClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "funding-workflow:w1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        edit_replacement_policy="replace_on_target_absence",
+    )
+
+    assert result["edited"] == (100,)
+    assert result["sent"] == ()
+    assert len(client.sent) == 1  # only initial send
+    copy = manager.copies("funding-workflow:w1")[("funding-workflow:w1", 100)]
+    assert copy.delivery == "confirmed"
+    assert copy.message_id == 5001
+    assert copy.stage == "in_progress"
+    assert copy.render_hash == manager.render_hash(progressed)
+
+
+def test_edit_rejection_message_not_found_replaces_once(tmp_path):
+    """replace_on_target_absence: 'message to edit not found' triggers a single replacement send."""
+
+    class NotFoundClient(FakeClient):
+        def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            raise TelegramApiRejected(
+                method="editMessageText",
+                error_code=400,
+                description="Bad Request: message to edit not found",
+            )
+
+    client = NotFoundClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "funding-workflow:w1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        edit_replacement_policy="replace_on_target_absence",
+    )
+
+    assert result["sent"] == (100,)
+    assert len(client.sent) == 2  # initial + 1 replacement
+    copy = manager.copies("funding-workflow:w1")[("funding-workflow:w1", 100)]
+    assert copy.delivery == "confirmed"
+    assert copy.message_id == client.next_message_id
+
+
+def test_generic_edit_rejection_records_failure_and_retries_edit(tmp_path):
+    """replace_on_target_absence: generic rejection records failure, keeps message_id, retries edit on next sweep."""
+    should_reject = True
+
+    class GenericRejectingClient(FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.edit_attempts: list[tuple[int, int, str]] = []
+
+        def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            self.edit_attempts.append((chat_id, message_id, text))
+            if should_reject:
+                raise TelegramApiRejected(
+                    method="editMessageText",
+                    error_code=400,
+                    description="Bad Request: can't parse entities",
+                )
+            return super().edit_message_text(chat_id, message_id, text, reply_markup)
+
+    client = GenericRejectingClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "funding-workflow:w1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        edit_replacement_policy="replace_on_target_absence",
+    )
+
+    assert result["failed"] == (100,)
+    assert result["sent"] == ()
+    assert len(client.sent) == 1  # no replacement send
+    copy = manager.copies("funding-workflow:w1")[("funding-workflow:w1", 100)]
+    assert copy.delivery == "failed"
+    assert copy.message_id == 5001  # preserved!
+
+    # Check failure event payload in store
+    rows = store.list_system_events_by_type("telegram_ui_card", limit=None)
+    failure_row = next(r for r in rows if r["payload"]["phase"] == "failure")
+    assert failure_row["payload"]["method"] == "editMessageText"
+    assert failure_row["payload"]["error_code"] == 400
+    assert failure_row["payload"]["description"] == "Bad Request: can't parse entities"
+
+    # Subsequent sweep retries the edit (not send)
+    should_reject = False
+    sweep_result = manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        edit_replacement_policy="replace_on_target_absence",
+    )
+    assert sweep_result["edited"] == (100,)
+    assert len(client.sent) == 1  # still no new send
+    assert len(client.edit_attempts) == 2  # 1 failed + 1 successful edit attempt
+    assert client.edit_attempts[0] == (100, 5001, progressed.text)
+    assert client.edit_attempts[1] == (100, 5001, progressed.text)
+    assert client.edited == [(100, 5001, progressed.text)]
+
+
+def test_edit_timeout_leaves_unknown_and_emits_ambiguous_notice(tmp_path):
+    """replace_on_target_absence: TimeoutError on edit leaves intent unknown without replacement."""
+
+    class TimingOutEditClient(FakeClient):
+        def edit_message_text(self, chat_id, message_id, text, reply_markup=None):
+            raise TimeoutError("Telegram Bot API timed out for method: editMessageText")
+
+    client = TimingOutEditClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100,))
+    manager.deliver("run_1", "funding-workflow:w1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    result = manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        edit_replacement_policy="replace_on_target_absence",
+    )
+
+    assert result["ambiguous"] == (100,)
+    assert result["sent"] == ()
+    assert len(client.sent) == 1  # no replacement send
+    copy = manager.copies("funding-workflow:w1")[("funding-workflow:w1", 100)]
+    assert copy.delivery == "unknown"
+
+    # Subsequent refresh emits only the buttonless ambiguity notice
+    manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        edit_replacement_policy="replace_on_target_absence",
+    )
+    assert [text for _, text in client.sent[1:]] == [
+        catalog.CARD_AMBIGUOUS_TEMPLATE.format(card_key="funding-workflow:w1", stage="in_progress")
+    ]
+
+
+def test_refresh_chat_ids_intersects_with_pinned_audience(tmp_path):
+    """refresh with chat_ids only refreshes the intersection with pinned audience."""
+    client = FakeClient()
+    store, manager = _manager(tmp_path, client, chat_ids=(100, 200))
+    manager.deliver("run_1", "funding-workflow:w1", "pending", CARD)
+    progressed = RenderedCard(text="🔵 주문 진행 중", reply_markup=None)
+
+    # Refresh only chat 100
+    result = manager.refresh(
+        "run_1",
+        "funding-workflow:w1",
+        "in_progress",
+        progressed,
+        chat_ids=[100, 999],  # 999 is unpinned
+    )
+
+    assert result["edited"] == (100,)
+    assert 200 not in result["edited"]
+    assert [c[0] for c in client.edited] == [100]
+
 
 
 def test_three_consecutive_rejections_send_a_plain_text_fallback(tmp_path):

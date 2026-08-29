@@ -108,14 +108,31 @@ def card_failure_event(
     render_hash: str,
     operation_id: str,
     error: str,
+    *,
+    method: str | None = None,
+    error_code: int | None = None,
+    description: str | None = None,
 ) -> dict[str, Any]:
     """Written when Telegram answered ok=false: it looked and refused.
 
     This is what separates a known failure from the unknown of a lost
     connection. Only a known failure may be retried automatically.
     """
+    payload: dict[str, Any] = {"error": error}
+    if method is not None:
+        payload["method"] = method
+    if error_code is not None:
+        payload["error_code"] = error_code
+    if description is not None:
+        payload["description"] = description
     return _event(
-        "failure", card_key, chat_id, stage, render_hash, operation_id, error=error
+        "failure",
+        card_key,
+        chat_id,
+        stage,
+        render_hash,
+        operation_id,
+        **payload,
     )
 
 

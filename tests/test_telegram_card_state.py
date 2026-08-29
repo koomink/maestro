@@ -4,6 +4,7 @@ from maestro.integrations.telegram.ui.card_state import (
     card_result_event,
     resolve_card_copies,
 )
+from maestro.state.store import StateStore
 
 
 def test_one_logical_card_keeps_a_separate_copy_per_chat():
@@ -124,3 +125,71 @@ def test_events_must_be_folded_oldest_first():
         resolve_card_copies(list(reversed(oldest_first)))[("approval:appr_1", 100)].delivery
         == "unknown"
     )
+
+
+def test_card_failure_event_preserves_rejection_metadata():
+    legacy = card_failure_event(
+        "approval:a1",
+        100,
+        "pending",
+        "hash",
+        "op-1",
+        "rejected",
+    )
+    enriched = card_failure_event(
+        "funding-workflow:w1",
+        100,
+        "budget_pending",
+        "hash-2",
+        "op-2",
+        "Bad Request: can't parse entities",
+        method="editMessageText",
+        error_code=400,
+        description="Bad Request: can't parse entities",
+    )
+
+    assert "method" not in legacy
+    assert "error_code" not in legacy
+    assert "description" not in legacy
+    assert enriched["method"] == "editMessageText"
+    assert enriched["error_code"] == 400
+    assert enriched["description"] == "Bad Request: can't parse entities"
+
+
+def test_card_failure_event_with_metadata_persists_and_folds_in_store(tmp_path):
+    store = StateStore(str(tmp_path / "state.db"))
+    confirmed = card_result_event(
+        "funding-workflow:w1", 100, "pending", "hash-1", "op-1", 5001
+    )
+    store.record_card_event("run-1", confirmed)
+    copy = store.load_card_delivery_state("funding-workflow:w1")[0]
+    assert copy["delivery"] == "confirmed"
+    assert copy["message_id"] == 5001
+    assert copy["consecutive_failures"] == 0
+
+    enriched = card_failure_event(
+        "funding-workflow:w1",
+        100,
+        "budget_pending",
+        "hash-2",
+        "op-2",
+        "Bad Request: can't parse entities",
+        method="editMessageText",
+        error_code=400,
+        description="Bad Request: can't parse entities",
+    )
+    store.record_card_event("run-1", enriched)
+    rows = store.list_system_events_by_type("telegram_ui_card", limit=None)
+    assert rows[0]["payload"]["method"] == "editMessageText"
+    assert rows[0]["payload"]["error_code"] == 400
+    assert rows[0]["payload"]["description"] == "Bad Request: can't parse entities"
+
+    copy = store.load_card_delivery_state("funding-workflow:w1")[0]
+    assert copy["delivery"] == "failed"
+    assert copy["message_id"] == 5001
+    assert copy["consecutive_failures"] == 1
+
+    copies = resolve_card_copies([row["payload"] for row in reversed(rows)])
+    assert copies[("funding-workflow:w1", 100)].delivery == "failed"
+    assert copies[("funding-workflow:w1", 100)].message_id == 5001
+

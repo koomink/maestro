@@ -1,3 +1,5 @@
+import io
+import urllib.error
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from maestro.core.enums import OrderSide, OrderStatus, RunMode
 from maestro.execution.base import OrderIntent
 from maestro.execution.live_orders import LiveOrderLifecycleNotification
 from maestro.integrations.telegram.bot import (
+    TelegramApiRejected,
     TelegramApprovalNotifier,
     TelegramApprovalService,
     TelegramBotAPIClient,
@@ -809,3 +812,82 @@ def test_non_telegram_notifier_keeps_every_order_risk_and_account():
         assert f"계좌: kis_{index}" in message
     assert "max_notional exceeded" in message
     assert "sector cap exceeded" in message
+
+
+def test_telegram_bot_api_client_preserves_rejection_metadata_on_200_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class DummyResponse:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    body = b'{"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found"}'
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: DummyResponse(body))
+    monkeypatch.setenv("TEST_TG_TOKEN", "123:test")
+    client = TelegramBotAPIClient(token_env="TEST_TG_TOKEN")
+
+    with pytest.raises(TelegramApiRejected) as exc_info:
+        client.edit_message_text(chat_id=100, message_id=50, text="hello")
+
+    exc = exc_info.value
+    assert isinstance(exc, RuntimeError)
+    assert exc.method == "editMessageText"
+    assert exc.error_code == 400
+    assert exc.description == "Bad Request: message to edit not found"
+
+
+def test_telegram_bot_api_client_preserves_rejection_metadata_on_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    body = b'{"ok": false, "error_code": 400, "description": "Bad Request: message to edit not found"}'
+    http_error = urllib.error.HTTPError(
+        url="https://api.telegram.org/bot123:test/editMessageText",
+        code=400,
+        msg="Bad Request",
+        hdrs={},  # type: ignore[arg-type]
+        fp=io.BytesIO(body),
+    )
+
+    def fake_urlopen(req, timeout=None):
+        raise http_error
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setenv("TEST_TG_TOKEN", "123:test")
+    client = TelegramBotAPIClient(token_env="TEST_TG_TOKEN")
+
+    with pytest.raises(TelegramApiRejected) as exc_info:
+        client.edit_message_text(chat_id=100, message_id=50, text="hello")
+
+    exc = exc_info.value
+    assert isinstance(exc, RuntimeError)
+    assert exc.method == "editMessageText"
+    assert exc.error_code == 400
+    assert exc.description == "Bad Request: message to edit not found"
+
+
+def test_telegram_bot_api_client_http_error_with_non_json_body_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    http_error = urllib.error.HTTPError(
+        url="https://api.telegram.org/bot123:test/editMessageText",
+        code=502,
+        msg="Bad Gateway",
+        hdrs={},  # type: ignore[arg-type]
+        fp=io.BytesIO(b"<html>502 Bad Gateway</html>"),
+    )
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=None: (_ for _ in ()).throw(http_error))
+    monkeypatch.setenv("TEST_TG_TOKEN", "123:test")
+    client = TelegramBotAPIClient(token_env="TEST_TG_TOKEN")
+
+    with pytest.raises(RuntimeError, match="Telegram Bot API unavailable for method: editMessageText"):
+        client.edit_message_text(chat_id=100, message_id=50, text="hello")
+

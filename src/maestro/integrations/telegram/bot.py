@@ -19,14 +19,42 @@ from maestro.integrations.telegram.ui.cards import approval_detail_pages
 
 
 class TelegramApiRejected(RuntimeError):
-    """Telegram answered ok=false: the message was definitively not delivered.
+    """Telegram explicitly rejected this API operation.
 
     Separate from transport failures on purpose. A timeout or a dropped
     connection may have happened after Telegram accepted the message, and an
     unparseable body means it certainly answered, so those stay ambiguous.
-    Only an explicit rejection is safe to retry automatically. Subclassing
-    RuntimeError keeps every existing ``except RuntimeError`` caller working.
+    Only an explicit rejection is safe to retry automatically: only a rejected
+    sendMessage proves that no new message was created, while an edit rejection
+    requires evidence classification. Subclassing RuntimeError keeps every
+    existing ``except RuntimeError`` caller working.
     """
+
+    method: str | None
+    error_code: int | None
+    description: str | None
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        method: str | None = None,
+        error_code: int | None = None,
+        description: str | None = None,
+    ) -> None:
+        self.method = method
+        self.error_code = error_code
+        self.description = description
+        text = (
+            message
+            if message is not None
+            else (
+                description
+                if description is not None
+                else (f"Telegram Bot API rejected method: {method}" if method is not None else "")
+            )
+        )
+        super().__init__(text)
 
 
 class TelegramBotClient(Protocol):
@@ -168,6 +196,18 @@ class TelegramBotAPIClient:
                 body = response.read().decode("utf-8")
         except TimeoutError as exc:
             raise TimeoutError(f"Telegram Bot API timed out for method: {method}") from exc
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read().decode("utf-8")
+            except Exception:
+                raise RuntimeError(f"Telegram Bot API unavailable for method: {method}") from exc
+            try:
+                decoded = json.loads(body)
+            except json.JSONDecodeError:
+                raise RuntimeError(f"Telegram Bot API unavailable for method: {method}") from exc
+            if not isinstance(decoded, Mapping):
+                raise RuntimeError(f"Telegram Bot API unavailable for method: {method}") from exc
+            return self._handle_decoded_payload(method, decoded)
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Telegram Bot API unavailable for method: {method}") from exc
 
@@ -177,9 +217,18 @@ class TelegramBotAPIClient:
             raise ValueError(f"Malformed Telegram response for method: {method}") from exc
         if not isinstance(decoded, Mapping):
             raise ValueError(f"Malformed Telegram response for method: {method}")
+        return self._handle_decoded_payload(method, decoded)
+
+    def _handle_decoded_payload(self, method: str, decoded: Mapping[str, Any]) -> Mapping[str, Any]:
         if not decoded.get("ok"):
+            raw_code = decoded.get("error_code")
+            error_code = raw_code if isinstance(raw_code, int) and not isinstance(raw_code, bool) else None
+            raw_description = decoded.get("description")
+            description = raw_description if isinstance(raw_description, str) else None
             raise TelegramApiRejected(
-                f"Telegram Bot API returned not ok for method: {method}"
+                method=method,
+                error_code=error_code,
+                description=description,
             )
         return decoded
 

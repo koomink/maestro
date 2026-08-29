@@ -8,7 +8,7 @@ instead of a card nobody will ever update again.
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from maestro.integrations.telegram.bot import TelegramApiRejected
 from maestro.integrations.telegram.ui import catalog
@@ -21,6 +21,11 @@ from maestro.integrations.telegram.ui.card_state import (
     new_operation_id,
 )
 from maestro.integrations.telegram.ui.cards import RenderedCard
+
+EditReplacementPolicy = Literal[
+    "replace_on_rejection",
+    "replace_on_target_absence",
+]
 
 
 class CardLifecycleManager:
@@ -89,7 +94,15 @@ class CardLifecycleManager:
             self.store.record_card_event(
                 run_id,
                 card_failure_event(
-                    card_key, chat_id, stage, render_hash, operation_id, str(exc)
+                    card_key,
+                    chat_id,
+                    stage,
+                    render_hash,
+                    operation_id,
+                    str(exc),
+                    method=exc.method,
+                    error_code=exc.error_code,
+                    description=exc.description,
                 ),
             )
             if self.consecutive_failures(card_key, chat_id) >= FALLBACK_AFTER_FAILURES:
@@ -174,6 +187,9 @@ class CardLifecycleManager:
         card_key: str,
         stage: str,
         rendered: RenderedCard,
+        *,
+        chat_ids: Sequence[int] | None = None,
+        edit_replacement_policy: EditReplacementPolicy = "replace_on_rejection",
     ) -> dict[str, Any]:
         """Bring every delivery copy up to the current stage."""
         render_hash = self.render_hash(rendered)
@@ -193,7 +209,8 @@ class CardLifecycleManager:
             # and writing this on each pass is a transaction per second per
             # open approval for a fact that never changes.
             self.store.record_card_audience(card_key, audience)
-        for chat_id in audience:
+        target_audience = [cid for cid in audience if cid in set(chat_ids)] if chat_ids is not None else audience
+        for chat_id in target_audience:
             copy = copies.get((card_key, chat_id))
             if (
                 copy is not None
@@ -229,13 +246,70 @@ class CardLifecycleManager:
                     reply_markup=rendered.reply_markup,
                 )
             except TelegramApiRejected as exc:
-                # Telegram refused the edit -- a 48h-expired or deleted message
-                # is the documented case. We still hold no doubt about what
-                # happened, so a fresh send is the right fallback.
+                if edit_replacement_policy == "replace_on_target_absence":
+                    desc = (exc.description or str(exc)).lower()
+                    if "message is not modified" in desc:
+                        self.store.record_card_event(
+                            run_id,
+                            card_result_event(
+                                card_key, chat_id, stage, render_hash, operation_id, copy.message_id
+                            ),
+                        )
+                        edited.append(chat_id)
+                        continue
+                    if "message to edit not found" in desc:
+                        self.store.record_card_event(
+                            run_id,
+                            card_failure_event(
+                                card_key,
+                                chat_id,
+                                stage,
+                                render_hash,
+                                operation_id,
+                                str(exc),
+                                method=exc.method,
+                                error_code=exc.error_code,
+                                description=exc.description,
+                            ),
+                        )
+                        outcome = self._deliver_one(
+                            run_id, card_key, stage, rendered, render_hash, chat_id
+                        )
+                        {"sent": sent, "failed": failed, "unknown": ambiguous}[outcome].append(chat_id)
+                        continue
+                    # Generic explicit rejection: record failure without replacement send
+                    self.store.record_card_event(
+                        run_id,
+                        card_failure_event(
+                            card_key,
+                            chat_id,
+                            stage,
+                            render_hash,
+                            operation_id,
+                            str(exc),
+                            method=exc.method,
+                            error_code=exc.error_code,
+                            description=exc.description,
+                        ),
+                    )
+                    if self.consecutive_failures(card_key, chat_id) >= FALLBACK_AFTER_FAILURES:
+                        self._escalate_repeated_failures(run_id, card_key, chat_id, stage)
+                    failed.append(chat_id)
+                    continue
+
+                # replace_on_rejection (default compatibility mode)
                 self.store.record_card_event(
                     run_id,
                     card_failure_event(
-                        card_key, chat_id, stage, render_hash, operation_id, str(exc)
+                        card_key,
+                        chat_id,
+                        stage,
+                        render_hash,
+                        operation_id,
+                        str(exc),
+                        method=exc.method,
+                        error_code=exc.error_code,
+                        description=exc.description,
                     ),
                 )
                 outcome = self._deliver_one(
