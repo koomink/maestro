@@ -145,7 +145,8 @@ def test_every_chat_gets_its_own_copy(tmp_path):
     copies = _copies_from_store(store)
     assert sorted(chat_id for _, chat_id in copies) == [100, 200]
     assert (
-        copies[("approval:appr_1", 100)].message_id != copies[("approval:appr_1", 200)].message_id
+        copies[("approval:appr_1", 100)].message_id
+        != copies[("approval:appr_1", 200)].message_id
     )
 
 

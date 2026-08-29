@@ -113,7 +113,8 @@ def validate_selected_budget(request: dict[str, Any], amount: float) -> None:
     maximum = float(request.get("selectable_max_budget") or 0.0)
     if amount < minimum or amount > maximum:
         raise ValueError(
-            f"Budget amount out of range: {amount:,.0f}; allowed {minimum:,.0f}-{maximum:,.0f}"
+            f"Budget amount out of range: {amount:,.0f}; "
+            f"allowed {minimum:,.0f}-{maximum:,.0f}"
         )
 
 

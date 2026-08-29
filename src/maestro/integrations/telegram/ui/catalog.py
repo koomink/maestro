@@ -46,7 +46,9 @@ APPROVAL_NEEDS_RECONCILIATION = (
 STALE_CALLBACK_TEXT = "이미 처리됐거나 만료된 요청이에요."
 #: 마이그레이션이 진행 중이라 금융 경로가 잠긴 동안의 응답. 실패가 아니라
 #: 보류이므로, 운영자가 다시 눌러야 할 일이라는 것을 알 수 있게 말한다.
-MIGRATION_IN_PROGRESS_TEXT = "상태 마이그레이션이 진행 중이에요. 끝난 뒤에 다시 눌러 주세요."
+MIGRATION_IN_PROGRESS_TEXT = (
+    "상태 마이그레이션이 진행 중이에요. 끝난 뒤에 다시 눌러 주세요."
+)
 CALLBACK_FAILED_TEXT = "처리하지 못했어요. 잠시 후 다시 시도해 주세요."
 ANSWER_APPROVED = "승인했어요."
 ANSWER_REJECTED = "거절했어요."

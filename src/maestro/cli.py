@@ -851,7 +851,8 @@ def profile_diff(
     )
     signal_contract_diff_keys = signal_contract_fingerprint_diff(left_config, right_config)
     typer.echo(
-        "signal_contract_fingerprint_changed=" + str(bool(signal_contract_diff_keys)).lower()
+        "signal_contract_fingerprint_changed="
+        + str(bool(signal_contract_diff_keys)).lower()
     )
     if signal_contract_diff_keys:
         typer.echo("signal_contract_diff_keys=" + ",".join(signal_contract_diff_keys))
@@ -1685,7 +1686,8 @@ def approval_outcome(
         typer.echo(f"  count {name}={count}")
     if outcome.has_unknown:
         typer.echo(
-            "  주의: 브로커에 닿았는지 알 수 없는 주문이 있다. 증권사 앱에서 먼저 확인할 것."
+            "  주의: 브로커에 닿았는지 알 수 없는 주문이 있다. "
+            "증권사 앱에서 먼저 확인할 것."
         )
 
 
@@ -1787,9 +1789,9 @@ def kis_sync(
     for result in report.results:
         row = latest_snapshot_for_account(store, result.account_id)
         payload = (row or {}).get("payload") or {}
-        broker_account_id = payload.get("broker_account_id") or (payload.get("account") or {}).get(
-            "account_id"
-        )
+        broker_account_id = payload.get("broker_account_id") or (
+            payload.get("account") or {}
+        ).get("account_id")
         typer.echo(
             f"account_id={result.account_id} broker_account_id={broker_account_id or 'none'} "
             f"status={result.status} "
@@ -1931,7 +1933,8 @@ def adopt_performance_baseline(
     ]
     if failures:
         raise typer.BadParameter(
-            "performance baseline requires fresh reconciled snapshots: " + ", ".join(failures)
+            "performance baseline requires fresh reconciled snapshots: "
+            + ", ".join(failures)
         )
     accounts: dict[str, dict[str, object]] = {}
     component_values: dict[str, float] = {}
@@ -1972,7 +1975,10 @@ def adopt_performance_baseline(
         SystemEventType.PERFORMANCE_BASELINE_ADOPTED,
         payload,
     )
-    typer.echo(f"adopted baseline_id={run_id} effective_at={effective_at} accounts={len(accounts)}")
+    typer.echo(
+        f"adopted baseline_id={run_id} effective_at={effective_at} "
+        f"accounts={len(accounts)}"
+    )
 
 
 @cash_flow_app.command("record")
@@ -2007,7 +2013,9 @@ def record_account_cash_flow(
         # side here would leave a permanently unpaired flow.
         raise typer.BadParameter("use `maestro cash-flow convert` to record a conversion")
     if normalized_class == INTERNAL_TRANSFER:
-        raise typer.BadParameter("use `maestro cash-flow transfer` to record both sides atomically")
+        raise typer.BadParameter(
+            "use `maestro cash-flow transfer` to record both sides atomically"
+        )
     normalized_currency = currency.strip().upper()
     timestamp = effective_at or utc_now().isoformat()
     store = _state_store(maestro_config, identity)
@@ -2174,7 +2182,8 @@ def open_ledger_baseline(
     )
     if any(str(row["payload"].get("account_id")) == account_id for row in existing):
         raise typer.BadParameter(
-            f"ledger opening baseline already exists for account_id={account_id}"
+            "ledger opening baseline already exists for "
+            f"account_id={account_id}"
         )
     snapshot = latest_snapshot_for_account(store, account_id)
     if snapshot is None:
@@ -2313,7 +2322,8 @@ def cash_drift_report(
     rows = [
         row
         for row in store.list_broker_account_snapshots(limit=None, since=since)
-        if str(row.get("account_id") or row["payload"].get("account_id") or "") == account_id
+        if str(row.get("account_id") or row["payload"].get("account_id") or "")
+        == account_id
     ]
     rows.reverse()
     if not rows:
@@ -2345,11 +2355,14 @@ def cash_drift_report(
             ledger = dict(ledger_payload.get("cash_by_currency") or {})
             if not ledger:
                 ledger = {
-                    maestro_config.portfolio.base_currency: float(ledger_payload.get("cash") or 0.0)
+                    maestro_config.portfolio.base_currency: float(
+                        ledger_payload.get("cash") or 0.0
+                    )
                 }
         drift = (
             {
-                currency: float(buying_power.get(currency, 0.0)) - float(ledger.get(currency, 0.0))
+                currency: float(buying_power.get(currency, 0.0))
+                - float(ledger.get(currency, 0.0))
                 for currency in sorted(set(ledger) | set(buying_power))
             }
             if ledger_payload is not None
@@ -2483,10 +2496,14 @@ def adopt_broker_snapshot(
     )
     if latest is None:
         scope = f" for account_id={account_id}" if account_id else ""
-        raise typer.BadParameter("adopt-broker-snapshot requires a latest broker snapshot" + scope)
+        raise typer.BadParameter(
+            "adopt-broker-snapshot requires a latest broker snapshot" + scope
+        )
 
     account = latest["payload"]["account"]
-    adopted_account_id = str(latest["payload"].get("account_id") or latest.get("account_id") or "")
+    adopted_account_id = str(
+        latest["payload"].get("account_id") or latest.get("account_id") or ""
+    )
     if not adopted_account_id:
         raise typer.BadParameter("broker snapshot is missing its Maestro account_id")
     existing_ledger = (
@@ -2524,7 +2541,8 @@ def adopt_broker_snapshot(
                     if str(row.get("run_id") or "") == order_history_backfill_run_id
                     and str((row.get("payload") or {}).get("account_id") or "")
                     == adopted_account_id
-                    and int((row.get("payload") or {}).get("missing_ledger_count") or 0) == 0
+                    and int((row.get("payload") or {}).get("missing_ledger_count") or 0)
+                    == 0
                 ),
                 None,
             )
@@ -2576,7 +2594,9 @@ def adopt_broker_snapshot(
             else None
         ),
         "flow_class": (
-            flow_class_for_cash_suspense(adopted_classification) if adopted_classification else None
+            flow_class_for_cash_suspense(adopted_classification)
+            if adopted_classification
+            else None
         ),
         "broker_snapshot_id": latest["id"],
         "account_id": adopted_account_id or None,
@@ -2711,7 +2731,9 @@ def restore_pending_maestro_sell_attribution(
         )
     store = _state_store(maestro_config, identity)
     audit = AuditLogger(maestro_config.audit.jsonl_path)
-    positions = AccountAttributionReconciliationService(store, audit).restore_pending_maestro_sell(
+    positions = AccountAttributionReconciliationService(
+        store, audit
+    ).restore_pending_maestro_sell(
         run_id=new_run_id(),
         account_id=account_id,
         symbol=symbol,

@@ -314,12 +314,12 @@ def test_collapsed_card_stays_within_telegram_limit():
 
 
 def test_decision_and_reminder_texts():
-    assert approval_decision_text("approved", "appr_x", orders_submitted=2, orders_failed=0) == (
-        "✅ 승인 완료 — 주문 2건을 접수했어요."
-    )
-    assert approval_decision_text("rejected", "appr_x", orders_submitted=0, orders_failed=0) == (
-        "❌ 거절했어요 — 이번 제안은 실행되지 않아요."
-    )
+    assert approval_decision_text(
+        "approved", "appr_x", orders_submitted=2, orders_failed=0
+    ) == ("✅ 승인 완료 — 주문 2건을 접수했어요.")
+    assert approval_decision_text(
+        "rejected", "appr_x", orders_submitted=0, orders_failed=0
+    ) == ("❌ 거절했어요 — 이번 제안은 실행되지 않아요.")
     reminder = approval_reminder_text(30, "카드 본문")
     assert reminder == "⏰ 아직 응답을 기다리고 있어요 (30분 경과)\n\n카드 본문"
     assert catalog.STALE_CALLBACK_TEXT == "이미 처리됐거나 만료된 요청이에요."

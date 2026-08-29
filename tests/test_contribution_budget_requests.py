@@ -45,7 +45,11 @@ def test_budget_request_message_and_markup_include_presets():
         "전액 8,000,000 KRW",
         "취소",
     }
-    assert {button["callback_data"] for button in buttons if button["text"] != "취소"} == {
+    assert {
+        button["callback_data"]
+        for button in buttons
+        if button["text"] != "취소"
+    } == {
         "operator:budget:sel:budget_req_1:m",
         "operator:budget:sel:budget_req_1:r",
         "operator:budget:sel:budget_req_1:f",

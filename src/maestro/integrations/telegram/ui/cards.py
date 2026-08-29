@@ -446,8 +446,9 @@ def _total_label(request: ApprovalRequest) -> str:
     if not totals:
         return money_kr(request.estimated_notional, None)
     return ", ".join(
-        money_kr(value, currency)
-        for currency, value in sorted(totals.items(), key=lambda item: str(item[0]))
+        money_kr(value, currency) for currency, value in sorted(
+            totals.items(), key=lambda item: str(item[0])
+        )
     )
 
 

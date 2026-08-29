@@ -144,7 +144,9 @@ def request_terminal_state(store: StateStore, request_id: str, phase: str) -> st
     return None
 
 
-def load_request_payload(store: StateStore, request_id: str, phase: str) -> dict[str, Any] | None:
+def load_request_payload(
+    store: StateStore, request_id: str, phase: str
+) -> dict[str, Any] | None:
     """The stored request event's payload, whatever its status."""
     _require_phase(phase)
     for row in store.list_system_events_by_type(_REQUEST_EVENT[phase], limit=None):
@@ -189,7 +191,6 @@ def _request_event_keys(request_id: str) -> tuple[str, str]:
     budget is exactly what the caller does not yet know.
     """
     return tuple(f"{event_type}:{request_id}" for event_type in _REQUEST_EVENT.values())
-
 
 # The pre-CAS handler (_load_pending_funding_request in
 # telegram/handlers.py) decides a request is finished by looking for one of
@@ -417,7 +418,9 @@ def plan_contribution_request(
     payload["funding_workflow_id"] = workflow_id
     payload["duplicate_key"] = f"{_REQUEST_EVENT[phase]}:{request_id}"
 
-    events: list[dict[str, Any]] = [{"event_type": _REQUEST_EVENT[phase], "payload": payload}]
+    events: list[dict[str, Any]] = [
+        {"event_type": _REQUEST_EVENT[phase], "payload": payload}
+    ]
     if previous_request_id and previous_request_id != request_id:
         superseded_payload: dict[str, Any] = {
             "duplicate_key": superseded_key(workflow_id, previous_request_id),
@@ -710,7 +713,9 @@ def claim_workflow_attempt(
     return {"claimed": False, "reason": reason, "attempt": attempt, "head_version": version}
 
 
-def _head_contradicts_transition(head: Mapping[str, Any], *, workflow_id: str, phase: str) -> bool:
+def _head_contradicts_transition(
+    head: Mapping[str, Any], *, workflow_id: str, phase: str
+) -> bool:
     """Whether this head describes a different workflow than the one claimed.
 
     ``load_funding_workflow_head`` selects by ``workflow_id``, so agreement is
@@ -887,7 +892,9 @@ def list_incomplete_workflows(store: StateStore) -> list[dict[str, Any]]:
         (str(payload.get("workflow_id")), str(payload.get("request_id")))
         for payload in (
             (row.get("payload") or {})
-            for row in store.list_system_events_by_type("funding_workflow_superseded", limit=None)
+            for row in store.list_system_events_by_type(
+                "funding_workflow_superseded", limit=None
+            )
         )
         if payload.get("legitimate_successor") is True
     )

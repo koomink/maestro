@@ -47,7 +47,9 @@ def new_operation_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
-def _duplicate_key(phase: str, card_key: str, chat_id: int, stage: str, operation_id: str) -> str:
+def _duplicate_key(
+    phase: str, card_key: str, chat_id: int, stage: str, operation_id: str
+) -> str:
     # operation_id is what makes a retry writable at all: system_events has a
     # UNIQUE index on duplicate_key (store.py:203), so a key that stopped at
     # the stage would make the second attempt raise IntegrityError.
