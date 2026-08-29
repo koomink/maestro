@@ -101,3 +101,22 @@ REQUEST_CARD_UNDELIVERED_TEMPLATE = (
     "⚠️ 입금/예산 요청 카드를 전달하지 못했어요 ({phase} 요청 {request_id}). "
     "이 요청은 카드 없이 남아 있어요. /history에서 확인해 주세요."
 )
+
+FUNDING_WORKFLOW_STAGE_COPY: dict[str, str] = {
+    "funding_pending": "📥 입금이 필요해요",
+    "funding_confirming": "⏳ 입금을 확인하고 있어요",
+    "funding_canceling": "⏳ 취소를 처리하고 있어요",
+    "budget_pending": "💰 이번 달 예산을 선택해 주세요",
+    "budget_applying": "⏳ 예산을 적용하고 있어요",
+    "budget_canceling": "⏳ 취소를 처리하고 있어요",
+    "funding_canceled": "🛑 이번 달 입금 요청을 취소했어요",
+    "budget_canceled": "🛑 이번 달 예산 선택을 취소했어요",
+    "budget_completed": "✅ 이번 달 예산을 확정했어요",
+    "funding_completed": "✅ 자금 확인을 마쳤어요",
+}
+FUNDING_WORKFLOW_ATTENTION_PREDECESSOR_INCOMPLETE = "⚠️ 자금 확인을 마무리하고 있어요"
+FUNDING_WORKFLOW_ATTENTION_INCOMPLETE_TRANSITION = "⚠️ 처리가 끝나지 않아 확인이 필요해요."
+FUNDING_WORKFLOW_PREDECESSOR_INCOMPLETE_BODY = (
+    "이번 달 예산 요청이 준비되었지만, 입금 확인이 끝나기 전에는 선택할 수 없어요."
+)
+

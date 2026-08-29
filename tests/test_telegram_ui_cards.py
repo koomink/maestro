@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from maestro.approval.models import ApprovalRequest
+from maestro.core.ids import new_budget_request_id, new_funding_request_id
 from maestro.integrations.telegram.ui import catalog
 from maestro.integrations.telegram.ui.cards import (
     TELEGRAM_TEXT_LIMIT,
@@ -9,8 +11,18 @@ from maestro.integrations.telegram.ui.cards import (
     approval_reminder_text,
     render_approval_card,
     render_approval_stage_card,
+    render_funding_workflow_card,
     telegram_text_length,
 )
+from maestro.integrations.telegram.ui.format import money_kr
+from maestro.integrations.telegram.ui.funding_workflow import (
+    FundingWorkflowAttention,
+    FundingWorkflowCardModel,
+    FundingWorkflowCardStage,
+    FundingWorkflowPhase,
+    FundingWorkflowRequestRef,
+)
+import pytest
 
 
 def _request() -> ApprovalRequest:
@@ -395,3 +407,247 @@ def test_a_stage_card_stays_within_the_telegram_limit():
     card = render_approval_stage_card(request, "attention")
 
     assert telegram_text_length(card.text) <= TELEGRAM_TEXT_LIMIT
+
+
+def _funding_workflow_card_model(
+    stage: FundingWorkflowCardStage,
+    *,
+    phase: FundingWorkflowPhase = "funding",
+    attention: FundingWorkflowAttention | None = None,
+    financial_actions_allowed: bool | None = None,
+    selected_budget: float | None = None,
+    request_id: str = "req_1",
+    request_payload: dict[str, Any] | None = None,
+) -> FundingWorkflowCardModel:
+    if financial_actions_allowed is None:
+        financial_actions_allowed = (
+            stage in ("funding_pending", "budget_pending") and attention is None
+        )
+    if request_payload is None:
+        if phase == "funding":
+            request_payload = {
+                "request_id": request_id,
+                "strategy_ids": ["tranquillo"],
+                "contribution_group_id": "core",
+                "account_id": "kis_ps",
+                "execution_sleeve": "krw_contribution",
+                "currency": "KRW",
+                "available_cash": 500_000.0,
+                "min_monthly_budget": 1_000_000.0,
+                "required_shortfall": 500_000.0,
+                "recommended_top_up": 500_000.0,
+                "month_key": "2026-08",
+            }
+        else:
+            request_payload = {
+                "request_id": request_id,
+                "strategy_ids": ["tranquillo"],
+                "contribution_group_id": "core",
+                "account_id": "kis_isa",
+                "execution_sleeve": "krw_contribution",
+                "currency": "KRW",
+                "available_cash": 8_000_000.0,
+                "min_monthly_budget": 1_660_000.0,
+                "recommended_budget": 4_000_000.0,
+                "selectable_max_budget": 8_000_000.0,
+                "month_key": "2026-08",
+            }
+    return FundingWorkflowCardModel(
+        workflow_id="wf_123",
+        month_key="2026-08",
+        scope=("core", "kis_ps" if phase == "funding" else "kis_isa", "krw_contribution", "KRW"),
+        phase=phase,
+        request_id=request_id,
+        request=request_payload,
+        stage=stage,
+        attention=attention,
+        financial_actions_allowed=financial_actions_allowed,
+        terminal_intent="cancel" if "canceled" in stage else ("confirm" if "completed" in stage else None),
+        selected_budget=selected_budget,
+        predecessor_request_id=None,
+        predecessor_completed=None,
+        card_delivery_version=0,
+        lineage=(FundingWorkflowRequestRef(request_id=request_id, phase=phase, lineage_distance=0),),
+    )
+
+
+@pytest.mark.parametrize(
+    ("stage", "phase", "expected_first_line", "actions_allowed"),
+    [
+        ("funding_pending", "funding", "📥 입금이 필요해요", True),
+        ("funding_confirming", "funding", "⏳ 입금을 확인하고 있어요", False),
+        ("funding_canceling", "funding", "⏳ 취소를 처리하고 있어요", False),
+        ("budget_pending", "budget", "💰 이번 달 예산을 선택해 주세요", True),
+        ("budget_applying", "budget", "⏳ 예산을 적용하고 있어요", False),
+        ("budget_canceling", "budget", "⏳ 취소를 처리하고 있어요", False),
+        ("funding_canceled", "funding", "🛑 이번 달 입금 요청을 취소했어요", False),
+        ("budget_canceled", "budget", "🛑 이번 달 예산 선택을 취소했어요", False),
+        ("budget_completed", "budget", "✅ 이번 달 예산을 확정했어요", False),
+        ("funding_completed", "funding", "✅ 자금 확인을 마쳤어요", False),
+    ],
+)
+def test_funding_workflow_card_snapshots_for_every_stage(
+    stage: FundingWorkflowCardStage,
+    phase: FundingWorkflowPhase,
+    expected_first_line: str,
+    actions_allowed: bool,
+):
+    selected_budget = 400_000.0 if stage == "budget_completed" else None
+    model = _funding_workflow_card_model(
+        stage=stage,
+        phase=phase,
+        financial_actions_allowed=actions_allowed,
+        selected_budget=selected_budget,
+    )
+    rendered = render_funding_workflow_card(model)
+    assert rendered.text.splitlines()[0] == expected_first_line
+    if model.financial_actions_allowed:
+        assert rendered.reply_markup is not None
+    else:
+        assert rendered.reply_markup is None
+
+    if stage == "budget_completed":
+        assert money_kr(400_000.0, "KRW") in rendered.text
+    elif stage == "funding_completed":
+        assert "선택 예산" not in rendered.text
+        assert "예산 확정" not in rendered.text
+        assert "예산 선택" not in rendered.text
+
+
+def test_funding_workflow_card_predecessor_incomplete_snapshot():
+    model = _funding_workflow_card_model(
+        stage="budget_pending",
+        phase="budget",
+        attention="predecessor_incomplete",
+        financial_actions_allowed=False,
+    )
+    rendered = render_funding_workflow_card(model)
+    assert rendered.text.splitlines()[0] == "⚠️ 자금 확인을 마무리하고 있어요"
+    assert rendered.reply_markup is None
+    assert "예산" in rendered.text
+    assert "선택할 수 없" in rendered.text or "마무리" in rendered.text
+
+
+def test_funding_workflow_card_incomplete_transition_snapshot():
+    model = _funding_workflow_card_model(
+        stage="funding_pending",
+        phase="funding",
+        attention="incomplete_transition",
+        financial_actions_allowed=False,
+    )
+    rendered = render_funding_workflow_card(model)
+    assert rendered.text.splitlines()[0] == "📥 입금이 필요해요"
+    assert "⚠️ 처리가 끝나지 않아 확인이 필요해요." in rendered.text
+    assert rendered.reply_markup is None
+
+
+def test_funding_workflow_card_button_authority_and_payloads():
+    funding_id = new_funding_request_id()
+    funding_model = _funding_workflow_card_model(
+        stage="funding_pending",
+        phase="funding",
+        request_id=funding_id,
+        financial_actions_allowed=True,
+    )
+    rendered_funding = render_funding_workflow_card(funding_model)
+    assert rendered_funding.reply_markup is not None
+    funding_rows = rendered_funding.reply_markup["inline_keyboard"]
+    funding_callbacks = [b["callback_data"] for row in funding_rows for b in row]
+    assert f"operator:funding:complete:{funding_id}" in funding_callbacks
+    assert f"operator:funding:cancel:{funding_id}" in funding_callbacks
+    for cb in funding_callbacks:
+        assert "funding_workflow_id" not in cb
+        assert "operator:wfresume" not in cb
+        assert "operator:appr" not in cb
+        assert "operator:ui:" not in cb
+        assert len(cb.encode("utf-8")) <= 64
+
+    budget_id = new_budget_request_id()
+    budget_model = _funding_workflow_card_model(
+        stage="budget_pending",
+        phase="budget",
+        request_id=budget_id,
+        financial_actions_allowed=True,
+    )
+    rendered_budget = render_funding_workflow_card(budget_model)
+    assert rendered_budget.reply_markup is not None
+    budget_rows = rendered_budget.reply_markup["inline_keyboard"]
+    budget_callbacks = [b["callback_data"] for row in budget_rows for b in row]
+    assert f"operator:budget:sel:{budget_id}:m" in budget_callbacks
+    assert f"operator:budget:sel:{budget_id}:r" in budget_callbacks
+    assert f"operator:budget:sel:{budget_id}:f" in budget_callbacks
+    assert f"operator:budget:cancel:{budget_id}" in budget_callbacks
+    for cb in budget_callbacks:
+        assert "funding_workflow_id" not in cb
+        assert "operator:wfresume" not in cb
+        assert "operator:appr" not in cb
+        assert "operator:ui:" not in cb
+        assert len(cb.encode("utf-8")) <= 64
+
+
+def test_funding_workflow_card_attention_and_terminal_are_buttonless():
+    terminal_stages: list[tuple[FundingWorkflowCardStage, FundingWorkflowPhase]] = [
+        ("funding_canceled", "funding"),
+        ("budget_canceled", "budget"),
+        ("funding_completed", "funding"),
+        ("budget_completed", "budget"),
+    ]
+    for stage, phase in terminal_stages:
+        model = _funding_workflow_card_model(
+            stage=stage,
+            phase=phase,
+            financial_actions_allowed=False,
+            selected_budget=500_000.0 if stage == "budget_completed" else None,
+        )
+        assert render_funding_workflow_card(model).reply_markup is None
+
+    for att in ("predecessor_incomplete", "incomplete_transition"):
+        model = _funding_workflow_card_model(
+            stage="budget_pending" if att == "predecessor_incomplete" else "funding_pending",
+            phase="budget" if att == "predecessor_incomplete" else "funding",
+            attention=att,  # type: ignore[arg-type]
+            financial_actions_allowed=False,
+        )
+        assert render_funding_workflow_card(model).reply_markup is None
+
+
+def test_funding_workflow_card_no_detail_or_fold_button():
+    for stage, phase in [
+        ("funding_pending", "funding"),
+        ("budget_pending", "budget"),
+        ("funding_confirming", "funding"),
+        ("budget_applying", "budget"),
+        ("budget_completed", "budget"),
+    ]:
+        model = _funding_workflow_card_model(
+            stage=stage,  # type: ignore[arg-type]
+            phase=phase,  # type: ignore[arg-type]
+            selected_budget=500_000.0 if stage == "budget_completed" else None,
+        )
+        card = render_funding_workflow_card(model)
+        assert "접기" not in card.text
+        assert "자세히" not in card.text
+        if card.reply_markup is not None:
+            callbacks = [b["callback_data"] for row in card.reply_markup["inline_keyboard"] for b in row]
+            button_texts = [b["text"] for row in card.reply_markup["inline_keyboard"] for b in row]
+            assert "접기" not in button_texts
+            assert "자세히" not in button_texts
+            for cb in callbacks:
+                assert not cb.startswith("operator:ui:d:")
+                assert not cb.startswith("operator:ui:f:")
+
+
+def test_funding_workflow_card_stays_within_telegram_limit():
+    long_account = "a" * 5000
+    model = _funding_workflow_card_model(
+        stage="funding_pending",
+        phase="funding",
+        request_payload={
+            "request_id": "req_long",
+            "account_id": long_account,
+            "currency": "KRW",
+        },
+    )
+    rendered = render_funding_workflow_card(model)
+    assert telegram_text_length(rendered.text) <= TELEGRAM_TEXT_LIMIT
+

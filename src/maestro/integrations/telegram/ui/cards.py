@@ -6,6 +6,8 @@ from typing import Any
 
 from maestro.approval.models import ApprovalRequest
 from maestro.core.strategy_names import strategy_display_label
+from maestro.execution.budget_requests import budget_request_reply_markup
+from maestro.execution.funding_requests import funding_request_reply_markup
 from maestro.integrations.telegram.ui import catalog
 from maestro.integrations.telegram.ui.format import (
     deadline_kr,
@@ -13,6 +15,7 @@ from maestro.integrations.telegram.ui.format import (
     money_kr,
     quantity_kr,
 )
+from maestro.integrations.telegram.ui.funding_workflow import FundingWorkflowCardModel
 
 _MAX_COLLAPSED_ORDER_LINES = 6
 _MAX_COLLAPSED_RISK_LINES = 3
@@ -475,3 +478,81 @@ def render_daily_card(
         )
         lines.append(catalog.DAILY_CARD_GROUP.format(label=label, stage=stage))
     return RenderedCard(text=_clamp("\n".join(lines)), reply_markup=None)
+
+
+def render_funding_workflow_card(model: FundingWorkflowCardModel) -> RenderedCard:
+    """Render a unified monthly funding workflow card from its ephemeral read model."""
+    if model.attention == "predecessor_incomplete":
+        first_line = catalog.FUNDING_WORKFLOW_ATTENTION_PREDECESSOR_INCOMPLETE
+    else:
+        default_stage = (
+            "funding_pending" if model.phase == "funding" else "budget_pending"
+        )
+        first_line = catalog.FUNDING_WORKFLOW_STAGE_COPY.get(
+            model.stage,
+            catalog.FUNDING_WORKFLOW_STAGE_COPY[default_stage],
+        )
+
+    lines: list[str] = [first_line]
+    if model.attention == "incomplete_transition":
+        lines.append(catalog.FUNDING_WORKFLOW_ATTENTION_INCOMPLETE_TRANSITION)
+
+    lines.append("")
+
+    if model.attention == "predecessor_incomplete":
+        lines.append(catalog.FUNDING_WORKFLOW_PREDECESSOR_INCOMPLETE_BODY)
+        lines.append("")
+
+    req = model.request
+    strategy_ids = req.get("strategy_ids") or []
+    if isinstance(strategy_ids, list) and strategy_ids:
+        lines.append(f"전략: {strategy_display_label(strategy_ids)}")
+
+    account_id = req.get("account_id")
+    if isinstance(account_id, str) and account_id:
+        lines.append(f"계좌: {account_id}")
+
+    execution_sleeve = req.get("execution_sleeve")
+    if isinstance(execution_sleeve, str) and execution_sleeve:
+        lines.append(f"슬리브: {execution_sleeve}")
+
+    currency = req.get("currency") if isinstance(req.get("currency"), str) else "KRW"
+    available_cash = _float_or_none(req.get("available_cash"))
+    if available_cash is not None:
+        lines.append(f"예수금: {money_kr(available_cash, currency)}")
+
+    if model.phase == "funding":
+        shortfall = _float_or_none(req.get("required_shortfall"))
+        if shortfall is not None:
+            lines.append(f"부족 금액: {money_kr(shortfall, currency)}")
+        min_budget = _float_or_none(req.get("min_monthly_budget"))
+        if min_budget is not None:
+            lines.append(f"최소 필요액: {money_kr(min_budget, currency)}")
+        recommended_top_up = _float_or_none(req.get("recommended_top_up"))
+        if recommended_top_up is not None and (
+            shortfall is None or recommended_top_up != shortfall
+        ):
+            lines.append(f"권장 입금액: {money_kr(recommended_top_up, currency)}")
+    else:  # budget
+        if model.selected_budget is not None:
+            lines.append(f"선택 예산: {money_kr(model.selected_budget, currency)}")
+        else:
+            min_budget = _float_or_none(req.get("min_monthly_budget"))
+            if min_budget is not None:
+                lines.append(f"최소 예산: {money_kr(min_budget, currency)}")
+            rec_budget = _float_or_none(req.get("recommended_budget"))
+            if rec_budget is not None:
+                lines.append(f"추천 예산: {money_kr(rec_budget, currency)}")
+            max_budget = _float_or_none(req.get("selectable_max_budget"))
+            if max_budget is not None:
+                lines.append(f"최대 예산: {money_kr(max_budget, currency)}")
+
+    reply_markup: dict[str, Any] | None = None
+    if model.financial_actions_allowed:
+        if model.phase == "funding":
+            reply_markup = funding_request_reply_markup(model.request_id)
+        else:
+            reply_markup = budget_request_reply_markup(dict(model.request))
+
+    return RenderedCard(text=_clamp("\n".join(lines)), reply_markup=reply_markup)
+
