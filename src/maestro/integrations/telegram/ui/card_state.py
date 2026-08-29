@@ -136,6 +136,40 @@ def card_failure_event(
     )
 
 
+def card_adoption_event(
+    card_key: str,
+    chat_id: int,
+    *,
+    source: CardCopy,
+    source_request_id: str,
+    source_phase: str,
+) -> dict[str, Any]:
+    """Adopt an existing delivery copy under a new target card key.
+
+    Preserves the source stage, render hash, delivery classification, and
+    message ID, without claiming that Telegram sent a message.
+    """
+    delivery = source.delivery
+    if delivery not in ("confirmed", "failed", "unknown"):
+        delivery = "unknown"
+    op_id = f"adopt:{source.operation_id}"
+    return {
+        "phase": "adoption",
+        "delivery": delivery,
+        "card_key": card_key,
+        "chat_id": chat_id,
+        "stage": source.stage,
+        "render_hash": source.render_hash,
+        "operation_id": op_id,
+        "message_id": source.message_id,
+        "adopted_from_card_key": source.card_key,
+        "adopted_from_operation_id": source.operation_id,
+        "adopted_from_request_id": source_request_id,
+        "adopted_from_phase": source_phase,
+        "duplicate_key": f"telegram-ui-card:adoption:{card_key}:{chat_id}:{source.card_key}:{source.operation_id}",
+    }
+
+
 def resolve_card_copies(
     events: Sequence[Mapping[str, Any]],
 ) -> dict[tuple[str, int], CardCopy]:
@@ -160,6 +194,16 @@ def resolve_card_copies(
         key = (card_key, raw_chat_id)
         previous = copies.get(key)
         message_id = event.get("message_id")
+        phase = str(event.get("phase") or "")
+        if phase == "adoption":
+            raw_delivery = str(event.get("delivery") or "")
+            delivery = (
+                raw_delivery
+                if raw_delivery in ("confirmed", "failed", "unknown")
+                else "unknown"
+            )
+        else:
+            delivery = _PHASE_DELIVERY.get(phase, "unknown")
         copies[key] = CardCopy(
             card_key=card_key,
             chat_id=raw_chat_id,
@@ -170,7 +214,7 @@ def resolve_card_copies(
             ),
             stage=str(event.get("stage") or ""),
             render_hash=str(event.get("render_hash") or ""),
-            delivery=_PHASE_DELIVERY.get(str(event.get("phase") or ""), "unknown"),
+            delivery=delivery,
             operation_id=str(event.get("operation_id") or ""),
         )
     return copies
