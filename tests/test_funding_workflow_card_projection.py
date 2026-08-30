@@ -836,3 +836,33 @@ def test_claim_intent_malformed_completed_rejected(store: StateStore):
 
     with pytest.raises(ValueError, match="invalid claim intent"):
         project_funding_workflow_card(store, wf_id)
+
+
+def test_empty_head_request_id_rejected(store: StateStore):
+    # 1. Publish a legitimate request to get canonical wf_id and valid structure
+    req_init = _funding_req("req-init", card_delivery_version=1)
+    pub = publish_contribution_request(store, "run-init", req_init, phase="funding")
+    wf_id = pub["workflow_id"]
+
+    # 2. Save a malformed request event with request_id="" so load_request_payload could find it
+    req_payload = _funding_req("", card_delivery_version=1)
+    req_payload["funding_workflow_id"] = wf_id
+    req_payload["duplicate_key"] = "contribution_funding_request:"
+    store.save_system_event("run-req", "contribution_funding_request", req_payload)
+
+    # 3. Save a malformed head with request_id=""
+    store.save_system_event(
+        "run-head-empty",
+        "funding_workflow_head",
+        {
+            "workflow_id": wf_id,
+            "request_id": "",
+            "phase": "funding",
+            "version": 2,
+            "scope": ["core", "paper_cash", "krw_contribution", "KRW"],
+            "duplicate_key": f"funding_workflow_head:{wf_id}:2",
+        },
+    )
+
+    with pytest.raises(ValueError, match="missing request_id"):
+        project_funding_workflow_card(store, wf_id)

@@ -548,6 +548,57 @@ def test_sweep_isolates_malformed_claim_intent_and_sends_nothing(tmp_path: Path)
     assert store.load_card_delivery_state(malformed_card_key) == []
 
 
+def test_sweep_isolates_empty_head_request_id_and_sends_nothing(tmp_path: Path) -> None:
+    router, store, client = _setup_router(tmp_path, chat_ids=(100, 200))
+
+    # 1. One valid workflow
+    req_valid = _funding_req("req-valid", month_key="2026-08", card_delivery_version=1)
+    pub_valid = publish_contribution_request(store, "run-valid", req_valid, phase="funding")
+    wf_valid = pub_valid["workflow_id"]
+
+    # 2. One malformed empty-request-id workflow in a distinct month
+    req_dummy = _funding_req("req-dummy", month_key="2026-09", card_delivery_version=1)
+    pub_dummy = publish_contribution_request(store, "run-dummy", req_dummy, phase="funding")
+    wf_empty = pub_dummy["workflow_id"]
+
+    req_empty = _funding_req("", month_key="2026-09", card_delivery_version=1)
+    req_empty["funding_workflow_id"] = wf_empty
+    req_empty["duplicate_key"] = "contribution_funding_request:"
+    store.save_system_event("run-req-empty", "contribution_funding_request", req_empty)
+    store.save_system_event(
+        "run-head-empty",
+        "funding_workflow_head",
+        {
+            "workflow_id": wf_empty,
+            "request_id": "",
+            "phase": "funding",
+            "version": 2,
+            "scope": ["core", "paper_cash", "krw_contribution", "KRW"],
+            "duplicate_key": f"funding_workflow_head:{wf_empty}:2",
+        },
+    )
+
+    router._sweep_funding_workflow_cards()
+
+    # Valid workflow card was still processed and delivered
+    valid_card_key = funding_workflow_card_key(wf_valid)
+    assert set(store.load_card_audience(valid_card_key)) == {100, 200}
+    assert len(client.sent) == 2
+
+    # Malformed empty-request-id workflow has NO audience, NO card events, NO client send
+    empty_card_key = funding_workflow_card_key(wf_empty)
+    assert store.load_card_audience(empty_card_key) == []
+    assert store.load_card_delivery_state(empty_card_key) == []
+
+    # Error logged for malformed workflow
+    error_events = [
+        e
+        for e in store.list_system_events_by_type("telegram_command", limit=None)
+        if e["payload"].get("status") == "error"
+    ]
+    assert any("ValueError" == e["payload"].get("error_type") for e in error_events)
+
+
 @pytest.mark.parametrize(
     ("req_factory", "phase"),
     [

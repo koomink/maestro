@@ -289,6 +289,9 @@ def project_funding_workflow_card(store: StateStore, workflow_id: str) -> Fundin
         raise ValueError(f"funding workflow head not found for {workflow_id}")
 
     request_id = str(head.get("request_id") or "")
+    if not request_id:
+        raise ValueError(f"head for workflow {workflow_id} is missing request_id")
+
     phase_raw = str(head.get("phase") or "")
     if phase_raw not in ("funding", "budget"):
         raise ValueError(f"invalid workflow head phase {phase_raw}")

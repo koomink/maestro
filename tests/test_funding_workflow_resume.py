@@ -43,6 +43,7 @@ from maestro.state.funding_workflow import (
     load_workflow_child,
     publish_contribution_request,
     require_completed_predecessor,
+    superseded_key,
     workflow_id_from_request,
 )
 from maestro.state.models import PortfolioState
@@ -2398,6 +2399,7 @@ def test_budget_admission_allowed_once_funding_predecessor_completed(operator_bo
     claims = store.list_system_events_by_type("funding_workflow_claim", limit=None)
     b_claims = [c for c in claims if c["payload"]["request_id"] == "req-b"]
     assert len(b_claims) == 1
+    assert b_claims[0]["payload"]["attempt"] == 1
 
 
 def test_budget_parent_survives_its_own_legitimate_successor_resume(
@@ -2410,8 +2412,10 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
     store = operator_bot.store
     workflow_id = _workflow_id_of("req-a")
 
-    # 1. Publish and durably complete funding A.
+    # 1. Publish funding A
     publish_contribution_request(store, "run-1", _request("req-a"), phase="funding")
+
+    # 2. Claim A attempt 1
     claim_a = claim_workflow_attempt(
         store,
         "run-claim-a",
@@ -2421,17 +2425,8 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
         attempt=1,
     )
     assert claim_a["claimed"] is True
-    complete_workflow(
-        store,
-        "run-complete-a",
-        workflow_id=workflow_id,
-        request_id="req-a",
-        phase="funding",
-        attempt=1,
-        legacy_payload={"request_id": "req-a", "status": "confirmed"},
-    )
 
-    # 2. Publish budget B as A's legitimate successor.
+    # 3. Publish budget B while A's claim is STILL OPEN
     publish_contribution_request(
         store,
         "run-2",
@@ -2442,7 +2437,36 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
     )
     assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-b"
 
-    # 3. Claim B attempt 1 with intent=confirm and selected_budget.
+    # 4. Assert A->B supersession marker explicitly
+    marker_ab = store.load_system_event_payload_by_duplicate_key(
+        superseded_key(workflow_id, "req-a")
+    )
+    assert marker_ab is not None
+    assert marker_ab["request_id"] == "req-a"
+    assert marker_ab["superseded_by"] == "req-b"
+    assert marker_ab["legitimate_successor"] is True
+    assert marker_ab["successor_of_phase"] == "funding"
+
+    # 5. Complete A attempt 1
+    complete_workflow(
+        store,
+        "run-complete-a",
+        workflow_id=workflow_id,
+        request_id="req-a",
+        phase="funding",
+        attempt=1,
+        legacy_payload={"request_id": "req-a", "status": "confirmed"},
+    )
+
+    # 6. Verify predecessor gate now allows B
+    require_completed_predecessor(
+        store,
+        workflow_id=workflow_id,
+        request_id="req-b",
+        phase="budget",
+    )
+
+    # 7. Claim B attempt 1 with intent=confirm and selected_budget
     claim_b = claim_workflow_attempt(
         store,
         "run-claim-b",
@@ -2454,9 +2478,7 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
     )
     assert claim_b["claimed"] is True
 
-    # 4. Simulate B's own child transition publishing legitimate successor C,
-    # so the workflow head moves B -> C and the durable superseded marker for B says:
-    # legitimate_successor=True, successor_of_phase="budget"
+    # 8. Publish C while B's claim REMAIN OPEN
     publish_contribution_request(
         store,
         "run-3",
@@ -2467,13 +2489,23 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
     )
     assert store.load_funding_workflow_head(workflow_id)["request_id"] == "req-c"
 
-    # 5. Do NOT complete B (simulates crash after B's child publication but before B completion).
+    # 9. Assert B->C supersession marker explicitly
+    marker_bc = store.load_system_event_payload_by_duplicate_key(
+        superseded_key(workflow_id, "req-b")
+    )
+    assert marker_bc is not None
+    assert marker_bc["request_id"] == "req-b"
+    assert marker_bc["superseded_by"] == "req-c"
+    assert marker_bc["legitimate_successor"] is True
+    assert marker_bc["successor_of_phase"] == "budget"
 
-    # 6. Verify B remains listed as incomplete/recoverable under existing 3a semantics.
+    # 10. Do NOT complete B (simulates crash after B's child publication but before B completion)
+
+    # 11. Verify B remains listed as incomplete/recoverable
     incomplete = list_incomplete_workflows(store)
     assert any(row["request_id"] == "req-b" for row in incomplete)
 
-    # 7. Helper check: require_completed_predecessor does NOT reject B merely because head is C.
+    # 12. Helper check: require_completed_predecessor does NOT reject B merely because head is C
     require_completed_predecessor(
         store,
         workflow_id=workflow_id,
@@ -2481,7 +2513,7 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
         phase="budget",
     )
 
-    # 8. Resume B as attempt 2 through the real handler path
+    # 13. Resume B as attempt 2 through the real handler path
     _stub_child_signal(
         monkeypatch,
         operator_bot,
@@ -2492,7 +2524,7 @@ def test_budget_parent_survives_its_own_legitimate_successor_resume(
     assert handled is True
     assert _wfresume_statuses(store) == ["resumed"]
 
-    # 9. Verify B is now durably completed
+    # 14. Verify B is now durably completed at attempt 2
     completed = store.list_system_events_by_type("funding_workflow_completed", limit=None)
     b_completed = [c for c in completed if c["payload"]["request_id"] == "req-b"]
     assert len(b_completed) == 1
